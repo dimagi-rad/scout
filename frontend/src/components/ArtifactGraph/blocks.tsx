@@ -259,7 +259,7 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
             {stringValue(config.label) ?? "Date range"}
           </span>
           <select
-            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="h-10 w-full rounded-md border border-input bg-background px-3 text-base sm:text-sm text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
             value={displayed.preset ?? "custom"}
             onChange={(event) => {
               setDraft(null)
@@ -383,7 +383,7 @@ function DateInput({ label, value, invalid, hintId, onChange }: {
         aria-invalid={invalid || undefined}
         aria-describedby={hintId}
         onChange={(event) => onChange(event.currentTarget.value, !event.currentTarget.validity.valid)}
-        className="h-9 min-w-0 w-full rounded-md border border-input bg-background px-2 text-sm tabular-nums text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-invalid:border-destructive"
+        className="h-9 min-w-0 w-full rounded-md border border-input bg-background px-2 text-base sm:text-sm tabular-nums text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-invalid:border-destructive"
       />
     </label>
   )

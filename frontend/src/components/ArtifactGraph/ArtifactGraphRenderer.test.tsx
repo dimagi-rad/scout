@@ -188,6 +188,13 @@ describe("ArtifactGraphRenderer", () => {
       }
     }
 
+    it("uses readable mobile date controls while preserving their desktop size", async () => {
+      const { start, end, preset } = await renderRange()
+      for (const control of [start, end, preset]) {
+        expect(control).toHaveClass("text-base", "sm:text-sm")
+      }
+    })
+
     it.each(["start", "end"] as const)("keeps the last valid range through clearing %s and a recovery refresh", async (field) => {
       const view = await renderRange()
       const input = view[field]
