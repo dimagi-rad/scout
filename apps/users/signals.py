@@ -118,14 +118,20 @@ def auto_create_workspace_on_membership(sender, instance, created, **kwargs):
     )
 
 
+def resolve_existing_tenants_on_social_login(request, sociallogin, **kwargs):
+    # allauth's social_account_updated fires before _store_token; pre_social_login is after it.
+    if sociallogin.account.pk and sociallogin.is_existing:
+        resolve_tenant_on_social_login(request, sociallogin)
+
+
 def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     """After CommCare/Connect/OCS OAuth, resolve tenants and create TenantMembership records.
 
     ``sociallogin.account`` is threaded through so the resolver attributes the
     fetch to *this* identity. It matters because an OCS token is team-scoped and a
-    user may hold several: allauth fires ``social_account_added`` for a newly
-    authorised team and ``social_account_updated`` for one they already had, which
-    is exactly the add-vs-update distinction the connection's ``scope_key`` needs.
+    user may hold several. New connects resolve on ``social_account_added``;
+    existing identities resolve on ``pre_social_login``, after allauth stores the
+    refreshed token so the credential observation can be checked safely.
     """
     provider = canonical_provider(sociallogin.account.provider)
 

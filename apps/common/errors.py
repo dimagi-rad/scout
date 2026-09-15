@@ -63,6 +63,8 @@ categories were recovered by substring-matching prose (#388 review).
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from apps.common.error_codes import ErrorCode
 
 
@@ -73,6 +75,11 @@ class ExpectedStateError(Exception):
     docstring for the four-part test a subclass must satisfy before it inherits
     from this.
     """
+
+
+class DenialScope(StrEnum):
+    TENANT = "tenant"
+    UNKNOWN = "unknown"
 
 
 class ExpectedUpstreamError(ExpectedStateError):
@@ -86,6 +93,7 @@ class ExpectedUpstreamError(ExpectedStateError):
 
     provider: str | None = None
     code: ErrorCode | None = None
+    denial_scope: DenialScope = DenialScope.TENANT
 
 
 class UpstreamTokenExpired(ExpectedUpstreamError):
@@ -101,6 +109,12 @@ class UpstreamTokenExpired(ExpectedUpstreamError):
     """
 
     code = ErrorCode.AUTH_TOKEN_EXPIRED
+
+
+class UpstreamRefreshFailed(ExpectedUpstreamError):
+    """Refresh could not complete; retry or reconnect without revoking memberships."""
+
+    code = ErrorCode.AUTH_REFRESH_FAILED
 
 
 class UpstreamAccessDenied(ExpectedUpstreamError):
@@ -136,6 +150,10 @@ class CommCareAuthError(Exception):
     """Raised when CommCare HQ refuses our credential."""
 
     provider = "commcare"
+
+    def __init__(self, message, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class CommCareTokenExpiredError(CommCareAuthError, UpstreamTokenExpired):

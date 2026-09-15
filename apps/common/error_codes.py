@@ -46,6 +46,7 @@ class ErrorCode(StrEnum):
     # Reconnecting mints an identically-scoped credential that fails the same
     # way, so this must never be collapsed into AUTH_TOKEN_EXPIRED (#372).
     AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
+    AUTH_REFRESH_FAILED = "AUTH_REFRESH_FAILED"
 
     # No credential could be resolved before contacting the provider. Unlike a
     # 401 or 403, this does not establish anything about upstream access.
