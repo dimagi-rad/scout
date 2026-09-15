@@ -926,7 +926,10 @@ def test_custom_dataset_draft_and_commit(canvas, semantic_model, workspace, monk
     cube = next(
         c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "visit_stats"
     )
-    assert cube["sql"] == dataset.metadata["cube_sql"]
+    assert cube["sql"] == (
+        f"SELECT * FROM (\n{dataset.metadata['cube_sql']}\n) AS scout_source\n"
+        "WHERE ARRAY[{SECURITY_CONTEXT.cubeDataRevision}]::text[] IS NOT NULL"
+    )
 
 
 @pytest.fixture
