@@ -17,6 +17,7 @@ from .models import (
     MaterializationRun,
     TenantSchema,
     Workspace,
+    WorkspaceDataRecovery,
     WorkspaceMembership,
     WorkspaceTenant,
     WorkspaceViewSchema,
@@ -78,3 +79,17 @@ class WorkspaceViewSchemaAdmin(ReadOnlyModelAdmin):
     list_display = ["schema_name", "state", "workspace", "last_accessed_at", "created_at"]
     list_filter = ["state"]
     search_fields = ["schema_name", "workspace__name"]
+
+
+@admin.register(WorkspaceDataRecovery)
+class WorkspaceDataRecoveryAdmin(ReadOnlyModelAdmin):
+    list_display = [
+        "workspace",
+        "recovery_type",
+        "state",
+        "requested_by",
+        "created_at",
+        "completed_at",
+    ]
+    list_filter = ["recovery_type", "state", "created_at"]
+    search_fields = ["workspace__name", "requested_by__email", "source_id"]

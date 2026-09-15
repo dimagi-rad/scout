@@ -342,7 +342,8 @@ def _captured_params(loader, page_json):
     resp.json.return_value = page_json
     captured = {}
 
-    def _get(url, params=None, timeout=None):
+    def _get(url, params=None, timeout=None, allow_redirects=None):
+        assert allow_redirects is False
         captured["url"] = url
         captured["params"] = params
         return resp

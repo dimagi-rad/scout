@@ -1,3 +1,4 @@
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -366,7 +367,11 @@ def test_generate_cube_schema_from_semantic_model(semantic_model):
     cube = schema["cubes"][0]
     assert cube["name"] == "visits"
     # Unqualified on purpose: the schema resolves via per-query search_path.
-    assert cube["sql_table"] == '"raw_visits"'
+    assert cube["sql"] == (
+        'SELECT * FROM (\nSELECT * FROM "raw_visits"\n) AS scout_source\n'
+        "WHERE ARRAY[{SECURITY_CONTEXT.cubeDataRevision}]::text[] IS NOT NULL"
+    )
+    assert "sql_table" not in cube
     # Cube's YAML compiler coerces '' to null and rejects it; omit when empty.
     assert "description" not in cube
     assert {"name": "count", "type": "count"} in cube["measures"]
@@ -413,7 +418,10 @@ def test_generate_cube_schema_renders_custom_dataset_as_sql(workspace, semantic_
         if cube["name"] == "large_visits"
     )
 
-    assert cube["sql"] == 'select username from "raw_visits"'
+    assert cube["sql"] == (
+        'SELECT * FROM (\nselect username from "raw_visits"\n) AS scout_source\n'
+        "WHERE ARRAY[{SECURITY_CONTEXT.cubeDataRevision}]::text[] IS NOT NULL"
+    )
     assert "sql_table" not in cube
 
 
@@ -448,7 +456,7 @@ def test_ensure_semantic_model_syncs_valid_custom_dataset(monkeypatch, workspace
     custom_dataset = model.datasets.get(name="visit_users")
 
     assert custom_dataset.source_kind == SemanticDataset.SourceKind.CUSTOM
-    assert custom_dataset.metadata["cube_sql"] == 'select username from "raw_visits"'
+    assert custom_dataset.metadata["cube_sql"] == 'SELECT username FROM "raw_visits"'
     assert custom_dataset.fields.filter(name="username", is_visible=True).exists()
     assert model.datasets.filter(name="raw_visits", is_visible=True).exists()
 
@@ -845,6 +853,28 @@ def test_failed_build_keeps_last_known_good_readable(
     assert CubeSchema.objects.filter(workspace=workspace, status=CubeSchema.Status.ERROR).exists()
 
 
+def test_record_skipped_build_replaces_stale_success_without_disabling_fallback(
+    workspace, semantic_model
+):
+    semantic_model.metadata = {"last_build": {"ok": True, "content_hash": "testhash"}}
+    semantic_model.save(update_fields=["metadata"])
+
+    cube_schema_service.record_cube_schema_build_failure(
+        workspace,
+        "Semantic Cube schema build skipped because the workspace view schema build failed.",
+    )
+
+    semantic_model.refresh_from_db()
+    assert semantic_model.status == SemanticModel.Status.ACTIVE
+    assert semantic_model.metadata["last_build"]["ok"] is False
+    assert "view schema build failed" in semantic_model.metadata["last_build"]["error"]
+    assert CubeSchema.objects.filter(
+        workspace=workspace,
+        semantic_model=semantic_model,
+        status=CubeSchema.Status.ACTIVE,
+    ).exists()
+
+
 def test_failed_refreshed_build_keeps_previous_catalog_readable(
     monkeypatch, workspace, semantic_model, no_close_old_connections
 ):
@@ -923,6 +953,42 @@ def test_promote_prunes_old_inactive_rows_and_records_last_build(
         status=CubeSchema.Status.ACTIVE
     )
     assert inactive.count() == KEEP_INACTIVE_CUBE_SCHEMAS
+
+
+def test_same_yaml_publication_advances_revision_but_failed_rebuild_does_not(
+    monkeypatch, workspace, semantic_model, no_close_old_connections
+):
+    monkeypatch.setattr(cube_schema_service, "CubeClient", _OkCubeClient)
+    monkeypatch.setattr(cube_schema_service, "load_workspace_context", _fake_workspace_context)
+    first = cube_schema_service.build_and_promote_cube_schema(workspace, model=semantic_model)
+    next_publication = first.updated_at + timedelta(microseconds=1)
+    monkeypatch.setattr(cube_schema_service.timezone, "now", lambda: next_publication)
+
+    second = cube_schema_service.build_and_promote_cube_schema(workspace, model=semantic_model)
+
+    assert second.id == first.id
+    assert second.content == first.content
+    assert second.content_hash == first.content_hash
+    assert second.updated_at == next_publication
+    assert second.updated_at != first.updated_at
+
+    class UnavailableValidator:
+        async def validate_schema(self, content):
+            raise RuntimeError("Synthetic validator unavailable")
+
+    monkeypatch.setattr(cube_schema_service, "CubeClient", UnavailableValidator)
+    monkeypatch.setattr(
+        cube_schema_service.timezone, "now", lambda: next_publication + timedelta(seconds=1)
+    )
+    with pytest.raises(RuntimeError, match="Synthetic validator unavailable"):
+        cube_schema_service.build_and_promote_cube_schema(workspace, model=semantic_model)
+
+    published = cube_schema_service.get_active_cube_schema(workspace, model=semantic_model)
+    assert published.id == second.id
+    assert published.content_hash == second.content_hash
+    assert published.updated_at == next_publication
+    semantic_model.refresh_from_db()
+    assert semantic_model.metadata["last_build"]["ok"] is False
 
 
 @pytest.mark.asyncio

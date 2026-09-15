@@ -74,7 +74,9 @@ class TestGetWithAuthRefresh:
         session = _fake_session([resp401, resp200])
         refresh = MagicMock(return_value="new-token")
 
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+        )
 
         assert result is resp200
         refresh.assert_called_once()
@@ -84,7 +86,9 @@ class TestGetWithAuthRefresh:
     def test_no_refresh_when_none(self):
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
-        result = get_with_auth_refresh(session, "https://x/y", refresh=None, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=None, timeout=(1, 1)
+        )
         assert result is resp401
         assert session.get.call_count == 1
 
@@ -92,7 +96,9 @@ class TestGetWithAuthRefresh:
         resp403 = MagicMock(status_code=403)
         session = _fake_session([resp403])
         refresh = MagicMock(return_value="new-token")
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+        )
         assert result is resp403
         refresh.assert_not_called()
         assert session.get.call_count == 1
@@ -102,7 +108,9 @@ class TestGetWithAuthRefresh:
         session = _fake_session([resp401])
         refresh = MagicMock(side_effect=RuntimeError("boom"))
         with pytest.raises(RuntimeError, match="boom"):
-            get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+            get_with_auth_refresh(
+                session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+            )
         assert session.get.call_count == 1
 
     def test_empty_new_token_does_not_retry(self):
@@ -110,7 +118,9 @@ class TestGetWithAuthRefresh:
         session = _fake_session([resp401])
         refresh = MagicMock(return_value=None)
         with pytest.raises(UpstreamRefreshFailed, match="no access token"):
-            get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+            get_with_auth_refresh(
+                session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+            )
         assert session.get.call_count == 1
 
 
@@ -119,7 +129,7 @@ def test_refresh_outage_has_expected_actionable_error(failure):
     session = _fake_session([MagicMock(status_code=401)])
     refresh = MagicMock(side_effect=failure, return_value=None)
     with pytest.raises(Exception) as caught:
-        get_with_auth_refresh(session, "https://x/y", refresh=refresh)
+        get_with_auth_refresh(session, "https://x/y", trusted_origin="https://x", refresh=refresh)
     assert isinstance(caught.value, ExpectedStateError)
     assert code_of(caught.value) == "AUTH_REFRESH_FAILED"
     assert "retry" in _CREDENTIAL_GUIDANCE[code_of(caught.value)]

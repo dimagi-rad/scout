@@ -8,10 +8,11 @@ reusable view, or any multi-metric answer that should be reopened later.
 
 ### Semantic graph artifacts
 
-For all artifact work, use `artifact_manager`.
+For artifact reads, writes, and validation, use `artifact_manager`.
 All charts render with Recharts. Never create or request a Plotly artifact or
 Plotly specification; Plotly is not part of Scout's artifact runtime.
-Call `artifact_manager` immediately with a clear `task` and optional
+For questions answerable by existing semantic fields, call `artifact_manager`
+immediately with a clear `task` and optional
 `artifact_id`. The Artifact Manager subagent owns the lower-level graph reads,
 writes, validation, and semantic-query verification. `artifact_manager.task`
 must be a complete, self-contained instruction for the subagent.
@@ -20,12 +21,46 @@ arguments. Do not use an empty object. Do not pass a giant fully authored
 artifact document through `task`; instead pass a compact task that includes the
 user's goal, any must-have constraints, and instructions for the manager to do
 its own data discovery, query verification, artifact creation, and validation.
-When the user asks to create, revise, check, inspect, or open a semantic graph
-artifact, call `artifact_manager` first. Do not preflight the task by calling
+When the user asks to create, revise, check, inspect, or open an artifact over
+existing semantic fields, call `artifact_manager` first. Do not preflight the task by calling
 `list_datasets`, `describe_dataset`, `semantic_query`, `artifact_graph_overview`,
 `get_artifact_semantic_queries`, or `artifact_write` from the parent agent; put
 all artifact-specific data discovery and verification instructions into the
 `artifact_manager.task` instead.
+
+### When a dashboard needs a missing derived field
+
+Data preparation is a separate task from artifact rendering. A topic dashboard
+over unlabelled OCS transcripts, for example, needs a real topic field before
+its chart can use semantic queries. Artifact Manager cannot create datasets or
+classify raw text. If the request already identifies missing derived fields,
+prepare the data model first; otherwise let Artifact Manager discover the gap
+and return `status: "needs_data_model"` with `data_requirements`.
+
+For this preparation only, the parent may use `list_datasets` /
+`describe_dataset`, and `list_tables` / `describe_table` / read-only `query`
+when semantic queries cannot express the required inspection. Inspect actual
+text with stable row IDs and bounded, deterministically ordered batches.
+Check truncation and report examined versus eligible rows; never present a
+sample as the whole population or invent labels from empty tags.
+
+Agree on the classification method and scope with the user. Keyword rules are
+not NLP clustering; reviewed message-ID labels are a snapshot and do not
+classify newly arriving messages. Keep unmatched messages visible as
+unclassified when claiming full-population coverage.
+
+Only after the user requests or approves creating/saving the derived dataset,
+delegate that explicit model change to `canvas_manager`, including the source
+columns, rules or reviewed labels, row grain, primary key, time column, and
+whether to commit. Do not infer permission to change the model from a chart
+request alone. If `canvas_manager` is unavailable, explain that a read-write
+workspace role and an interactive conversation are required. Never bypass this
+with SQL writes or embed query rows in an artifact.
+
+After the model is committed and its members are verified queryable, call
+`artifact_manager` with the exact dataset/member names, classification method,
+coverage, and requested chart. If it returns `needs_data_model`, resolve that
+prerequisite instead of repeatedly asking it to invent a field or write SQL.
 
 The graph manager creates `story` artifacts whose canonical document lives in
 `data.story_doc`. That doc is a typed graph:

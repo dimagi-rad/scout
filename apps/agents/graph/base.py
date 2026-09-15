@@ -15,8 +15,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.db.models import Exists, OuterRef
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -36,10 +36,7 @@ from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.semantic.services.catalog import (
-    SemanticCatalogUnavailable,
-    get_active_semantic_model,
-)
+from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
 from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
@@ -52,6 +49,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     select_pipeline_config,
 )
+from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
 from mcp_server.services.metadata import (
     pipeline_list_tables,
     transformation_aware_list_tables,
@@ -249,8 +247,8 @@ def _system_prompt_cache_key(
     return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}"
 
 
-def _semantic_catalog_context_sync(workspace) -> str:
-    get_active_semantic_model(workspace)
+async def _semantic_catalog_context(workspace) -> str:
+    await aget_active_semantic_model(workspace)
     return (
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
@@ -262,8 +260,68 @@ def _semantic_catalog_context_sync(workspace) -> str:
 
 
 async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
+    # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
+    # Runs track live work even while the previous semantic catalog remains active.
+    active_runs = MaterializationRun.objects.filter(
+        tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    )
+    if await active_runs.aexists():
+        tenant_count = await workspace.tenants.acount()
+        serving_view = (
+            await WorkspaceViewSchema.objects.filter(
+                workspace=workspace, state=SchemaState.ACTIVE
+            ).afirst()
+            if tenant_count > 1
+            else None
+        )
+        coverage = parse_coverage(serving_view.tenant_coverage) if serving_view else None
+        serving_runs = active_runs
+        if coverage is not None:
+            excluded_ids = {entry["tenant_id"] for entry in coverage["excluded_tenants"]} - {
+                entry["tenant_id"] for entry in coverage["included_tenants"]
+            }
+            # An explicitly excluded tenant has no physical dependencies in this
+            # ACTIVE view. Use actual run IDs so malformed UUID strings cannot crash a turn.
+            excluded_run_tenants = [
+                tenant_id
+                async for tenant_id in active_runs.values_list(
+                    "tenant_schema__tenant_id", flat=True
+                )
+                if str(tenant_id) in excluded_ids
+            ]
+            serving_runs = active_runs.exclude(tenant_schema__tenant_id__in=excluded_run_tenants)
+        runs_with_serving_schema = serving_runs.annotate(
+            has_serving_schema=Exists(
+                TenantSchema.objects.filter(
+                    tenant_id=OuterRef("tenant_schema__tenant_id"), state=SchemaState.ACTIVE
+                )
+            )
+        )
+        unsafe_run = await runs_with_serving_schema.exclude(
+            tenant_schema__state=SchemaState.PROVISIONING, has_serving_schema=True
+        ).aexists()
+        if not unsafe_run:
+            try:
+                ready_context = await _semantic_catalog_context(workspace)
+            except SemanticCatalogUnavailable:
+                pass
+            else:
+                if tenant_count == 1 or serving_view is not None:
+                    return (
+                        "A refresh is in progress outside the currently serving data. "
+                        "You may query the "
+                        "previously loaded data while it finishes; tell the user results do "
+                        "not include this refresh yet. Do NOT trigger another materialization. "
+                        "Do not promise an automatic follow-up based on this status.\n\n"
+                        f"{ready_context}"
+                    )
+        if not interactive:
+            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
+
     try:
-        return await sync_to_async(_semantic_catalog_context_sync, thread_sensitive=True)(workspace)
+        return await _semantic_catalog_context(workspace)
     except SemanticCatalogUnavailable:
         tenant_count = await workspace.tenants.acount()
         if tenant_count == 1:
@@ -288,12 +346,7 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
-                    else (
-                        "A materialization is already in progress in the background. Do NOT "
-                        "trigger another one and do NOT call other data tools. Briefly tell "
-                        "the user it's still loading and end your turn — the system will "
-                        "resume the conversation automatically when materialization completes."
-                    )
+                    else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
             return (
                 "Data is loaded, but no semantic datasets are available yet. "
@@ -306,12 +359,7 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
-                    else (
-                        "A materialization is already in progress in the background. Do NOT "
-                        "trigger another one and do NOT call other data tools. Briefly tell "
-                        "the user it's still loading and end your turn — the system will "
-                        "resume the conversation automatically when materialization completes."
-                    )
+                    else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
             return (
                 f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
@@ -329,6 +377,15 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 "conversation automatically when materialization completes."
             )
         )
+
+
+# Only the thread that dispatched a load has a completion callback.
+_INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
+    "A materialization is already in progress in the background. Do NOT "
+    "trigger another one and do NOT call other data tools. Briefly tell "
+    "the user it's still loading and ask them to check back once loading finishes. "
+    "End your turn. Do not promise an automatic follow-up based on this status."
+)
 
 
 # HEADLESS (non-interactive, e.g. recipe) guidance. No Thread/checkpointer/resume
@@ -396,13 +453,7 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     if ts.state == SchemaState.MATERIALIZING:
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return (
-            "A materialization is already in progress in the background. Do NOT "
-            "trigger another one and do NOT call other data tools (the data is "
-            "not yet ready). Briefly tell the user it's still loading and end "
-            "your turn — the system will resume the conversation automatically "
-            "when the current materialization completes."
-        )
+        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
 
     try:
         pipeline_config = select_pipeline_config(provider=tenant.provider)
@@ -479,13 +530,7 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
     if active_run is not None or (vs is not None and vs.state == SchemaState.MATERIALIZING):
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return (
-            "A materialization is already in progress in the background. Do NOT "
-            "trigger another one and do NOT call other data tools (the data is "
-            "not yet ready). Briefly tell the user it's still loading and end "
-            "your turn — the system will resume the conversation automatically "
-            "when the current materialization completes."
-        )
+        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
 
     if vs is None or vs.state != SchemaState.ACTIVE:
         if not interactive:
@@ -1021,7 +1066,38 @@ async def _build_system_prompt(
     no longer rewrites cached prefix bytes and defeats every cache hit (arch #254,
     finding 02#3). ``volatile_suffix`` may be "".
     """
-    cache_key = _system_prompt_cache_key(workspace, user, interactive, canvas_write)
+    has_tenants = await workspace.tenants.aexists()
+    stable = await _build_stable_system_prompt(
+        workspace, user, has_tenants, interactive, canvas_write
+    )
+    volatile = ""
+    if has_tenants:
+        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
+        volatile = f"\n## Data Availability\n\n{semantic_context}\n"
+        if await workspace.tenants.acount() > 1:
+            coverage = (
+                await WorkspaceViewSchema.objects.filter(
+                    workspace_id=workspace.id, state=SchemaState.ACTIVE
+                )
+                .values_list("tenant_coverage", flat=True)
+                .afirst()
+            )
+            warning = coverage_warning(coverage)
+            if warning:
+                volatile += warning + "\n"
+    return stable, volatile
+
+
+async def _build_stable_system_prompt(
+    workspace: Workspace,
+    user,
+    has_tenants: bool,
+    interactive: bool,
+    canvas_write: bool,
+) -> str:
+    cache_key = (
+        f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write)}:{has_tenants}"
+    )
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
@@ -1041,12 +1117,7 @@ async def _build_system_prompt(
         # (arch #254, finding 01#4).
         stable_sections.append(f"\n{knowledge_context}\n")
 
-    # Volatile sections (after the cache breakpoint)
-    volatile_sections: list[str] = []
-
-    tenant_count = await workspace.tenants.acount()
-
-    if tenant_count > 0:
+    if has_tenants:
         stable_sections.append("""
 ## Workspace And Dataset Discovery
 
@@ -1086,9 +1157,6 @@ Dataset editing vocabulary:
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
 
-        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
-        volatile_sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
-
     if interactive and canvas_write:
         stable_sections.append("""
 ## Semantic Canvas (dataset editing)
@@ -1100,8 +1168,15 @@ format / number format or currency, add measures or dimensions, link datasets, o
 CTE/SQL-derived dataset, delegate the whole job to the `canvas_manager` tool
 with a complete task description (datasets, field names and source columns,
 relationship endpoints, SQL, display metadata, and whether to commit). Use
-`canvas_read` yourself only to answer questions about pending draft changes.
+`canvas_read` yourself to inspect pending draft changes, including after an
+interrupted delegation. A Canvas Manager error does not roll back earlier
+commits: use its committed_objects, cube_schema, and pending_count evidence,
+then inspect/verify current state before a bounded retry. Do not recreate
+already committed datasets or discard remaining drafts automatically.
 Draft changes become queryable only after the canvas is committed.
+Reusable CTE/SQL rules evaluate the current materialized source rows, including
+newly materialized messages; they are not a fixed snapshot unless the SQL uses
+an explicit snapshot or message-ID label mapping.
 Autogenerated fields can be curated (label/description/format/currency) but
 never removed or retyped.
 For value format requests, tell `canvas_manager` to set field metadata `format`
@@ -1119,10 +1194,7 @@ currency, explain that a read-write workspace role is required.
 """)
 
     stable = "\n".join(stable_sections)
-    volatile = "\n".join(volatile_sections)
-    result = (stable, volatile)
-
-    _system_prompt_cache[cache_key] = (result, time.monotonic())
+    _system_prompt_cache[cache_key] = (stable, time.monotonic())
 
     if len(_system_prompt_cache) > 256:
         now = time.monotonic()
@@ -1132,7 +1204,7 @@ currency, explain that a read-write workspace role is required.
         for k in expired:
             del _system_prompt_cache[k]
 
-    return result
+    return stable
 
 
 __all__ = [

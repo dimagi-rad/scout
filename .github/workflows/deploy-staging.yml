@@ -25,6 +25,11 @@ jobs:
     environment: staging
     env:
       IMAGE_TAG: ${{ github.sha }}
+      # Code layers are shared, but Kamal's service label differs by role.
+      # Isolate exact versions from other roles and simultaneous prod deploys.
+      API_TAG: staging-api-${{ github.sha }}
+      MCP_TAG: staging-mcp-${{ github.sha }}
+      WORKER_TAG: staging-worker-${{ github.sha }}
       # Staging has its own OAuth provider database and therefore cannot reuse
       # the production Connect client. These come from the GitHub `staging`
       # environment and are mapped into Kamal's container secret names.
@@ -34,10 +39,8 @@ jobs:
       # in the staging environment prevents a branch deploy from depending on
       # (or rotating) any future production Cube credential.
       SCOUT_CUBEJS_API_SECRET: ${{ secrets.SCOUT_STAGING_CUBEJS_API_SECRET }}
-      # The API image is environment-agnostic (env comes from Kamal), so staging
-      # reuses prod's tag. The frontend bakes in the nginx conf and Sentry
-      # environment at build time, so it needs a tag of its own or the two
-      # environments overwrite each other's scout/frontend:<sha>.
+      # The frontend bakes in nginx and Sentry environment settings, so its
+      # exact version must also be separate from production's.
       FRONTEND_TAG: staging-${{ github.sha }}
       # The Cube runtime uses the existing scout/mcp ECR repository; the MCP
       # process itself shares the API image, so that repository is otherwise idle.
@@ -82,17 +85,18 @@ jobs:
           test -n "$SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET"
           test -n "$SCOUT_CUBEJS_API_SECRET"
 
-      - name: Build and push API image
-        run: |
-          docker build -t "$SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG" .
-          docker push "$SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG"
-
       - name: Build and push Frontend image
+        env:
+          VITE_SENTRY_DSN: ${{ secrets.SCOUT_VITE_SENTRY_DSN }}
         run: |
+          : "${VITE_SENTRY_DSN:?SCOUT_VITE_SENTRY_DSN is required for frontend error reporting}"
+          : "${IMAGE_TAG:?IMAGE_TAG is required for frontend release tracking}"
           docker build -t "$SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG" \
+            --platform linux/amd64 \
             -f Dockerfile.frontend \
+            --label service=scout-frontend \
             --build-arg NGINX_CONF=frontend/nginx.staging-kamal.conf \
-            --build-arg VITE_SENTRY_DSN="${{ secrets.SCOUT_VITE_SENTRY_DSN }}" \
+            --build-arg VITE_SENTRY_DSN \
             --build-arg VITE_SENTRY_ENVIRONMENT=staging \
             --build-arg VITE_SENTRY_RELEASE="$IMAGE_TAG" \
             .
@@ -110,16 +114,17 @@ jobs:
         run: kamal deploy -c config/deploy-cube.yml -d staging --version="$CUBE_TAG"
 
       - name: Deploy MCP
-        run: kamal deploy -c config/deploy-mcp.yml -d staging --version="$IMAGE_TAG"
+        run: kamal deploy -c config/deploy-mcp.yml -d staging --version="$MCP_TAG"
 
       - name: Deploy API
-        run: kamal deploy -d staging --version="$IMAGE_TAG"
+        run: kamal deploy -d staging --version="$API_TAG"
 
       - name: Deploy Worker
-        run: kamal deploy -c config/deploy-worker.yml -d staging --version="$IMAGE_TAG"
+        run: kamal deploy -c config/deploy-worker.yml -d staging --version="$WORKER_TAG"
 
       - name: Deploy Frontend
-        run: kamal deploy -c config/deploy-frontend.yml -d staging --version="$FRONTEND_TAG"
+        # Preserve the staging image's baked-in nginx, environment, and release.
+        run: kamal deploy -c config/deploy-frontend.yml -d staging --skip-push --version="$FRONTEND_TAG"
 
       - name: Summary
         run: |

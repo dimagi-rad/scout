@@ -15,6 +15,7 @@ from apps.common.errors import (
     OCSTokenExpiredError,
 )
 from mcp_server.loaders._http import build_retry, get_with_auth_refresh
+from mcp_server.loaders._urls import ProviderURLPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,14 @@ class OCSBaseLoader:
         surviving non-2xx becomes a typed error rather than a bare HTTPError.
         """
         resp = get_with_auth_refresh(
-            self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
+            self._session,
+            url,
+            trusted_origin=self.base_url,
+            refresh=self._refresh,
+            params=params,
+            timeout=HTTP_TIMEOUT,
         )
+        self._response_url = resp.url if isinstance(resp.url, str) else url
         # Describe only; remediation copy belongs to the presentation layer, keyed
         # off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
         if resp.status_code == 403:
@@ -94,7 +101,7 @@ class OCSBaseLoader:
         if resp.status_code >= 400:
             raise OCSExportError(
                 f"OCS export request failed for experiment {self.experiment_id}: "
-                f"HTTP {resp.status_code} for {url}"
+                f"HTTP {resp.status_code}"
             )
         return resp
 
@@ -104,7 +111,7 @@ class OCSBaseLoader:
         try:
             return resp.json()
         except ValueError as e:
-            raise OCSExportError(f"OCS API returned invalid JSON for {url}: {e}") from e
+            raise OCSExportError(f"OCS API returned invalid JSON: {e}") from e
 
     def _paginate(
         self, url: str, params: dict | None = None
@@ -124,7 +131,7 @@ class OCSBaseLoader:
             if "results" not in payload:
                 # A missing ``results`` key means the envelope changed — fail
                 # rather than yielding a silently-empty page (finding 03#6).
-                raise OCSExportError(f"OCS API response missing 'results' key for {current_url}")
+                raise OCSExportError("OCS API response missing 'results' key")
             page = payload["results"]
             if first_page:
                 total = payload.get("count")
@@ -134,5 +141,12 @@ class OCSBaseLoader:
                 first_page = False
             else:
                 yield page, None
-            current_url = payload.get("next")
+            next_url = payload.get("next")
+            current_url = (
+                ProviderURLPolicy(self.base_url).resolve(
+                    next_url, relative_to=getattr(self, "_response_url", current_url)
+                )
+                if next_url
+                else None
+            )
             current_params = None

@@ -22,6 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       IMAGE_TAG: ${{ github.sha }}
+      # Kamal adds a different service label to each backend image. Never let
+      # another role or destination overwrite the exact version being pulled.
+      API_TAG: production-api-${{ github.sha }}
+      MCP_TAG: production-mcp-${{ github.sha }}
+      WORKER_TAG: production-worker-${{ github.sha }}
       CUBE_TAG: cube-${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
@@ -58,19 +63,19 @@ jobs:
           test -n "$cube_secret"
           echo "::add-mask::$cube_secret"
 
-      - name: Build and push API image
-        run: |
-          docker build -t "$SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG" .
-          docker push "$SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG"
-
       - name: Build and push Frontend image
         env:
+          VITE_SENTRY_DSN: ${{ secrets.SCOUT_VITE_SENTRY_DSN }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SCOUT_SENTRY_AUTH_TOKEN }}
         run: |
+          : "${VITE_SENTRY_DSN:?SCOUT_VITE_SENTRY_DSN is required for frontend error reporting}"
+          : "${IMAGE_TAG:?IMAGE_TAG is required for frontend release tracking}"
           docker build -t "$SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG" \
+            --platform linux/amd64 \
             -f Dockerfile.frontend \
+            --label service=scout-frontend \
             --build-arg NGINX_CONF=frontend/nginx.prod-kamal.conf \
-            --build-arg VITE_SENTRY_DSN="${{ secrets.SCOUT_VITE_SENTRY_DSN }}" \
+            --build-arg VITE_SENTRY_DSN \
             --build-arg VITE_SENTRY_ENVIRONMENT=production \
             --build-arg VITE_SENTRY_RELEASE="$IMAGE_TAG" \
             --build-arg SENTRY_ORG="${{ vars.SCOUT_SENTRY_ORG }}" \
@@ -91,13 +96,15 @@ jobs:
         run: kamal deploy -c config/deploy-cube.yml --version="$CUBE_TAG"
 
       - name: Deploy MCP
-        run: kamal deploy -c config/deploy-mcp.yml --version="$IMAGE_TAG"
+        run: kamal deploy -c config/deploy-mcp.yml --version="$MCP_TAG"
 
       - name: Deploy API
-        run: kamal deploy --version="$IMAGE_TAG"
+        run: kamal deploy --version="$API_TAG"
 
       - name: Deploy Worker
-        run: kamal deploy -c config/deploy-worker.yml --version="$IMAGE_TAG"
+        run: kamal deploy -c config/deploy-worker.yml --version="$WORKER_TAG"
 
       - name: Deploy Frontend
-        run: kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
+        # Preserve the image built above, including its Sentry settings and maps.
+        # A default Kamal deploy rebuilds this tag without those build inputs.
+        run: kamal deploy -c config/deploy-frontend.yml --skip-push --version="$IMAGE_TAG"

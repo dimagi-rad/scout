@@ -8,7 +8,6 @@ and a single auth-header builder.
 from __future__ import annotations
 
 import logging
-from urllib.parse import urljoin
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -19,6 +18,7 @@ from apps.common.errors import (
     CommCareTokenExpiredError,
 )
 from mcp_server.loaders._http import build_retry, get_with_auth_refresh
+from mcp_server.loaders._urls import ProviderURLPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -68,16 +68,12 @@ class CommCareBaseLoader:
         self._session.mount("http://", adapter)
 
     def _resolve_next_url(self, base_url: str, next_url: str | None) -> str | None:
-        """Resolve a potentially-relative ``next`` URL from a CommCare API response.
-
-        CommCare APIs return ``meta.next`` in several formats:
-        - Absolute URL (e.g. ``https://www.commcarehq.org/a/domain/api/...``) — returned as-is.
-        - Path-relative (e.g. ``/a/domain/api/...``) — resolved against the base URL.
-        - Query-string-only (e.g. ``?limit=1000&offset=1000``) — resolved against the base URL.
-        """
+        """Resolve a next link against the last page, enforcing the HQ origin."""
         if not next_url:
             return None
-        return urljoin(base_url, next_url)
+        return ProviderURLPolicy("https://www.commcarehq.org").resolve(
+            next_url, relative_to=getattr(self, "_response_url", base_url)
+        )
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         """GET a URL, raising on auth failure or an unrecoverable status.
@@ -87,8 +83,14 @@ class CommCareBaseLoader:
         error rather than a bare ``requests.HTTPError``.
         """
         resp = get_with_auth_refresh(
-            self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
+            self._session,
+            url,
+            trusted_origin="https://www.commcarehq.org",
+            refresh=self._refresh,
+            params=params,
+            timeout=HTTP_TIMEOUT,
         )
+        self._response_url = resp.url if isinstance(resp.url, str) else url
         # Describe only; remediation copy belongs to the presentation layer, keyed
         # off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
         if resp.status_code == 403:
@@ -105,8 +107,7 @@ class CommCareBaseLoader:
             )
         if resp.status_code >= 400:
             raise CommCareExportError(
-                f"CommCare export request failed for domain {self.domain}: "
-                f"HTTP {resp.status_code} for {url}"
+                f"CommCare export request failed for domain {self.domain}: HTTP {resp.status_code}"
             )
         return resp
 
@@ -116,4 +117,4 @@ class CommCareBaseLoader:
         try:
             return resp.json()
         except ValueError as e:
-            raise CommCareExportError(f"CommCare API returned invalid JSON for {url}: {e}") from e
+            raise CommCareExportError(f"CommCare API returned invalid JSON: {e}") from e

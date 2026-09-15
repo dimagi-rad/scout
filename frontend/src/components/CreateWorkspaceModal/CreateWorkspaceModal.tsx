@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react"
 import { useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { workspaceApi } from "@/api/workspaces"
 import { type UserTenant } from "@/api/auth"
 import { getUserTenantsCached } from "@/api/userTenantsCache"
@@ -29,6 +30,7 @@ interface Props {
 
 export function CreateWorkspaceModal({ onClose }: Props) {
   const navigate = useNavigate()
+  const isCurrentAccount = useIsCurrentAccount()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const userId = useAppStore((s) => s.user?.id)
@@ -151,14 +153,17 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     setError(null)
     try {
       const workspace = await workspaceApi.create(name.trim(), [...selected])
+      if (!isCurrentAccount()) return
       await fetchDomains()
+      if (!isCurrentAccount()) return
       setActiveDomain(workspace.id)
       onClose()
       navigate(workspacePath(workspace))
     } catch (err) {
+      if (!isCurrentAccount()) return
       setError(err instanceof ApiError ? err.message : "Failed to create workspace")
     } finally {
-      setLoading(false)
+      if (isCurrentAccount()) setLoading(false)
     }
   }
 

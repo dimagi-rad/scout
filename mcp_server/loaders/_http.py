@@ -13,6 +13,7 @@ import requests
 from urllib3.util.retry import Retry
 
 from apps.common.errors import UpstreamRefreshFailed
+from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 # urllib3 honours a server ``Retry-After`` header verbatim when
 # ``respect_retry_after_header=True`` — with NO upper bound (``backoff_max``
@@ -69,10 +70,13 @@ def get_with_auth_refresh(
     session: requests.Session,
     url: str,
     *,
+    trusted_origin: str,
     refresh: TokenRefresher | None = None,
     **kwargs,
 ) -> requests.Response:
-    """GET ``url`` and, on a 401, refresh the OAuth token once and retry.
+    """GET within ``trusted_origin``, validating every redirect before sending.
+
+    On a 401, refresh the OAuth token once and retry the validated target.
 
     ``refresh`` (when provided) mints a fresh access token — the mid-run
     reactive refresh that lets a load outlive a short-lived OAuth token
@@ -82,11 +86,28 @@ def get_with_auth_refresh(
     not evidence that the credential was revoked. A refresher that returns
     no token raises an expected refresh failure for the same reason.
     """
-    resp = session.get(url, **kwargs)
-    if resp.status_code != 401 or refresh is None:
-        return resp
-    new_token = refresh()
-    if not new_token:
-        raise UpstreamRefreshFailed("Mid-run token refresh returned no access token")
-    session.headers["Authorization"] = f"Bearer {new_token}"
-    return session.get(url, **kwargs)
+    policy = ProviderURLPolicy(trusted_origin)
+    url = policy.resolve(url)
+    kwargs["allow_redirects"] = False
+    redirects = 0
+    refreshed = False
+    while True:
+        resp = session.get(url, **kwargs)
+        if resp.status_code in (301, 302, 303, 307, 308) and "Location" in resp.headers:
+            try:
+                if redirects >= session.max_redirects:
+                    raise UnsafeProviderURL("Provider origin redirect limit exceeded")
+                url = policy.resolve(resp.headers["Location"], relative_to=resp.url)
+            finally:
+                resp.close()
+            redirects += 1
+            kwargs.pop("params", None)
+            continue
+        if resp.status_code != 401 or refresh is None or refreshed:
+            return resp
+        refreshed = True
+        resp.close()
+        new_token = refresh()
+        if not new_token:
+            raise UpstreamRefreshFailed("Mid-run token refresh returned no access token")
+        session.headers["Authorization"] = f"Bearer {new_token}"

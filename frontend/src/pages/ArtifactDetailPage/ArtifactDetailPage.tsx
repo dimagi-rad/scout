@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Link, Navigate, useParams } from "react-router-dom"
+import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom"
 import { ArrowLeft } from "lucide-react"
 
 import {
@@ -12,10 +12,12 @@ import {
 } from "@/components/ArtifactViewer"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/store/store"
+import { artifactPath } from "@/lib/artifactPath"
 
 export function ArtifactDetailPage() {
-  const { artifactId } = useParams()
+  const { artifactId, workspaceId: urlWorkspaceId } = useParams()
   const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const workspaceId = urlWorkspaceId ?? activeDomainId
   const closeArtifact = useAppStore((s) => s.uiActions.closeArtifact)
 
   useEffect(() => {
@@ -28,8 +30,8 @@ export function ArtifactDetailPage() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8" data-testid="artifact-detail-page">
-      {activeDomainId ? (
-        <ArtifactDetailContent artifactId={artifactId} workspaceId={activeDomainId} />
+      {workspaceId ? (
+        <ArtifactDetailContent key={`${workspaceId}/${artifactId}`} artifactId={artifactId} workspaceId={workspaceId} />
       ) : (
         <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
           Select a workspace to view this artifact.
@@ -40,6 +42,12 @@ export function ArtifactDetailPage() {
 }
 
 function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string; workspaceId: string }) {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const domains = useAppStore((s) => s.domains)
+  const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const adoptedWorkspaceRef = useRef(false)
   const [dataOpen, setDataOpen] = useState(false)
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
@@ -50,6 +58,25 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
     refetch: refetchData,
     setQueryData,
   } = useArtifactQueryData(artifactId, workspaceId)
+
+  useEffect(() => {
+    if (adoptedWorkspaceRef.current) {
+      if (activeDomainId && activeDomainId !== workspaceId) navigate("/artifacts")
+      return
+    }
+    // The scoped API must authorize the link before it changes workspace context.
+    if (!artifact || isLoading || error) return
+    adoptedWorkspaceRef.current = true
+    setActiveDomain(workspaceId)
+  }, [activeDomainId, artifact, error, isLoading, navigate, setActiveDomain, workspaceId])
+
+  useEffect(() => {
+    if (!artifact || isLoading || error) return
+    const workspace = domains.find((item) => item.id === workspaceId) ?? { id: workspaceId }
+    const canonical = artifactPath(workspace, artifactId)
+    // Qualify legacy links only after resolving them in the selected workspace.
+    if (location.pathname !== canonical) navigate(canonical, { replace: true })
+  }, [artifact, artifactId, domains, error, isLoading, location.pathname, navigate, workspaceId])
 
   function handleViewData() {
     setDataOpen(true)

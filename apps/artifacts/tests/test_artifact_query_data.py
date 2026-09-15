@@ -14,6 +14,22 @@ from apps.users.models import TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
 
+@pytest.fixture(autouse=True)
+def query_surface_ready():
+    """These query execution tests isolate result handling from recovery state."""
+    with patch(
+        "apps.artifacts.views.artifact_data_state",
+        new=AsyncMock(
+            return_value={
+                "status": "ready",
+                "queryable": True,
+                "message": "Artifact data is ready.",
+            }
+        ),
+    ):
+        yield
+
+
 @pytest.fixture
 def workspace(db):
     from apps.users.models import Tenant

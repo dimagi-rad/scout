@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from apps.users.models import User
     from apps.workspaces.models import Workspace
 
+from apps.workspaces.services.tenant_coverage import coverage_warning
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +65,7 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         loaded = sum(1 for t in tenants if t.get("success"))
         view_schema = summary.get("view_schema")
         view_ok = view_schema is None or view_schema.get("ok")
+        coverage = (view_schema or {}).get("tenant_coverage") or {}
 
         not_loaded = [
             t.get("display_name") or t.get("tenant") for t in tenants if not t.get("success")
@@ -73,9 +76,15 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         named = f": {', '.join(str(t) for t in not_loaded)}" if not_loaded else ""
         all_loaded = bool(summary.get("all_succeeded"))
 
+        cube_outcome = summary.get("cube_schema") or {}
+        promotion_deferred = cube_outcome.get("status") == "deferred"
         if all_loaded and view_ok:
-            status = "completed"
-            message = "Data loaded successfully. Continue with the analysis."
+            status = "partial" if promotion_deferred else "completed"
+            message = (
+                "All tenants refreshed."
+                if promotion_deferred
+                else "Data loaded successfully. Continue with the analysis."
+            )
         elif all_loaded:
             # Nothing left to load and still no queryable surface, so the view
             # build itself is broken (its exception is swallowed into
@@ -113,6 +122,18 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
             status = "failed"
             message = f"Materialization failed; no data was loaded{named}."
 
+        if promotion_deferred:
+            message += (
+                " Semantic promotion is deferred while an included source is still refreshing. "
+                "Check current data availability before analysis; do not claim a fresh complete "
+                "semantic snapshot yet."
+            )
+
+        if view_ok and coverage:
+            warning = coverage_warning(coverage)
+            if warning:
+                message += " " + warning
+
         failure_details = [
             f"{tenant.get('display_name') or tenant.get('tenant') or 'unknown'}: {tenant['error'].strip()}"
             for tenant in tenants
@@ -144,6 +165,7 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
             "tenants_loaded": loaded,
             "tenants_not_loaded": not_loaded,
             "message": message,
+            "tenant_coverage": coverage,
         }
 
     run_materialization.name = "run_materialization"

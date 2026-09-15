@@ -9,7 +9,7 @@ import {
   Minus,
   ScanText,
 } from "lucide-react"
-import { useId } from "react"
+import { useId, useState } from "react"
 import type React from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -192,9 +192,63 @@ function MarkdownBlockContent({ content }: { content: string }) {
   )
 }
 
+interface DateFilterDraft {
+  source: unknown
+  value: DateRange
+  invalidStart: boolean
+  invalidEnd: boolean
+}
+
+function isCompleteDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000-")) return false
+  const date = new Date(`${value}T00:00:00Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function dateDraftErrors(draft: DateFilterDraft) {
+  const start = draft.invalidStart || !isCompleteDate(draft.value.start)
+  const end = draft.invalidEnd || !isCompleteDate(draft.value.end)
+  const reversed = !start && !end && draft.value.start > draft.value.end
+  const message = start && end
+    ? "Enter complete start and end dates to apply the range."
+    : start
+      ? "Enter a complete, valid start date to apply the range."
+      : end
+        ? "Enter a complete, valid end date to apply the range."
+        : reversed
+          ? "Choose an end date on or after the start date to apply the range."
+          : null
+  return { start: start || reversed, end: end || reversed, message }
+}
+
 function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
   const state = useOutput(engine, outputKey(block.id, "value"))
   const value = asDateRange(state.value) ?? resolvePresetRange(stringValue(config.default))
+  const [draft, setDraft] = useState<DateFilterDraft | null>(null)
+  const hintId = useId()
+  // Source outputs survive data refreshes. A genuinely new source value (for
+  // example, a changed block config) supersedes a draft without remounting inputs.
+  const pending = draft?.source === state.value ? draft : null
+  const displayed = pending?.value ?? value
+  const errors = pending ? dateDraftErrors(pending) : null
+
+  function editDate(field: "start" | "end", text: string, invalid: boolean) {
+    const next: DateFilterDraft = {
+      source: state.value,
+      value: { ...displayed, [field]: text, preset: "custom" },
+      invalidStart: field === "start" ? invalid : pending?.invalidStart ?? false,
+      invalidEnd: field === "end" ? invalid : pending?.invalidEnd ?? false,
+    }
+    if (dateDraftErrors(next).message) {
+      setDraft(next)
+      return
+    }
+    setDraft(null)
+    // Restoring an unchanged range only dismisses the draft; don't repeat its query.
+    if (next.value.start !== value.start || next.value.end !== value.end) {
+      engine.setSourceOutputs(block.id, { value: next.value })
+    }
+  }
 
   return (
     <div data-block-type="date_filter" className="rounded-xl border border-border bg-card p-4 text-card-foreground">
@@ -205,9 +259,12 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
             {stringValue(config.label) ?? "Date range"}
           </span>
           <select
-            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            value={value.preset ?? "custom"}
-            onChange={(event) => engine.setSourceOutputs(block.id, { value: resolvePresetRange(event.target.value) })}
+            className="h-10 w-full rounded-md border border-input bg-background px-3 text-base sm:text-sm text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            value={displayed.preset ?? "custom"}
+            onChange={(event) => {
+              setDraft(null)
+              engine.setSourceOutputs(block.id, { value: resolvePresetRange(event.target.value) })
+            }}
           >
             <option value="last_30_days">Last 30 days</option>
             <option value="last_7_days">Last 7 days</option>
@@ -215,20 +272,30 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
             <option value="month_to_date">Month to date</option>
             <option value="today">Today</option>
             <option value="yesterday">Yesterday</option>
+            <option value="custom" disabled>Custom dates</option>
           </select>
         </label>
         <div className="grid gap-3 border-t border-border pt-3 sm:grid-cols-2">
           <DateInput
             label="Start date"
-            value={value.start}
-            onChange={(start) => engine.setSourceOutputs(block.id, { value: { ...value, start, preset: "custom" } })}
+            value={displayed.start}
+            invalid={errors?.start}
+            hintId={hintId}
+            onChange={(start, invalid) => editDate("start", start, invalid)}
           />
           <DateInput
             label="End date"
-            value={value.end}
-            onChange={(end) => engine.setSourceOutputs(block.id, { value: { ...value, end, preset: "custom" } })}
+            value={displayed.end}
+            invalid={errors?.end}
+            hintId={hintId}
+            onChange={(end, invalid) => editDate("end", end, invalid)}
           />
         </div>
+        <p id={hintId} role="status" className="text-sm text-muted-foreground">
+          {errors?.message
+            ? `${errors.message} Last applied range: ${formatDateRange(value)}.`
+            : "Dates apply automatically when the range is valid."}
+        </p>
       </div>
     </div>
   )
@@ -300,15 +367,23 @@ function localDate(value: string): Date | null {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-function DateInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function DateInput({ label, value, invalid, hintId, onChange }: {
+  label: string
+  value: string
+  invalid?: boolean
+  hintId: string
+  onChange: (value: string, invalid: boolean) => void
+}) {
   return (
     <label className="grid min-w-0 gap-1.5 text-xs font-medium text-muted-foreground">
       {label}
       <input
         type="date"
         value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-9 min-w-0 w-full rounded-md border border-input bg-background px-2 text-sm tabular-nums text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        aria-invalid={invalid || undefined}
+        aria-describedby={hintId}
+        onChange={(event) => onChange(event.currentTarget.value, !event.currentTarget.validity.valid)}
+        className="h-9 min-w-0 w-full rounded-md border border-input bg-background px-2 text-base sm:text-sm tabular-nums text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-invalid:border-destructive"
       />
     </label>
   )

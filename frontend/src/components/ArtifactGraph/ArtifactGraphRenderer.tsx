@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useEffect, useMemo, useRef, type Ref } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
@@ -10,9 +10,11 @@ import type { ArtifactDetail, StoryBlock, StoryEngineApi, StoryRuntimeContext } 
 interface ArtifactGraphRendererProps {
   artifact: ArtifactDetail
   workspaceId: string
+  dataRevision?: string
+  containerRef?: Ref<HTMLDivElement>
 }
 
-export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRendererProps) {
+export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dataRevision }: ArtifactGraphRendererProps) {
   const registry = useMemo(() => buildStoryRegistry(), [])
   const doc = useMemo(
     () => normalizeStoryDoc(isRecord(artifact.data) ? artifact.data.story_doc : undefined, artifact.title),
@@ -25,6 +27,13 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
     [workspaceId],
   )
   const engine = useStoryEngine(registry, ctx, doc)
+  const lastPublication = useRef({ engine, dataRevision })
+  useEffect(() => {
+    if (lastPublication.current.engine === engine && lastPublication.current.dataRevision !== dataRevision) {
+      engine?.refreshData()
+    }
+    lastPublication.current = { engine, dataRevision }
+  }, [engine, dataRevision])
   const visibleGroups = useMemo(() => groupVisibleBlocks(doc.blocks), [doc.blocks])
 
   if (!engine) {
@@ -32,8 +41,8 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-background">
-      <div className="mx-auto max-w-5xl px-6 py-6">
+    <div ref={containerRef} data-artifact-story className="h-full overflow-y-auto bg-background">
+      <div data-artifact-story-content className="mx-auto max-w-5xl px-6 py-6">
         <Diagnostics engine={engine} />
         {doc.prd && (
           <div className="mb-5 border-l-2 border-primary/40 pl-3 text-xs text-muted-foreground">

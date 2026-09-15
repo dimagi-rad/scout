@@ -30,6 +30,7 @@ from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.server import get_schema_status
 from mcp_server.services.pool import close_all_pools
 from mcp_server.services.query import execute_query
+from tests.managed_query_fixture import managed_query_context
 
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
@@ -1171,79 +1172,17 @@ class TestExecuteAsyncIntegration:
     statement_timeout failing with psycopg3's server-side parameters) that
     mock-based tests can't detect.
 
-    Skipped automatically when DATABASE_URL is not set.
+    Uses MANAGED_DATABASE_URL, which CI requires via test_ci_integrity.
     """
 
     @pytest.fixture(autouse=True)
     def real_db(self):
-        import os
-        from urllib.parse import urlparse
-
-        import psycopg
-
-        db_url = os.environ.get("DATABASE_URL")
-        if not db_url:
-            pytest.skip("No DATABASE_URL for integration test")
-
-        parsed = urlparse(db_url)
-        self.connection_params = {
-            "host": parsed.hostname or "localhost",
-            "port": parsed.port or 5432,
-            "dbname": parsed.path.lstrip("/") or "scout",
-            "user": parsed.username or "",
-            "password": parsed.password or "",
-        }
-        self.schema = "test_query_exec"
-        self.ro_role = f"{self.schema}_ro"
-
-        conn = psycopg.connect(**self.connection_params, autocommit=True)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
-                cur.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS "{self.schema}".items (
-                        id SERIAL PRIMARY KEY,
-                        name TEXT,
-                        value INTEGER
-                    )
-                    """
-                )
-                cur.execute(
-                    f"""
-                    INSERT INTO "{self.schema}".items (name, value)
-                    VALUES ('alpha', 1), ('beta', 2), ('gamma', 3)
-                    """
-                )
-                # Create the read-only role required by the executor SET ROLE
-                cur.execute(f'CREATE ROLE "{self.ro_role}"')
-                cur.execute(f'GRANT USAGE ON SCHEMA "{self.schema}" TO "{self.ro_role}"')
-                cur.execute(
-                    f'GRANT SELECT ON ALL TABLES IN SCHEMA "{self.schema}" TO "{self.ro_role}"'
-                )
-        finally:
-            conn.close()
-
-        yield
-
-        conn = psycopg.connect(**self.connection_params, autocommit=True)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f'DROP SCHEMA IF EXISTS "{self.schema}" CASCADE')
-                cur.execute(f'DROP ROLE IF EXISTS "{self.ro_role}"')
-        finally:
-            conn.close()
+        with managed_query_context() as ctx:
+            self.query_context = ctx
+            yield
 
     def _ctx(self):
-        from mcp_server.context import QueryContext
-
-        return QueryContext(
-            tenant_id="test-integration",
-            schema_name=self.schema,
-            max_rows_per_query=500,
-            max_query_timeout_seconds=30,
-            connection_params=self.connection_params,
-        )
+        return self.query_context
 
     @pytest.mark.asyncio
     async def test_returns_rows(self):
@@ -1318,3 +1257,39 @@ class TestExecuteAsyncIntegration:
 
         assert result["row_count"] == 1
         assert result["rows"][0][0] == 3
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("view_state", [SchemaState.ACTIVE, SchemaState.MATERIALIZING])
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_schema_status_discloses_missing_sources(user, view_state, malformed):
+    workspace = await Workspace.objects.acreate(name="Degraded workspace", created_by=user)
+    tenants = []
+    for suffix in ("ready", "missing"):
+        tenant = await Tenant.objects.acreate(provider="commcare", external_id=suffix)
+        tenants.append(tenant)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    coverage = {
+        "included_tenants": [{"tenant_id": str(tenants[0].id), "external_id": "ready"}],
+        "excluded_tenants": [{"tenant_id": str(tenants[1].id), "external_id": "missing"}],
+    }
+    if malformed:
+        coverage = {"excluded_tenants": [None]}
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="ws_degraded_status",
+        state=view_state,
+        tenant_coverage=coverage,
+    )
+    with (
+        patch("mcp_server.server._resolve_mcp_context", AsyncMock()),
+        patch("mcp_server.server.workspace_list_tables", AsyncMock(return_value=[])),
+    ):
+        result = await get_schema_status(workspace_id=str(workspace.id))
+    assert result["success"] is True
+    assert result["data"]["tenant_coverage"] == (
+        coverage if view_state == SchemaState.ACTIVE else None
+    )
+    assert result["data"]["data_complete"] is (
+        False if view_state == SchemaState.ACTIVE and not malformed else None
+    )

@@ -10,11 +10,13 @@ import contextlib
 import hashlib
 import logging
 import re
+import threading
 import uuid
 
 import psycopg
 import psycopg.sql
 from django.conf import settings
+from django.db import connection
 from django.utils import timezone
 
 from apps.common.identifiers import (
@@ -34,6 +36,43 @@ logger = logging.getLogger(__name__)
 # budget for the ``__{table}`` suffix (the full name is hard-failed if it still
 # exceeds the limit). Identifier minting lives in apps.common.identifiers (arch #235).
 _MAX_VIEW_PREFIX_LEN = 32
+
+
+_VIEW_BUILD_LOCK_NAMESPACE = 0x53435642
+_view_build_context = threading.local()
+
+
+@contextlib.contextmanager
+def _serialize_view_build(workspace_id):
+    workspace_key = str(workspace_id)
+    active_builds = getattr(_view_build_context, "workspaces", None)
+    if active_builds is None:
+        active_builds = _view_build_context.workspaces = set()
+    if workspace_key in active_builds:
+        raise RuntimeError(f"Recursive view build for workspace {workspace_key}")
+    lock_key = int.from_bytes(hashlib.sha256(workspace_key.encode()).digest()[:4], signed=True)
+    active_builds.add(workspace_key)
+    try:
+        # A session lock serializes plan capture, DDL, and publication while
+        # autocommit keeps PROVISIONING visible to readers in other processes.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_lock(%s, %s)", [_VIEW_BUILD_LOCK_NAMESPACE, lock_key]
+            )
+            try:
+                yield
+            finally:
+                try:
+                    cursor.execute(
+                        "SELECT pg_advisory_unlock(%s, %s)", [_VIEW_BUILD_LOCK_NAMESPACE, lock_key]
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to release workspace view-build lock for %s", workspace_key
+                    )
+                    connection.close()
+    finally:
+        active_builds.remove(workspace_key)
 
 
 def get_managed_db_connection():
@@ -269,6 +308,25 @@ class SchemaManager:
         return f"{sanitized[:23]}_{digest}"
 
     def build_view_schema(self, workspace) -> WorkspaceViewSchema:
+        """Publish one coherent physical view schema and its coverage per workspace."""
+        with _serialize_view_build(workspace.id):
+            return self._build_view_schema(workspace)
+
+    def tenant_ids_for_view(self, view_name: str, tenants) -> tuple[str, ...]:
+        """Recover a legacy view's owner only when the canonical plan is unambiguous.
+
+        Use the same bounded prefix as publication, never labels guessed from a
+        semantic member. New catalogs persist the result before names can change.
+        """
+        candidates = [
+            str(tenant.id)
+            for tenant in tenants
+            if view_name.startswith(f"{self._view_prefix(tenant)}__")
+            and len(view_name) > len(self._view_prefix(tenant)) + 2
+        ]
+        return tuple(candidates) if len(candidates) == 1 else ()
+
+    def _build_view_schema(self, workspace) -> WorkspaceViewSchema:
         """(Re)build the PostgreSQL view schema for a multi-tenant workspace.
 
         Fetches all active TenantSchema objects for the workspace's tenants and
@@ -277,9 +335,11 @@ class SchemaManager:
         recreated from scratch each call, so a rebuild after an underlying table's
         columns changed succeeds rather than failing on view-column mismatches.
 
-        Raises ValueError if any tenant has no active schema, if two tenants
-        produce the same view prefix or full view name, or if a composed view
-        name would exceed PostgreSQL's 63-byte identifier limit.
+        A workspace with at least one active tenant schema remains queryable: tenants
+        without one are recorded in ``tenant_coverage`` and omitted from this build.
+        Raises ValueError if no tenant has an active schema, if two included tenants
+        produce the same view prefix or full view name, or if a composed view name
+        would exceed PostgreSQL's 63-byte identifier limit.
 
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
@@ -296,23 +356,38 @@ class SchemaManager:
         vs.save(update_fields=["schema_name", "state"])
 
         try:
-            tenants = list(workspace.tenants.all())
+            tenants = sorted(
+                workspace.tenants.all(),
+                key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
+            )
             if not tenants:
+                vs.tenant_coverage = {
+                    "included_tenants": [],
+                    "excluded_tenants": [],
+                }
+                vs.save(update_fields=["tenant_coverage"])
                 raise ValueError(f"Workspace {workspace.id} has no tenants")
 
             active_schemas = {
                 ts.tenant_id: ts
                 for ts in TenantSchema.objects.filter(tenant__in=tenants, state=SchemaState.ACTIVE)
             }
-            tenant_schemas: list[tuple[str, Tenant]] = []  # (schema_name, tenant)
-            for tenant in tenants:
-                ts = active_schemas.get(tenant.id)
-                if ts is None:
-                    raise ValueError(
-                        f"Tenant '{tenant.external_id}' has no active schema. "
-                        "Run a data refresh for this tenant before building the view schema."
-                    )
-                tenant_schemas.append((ts.schema_name, tenant))
+            included_tenants = [tenant for tenant in tenants if tenant.id in active_schemas]
+            excluded_tenants = [tenant for tenant in tenants if tenant.id not in active_schemas]
+            tenant_schemas: list[tuple[str, Tenant]] = [
+                (active_schemas[tenant.id].schema_name, tenant) for tenant in included_tenants
+            ]
+            vs.tenant_coverage = {
+                "included_tenants": [self._tenant_coverage_entry(t) for t in included_tenants],
+                "excluded_tenants": [self._tenant_coverage_entry(t) for t in excluded_tenants],
+            }
+            vs.save(update_fields=["tenant_coverage"])
+
+            if not tenant_schemas:
+                raise ValueError(
+                    f"Workspace {workspace.id} has no active schema for any tenant. "
+                    "Run a data refresh before building the view schema."
+                )
         except ValueError as exc:
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
@@ -468,6 +543,14 @@ class SchemaManager:
             views_created,
         )
         return vs
+
+    @staticmethod
+    def _tenant_coverage_entry(tenant: Tenant) -> dict[str, str]:
+        return {
+            "tenant_id": str(tenant.id),
+            "provider": tenant.provider,
+            "external_id": tenant.external_id,
+        }
 
     def teardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
         """Drop the physical PostgreSQL schema for a WorkspaceViewSchema.

@@ -53,9 +53,7 @@ class CommCareFormLoader(CommCareBaseLoader):
                 # TastyPie always returns ``"objects": []`` for an empty page;
                 # a missing key signals an envelope change — fail rather than
                 # silently completing the source empty (arch #252, finding 03#6).
-                raise CommCareExportError(
-                    f"CommCare Form API response missing 'objects' key for {url}"
-                )
+                raise CommCareExportError("CommCare Form API response missing 'objects' key")
             forms = [_normalize_form(raw) for raw in data["objects"]]
             page_total: int | None = None
             if first_page:

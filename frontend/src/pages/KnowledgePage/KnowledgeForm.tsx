@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react"
 import { Loader2 } from "lucide-react"
+import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import {
   Dialog,
   DialogContent,
@@ -60,6 +61,7 @@ const categoryOptions = [
 ]
 
 export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFormProps) {
+  const isCurrentAccount = useIsCurrentAccount()
   const [form, setForm] = useState<FormState>(initialFormState)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -122,11 +124,13 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
       }
 
       await onSave(data)
+      if (!isCurrentAccount()) return
       onOpenChange(false)
     } catch (err) {
+      if (!isCurrentAccount()) return
       setError(err instanceof Error ? err.message : "Failed to save knowledge item")
     } finally {
-      setLoading(false)
+      if (isCurrentAccount()) setLoading(false)
     }
   }
 

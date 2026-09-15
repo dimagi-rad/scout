@@ -32,6 +32,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     aresolve_pipeline_config,
 )
+from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
 from mcp_server.context import load_workspace_context
 from mcp_server.pipeline_registry import get_registry
@@ -60,6 +61,7 @@ class PhysicalTable:
     materialized_row_count: int | None = None
     materialized_at: str | None = None
     primary_key: str = ""
+    source_tenant_ids: tuple[str, ...] = ()
 
 
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_]+")
@@ -253,6 +255,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
         tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
     primary_keys = await pipeline_table_primary_keys(ctx)
+    tenants = [tenant async for tenant in workspace.tenants.all()] if is_view_schema else []
     physical_tables: list[PhysicalTable] = []
     for entry in table_entries:
         table_name = entry.get("name", "")
@@ -275,6 +278,11 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 materialized_at=entry.get("materialized_at"),
                 primary_key=primary_keys.get(table_name, "")
                 or _fallback_primary_key(entry.get("type", "table"), columns),
+                source_tenant_ids=(
+                    (str(ts.tenant_id),)
+                    if ts is not None
+                    else SchemaManager().tenant_ids_for_view(table_name, tenants)
+                ),
             )
         )
     return schema_name, physical_tables
@@ -379,6 +387,11 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                         "source_type": table.type,
                         "materialized_at": table.materialized_at,
                         "row_count_verified": False,
+                        **(
+                            {"source_tenant_ids": list(table.source_tenant_ids)}
+                            if table.source_tenant_ids
+                            else {}
+                        ),
                     },
                 },
             )
@@ -403,18 +416,27 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         return model
 
 
-def get_active_semantic_model(workspace) -> SemanticModel:
-    """Return the current queryable semantic model without refreshing it."""
-    model = SemanticModel.objects.filter(
-        workspace=workspace,
-        status=SemanticModel.Status.ACTIVE,
-    ).first()
+def _active_semantic_models(workspace):
+    return SemanticModel.objects.filter(workspace=workspace, status=SemanticModel.Status.ACTIVE)
+
+
+def _require_active_semantic_model(model) -> SemanticModel:
     if model is None:
         raise SemanticCatalogUnavailable(
             "No active semantic model is available. Refresh workspace data.",
             schema_status="unavailable",
         )
     return model
+
+
+def get_active_semantic_model(workspace) -> SemanticModel:
+    """Return the current queryable semantic model without refreshing it."""
+    return _require_active_semantic_model(_active_semantic_models(workspace).first())
+
+
+async def aget_active_semantic_model(workspace) -> SemanticModel:
+    """Async counterpart using the same queryability predicate."""
+    return _require_active_semantic_model(await _active_semantic_models(workspace).afirst())
 
 
 def _sync_custom_datasets(
@@ -439,7 +461,7 @@ def _sync_custom_datasets(
     for custom in CustomDataset.objects.filter(
         workspace=workspace,
         is_visible=True,
-        status=CustomDataset.Status.ACTIVE,
+        status__in=[CustomDataset.Status.ACTIVE, CustomDataset.Status.ERROR],
     ).order_by("name"):
         try:
             if custom.name in physical_names:
@@ -497,7 +519,11 @@ def _sync_custom_datasets(
             defaults=defaults,
         )
         _sync_fields(dataset, columns, None)
-        CustomDataset.objects.filter(id=custom.id).update(diagnostics=[])
+        # ERROR is a failed validation, not an intentional DRAFT/hidden model.
+        # Revalidate after a missing physical dependency becomes available again.
+        CustomDataset.objects.filter(id=custom.id).update(
+            status=CustomDataset.Status.ACTIVE, diagnostics=[]
+        )
         valid_custom_ids.add(str(custom.id))
 
     stale_custom_datasets = SemanticDataset.objects.filter(

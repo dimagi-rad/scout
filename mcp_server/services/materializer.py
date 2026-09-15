@@ -54,7 +54,10 @@ from apps.common.error_codes import code_of
 from apps.common.errors import DenialScope, UpstreamAccessDenied, UpstreamTokenExpired
 from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset, TransformationRunStatus
-from apps.transformations.services.commcare_staging import upsert_system_assets
+from apps.transformations.services.commcare_staging import (
+    CaseModelMigrationRequired,
+    upsert_system_assets,
+)
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
 from apps.users.services.upstream_denial import record_upstream_denial
@@ -240,6 +243,11 @@ def run_pipeline(
                         "Skipping asset generation for %s: tenant metadata is unavailable",
                         tenant_membership.tenant.external_id,
                     )
+            except CaseModelMigrationRequired:
+                # Continuing would run stale, ambiguous assets and report an
+                # incomplete rebuild as successful. The outer handler records
+                # this actionable failure before any provider rows are loaded.
+                raise
             except Exception:
                 logger.exception(
                     "Failed to generate system assets for %s; continuing pipeline",
