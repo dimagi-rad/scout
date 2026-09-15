@@ -105,3 +105,19 @@ def test_visit_aliases_do_not_collide_with_literal_suffix(connect_tenant):
     assert sql.count(' AS "status_2"') == 1
     assert sql.count(' AS "status_3"') == 1
     assert sql.count(' AS "status_4"') == 1
+
+
+def test_long_repeat_group_name_fits_postgres_identifier_limit():
+    leaf = "household_member_immunization_history_details_v2"
+    form_definitions = {
+        "visit": {
+            "name": "Visit",
+            "questions": [{"value": f"/data/{leaf}/dose", "type": "Text", "repeat": True}],
+        }
+    }
+    tenant = Tenant(provider="connect", external_id="synthetic-long-repeat")
+    repeat = next(
+        a for a in generate_connect_assets(form_definitions, tenant) if a.name != "stg_visits"
+    )
+    assert len(repeat.name.encode()) <= 63
+    assert repeat.name.startswith("stg_visits__repeat_household_member")

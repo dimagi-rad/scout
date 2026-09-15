@@ -35,8 +35,7 @@ async function request<T>(
   })
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText, body)
+    throw await responseError(res)
   }
 
   if (res.status === 204) {
@@ -44,6 +43,40 @@ async function request<T>(
   }
 
   return res.json() as Promise<T>
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function messageText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+
+function messageLeaf(value: unknown): string | undefined {
+  const record = asRecord(value)
+  // Read only explicit message fields. In particular, a semantic error's
+  // `detail`, validation `input`/`ctx`, and arbitrary metadata are not UI copy.
+  return messageText(value) ?? messageText(record?.message) ?? messageText(record?.msg)
+}
+
+function errorMessage(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return messageLeaf(value)
+  const messages = value.map(messageLeaf).filter((message) => message !== undefined)
+  return messages.length ? [...new Set(messages)].join(" ") : undefined
+}
+
+async function responseError(res: Response): Promise<ApiError> {
+  const body: unknown = await res.json().catch(() => undefined)
+  const record = asRecord(body)
+  const message = errorMessage(record?.detail)
+    ?? errorMessage(record?.error)
+    ?? errorMessage(body)
+    ?? messageText(res.statusText)
+    ?? `Request failed (HTTP ${res.status}).`
+  return new ApiError(res.status, message, body)
 }
 
 export class ApiError extends Error {
@@ -73,7 +106,7 @@ export const api = {
     const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
     const res = await fetch(prefixedUrl, { credentials: "include" })
     if (!res.ok) {
-      throw new ApiError(res.status, res.statusText)
+      throw await responseError(res)
     }
     return res.blob()
   },

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { fireEvent, render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import type { UIMessage } from "ai"
 import { ChatMessage } from "./ChatMessage"
 import { useAppStore } from "@/store/store"
@@ -7,7 +8,7 @@ import { useAppStore } from "@/store/store"
 // A live tool part as produced by the SSE stream: `output` is a JSON STRING
 // (apps/chat/stream.py emits the MCP envelope as compact JSON). The rich card
 // must render LIVE from this string — not fall back to a raw <pre>.
-function liveMessage(toolName: string, output: unknown): UIMessage {
+function liveMessage(toolName: string, output: unknown, input: unknown = {}): UIMessage {
   return {
     id: "m1",
     role: "assistant",
@@ -17,7 +18,7 @@ function liveMessage(toolName: string, output: unknown): UIMessage {
         toolName,
         toolCallId: "toolu_LIVE",
         state: "output-available",
-        input: {},
+        input,
         output: typeof output === "string" ? output : JSON.stringify(output),
       },
     ],
@@ -25,6 +26,36 @@ function liveMessage(toolName: string, output: unknown): UIMessage {
 }
 
 describe("ChatMessage live tool cards (arch #246)", () => {
+  it("renders the rich query card with the executed SQL", async () => {
+    const msg = liveMessage("query", {
+      success: true,
+      data: {
+        columns: ["id", "name"],
+        rows: [[1, "Alice"]],
+        row_count: 1,
+        sql_executed: "SELECT id, name FROM users LIMIT 500",
+        tables_accessed: ["users"],
+      },
+    })
+    render(<ChatMessage message={msg} isActiveMessage={true} />)
+    expect(screen.getByText("Query succeeded")).toBeInTheDocument()
+    expect(screen.getByText("Alice")).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId("query-tab-sql"))
+    expect(screen.getByTestId("query-sql")).toHaveTextContent(/FROM\s+users/)
+  })
+
+  it("shows the attempted SQL from the tool input when the query fails", () => {
+    const msg = liveMessage(
+      "query",
+      { success: false, error: { code: "QUERY_TIMEOUT", message: "Query timed out." } },
+      { sql: "SELECT count(*) FROM big_table" },
+    )
+    render(<ChatMessage message={msg} isActiveMessage={true} />)
+    expect(screen.getByText("Query timed out.")).toBeInTheDocument()
+    expect(screen.getByTestId("query-sql")).toHaveTextContent(/FROM\s+big_table/)
+  })
+
   it("renders the rich semantic query card from a live JSON-string output", () => {
     const msg = liveMessage("semantic_query", {
       success: true,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import {
   GetMetadataOutput,
   QueryToolOutput,
@@ -92,6 +93,37 @@ describe("QueryToolOutput (arch #246 13#6 / 13#8)", () => {
     }
     render(<QueryToolOutput output={output} />)
     expect(screen.getByText("O'Brien")).toBeInTheDocument()
+  })
+
+  it("renders the executed SQL and tables accessed", async () => {
+    const output: QueryOutput = {
+      success: true,
+      data: {
+        columns: ["id"],
+        rows: [[1]],
+        row_count: 1,
+        sql_executed: "select id from users limit 500",
+        tables_accessed: ["public.users"],
+      },
+    }
+    render(<QueryToolOutput output={output} />)
+    // Results are the default tab; the SQL sits behind its own tab.
+    expect(screen.getByText("Tables:")).toBeInTheDocument()
+    expect(screen.getByText("public.users")).toBeInTheDocument()
+    expect(screen.queryByTestId("query-sql")).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId("query-tab-sql"))
+    expect(screen.getByTestId("query-sql")).toHaveTextContent(/SELECT\s+id\s+FROM\s+users/)
+  })
+
+  it("falls back to the input SQL when the query fails", () => {
+    const output: QueryOutput = {
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Table not allowed." },
+    }
+    render(<QueryToolOutput output={output} sql="select * from secrets" />)
+    expect(screen.getByText("Table not allowed.")).toBeInTheDocument()
+    expect(screen.getByTestId("query-sql")).toHaveTextContent(/SELECT\s+\*\s+FROM\s+secrets/)
   })
 })
 
