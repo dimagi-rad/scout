@@ -47,7 +47,14 @@ class ArtifactWriteInput(BaseModel):
     action: str = Field(description="One of: create, replace, apply, check.")
     artifact_id: str | None = Field(default=None)
     title: str | None = None
-    description: str = ""
+    description: str | None = Field(
+        default=None,
+        description=(
+            "Library-card description, separate from story_doc.prd. Supported on create, "
+            "replace, and apply. Omit or use null to preserve it on edits; use an empty "
+            "string to clear it. A description-only apply may omit ops."
+        ),
+    )
     story_doc: dict[str, Any] | None = None
     ops: list[dict[str, Any]] | None = Field(
         default=None,
@@ -142,7 +149,7 @@ def create_artifact_graph_tools(
         action: str,
         artifact_id: str | None = None,
         title: str | None = None,
-        description: str = "",
+        description: str | None = None,
         story_doc: dict[str, Any] | None = None,
         ops: list[dict[str, Any]] | None = None,
         run_check: bool = True,
@@ -173,6 +180,7 @@ def create_artifact_graph_tools(
                     conversation_id=conversation_id,
                     artifact_id=artifact_id,
                     title=title,
+                    description=description,
                     story_doc=story_doc,
                     run_check=True,
                 )
@@ -183,6 +191,7 @@ def create_artifact_graph_tools(
                     conversation_id=conversation_id,
                     artifact_id=artifact_id,
                     title=title,
+                    description=description,
                     ops=ops,
                     run_check=True,
                 )
@@ -227,7 +236,7 @@ async def _create_graph_artifact(
     conversation_id: str | None,
     *,
     title: str | None,
-    description: str,
+    description: str | None,
     story_doc: dict[str, Any] | None,
     run_check: bool,
 ) -> dict[str, Any]:
@@ -275,6 +284,7 @@ async def _replace_graph_artifact(
     conversation_id: str | None,
     artifact_id: str | None,
     title: str | None,
+    description: str | None,
     story_doc: dict[str, Any] | None,
     run_check: bool,
 ) -> dict[str, Any]:
@@ -297,6 +307,7 @@ async def _replace_graph_artifact(
         original,
         user,
         title=(title.strip() if title else original.title),
+        description=description,
         story_doc=doc,
         conversation_id=conversation_id or original.conversation_id,
     )
@@ -319,18 +330,19 @@ async def _apply_graph_ops(
     conversation_id: str | None,
     artifact_id: str | None,
     title: str | None,
+    description: str | None,
     ops: list[dict[str, Any]] | None,
     run_check: bool,
 ) -> dict[str, Any]:
     if not artifact_id:
         return {"status": "error", "message": "artifact_id is required for apply."}
-    if not ops:
-        return {"status": "error", "message": "ops are required for apply."}
+    if not ops and description is None:
+        return {"status": "error", "message": "ops or description are required for apply."}
     original = await Artifact.objects.aget(id=artifact_id, workspace=workspace)
     if original.artifact_type != ArtifactType.STORY:
         return {"status": "error", "message": "Only story artifacts can be edited."}
     doc = story_doc_from_artifact_data(original.data)
-    updated_doc = apply_ops(doc, ops)
+    updated_doc = apply_ops(doc, ops or [])
     diagnostics = validate_doc(updated_doc)
     if diagnostics_have_errors(diagnostics):
         return {
@@ -342,6 +354,7 @@ async def _apply_graph_ops(
         original,
         user,
         title=(title.strip() if title else original.title),
+        description=description,
         story_doc=updated_doc,
         conversation_id=conversation_id or original.conversation_id,
     )
@@ -362,6 +375,7 @@ async def _create_graph_version(
     user: User | None,
     *,
     title: str,
+    description: str | None,
     story_doc: dict[str, Any],
     conversation_id: str,
 ) -> Artifact:
@@ -369,7 +383,7 @@ async def _create_graph_version(
         workspace_id=original.workspace_id,
         created_by=user,
         title=title,
-        description=original.description,
+        description=original.description if description is None else description.strip(),
         artifact_type=ArtifactType.STORY,
         code="",
         data={"story_doc": story_doc},
@@ -442,6 +456,7 @@ def _artifact_summary(artifact: Artifact) -> dict[str, Any]:
     return {
         "id": str(artifact.id),
         "title": artifact.title,
+        "description": artifact.description,
         "version": artifact.version,
         "artifact_type": artifact.artifact_type,
         "updated_at": artifact.updated_at.isoformat() if artifact.updated_at else None,

@@ -161,6 +161,14 @@ again rather than explaining the failure to the parent. Treat
 publication failures. Do not set `run_check=false` to publish a user-facing
 artifact.
 
+The top-level `description` argument to `artifact_write` is library-card metadata,
+not the rendered `story_doc.prd`. Set it on create, replace, or apply when requested.
+For edits, omitting it or passing null preserves the existing description; an empty
+string clears it. For a description-only edit, use apply without ops. Read the
+persisted `artifact.description` in the tool result or artifact_graph_overview
+before claiming the description changed; runtime validation alone does not verify
+the requested metadata.
+
 For `action="apply"`, `ops` supports only these exact shapes:
 - Set a story field: `{"op":"set","target":"story/name","value":"..."}`
   or targets `story/prd` and `story/tags`.

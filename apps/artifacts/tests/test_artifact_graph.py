@@ -84,6 +84,223 @@ def graph_doc():
     }
 
 
+@pytest.fixture
+def static_story_doc():
+    return {
+        "schema_version": 1,
+        "name": "Description smoke test",
+        "prd": "Rendered scope is separate from the library description.",
+        "blocks": [
+            {"id": "intro", "type": "markdown", "config": {"body": "Original content"}},
+        ],
+    }
+
+
+@pytest.fixture
+def graph_tools(workspace, member_user):
+    return {tool.name: tool for tool in create_artifact_graph_tools(workspace, member_user)}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("description_args", "expected"),
+    [
+        pytest.param({}, "", id="omitted"),
+        pytest.param({"description": None}, "", id="null"),
+        pytest.param({"description": ""}, "", id="empty"),
+        pytest.param({"description": "  New description\n"}, "New description", id="trimmed"),
+    ],
+)
+async def test_graph_manager_create_description(
+    graph_tools, static_story_doc, description_args, expected
+):
+    result = await graph_tools["artifact_write"].ainvoke(
+        {
+            "action": "create",
+            "title": "Description smoke test",
+            "story_doc": static_story_doc,
+            **description_args,
+        }
+    )
+
+    assert result["status"] == "created"
+    artifact = await Artifact.objects.aget(id=result["artifact"]["id"])
+    assert artifact.description == expected
+    assert result["artifact"]["description"] == expected
+    assert result["runtime"]["success"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["apply", "replace"])
+@pytest.mark.parametrize(
+    ("description_args", "expected"),
+    [
+        pytest.param({}, "Original description", id="omitted-preserves"),
+        pytest.param({"description": None}, "Original description", id="null-preserves"),
+        pytest.param(
+            {"description": "  Updated description\n"}, "Updated description", id="updates"
+        ),
+        pytest.param({"description": ""}, "", id="empty-clears"),
+        pytest.param({"description": " \n "}, "", id="whitespace-clears"),
+    ],
+)
+async def test_graph_manager_description_edits_round_trip(
+    graph_tools, static_story_doc, member_client, workspace, action, description_args, expected
+):
+    write = graph_tools["artifact_write"]
+    created = await write.ainvoke(
+        {
+            "action": "create",
+            "title": "Description smoke test",
+            "description": "Original description",
+            "story_doc": static_story_doc,
+        }
+    )
+    original_id = created["artifact"]["id"]
+    edit = {"action": action, "artifact_id": original_id, **description_args}
+    if action == "apply":
+        edit["ops"] = [
+            {"op": "set", "target": "block/intro/config/body", "value": "Revised content"}
+        ]
+    else:
+        static_story_doc["blocks"][0]["config"]["body"] = "Revised content"
+        edit["story_doc"] = static_story_doc
+
+    result = await write.ainvoke(edit)
+
+    assert result["status"] == ("updated" if action == "apply" else "replaced")
+    latest_id = result["artifact"]["id"]
+    latest = await Artifact.objects.aget(id=latest_id)
+    original = await Artifact.objects.aget(id=original_id)
+    assert latest.description == expected
+    assert original.description == "Original description"
+    assert original.data["story_doc"]["blocks"][0]["config"]["body"] == "Original content"
+    assert latest.parent_artifact_id == original.id
+    assert latest.version == 2
+    assert latest.data["story_doc"]["blocks"][0]["config"]["body"] == "Revised content"
+    assert latest.data["story_doc"]["prd"] == static_story_doc["prd"]
+    assert result["artifact"]["description"] == expected
+    assert result["runtime"]["success"] is True
+
+    # The agent must be able to verify metadata, not infer it from a successful write.
+    overview = await graph_tools["artifact_graph_overview"].ainvoke({"artifact_id": latest_id})
+    dependencies = await graph_tools["get_artifact_semantic_queries"].ainvoke(
+        {"artifact_id": latest_id}
+    )
+    checked = await write.ainvoke({"action": "check", "artifact_id": latest_id})
+    for payload in (overview, dependencies, checked):
+        assert payload["artifact"]["description"] == expected
+
+    # Re-fetch via the API used by the actual card; only the latest revision is listed.
+    response = await member_client.get(f"/api/workspaces/{workspace.id}/artifacts/")
+    assert response.status_code == 200
+    cards = response.json()["results"]
+    assert [(card["id"], card["version"], card["description"]) for card in cards] == [
+        (latest_id, 2, expected)
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ops_args", [{}, {"ops": []}], ids=["omitted-ops", "empty-ops"])
+@pytest.mark.parametrize("description", ["Metadata only", ""])
+async def test_graph_manager_description_only_edit(
+    graph_tools, static_story_doc, ops_args, description
+):
+    write = graph_tools["artifact_write"]
+    created = await write.ainvoke(
+        {
+            "action": "create",
+            "title": "Description smoke test",
+            "description": "Original description",
+            "story_doc": static_story_doc,
+        }
+    )
+
+    result = await write.ainvoke(
+        {
+            "action": "apply",
+            "artifact_id": created["artifact"]["id"],
+            "description": description,
+            **ops_args,
+        }
+    )
+
+    assert result["status"] == "updated"
+    latest = await Artifact.objects.aget(id=result["artifact"]["id"])
+    assert latest.description == description
+    assert latest.data["story_doc"] == static_story_doc
+    assert latest.version == 2
+    assert result["runtime"]["success"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "edit_args", [{}, {"description": None}, {"description": "Changed", "ops": [{"op": "invalid"}]}]
+)
+async def test_graph_manager_rejects_missing_or_invalid_description_edit(
+    graph_tools, static_story_doc, edit_args
+):
+    write = graph_tools["artifact_write"]
+    created = await write.ainvoke(
+        {
+            "action": "create",
+            "title": "Description smoke test",
+            "description": "Original description",
+            "story_doc": static_story_doc,
+        }
+    )
+    result = await write.ainvoke(
+        {"action": "apply", "artifact_id": created["artifact"]["id"], **edit_args}
+    )
+
+    assert result["status"] == "error"
+    assert await Artifact.objects.acount() == 1
+    original = await Artifact.objects.aget(id=created["artifact"]["id"])
+    assert original.description == "Original description"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["apply", "replace"])
+async def test_graph_manager_failed_description_edit_preserves_original(
+    graph_tools, static_story_doc, action
+):
+    write = graph_tools["artifact_write"]
+    created = await write.ainvoke(
+        {
+            "action": "create",
+            "title": "Description smoke test",
+            "description": "Original description",
+            "story_doc": static_story_doc,
+        }
+    )
+    edit = {
+        "action": action,
+        "artifact_id": created["artifact"]["id"],
+        "description": "Must not be published",
+    }
+    if action == "replace":
+        edit["story_doc"] = static_story_doc
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(return_value={"success": False, "summary": "Runtime failure"}),
+    ) as check:
+        result = await write.ainvoke(edit)
+
+    check.assert_awaited_once()
+    assert result["status"] == "error"
+    assert await Artifact.objects.acount() == 1
+    original = await Artifact.objects.aget(id=created["artifact"]["id"])
+    assert original.description == "Original description"
+    assert (
+        await Artifact.all_objects.filter(parent_artifact=original, is_deleted=True).acount() == 1
+    )
+
+
 def test_graph_doc_rejects_empty_blocks():
     diagnostics = validate_doc({"schema_version": 1, "blocks": []})
 
