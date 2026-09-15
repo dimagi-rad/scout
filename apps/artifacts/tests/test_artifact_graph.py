@@ -1,3 +1,4 @@
+from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -165,8 +166,9 @@ async def test_graph_manager_description_edits_round_trip(
             {"op": "set", "target": "block/intro/config/body", "value": "Revised content"}
         ]
     else:
-        static_story_doc["blocks"][0]["config"]["body"] = "Revised content"
-        edit["story_doc"] = static_story_doc
+        revised_doc = deepcopy(static_story_doc)
+        revised_doc["blocks"][0]["config"]["body"] = "Revised content"
+        edit["story_doc"] = revised_doc
 
     result = await write.ainvoke(edit)
 
@@ -218,6 +220,7 @@ async def test_graph_manager_description_only_edit(
             "story_doc": static_story_doc,
         }
     )
+    original = await Artifact.objects.aget(id=created["artifact"]["id"])
 
     result = await write.ainvoke(
         {
@@ -231,7 +234,7 @@ async def test_graph_manager_description_only_edit(
     assert result["status"] == "updated"
     latest = await Artifact.objects.aget(id=result["artifact"]["id"])
     assert latest.description == description
-    assert latest.data["story_doc"] == static_story_doc
+    assert latest.data["story_doc"] == original.data["story_doc"]
     assert latest.version == 2
     assert result["runtime"]["success"] is True
 
