@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from psycopg import sql as psycopg_sql
 
+from apps.common.identifiers import view_name
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     SchemaState,
@@ -699,10 +700,12 @@ def test_build_view_schema_idempotent_rebuild_after_column_change(
         ts2.delete()
 
 
-def test_build_view_schema_oversized_view_name_raises(two_tenant_workspace, managed_db_connection):
-    """A composed view name exceeding 63 bytes must raise ValueError naming the
-    offending view BEFORE any DDL, rather than letting PostgreSQL silently
-    truncate it."""
+def test_build_view_schema_oversized_view_name_is_fitted(
+    two_tenant_workspace, managed_db_connection
+):
+    """A composed view name exceeding 63 bytes is fitted (head + digest) rather
+    than failing the whole workspace build (SCOUT-DJANGO-3C). Two long tables
+    sharing a 63-byte head get distinct views; short names stay verbatim."""
     ws, t1, _t2 = two_tenant_workspace
 
     ts1 = TenantSchema.objects.create(
@@ -712,26 +715,50 @@ def test_build_view_schema_oversized_view_name_raises(two_tenant_workspace, mana
         tenant=_t2, schema_name="build_oversize_b", state=SchemaState.ACTIVE
     )
     # t1 canonical_name "domain_a" -> prefix "domain_a" (8 chars) + "__" = 10.
-    # A 60-char table name pushes the composed name to 70 bytes (>63).
-    long_table = "x" * 60
+    # 60-char table names push the composed name to 70 bytes (>63); the two
+    # differ only past the 63-byte boundary.
+    long_a = "x" * 59 + "a"
+    long_b = "x" * 59 + "b"
     conn = managed_db_connection
     c = conn.cursor()
     try:
         c.execute("CREATE SCHEMA IF NOT EXISTS build_oversize_a")
-        c.execute(f'CREATE TABLE IF NOT EXISTS build_oversize_a."{long_table}" (id TEXT)')
+        c.execute(f'CREATE TABLE IF NOT EXISTS build_oversize_a."{long_a}" (a_col TEXT)')
+        c.execute(f'CREATE TABLE IF NOT EXISTS build_oversize_a."{long_b}" (b_col TEXT)')
+        c.execute("CREATE TABLE IF NOT EXISTS build_oversize_a.raw_visits (id TEXT)")
         c.execute("CREATE SCHEMA IF NOT EXISTS build_oversize_b")
     finally:
         c.close()
 
+    vs = None
     try:
-        with pytest.raises(ValueError, match="63-byte"):
-            SchemaManager().build_view_schema(ws)
-        # Offending view name is identified in the message
+        vs = SchemaManager().build_view_schema(ws)
+        assert vs.state == SchemaState.ACTIVE
+
         prefix = SchemaManager()._view_prefix(t1)
+        fitted_a = view_name(prefix, long_a)
+        fitted_b = view_name(prefix, long_b)
+        assert fitted_a != fitted_b
+        assert len(fitted_a.encode("utf-8")) <= 63
+        assert len(fitted_b.encode("utf-8")) <= 63
+
+        c2 = conn.cursor()
         try:
-            SchemaManager().build_view_schema(ws)
-        except ValueError as exc:
-            assert f"{prefix}__{long_table}" in str(exc)
+            c2.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+                (vs.schema_name,),
+            )
+            view_names = {row[0] for row in c2.fetchall()}
+            c2.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (vs.schema_name, fitted_a),
+            )
+            a_cols = {row[0] for row in c2.fetchall()}
+        finally:
+            c2.close()
+        assert {fitted_a, fitted_b, f"{prefix}__raw_visits"} <= view_names
+        assert a_cols == {"a_col"}
     finally:
         c3 = conn.cursor()
         try:

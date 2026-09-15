@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from apps.common.identifiers import view_name
 from apps.semantic.models import (
     CubeSchema,
     CustomDataset,
@@ -772,6 +773,46 @@ def test_relationships_match_namespaced_views_within_prefix(monkeypatch, workspa
     relationship = SemanticRelationship.objects.get(workspace=workspace)
     assert relationship.from_dataset.name == "t1__raw_visits"
     assert relationship.to_dataset.name == "t1__raw_users"
+
+
+def test_relationships_match_fitted_namespaced_view(monkeypatch, workspace):
+    """A to-table whose composed view name overflowed 63 bytes is published under
+    a fitted (head + digest) name; the relationship must still resolve to it."""
+    prefix = "kangaroomothercare_pret_388c2eaf"
+    repeat_table = "stg_visits__repeat_join_max_non_selected_numbers"
+    fitted = view_name(prefix, repeat_table)
+    assert fitted != f"{prefix}__{repeat_table}"
+    tables = [
+        PhysicalTable(
+            name=f"{prefix}__stg_visits",
+            type="view",
+            description="",
+            columns=[{"name": "visit_id", "type": "text"}],
+        ),
+        PhysicalTable(
+            name=fitted,
+            type="view",
+            description="",
+            columns=[{"name": "visit_id", "type": "text"}],
+        ),
+    ]
+    monkeypatch.setattr(
+        catalog_service, "load_physical_tables", lambda _workspace: ("ws_schema", tables)
+    )
+    rel = RelationshipConfig(
+        from_table="stg_visits",
+        from_column="visit_id",
+        to_table=repeat_table,
+        to_column="visit_id",
+        description="Repeat rows belong to a visit",
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([rel]))
+
+    catalog_service.ensure_semantic_model(workspace)
+
+    relationship = SemanticRelationship.objects.get(workspace=workspace)
+    assert relationship.from_dataset.name == f"{prefix}__stg_visits"
+    assert relationship.to_dataset.name == fitted
 
 
 @pytest.fixture
