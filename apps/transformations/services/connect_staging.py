@@ -15,11 +15,10 @@ import logging
 from apps.common.identifiers import dbt_column_alias
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
-    _column_name_from_path,
+    _leaf_slug,
     _question_path_to_json_path,
     _sql_escape,
     _typed_expression,
-    slugify_model_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,12 +59,12 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
             questions.append(q)
 
     seen_aliases: dict[str, int] = {col: 1 for col in _VISIT_BASE_COLUMNS}
-    reserved_aliases = set(seen_aliases) | {_column_name_from_path(q["value"]) for q in questions}
+    reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in questions}
     return [
         (
             q,
             dbt_column_alias(
-                _column_name_from_path(q["value"]),
+                _leaf_slug(q["value"]),
                 seen_aliases,
                 reserved=reserved_aliases,
             ),
@@ -113,7 +112,8 @@ def _generate_connect_repeat_group_asset(
     ``stg_visits`` as the parent and ``form_json`` as the JSON column.
     """
     group_json_path = _question_path_to_json_path(group_path)
-    group_slug = slugify_model_name(group_path.rsplit("/", 1)[-1])
+    group_leaf = group_path.rsplit("/", 1)[-1]
+    group_slug = _leaf_slug(group_path)
     parent_model = "stg_visits"
 
     lines = ["SELECT"]
@@ -123,16 +123,12 @@ def _generate_connect_repeat_group_asset(
     ]
     seen_aliases: dict[str, int] = {"visit_id": 1, "repeat_index": 1}
     staged_questions = [q for q in child_questions if q.get("value", "")]
-    reserved_aliases = set(seen_aliases) | {
-        _column_name_from_path(q["value"]) for q in staged_questions
-    }
+    reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in staged_questions}
 
     for q in staged_questions:
         value_path = q["value"]
         leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = dbt_column_alias(
-            _column_name_from_path(value_path), seen_aliases, reserved=reserved_aliases
-        )
+        col_name = dbt_column_alias(_leaf_slug(value_path), seen_aliases, reserved=reserved_aliases)
         raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -147,7 +143,7 @@ def _generate_connect_repeat_group_asset(
     model_name = f"{parent_model}__repeat_{group_slug}"
     return TransformationAsset(
         name=model_name,
-        description=f"Repeat group '{group_slug}' from {parent_model}",
+        description=f"Repeat group '{group_leaf}' from {parent_model}",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
         sql_content="\n".join(lines),
