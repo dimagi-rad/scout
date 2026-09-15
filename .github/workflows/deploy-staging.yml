@@ -88,11 +88,17 @@ jobs:
           docker push "$SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG"
 
       - name: Build and push Frontend image
+        env:
+          VITE_SENTRY_DSN: ${{ secrets.SCOUT_VITE_SENTRY_DSN }}
         run: |
+          : "${VITE_SENTRY_DSN:?SCOUT_VITE_SENTRY_DSN is required for frontend error reporting}"
+          : "${IMAGE_TAG:?IMAGE_TAG is required for frontend release tracking}"
           docker build -t "$SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG" \
+            --platform linux/amd64 \
             -f Dockerfile.frontend \
+            --label service=scout-frontend \
             --build-arg NGINX_CONF=frontend/nginx.staging-kamal.conf \
-            --build-arg VITE_SENTRY_DSN="${{ secrets.SCOUT_VITE_SENTRY_DSN }}" \
+            --build-arg VITE_SENTRY_DSN \
             --build-arg VITE_SENTRY_ENVIRONMENT=staging \
             --build-arg VITE_SENTRY_RELEASE="$IMAGE_TAG" \
             .
@@ -119,7 +125,8 @@ jobs:
         run: kamal deploy -c config/deploy-worker.yml -d staging --version="$IMAGE_TAG"
 
       - name: Deploy Frontend
-        run: kamal deploy -c config/deploy-frontend.yml -d staging --version="$FRONTEND_TAG"
+        # Preserve the staging image's baked-in nginx, environment, and release.
+        run: kamal deploy -c config/deploy-frontend.yml -d staging --skip-push --version="$FRONTEND_TAG"
 
       - name: Summary
         run: |
