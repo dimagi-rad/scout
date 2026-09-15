@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 
-from apps.common.identifiers import dbt_column_alias, dbt_model_name
+from apps.common.identifiers import dbt_column_alias
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     _leaf_slug,
     _NameFallbacks,
     _question_path,
     _question_path_to_json_path,
+    _repeat_model_names,
     _sql_escape,
     _typed_expression,
 )
@@ -110,7 +111,12 @@ def _generate_stg_visits(
 
 
 def _generate_connect_repeat_group_asset(
-    tenant, group_path: str, child_questions: list[dict], fallbacks: _NameFallbacks | None = None
+    tenant,
+    group_path: str,
+    child_questions: list[dict],
+    fallbacks: _NameFallbacks | None = None,
+    *,
+    model_name: str,
 ) -> TransformationAsset:
     """Generate a ``stg_visits__repeat_<group>`` asset for a repeat group.
 
@@ -119,7 +125,6 @@ def _generate_connect_repeat_group_asset(
     """
     group_json_path = _question_path_to_json_path(group_path)
     group_leaf = group_path.rsplit("/", 1)[-1]
-    group_slug = _leaf_slug(group_path, kind="repeat group", fallbacks=fallbacks)
     parent_model = "stg_visits"
 
     lines = ["SELECT"]
@@ -152,7 +157,6 @@ def _generate_connect_repeat_group_asset(
     lines.append(") WITH ORDINALITY AS elem(value, ordinality)")
     lines.append(f"WHERE f.form_json #> {group_json_path} IS NOT NULL")
 
-    model_name = dbt_model_name(f"{parent_model}__repeat_{group_slug}")
     return TransformationAsset(
         name=model_name,
         description=f"Repeat group '{group_leaf}' from {parent_model}",
@@ -243,8 +247,13 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
             group_path = value_path.rsplit("/", 1)[0]
             repeat_groups.setdefault(group_path, []).append(q)
 
+    model_names = _repeat_model_names("stg_visits", repeat_groups, fallbacks)
     for group_path, child_qs in repeat_groups.items():
-        assets.append(_generate_connect_repeat_group_asset(tenant, group_path, child_qs, fallbacks))
+        assets.append(
+            _generate_connect_repeat_group_asset(
+                tenant, group_path, child_qs, fallbacks, model_name=model_names[group_path]
+            )
+        )
 
     if summary := fallbacks.summary():
         logger.info(

@@ -2,6 +2,8 @@ const { Pool } = require('pg');
 const { createHash } = require('node:crypto');
 
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
+const PUBLICATION_REVISION = Symbol('scoutPublicationRevision');
+const CATALOG_QUERY_TIMEOUT_MS = 5000;
 
 function sslConfigForUrl(rawUrl) {
   if (!rawUrl) {
@@ -61,10 +63,44 @@ function contextId(prefix, parts) {
 
 const appDatabaseUrl = process.env.DATABASE_URL || 'postgresql://platform:devpassword@platform-db:5432/agent_platform';
 const managedDatabaseUrl = process.env.MANAGED_DATABASE_URL || appDatabaseUrl;
-const appPool = new Pool({ connectionString: appDatabaseUrl, ssl: sslConfigForUrl(appDatabaseUrl) });
+const appPool = new Pool({
+  connectionString: appDatabaseUrl,
+  ssl: sslConfigForUrl(appDatabaseUrl),
+  connectionTimeoutMillis: CATALOG_QUERY_TIMEOUT_MS,
+  statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
+  query_timeout: CATALOG_QUERY_TIMEOUT_MS,
+});
 const managedConfig = connectionFromUrl(managedDatabaseUrl);
 
 module.exports = {
+  queryRewrite: async (query, context) => {
+    const { securityContext } = context;
+    if (!workspaceContext(securityContext)) {
+      return query;
+    }
+    // One authoritative lookup per request also supports JWTs from an older
+    // API during Cube-first deployments. Never cache this across publications.
+    context[PUBLICATION_REVISION] ??= appPool.query(
+      `
+        SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS data_revision
+        FROM semantic_cubeschema
+        WHERE workspace_id = $1
+          AND semantic_model_id = $2
+          AND status = 'active'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `,
+      [securityContext.workspaceId, securityContext.semanticModelId]
+    ).then(({ rows }) => {
+      if (!rows[0]?.data_revision) {
+        throw new Error('No active Cube schema for this workspace');
+      }
+      return rows[0].data_revision;
+    });
+    securityContext.cubeDataRevision = await context[PUBLICATION_REVISION];
+    return query;
+  },
+
   contextToAppId: ({ securityContext }) => {
     const context = workspaceContext(securityContext);
     if (!context) {

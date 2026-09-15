@@ -10,6 +10,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-ocr-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test .github/scripts/ocr-gate.test.cjs
+
   test-cube-config:
     runs-on: ubuntu-latest
     steps:
@@ -17,8 +26,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Test Cube workspace isolation
-        run: node --test cube_config/cube.test.js
+      - name: Test Cube isolation and bounded memory cache
+        run: node --test cube_config/*.test.js
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Verify pinned Cube compiler, cache, and queue
+        env:
+          DJANGO_SECRET_KEY: cube-cache-ci-not-for-production
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          # These tests run a separate Node process with a fake source driver.
+          # No serving Cube process or PostgreSQL connection is needed.
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+          MANAGED_DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+          SCOUT_CUBE_COMPILER_CONTAINER: scout-cube-cache-ci
+        run: |
+          docker build -f cube_config/Dockerfile -t scout-cube-cache-ci cube_config
+          docker run --detach --name scout-cube-cache-ci --network none \
+            --entrypoint sleep scout-cube-cache-ci 600
+          trap 'docker rm -f scout-cube-cache-ci' EXIT
+          uv run pytest tests/smoke/test_cube_publication_cache.py -m smoke
 
   lint-python:
     runs-on: ubuntu-latest
