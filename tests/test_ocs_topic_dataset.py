@@ -127,12 +127,21 @@ def test_ocs_topic_dataset_can_be_committed_and_bound_to_dashboard(workspace, us
         assert dataset.fields.get(name="created_at").field_type == "time_dimension"
 
         cube = next(c for c in generate_cube_schema(model)["cubes"] if c["name"] == dataset.name)
-        assert cube["sql"] == dataset.metadata["cube_sql"]
+        assert cube["sql"] == (
+            f"SELECT * FROM (\n{dataset.metadata['cube_sql']}\n) AS scout_source\n"
+            "WHERE ARRAY[{SECURITY_CONTEXT.cubeDataRevision}]::text[] IS NOT NULL"
+        )
+        # Cube binds this server-owned context value; preserve literal ILIKE
+        # percentages while using psycopg's parameter protocol in this DB test.
+        bound_sql = (
+            cube["sql"].replace("%", "%%").replace("{SECURITY_CONTEXT.cubeDataRevision}", "%s")
+        )
         with connection.cursor() as cursor:
             cursor.execute(
                 psql.SQL(
                     "SELECT topic, count(*) FROM ({}) topics GROUP BY topic ORDER BY topic"
-                ).format(psql.SQL(cube["sql"]))
+                ).format(psql.SQL(bound_sql)),
+                ["2026-09-15T05:33:25.291945Z"],
             )
             rows = [list(row) for row in cursor.fetchall()]
         assert rows == [["Account update", 2], ["Other / unclassified", 1], ["Work from home", 1]]

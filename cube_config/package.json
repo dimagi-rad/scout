@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "start": "/start-cube-with-validator.sh"
+    "start": "node /cube/conf/patch-local-cache.js --verify && /start-cube-with-validator.sh"
   },
   "dependencies": {
     "@cubejs-backend/native": "1.6.39",
