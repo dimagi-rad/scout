@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from apps.common.identifiers import dbt_column_alias
+from apps.common.identifiers import dbt_column_alias, dbt_model_name
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     _leaf_slug,
@@ -140,7 +140,7 @@ def _generate_connect_repeat_group_asset(
     lines.append(") WITH ORDINALITY AS elem(value, ordinality)")
     lines.append(f"WHERE f.form_json #> {group_json_path} IS NOT NULL")
 
-    model_name = f"{parent_model}__repeat_{group_slug}"
+    model_name = dbt_model_name(f"{parent_model}__repeat_{group_slug}")
     return TransformationAsset(
         name=model_name,
         description=f"Repeat group '{group_leaf}' from {parent_model}",
