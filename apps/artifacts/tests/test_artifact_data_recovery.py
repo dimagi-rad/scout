@@ -135,7 +135,11 @@ async def test_active_physical_and_semantic_surfaces_are_ready(recovery_setup):
         status=CubeSchema.Status.ACTIVE,
     )
     dataset = await SemanticDataset.objects.acreate(
-        workspace=recovery_setup.workspace, semantic_model=model, name="visits", table_name="visits"
+        workspace=recovery_setup.workspace,
+        semantic_model=model,
+        name="visits",
+        table_name="visits",
+        schema_name="t_recovery_domain",
     )
     await SemanticField.objects.acreate(
         dataset=dataset, name="count", field_type="measure", measure_type="count"
