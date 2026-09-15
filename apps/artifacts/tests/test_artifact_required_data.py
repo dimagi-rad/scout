@@ -752,6 +752,25 @@ async def test_restored_source_with_rolled_back_catalog_retries_only_semantic_pr
         (
             [
                 {
+                    "tenant": "source-alpha",
+                    "provider": "commcare",
+                    "success": False,
+                    "error": "Missing credential",
+                    "error_code": ErrorCode.AUTH_CREDENTIAL_MISSING,
+                },
+                {
+                    "tenant": "source-beta",
+                    "provider": "commcare",
+                    "success": False,
+                    "error": "Synthetic access denied",
+                    "error_code": ErrorCode.AUTH_ACCESS_DENIED,
+                },
+            ],
+            "source-alpha (commcare): no usable sign-in is available",
+        ),
+        (
+            [
+                {
                     "success": False,
                     "error": "Synthetic access denied",
                     "error_code": ErrorCode.AUTH_ACCESS_DENIED,
@@ -802,6 +821,10 @@ async def test_recovery_failure_prioritizes_source_remedy_over_downstream_cube_e
         assert "Synthetic Cube validation failed" not in recovery.error
     if len(tenants) == 2:
         assert recovery.error.count("Connected Accounts") == 1
+        if tenants[0].get("tenant") == "source-alpha":
+            assert "source-beta (commcare): access was removed upstream" in state["detail"]
+            assert "reconnecting will NOT restore it" in state["detail"]
+            assert "Ask an admin on the affected provider" in state["detail"]
     if len(tenants) == 5:
         assert "Synthetic source 2" in recovery.error
         assert "Synthetic source 3" not in recovery.error

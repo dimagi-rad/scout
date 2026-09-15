@@ -1321,7 +1321,7 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
     # A failed source commonly causes a downstream Cube *skip*, not a Cube
     # failure. Show the source remedy first; never infer auth advice by parsing
     # human/provider error text, or conflate missing credentials with a 403.
-    source_errors = []
+    source_errors: dict[str, list[str]] = {}
     for tenant in result.get("tenants") or []:
         if not isinstance(tenant, dict) or tenant.get("success") is True:
             continue
@@ -1329,12 +1329,24 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
             _CREDENTIAL_GUIDANCE.get(tenant.get("error_code"))
             or " ".join(str(tenant.get("error") or "").split())[:200]
         )
-        if error and error not in source_errors:
-            source_errors.append(error)
-        if len(source_errors) == 3:
-            break
+        if not error or (error not in source_errors and len(source_errors) == 3):
+            continue
+        name = tenant.get("display_name")
+        if not name:
+            name = str(tenant.get("tenant") or "Source")
+            if tenant.get("provider"):
+                name = f"{name} ({tenant['provider']})"
+        label = " ".join(str(name).split())[:80]
+        labels = source_errors.setdefault(error, [])
+        if label not in labels and len(labels) < 3:
+            labels.append(label)
     if source_errors:
-        return ("Data source loading failed: " + " ".join(source_errors))[:1000]
+        # Opposite remedies (reconnect vs restore upstream permissions) must
+        # keep their subjects, even when several sources share one diagnosis.
+        return (
+            "Data source loading failed: "
+            + " ".join(f"{', '.join(labels)}: {error}" for error, labels in source_errors.items())
+        )[:1000]
     if result.get("error"):
         return str(result["error"])[:1000]
     cube_result = result.get("cube_schema") or {}
