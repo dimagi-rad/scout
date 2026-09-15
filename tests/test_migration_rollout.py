@@ -80,10 +80,18 @@ def entrypoint_commands(tmp_path):
         command.write_text(script)
         command.chmod(0o755)
     return log, {
-        "PATH": os.pathsep.join((str(tmp_path), os.defpath)),
+        "PATH": os.pathsep.join(
+            (str(tmp_path), *(part for part in os.defpath.split(os.pathsep) if part))
+        ),
         "CALL_LOG": str(log),
         "DJANGO_ALLOWED_HOSTS": "scout-staging.example.invalid,other.example.invalid",
     }
+
+
+def test_fake_command_path_never_includes_current_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "defpath", ":/bin::/usr/bin:")
+    _, env = entrypoint_commands.__wrapped__(tmp_path)
+    assert env["PATH"].split(os.pathsep) == [str(tmp_path), "/bin", "/usr/bin"]
 
 
 def _entrypoint(*args):

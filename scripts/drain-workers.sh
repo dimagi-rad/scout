@@ -52,9 +52,9 @@ inspect_worker() {
 }
 
 # Receipts live on the deployment host, not inside containers: a failed/stopped
-# container must remain a blocker on the next invocation. SSH starts in the
-# deployment user's home directory; manual host invocations must use that same
-# directory. Never follow links, chmod existing metadata, or broadly clean it up.
+# container must remain a blocker on the next invocation. Resolve the deployment
+# account independently of CWD or HOME so every invocation uses the same store.
+# Never follow links, chmod existing metadata, or broadly clean it up.
 validate_directory() {
   local directory=$1 private=$2 mode
   [[ -d "$directory" && ! -L "$directory" && -O "$directory" ]] \
@@ -80,9 +80,30 @@ ensure_directory() {
   validate_directory "$directory" "$private"
 }
 
-ensure_directory .kamal false
-ensure_directory .kamal/scout-worker-drains-v1 true
-receipt_directory=".kamal/scout-worker-drains-v1/$destination"
+account_record=$(timeout --foreground 15s getent passwd scout) \
+  || fail "Could not resolve the scout deployment account."
+[[ "$account_record" != *$'\n'* && "$account_record" != *$'\r'* && \
+   "$account_record" =~ ^scout:[^:]*:[0-9]+:[0-9]+:[^:]*:[^:]+:[^:]*$ ]] \
+  || fail "Invalid scout deployment account record."
+IFS=: read -r account_name account_password account_uid account_gid account_gecos deployment_home account_shell \
+  <<< "$account_record"
+[[ "$account_uid" == "$(id -u)" ]] || fail "Worker drains must run as the scout deployment account."
+[[ "$deployment_home" == /* && "$deployment_home" != / ]] \
+  || fail "The scout deployment account must have an absolute non-root home directory."
+validate_directory "$deployment_home" false
+cd -- "$deployment_home" || fail "Could not enter the scout deployment account home."
+deployment_home=$(pwd -P)
+[[ "$deployment_home" != / ]] || fail "The scout deployment account home cannot be the filesystem root."
+
+# Kamal owns .kamal and may make it group-writable. Do not put private receipts
+# below it or alter its permissions. Never ignore possible receipts from the old
+# layout: an operator must inspect that state before any new signal is allowed.
+if [[ -L .kamal || ( -e .kamal && ( ! -d .kamal || ! -r .kamal || ! -x .kamal ) ) || \
+      -e .kamal/scout-worker-drains-v1 || -L .kamal/scout-worker-drains-v1 ]]; then
+  fail "Legacy worker drain metadata may exist in $deployment_home/.kamal/scout-worker-drains-v1; inspect it before migrating receipts to $deployment_home/.scout-worker-drains-v1."
+fi
+ensure_directory "$deployment_home/.scout-worker-drains-v1" true
+receipt_directory="$deployment_home/.scout-worker-drains-v1/$destination"
 ensure_directory "$receipt_directory" true
 
 validate_receipt() {

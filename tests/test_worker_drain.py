@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKER = "a" * 64
 OTHER = "b" * 64
 STARTED = "2026-09-15T10:20:30.123456789Z"
-RECEIPT_ROOT = Path(".kamal/scout-worker-drains-v1")
+RECEIPT_ROOT = Path(".scout-worker-drains-v1")
 
 DOCKER_DOUBLE = r"""
 import atexit, json, os, sys
@@ -69,7 +69,7 @@ if args[0] == "inspect":
         container["status"] = "exited"
     if container.get("signals") and container.get("restart_after_signal"):
         container["started"] = "2026-09-15T10:21:30.123456789Z"
-    if list(Path(".kamal/scout-worker-drains-v1").glob("*/*")) and container.get("restart_after_marker"):
+    if list(Path(".scout-worker-drains-v1").glob("*/*")) and container.get("restart_after_marker"):
         container["started"] = "2026-09-15T10:21:30.123456789Z"
     done(output="|".join([
         ident, container.get("service", "scout-worker"), container.get("role", "web"),
@@ -83,7 +83,7 @@ if args[0] == "kill":
     assert args == ["kill", "--signal=TERM", ident]
     destination = "staging" if container.get("destination") else "production"
     started = container.get("started", "2026-09-15T10:20:30.123456789Z")
-    receipt = Path(".kamal/scout-worker-drains-v1") / destination / f"{ident}-{started}"
+    receipt = Path(".scout-worker-drains-v1") / destination / f"{ident}-{started}"
     assert receipt.is_dir() and not receipt.is_symlink()
     assert receipt.stat().st_mode & 0o777 == 0o700
     assert not list(receipt.iterdir())
@@ -101,6 +101,22 @@ raise AssertionError(args)
 @pytest.fixture
 def drain_cli(tmp_path):
     state_file = tmp_path / "docker-state.json"
+    account_file = tmp_path / "account.json"
+    account_file.write_text(
+        json.dumps({"home": str(tmp_path), "uid": os.geteuid(), "name": "scout"})
+    )
+    getent = tmp_path / "getent"
+    getent.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "assert sys.argv[1:] == ['passwd', 'scout']\n"
+        f"account = json.loads(Path({str(account_file)!r}).read_text())\n"
+        "if account.get('fail'):\n"
+        "    raise SystemExit(2)\n"
+        "print(account.get('record', f\"{account['name']}:x:{account['uid']}:{os.getegid()}::{account['home']}:/bin/bash\"))\n"
+    )
+    getent.chmod(0o755)
     docker = tmp_path / "docker"
     docker.write_text(f"#!{sys.executable}\n" + DOCKER_DOUBLE)
     docker.chmod(0o755)
@@ -113,17 +129,21 @@ def drain_cli(tmp_path):
     )
     timeout.chmod(0o755)
     env = {
-        "PATH": os.pathsep.join((str(tmp_path), os.defpath)),
+        "PATH": os.pathsep.join(
+            (str(tmp_path), *(part for part in os.defpath.split(os.pathsep) if part))
+        ),
         "DOCKER_STATE": str(state_file),
     }
 
-    def run(containers=None, *, destination="staging", budget="1", options=None, reset=True):
+    def run(
+        containers=None, *, destination="staging", budget="1", options=None, reset=True, cwd=None
+    ):
         if reset:
             state_file.write_text(json.dumps({"containers": containers or {}, **(options or {})}))
         result = subprocess.run(  # noqa: S603 - real repository shell; only fake Docker can execute
             ["/bin/bash", str(ROOT / "scripts" / "drain-workers.sh"), destination, budget],
             env=env,
-            cwd=tmp_path,
+            cwd=tmp_path if cwd is None else cwd,
             capture_output=True,
             text=True,
             timeout=10,
@@ -145,6 +165,13 @@ def drain_cli(tmp_path):
         return result, json.loads(state_file.read_text())
 
     run.invoke_double = invoke_double
+
+    def set_account(**updates):
+        account = json.loads(account_file.read_text())
+        account.update(updates)
+        account_file.write_text(json.dumps(account))
+
+    run.set_account = set_account
     return run
 
 
@@ -152,7 +179,9 @@ def pending_receipt(tmp_path, *, destination="staging", ident=WORKER, started=ST
     """Owned test metadata with the exact private on-host directory contract."""
     receipt = tmp_path / RECEIPT_ROOT / destination / f"{ident}-{started}"
     receipt.mkdir(mode=0o700, parents=True)
-    for directory in (receipt.parent, receipt.parent.parent):
+    for directory in receipt.parents:
+        if directory == tmp_path:
+            break
         directory.chmod(0o700)
     return receipt
 
@@ -192,18 +221,164 @@ def test_all_old_versions_are_signalled_once_without_touching_other_destination(
     assert {command[0] for command in state["commands"]} <= {"ps", "inspect", "kill"}
 
 
-def test_timeout_and_retry_do_not_signal_twice_or_abort_running_jobs(drain_cli):
+def test_timeout_and_retry_do_not_signal_twice_or_abort_running_jobs(drain_cli, tmp_path):
     result, state = drain_cli({WORKER: {"destination": "staging", "held": True}})
     assert result.returncode != 0
     assert "timed out" in result.stderr
     assert "queued jobs wait" in result.stderr
-    assert ".kamal/scout-worker-drains-v1/staging" in result.stderr
+    assert str(tmp_path / RECEIPT_ROOT / "staging") in result.stderr
     assert state["containers"][WORKER]["signals"] == 1
     retried, state = drain_cli(reset=False)
     assert retried.returncode != 0
     assert "without another signal" in retried.stdout
     assert state["containers"][WORKER]["signal_calls"] == 1
     assert state["containers"][WORKER].get("status", "running") == "running"
+
+
+def test_different_working_directories_share_one_receipt_and_one_signal(drain_cli, tmp_path):
+    first_cwd = tmp_path / "first-invocation"
+    second_cwd = tmp_path / "second-invocation"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    first, _ = drain_cli({WORKER: {"destination": "staging", "held": True}}, cwd=first_cwd)
+    assert first.returncode != 0 and "timed out" in first.stderr
+    retried, state = drain_cli(reset=False, cwd=second_cwd)
+    assert retried.returncode != 0 and "timed out" in retried.stderr
+    assert state["containers"][WORKER]["signal_calls"] == 1
+    assert "without another signal" in retried.stdout
+    assert len(list((tmp_path / ".scout-worker-drains-v1" / "staging").iterdir())) == 1
+    assert not (first_cwd / ".kamal").exists()
+    assert not (second_cwd / ".kamal").exists()
+    assert not (first_cwd / ".scout-worker-drains-v1").exists()
+    assert not (second_cwd / ".scout-worker-drains-v1").exists()
+
+
+@pytest.mark.parametrize("has_worker", [False, True])
+def test_writable_kamal_directory_is_not_used_or_changed(drain_cli, tmp_path, has_worker):
+    kamal = tmp_path / ".kamal"
+    kamal.mkdir()
+    kamal.chmod(0o775)
+    sentinel = kamal / "keep"
+    sentinel.write_text("Kamal-owned control")
+    result, state = drain_cli({WORKER: {"destination": "staging"}} if has_worker else {})
+    assert result.returncode == 0, result.stderr
+    assert kamal.stat().st_mode & 0o777 == 0o775
+    assert sentinel.read_text() == "Kamal-owned control"
+    assert list(kamal.iterdir()) == [sentinel]
+    assert (tmp_path / ".scout-worker-drains-v1").stat().st_mode & 0o777 == 0o700
+    if has_worker:
+        assert state["containers"][WORKER]["signal_calls"] == 1
+
+
+@pytest.mark.parametrize("mode", [0o700, 0o750, 0o755])
+def test_deployment_home_allows_safe_nonprivate_ancestors(drain_cli, tmp_path, mode):
+    tmp_path.chmod(mode)
+    result, _ = drain_cli()
+    assert result.returncode == 0, result.stderr
+    assert tmp_path.stat().st_mode & 0o777 == mode
+    assert (tmp_path / RECEIPT_ROOT).stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o777])
+def test_writable_deployment_home_fails_without_changing_it(drain_cli, tmp_path, mode):
+    tmp_path.chmod(mode)
+    result, state = drain_cli({WORKER: {"destination": "staging"}})
+    assert result.returncode != 0
+    assert "Drain metadata has unsafe permissions." in result.stderr
+    assert tmp_path.stat().st_mode & 0o777 == mode
+    assert not (tmp_path / RECEIPT_ROOT).exists()
+    assert not state.get("commands")
+
+
+@pytest.mark.parametrize(
+    "updates, message",
+    [
+        ({"fail": True}, "Could not resolve the scout deployment account."),
+        ({"name": "different"}, "Invalid scout deployment account record."),
+        ({"uid": os.geteuid() + 1}, "Worker drains must run as the scout deployment account."),
+        ({"record": "scout:x:123"}, "Invalid scout deployment account record."),
+        (
+            {"record": "scout:x:123:123::/home/scout:/bin/bash\nextra"},
+            "Invalid scout deployment account record.",
+        ),
+        (
+            {"home": "relative"},
+            "The scout deployment account must have an absolute non-root home directory.",
+        ),
+        (
+            {"home": "/"},
+            "The scout deployment account must have an absolute non-root home directory.",
+        ),
+    ],
+)
+def test_deployment_account_is_verified_before_any_metadata_or_docker(
+    drain_cli, tmp_path, updates, message
+):
+    drain_cli.set_account(**updates)
+    result, state = drain_cli({WORKER: {"destination": "staging"}})
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not (tmp_path / RECEIPT_ROOT).exists()
+    assert not state.get("commands")
+
+
+def test_symlinked_deployment_home_is_rejected_before_writing(drain_cli, tmp_path):
+    link = tmp_path / "home-link"
+    link.symlink_to(tmp_path, target_is_directory=True)
+    drain_cli.set_account(home=str(link))
+    result, state = drain_cli({WORKER: {"destination": "staging"}})
+    assert result.returncode != 0
+    assert "Drain metadata must be an owned real directory." in result.stderr
+    assert not (tmp_path / RECEIPT_ROOT).exists()
+    assert not state.get("commands")
+
+
+@pytest.mark.parametrize("kind", ["directory", "file", "symlink", "kamal-symlink", "kamal-file"])
+def test_legacy_receipts_require_inspection_before_any_new_signal(drain_cli, tmp_path, kind):
+    kamal = tmp_path / ".kamal"
+    legacy = kamal / "scout-worker-drains-v1"
+    sentinel = tmp_path / "unrelated"
+    sentinel.mkdir()
+    (sentinel / "keep").write_text("unrelated content")
+    if kind == "kamal-symlink":
+        kamal.symlink_to(sentinel, target_is_directory=True)
+    elif kind == "kamal-file":
+        kamal.write_text("Kamal-owned file")
+    else:
+        kamal.mkdir(mode=0o775)
+        kamal.chmod(0o775)
+        if kind == "directory":
+            legacy.mkdir()
+        elif kind == "file":
+            legacy.write_text("legacy metadata")
+        else:
+            legacy.symlink_to(sentinel, target_is_directory=True)
+    result, state = drain_cli(
+        {WORKER: {"destination": "staging", "held": True, "signals": 1, "signal_calls": 1}}
+    )
+    assert result.returncode != 0
+    assert f"Legacy worker drain metadata may exist in {legacy}" in result.stderr
+    assert "inspect it before migrating receipts" in result.stderr
+    assert kamal.exists()
+    assert (sentinel / "keep").read_text() == "unrelated content"
+    assert list(sentinel.iterdir()) == [sentinel / "keep"]
+    if kind in {"directory", "file", "symlink"}:
+        assert legacy.exists()
+        assert kamal.stat().st_mode & 0o777 == 0o775
+    assert not (tmp_path / RECEIPT_ROOT).exists()
+    assert not state.get("commands")
+    assert state["containers"][WORKER]["signal_calls"] == 1
+
+
+def test_seeded_receipt_fixture_remains_private_under_group_writable_umask(drain_cli, tmp_path):
+    previous_umask = os.umask(0o002)
+    try:
+        receipt = pending_receipt(tmp_path)
+    finally:
+        os.umask(previous_umask)
+    result, _ = drain_cli({WORKER: {"destination": "staging", "status": "exited"}})
+    assert result.returncode == 0, result.stderr
+    assert not receipt.exists()
 
 
 def test_private_receipt_accepts_safe_setgid_without_exposing_group_permissions(
@@ -283,6 +458,7 @@ def test_signal_failure_only_accepts_verified_same_process_clean_exit(
 def test_docker_double_preserves_invocation_evidence_when_an_invariant_fails(drain_cli, args):
     result, state = drain_cli.invoke_double(args, {WORKER: {"destination": "staging"}})
     assert result.returncode != 0
+    assert "AssertionError" in result.stderr
     assert state["commands"] == [args]
     if args[0] == "kill":
         assert state["containers"][WORKER]["signal_calls"] == 1
@@ -310,6 +486,7 @@ def test_docker_double_requires_the_actual_complete_status_selection(drain_cli, 
         args, {WORKER: {"destination": "staging", "status": "paused"}}
     )
     assert result.returncode != 0
+    assert "AssertionError" in result.stderr
     assert state["commands"] == [args]
 
 
@@ -454,14 +631,14 @@ def test_malformed_receipt_fails_closed_without_signal_or_cleanup(drain_cli, tmp
     assert not any(command[0] == "kill" for command in state.get("commands", []))
 
 
-@pytest.mark.parametrize("level", [".kamal", str(RECEIPT_ROOT), str(RECEIPT_ROOT / "staging")])
+@pytest.mark.parametrize("level", [str(RECEIPT_ROOT), str(RECEIPT_ROOT / "staging")])
 def test_symlinked_metadata_path_never_traverses_outside_receipt_scope(drain_cli, tmp_path, level):
     target = tmp_path / "unrelated"
     target.mkdir()
     (target / "keep").write_text("unrelated content")
     link = tmp_path / level
     link.parent.mkdir(parents=True, exist_ok=True)
-    for directory in (tmp_path / ".kamal", tmp_path / RECEIPT_ROOT):
+    for directory in (tmp_path / RECEIPT_ROOT,):
         if directory.is_dir():
             directory.chmod(0o700)
     link.symlink_to(target, target_is_directory=True)
@@ -508,7 +685,7 @@ def test_failed_inventory_cannot_report_a_successful_drain(drain_cli):
 
 
 def test_receipt_metadata_write_failure_prevents_signal(drain_cli, tmp_path):
-    (tmp_path / ".kamal").write_text("not a directory")
+    (tmp_path / RECEIPT_ROOT).write_text("not a directory")
     result, state = drain_cli({WORKER: {"destination": "staging"}})
     assert result.returncode != 0
     assert "Drain metadata must be an owned real directory." in result.stderr

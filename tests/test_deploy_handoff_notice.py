@@ -102,7 +102,7 @@ def test_notice_emits_annotation_and_summary_without_running_remote_commands(des
     assert destination in guidance
     assert "may be draining or stopped" in guidance
     assert "queued jobs may be paused" in guidance
-    assert f".kamal/scout-worker-drains-v1/{destination}/" in guidance
+    assert f".scout-worker-drains-v1/{destination}/" in guidance
     assert "Inspect worker state, in-flight jobs, and pending receipts" in guidance
     assert "roll forward" in guidance
     assert "Do not blindly reboot old workers" in guidance
