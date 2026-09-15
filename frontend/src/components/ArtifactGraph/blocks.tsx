@@ -215,6 +215,7 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
             <option value="month_to_date">Month to date</option>
             <option value="today">Today</option>
             <option value="yesterday">Yesterday</option>
+            <option value="custom" disabled>Custom dates</option>
           </select>
         </label>
         <div className="grid gap-3 border-t border-border pt-3 sm:grid-cols-2">

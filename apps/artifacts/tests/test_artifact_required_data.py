@@ -14,6 +14,7 @@ from django.test import AsyncClient
 from django.utils import timezone
 
 from apps.artifacts.models import Artifact, ArtifactType
+from apps.common.error_codes import ErrorCode
 from apps.semantic.models import (
     CubeSchema,
     CustomDataset,
@@ -730,3 +731,77 @@ async def test_restored_source_with_rolled_back_catalog_retries_only_semantic_pr
     assert result["status"] == "completed"
     build.assert_awaited_once()
     load.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tenants", "expected"),
+    [
+        (
+            [
+                {
+                    "success": False,
+                    "state": "not_run",
+                    "error": "No usable credential could be resolved",
+                    "error_code": ErrorCode.AUTH_CREDENTIAL_MISSING,
+                }
+            ]
+            * 2,
+            "open Connected Accounts and connect or reconnect",
+        ),
+        (
+            [
+                {
+                    "success": False,
+                    "error": "Synthetic access denied",
+                    "error_code": ErrorCode.AUTH_ACCESS_DENIED,
+                }
+            ],
+            "Ask an admin on the affected provider to restore access",
+        ),
+        (
+            [
+                {
+                    "success": False,
+                    "error": f"Synthetic source {index} timed out. " + "details " * 100,
+                }
+                for index in range(5)
+            ],
+            "Synthetic source 0 timed out",
+        ),
+        ([], "Synthetic Cube validation failed"),
+        (
+            [{"success": True, "error": "An obsolete source error"}],
+            "Synthetic Cube validation failed",
+        ),
+    ],
+)
+async def test_recovery_failure_prioritizes_source_remedy_over_downstream_cube_error(
+    required_setup, tenants, expected
+):
+    setup = required_setup
+    recovery = await make_recovery(setup)
+    summary = {
+        "all_succeeded": False,
+        "tenants": tenants,
+        "cube_schema": {"ok": False, "error": "Synthetic Cube validation failed"},
+    }
+    with patch(
+        "apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock(return_value=summary)
+    ):
+        result = await recover_workspace_data.func(task_context(), str(recovery.id))
+    await recovery.arefresh_from_db()
+    assert result["status"] == recovery.state == "failed"
+    assert recovery.result == summary
+    assert expected in recovery.error
+    assert len(recovery.error) <= 1000
+    state = (await setup.client.get(recovery_url(setup.b))).json()
+    assert state["status"] == "failed"
+    assert expected in state["detail"]
+    if expected != "Synthetic Cube validation failed":
+        assert "Synthetic Cube validation failed" not in recovery.error
+    if len(tenants) == 2:
+        assert recovery.error.count("Connected Accounts") == 1
+    if len(tenants) == 5:
+        assert "Synthetic source 2" in recovery.error
+        assert "Synthetic source 3" not in recovery.error

@@ -105,6 +105,10 @@ logger = logging.getLogger(__name__)
 # it applies to. A 401 and a 403 in one run need *opposite* advice, so an
 # unattributed pair reads as a flat contradiction (#372).
 _CREDENTIAL_GUIDANCE: dict[str, str] = {
+    ErrorCode.AUTH_CREDENTIAL_MISSING: (
+        "no usable sign-in is available — open Connected Accounts and connect or "
+        "reconnect the affected account before retrying."
+    ),
     ErrorCode.PIPELINE_UNRESOLVED: (
         "ask an administrator to configure or repair the materialization pipeline "
         "for this provider before retrying. Re-running cannot resolve this pipeline "
@@ -512,7 +516,11 @@ async def materialize_workspace_core(
             continue
         if credential is None:
             tenant_results.append(
-                _preflight_failure(tm.tenant, "No usable credential could be resolved")
+                _preflight_failure(
+                    tm.tenant,
+                    "No usable credential could be resolved",
+                    ErrorCode.AUTH_CREDENTIAL_MISSING,
+                )
             )
             continue
 
@@ -1310,6 +1318,23 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
 
 def _workspace_recovery_error(result: dict, surface: dict) -> str:
     """Select the most useful persisted error for an artifact recovery card."""
+    # A failed source commonly causes a downstream Cube *skip*, not a Cube
+    # failure. Show the source remedy first; never infer auth advice by parsing
+    # human/provider error text, or conflate missing credentials with a 403.
+    source_errors = []
+    for tenant in result.get("tenants") or []:
+        if not isinstance(tenant, dict) or tenant.get("success") is True:
+            continue
+        error = (
+            _CREDENTIAL_GUIDANCE.get(tenant.get("error_code"))
+            or " ".join(str(tenant.get("error") or "").split())[:200]
+        )
+        if error and error not in source_errors:
+            source_errors.append(error)
+        if len(source_errors) == 3:
+            break
+    if source_errors:
+        return ("Data source loading failed: " + " ".join(source_errors))[:1000]
     if result.get("error"):
         return str(result["error"])[:1000]
     cube_result = result.get("cube_schema") or {}
@@ -1321,9 +1346,6 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
     view_error = (result.get("view_schema") or {}).get("error")
     if view_error:
         return str(view_error)[:1000]
-    for tenant in result.get("tenants") or []:
-        if tenant.get("error"):
-            return str(tenant["error"])[:1000]
     if surface.get("detail"):
         return str(surface["detail"])[:1000]
     return str(surface.get("message") or "Scout could not restore this artifact's data.")[:1000]

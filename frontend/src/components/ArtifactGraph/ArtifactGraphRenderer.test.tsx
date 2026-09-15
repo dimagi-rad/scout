@@ -126,6 +126,7 @@ describe("ArtifactGraphRenderer", () => {
     await waitFor(() => expect(screen.getAllByText("27").length).toBeGreaterThan(0))
     expect(start).toHaveValue("2026-06-01")
     expect(end).toHaveValue("2026-06-30")
+    expect(screen.getByRole("combobox", { name: "Date range" })).toHaveDisplayValue("Custom dates")
     expect(screen.getByLabelText("Start date")).toBe(start)
     expect(container.firstElementChild).toBe(originalRenderer)
     expect(mockedPost).toHaveBeenCalledTimes(1)
@@ -135,6 +136,21 @@ describe("ArtifactGraphRenderer", () => {
     )
     rerender(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" dataRevision="new" />)
     expect(mockedPost).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(["Start date", "End date"])("labels a manually edited %s as Custom dates", async (label) => {
+    mockedPost.mockResolvedValue({ columns: [], rows: [], row_count: 0 })
+    render(<ArtifactGraphRenderer artifact={artifact()} workspaceId="workspace-1" />)
+    const preset = screen.getByRole("combobox", { name: "Date range" })
+    expect(preset).toHaveDisplayValue("Last 7 days")
+
+    fireEvent.change(screen.getByLabelText(label), { target: { value: "2026-06-15" } })
+
+    expect(preset).toHaveDisplayValue("Custom dates")
+    expect(screen.getByRole("option", { name: "Custom dates" })).toBeDisabled()
+    fireEvent.change(preset, { target: { value: "last_30_days" } })
+    expect(preset).toHaveDisplayValue("Last 30 days")
+    await waitFor(() => expect(mockedPost).toHaveBeenCalled())
   })
 
   it("rejects Recharts props.data refs instead of falling back to block rows", async () => {

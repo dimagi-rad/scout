@@ -1623,6 +1623,8 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
     assert expected in body
     assert expected in tj.error_summary
     if reason == "credential":
+        assert failure["error_code"] == ErrorCode.AUTH_CREDENTIAL_MISSING
+        assert "Connected Accounts" in body
         assert "resolved." in tj.error_summary
         assert "resolved This" not in tj.error_summary
     assert "preflight_recorded" not in body
