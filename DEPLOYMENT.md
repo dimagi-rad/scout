@@ -354,6 +354,15 @@ It does not force-kill workers, restart them, or modify queued jobs. Jobs deferr
 during the handoff wait until the new worker starts; interactive background work
 can therefore pause for the duration of the rollout.
 
+If a workflow fails or is cancelled after the drain starts and before the new
+worker deploy succeeds, it emits an explicit error annotation and recovery steps
+in the run summary. **Workers may remain stopped and queued jobs may remain
+paused after that failed rollout.** Inspect worker state, in-flight jobs, and
+pending receipts; resolve the failed gate and roll forward through the complete
+destination-specific workflow once the worker/job state is safe. The notice
+does not restart old workers or remove drain receipts. A runner that is abruptly
+lost may not emit the notice, so inspect the handoff whenever a run ends there.
+
 The API runs migrations and OAuth setup before starting uvicorn. Because this
 service has no Kamal proxy, its container has an explicit loopback `/health/`
 check with the configured allowed Host. The readiness check verifies the platform

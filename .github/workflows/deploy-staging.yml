@@ -114,6 +114,7 @@ jobs:
         run: kamal deploy -c config/deploy-cube.yml -d staging --version="$CUBE_TAG"
 
       - name: Drain old workers
+        id: drain_workers
         timeout-minutes: 12
         run: |
           ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
@@ -128,11 +129,34 @@ jobs:
         run: kamal deploy -c config/deploy-mcp.yml -d staging --version="$MCP_TAG"
 
       - name: Deploy Worker
+        id: deploy_worker
         run: kamal deploy -c config/deploy-worker.yml -d staging --version="$WORKER_TAG"
 
       - name: Deploy Frontend
         # Preserve the staging image's baked-in nginx, environment, and release.
         run: kamal deploy -c config/deploy-frontend.yml -d staging --skip-push --version="$FRONTEND_TAG"
+
+      - name: Report interrupted backend handoff
+        if: >-
+          ${{ (failure() || cancelled()) &&
+              (steps.drain_workers.outcome == 'success' ||
+               steps.drain_workers.outcome == 'failure' ||
+               steps.drain_workers.outcome == 'cancelled') &&
+              steps.deploy_worker.outcome != 'success' }}
+        shell: bash
+        run: |
+          echo "::error title=Backend handoff interrupted::Staging workers may be draining or stopped; queued jobs may be paused. Inspect the recovery steps in this run's summary before retrying."
+          printf '%s\n' \
+            '### Staging backend handoff interrupted' \
+            '' \
+            'Staging workers may be draining or stopped; queued jobs may be paused until a compatible worker is deployed.' \
+            '' \
+            '1. Inspect worker state, in-flight jobs, and pending receipts in the deployment user home at .kamal/scout-worker-drains-v1/staging/.' \
+            '2. Resolve the failed drain, migration, health, or deployment step; then roll forward by rerunning the complete staging deployment once the worker/job state is safe.' \
+            '3. Do not blindly reboot old workers, force-stop them, or delete receipts. An old publisher can invalidate newly published source mappings; unconfirmed drains require operator inspection.' \
+            '' \
+            'See DEPLOYMENT.md: Migration-safe backend handoff. No automatic worker restart was attempted.' \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary
         run: |

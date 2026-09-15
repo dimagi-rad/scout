@@ -17,7 +17,7 @@ STARTED = "2026-09-15T10:20:30.123456789Z"
 RECEIPT_ROOT = Path(".kamal/scout-worker-drains-v1")
 
 DOCKER_DOUBLE = r"""
-import json, os, sys
+import atexit, json, os, sys
 from pathlib import Path
 
 path = Path(os.environ["DOCKER_STATE"])
@@ -25,6 +25,9 @@ state = json.loads(path.read_text())
 args = sys.argv[1:]
 state.setdefault("commands", []).append(args)
 containers = state["containers"]
+# An assertion must not erase evidence that the helper attempted a command.
+path.write_text(json.dumps(state))
+atexit.register(lambda: path.write_text(json.dumps(state)))
 
 def done(code=0, output=""):
     path.write_text(json.dumps(state))
@@ -38,10 +41,13 @@ if args[0] == "ps":
         containers["c" * 64] = {"status": "running", "destination": "staging"}
     filters = [args[i + 1] for i, value in enumerate(args) if value == "--filter"]
     assert "label=service=scout-worker" in filters and "label=role=web" in filters
+    assert {"--all", "--no-trunc", "--quiet"} <= set(args)
+    statuses = {value.split("=", 1)[1] for value in filters if value.startswith("status=")}
+    assert statuses == {"running", "restarting", "paused"}
     destination = next(value.split("=", 2)[2] for value in filters if value.startswith("label=destination="))
     selected = []
     for ident, container in containers.items():
-        if container.get("status", "running") not in {"running", "restarting", "paused"}:
+        if container.get("status", "running") not in statuses:
             continue
         if not state.get("ignore_filters") and (
             container.get("absent_destination") or
@@ -73,6 +79,7 @@ if args[0] == "inspect":
         "" if container.get("absent_destination") else "present",
     ]) + "\n")
 if args[0] == "kill":
+    container["signal_calls"] = container.get("signal_calls", 0) + 1
     assert args == ["kill", "--signal=TERM", ident]
     destination = "staging" if container.get("destination") else "production"
     started = container.get("started", "2026-09-15T10:20:30.123456789Z")
@@ -80,7 +87,9 @@ if args[0] == "kill":
     assert receipt.is_dir() and not receipt.is_symlink()
     assert receipt.stat().st_mode & 0o777 == 0o700
     assert not list(receipt.iterdir())
-    container["signal_calls"] = container.get("signal_calls", 0) + 1
+    if "exit_before_signal" in container:
+        container.update(status="exited", **container["exit_before_signal"])
+        done(1)
     if container.get("signal_failure"):
         done(1)
     container["signals"] = container.get("signals", 0) + 1
@@ -122,6 +131,20 @@ def drain_cli(tmp_path):
         )
         return result, json.loads(state_file.read_text())
 
+    def invoke_double(args, containers=None):
+        state_file.write_text(json.dumps({"containers": containers or {}}))
+        result = subprocess.run(  # noqa: S603 - isolated synthetic Docker recorder only
+            [str(docker), *args],
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return result, json.loads(state_file.read_text())
+
+    run.invoke_double = invoke_double
     return run
 
 
@@ -144,7 +167,8 @@ def amend_container(tmp_path, ident=WORKER, **changes):
 def test_empty_destination_is_a_successful_first_deploy(drain_cli):
     result, state = drain_cli()
     assert result.returncode == 0, result.stderr
-    assert "exited cleanly" in result.stdout
+    assert "No active or pending staging workers were found" in result.stdout
+    assert "exited cleanly" not in result.stdout
     assert all(command[0] == "ps" for command in state["commands"])
 
 
@@ -173,12 +197,120 @@ def test_timeout_and_retry_do_not_signal_twice_or_abort_running_jobs(drain_cli):
     assert result.returncode != 0
     assert "timed out" in result.stderr
     assert "queued jobs wait" in result.stderr
+    assert ".kamal/scout-worker-drains-v1/staging" in result.stderr
     assert state["containers"][WORKER]["signals"] == 1
     retried, state = drain_cli(reset=False)
     assert retried.returncode != 0
     assert "without another signal" in retried.stdout
     assert state["containers"][WORKER]["signal_calls"] == 1
     assert state["containers"][WORKER].get("status", "running") == "running"
+
+
+def test_private_receipt_accepts_safe_setgid_without_exposing_group_permissions(
+    drain_cli, tmp_path
+):
+    receipt = pending_receipt(tmp_path)
+    # BSD filesystems can clear SGID on chmod for a nonmember inherited group;
+    # report the exact Linux inherited-SGID mode while preserving real 0700 IO.
+    stat = tmp_path / "stat"
+    stat.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "print(format((os.stat(sys.argv[-1]).st_mode & 0o777) | 0o2000, 'o'))\n"
+    )
+    stat.chmod(0o755)
+    result, _ = drain_cli({WORKER: {"destination": "staging", "status": "exited"}})
+    assert result.returncode == 0, result.stderr
+    assert not receipt.exists()
+
+
+def test_private_mode_validation_uses_bits_not_stat_string_format(drain_cli, tmp_path):
+    stat = tmp_path / "stat"
+    stat.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "print(format(os.stat(sys.argv[-1]).st_mode & 0o7777, '04o'))\n"
+    )
+    stat.chmod(0o755)
+    result, _ = drain_cli()
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("mode", [0o2701, 0o2710, 0o2770, 0o2600])
+def test_setgid_does_not_relax_private_receipt_permissions(drain_cli, tmp_path, mode):
+    receipt = pending_receipt(tmp_path)
+    receipt.chmod(mode)
+    result, state = drain_cli({WORKER: {"destination": "staging", "status": "exited"}})
+    assert result.returncode != 0
+    assert (
+        "metadata has unsafe permissions" in result.stderr
+        or "receipts must be private" in result.stderr
+    )
+    assert receipt.exists()
+    assert not any(command[0] == "kill" for command in state.get("commands", []))
+
+
+@pytest.mark.parametrize(
+    "exit_state, message",
+    [
+        ({"exit": 0}, None),
+        ({"exit": 1}, "exited unsuccessfully"),
+        ({"oom": True}, "exited unsuccessfully"),
+        ({"started": "2026-09-15T11:20:30.123456789Z"}, "restarted during drain"),
+        ({"destination": "production"}, "labels do not match"),
+    ],
+)
+def test_signal_failure_only_accepts_verified_same_process_clean_exit(
+    drain_cli, tmp_path, exit_state, message
+):
+    result, state = drain_cli(
+        {WORKER: {"destination": "staging", "exit_before_signal": exit_state}}
+    )
+    assert state["containers"][WORKER]["signal_calls"] == 1
+    assert not state["containers"][WORKER].get("signals")
+    receipt = tmp_path / RECEIPT_ROOT / "staging" / f"{WORKER}-{STARTED}"
+    if message is None:
+        assert result.returncode == 0, result.stderr
+        assert "exited cleanly" in result.stdout
+        assert not receipt.exists()
+    else:
+        assert result.returncode != 0
+        assert message in result.stderr
+        assert receipt.exists()
+
+
+@pytest.mark.parametrize("args", [["kill", "--signal=TERM", WORKER], ["unexpected", WORKER]])
+def test_docker_double_preserves_invocation_evidence_when_an_invariant_fails(drain_cli, args):
+    result, state = drain_cli.invoke_double(args, {WORKER: {"destination": "staging"}})
+    assert result.returncode != 0
+    assert state["commands"] == [args]
+    if args[0] == "kill":
+        assert state["containers"][WORKER]["signal_calls"] == 1
+        assert not state["containers"][WORKER].get("signals")
+
+
+@pytest.mark.parametrize(
+    "omitted", ["--all", "status=paused", "status=restarting", "status=running"]
+)
+def test_docker_double_requires_the_actual_complete_status_selection(drain_cli, omitted):
+    args = ["ps", "--all", "--no-trunc", "--quiet"]
+    for selector in (
+        "label=service=scout-worker",
+        "label=role=web",
+        "label=destination=staging",
+        "status=running",
+        "status=restarting",
+        "status=paused",
+    ):
+        if selector != omitted:
+            args.extend(["--filter", selector])
+    if omitted == "--all":
+        args.remove(omitted)
+    result, state = drain_cli.invoke_double(
+        args, {WORKER: {"destination": "staging", "status": "paused"}}
+    )
+    assert result.returncode != 0
+    assert state["commands"] == [args]
 
 
 @pytest.mark.parametrize("wrong", [{"destination": ""}, {"service": "other"}, {"role": "other"}])
@@ -196,6 +328,7 @@ def test_labels_are_revalidated_before_any_mutation(drain_cli, wrong):
 def test_ambiguous_initial_worker_state_fails_without_mutation(drain_cli, status):
     result, state = drain_cli({WORKER: {"destination": "staging", "status": status}})
     assert result.returncode != 0
+    assert "An old worker is paused or restarting; inspect it before deploying." in result.stderr
     assert not any(command[0] in {"exec", "kill"} for command in state["commands"])
 
 
@@ -262,6 +395,13 @@ def test_pending_receipt_is_revalidated_before_signalling_another_worker(
             containers[WORKER]["absent_destination"] = True
     result, state = drain_cli(containers)
     assert result.returncode != 0
+    message = {
+        "missing": "Could not verify the selected worker.",
+        "restarted": "An old worker restarted during drain.",
+        "failed": "An old worker exited unsuccessfully",
+        "absent-label": "Worker labels do not match",
+    }[condition]
+    assert message in result.stderr
     assert receipt.is_dir()
     assert not any(command[0] == "kill" for command in state["commands"])
 
@@ -299,6 +439,15 @@ def test_malformed_receipt_fails_closed_without_signal_or_cleanup(drain_cli, tmp
         receipt.chmod(0o755)
     result, state = drain_cli({WORKER: {"destination": "staging"}})
     assert result.returncode != 0
+    message = {
+        "bad-name": "Malformed pending worker drain receipt",
+        "hidden-name": "Malformed pending worker drain receipt",
+        "file": "Drain metadata must be an owned real directory.",
+        "symlink": "Drain metadata must be an owned real directory.",
+        "nonempty": "Pending worker drain receipt contains unexpected data.",
+        "public": "Pending drain receipts must be private.",
+    }[kind]
+    assert message in result.stderr
     assert receipt.exists()
     if kind == "symlink":
         assert (tmp_path / "unrelated" / "keep").read_text() == "unrelated content"
@@ -318,6 +467,7 @@ def test_symlinked_metadata_path_never_traverses_outside_receipt_scope(drain_cli
     link.symlink_to(target, target_is_directory=True)
     result, state = drain_cli({WORKER: {"destination": "staging"}})
     assert result.returncode != 0
+    assert "Drain metadata must be an owned real directory." in result.stderr
     assert (target / "keep").read_text() == "unrelated content"
     assert len(list(target.iterdir())) == 1
     assert not state.get("commands")
@@ -343,6 +493,7 @@ def test_new_worker_appearing_during_drain_prevents_deployment(drain_cli):
 def test_uncertain_signal_failure_is_never_retried_as_a_second_signal(drain_cli):
     result, state = drain_cli({WORKER: {"destination": "staging", "signal_failure": True}})
     assert result.returncode != 0
+    assert "The graceful signal was not confirmed; inspect before retrying." in result.stderr
     assert state["containers"][WORKER]["signal_calls"] == 1
     retried, state = drain_cli(reset=False)
     assert retried.returncode != 0
@@ -352,6 +503,7 @@ def test_uncertain_signal_failure_is_never_retried_as_a_second_signal(drain_cli)
 def test_failed_inventory_cannot_report_a_successful_drain(drain_cli):
     result, state = drain_cli(options={"fail_inventory": True})
     assert result.returncode != 0
+    assert "Could not inventory old workers." in result.stderr
     assert len(state["commands"]) == 1
 
 
@@ -359,12 +511,14 @@ def test_receipt_metadata_write_failure_prevents_signal(drain_cli, tmp_path):
     (tmp_path / ".kamal").write_text("not a directory")
     result, state = drain_cli({WORKER: {"destination": "staging"}})
     assert result.returncode != 0
+    assert "Drain metadata must be an owned real directory." in result.stderr
     assert not any(command[0] == "kill" for command in state.get("commands", []))
 
 
 def test_changed_process_after_marker_is_not_signalled(drain_cli):
     result, state = drain_cli({WORKER: {"destination": "staging", "restart_after_marker": True}})
     assert result.returncode != 0
+    assert "An old worker restarted during drain." in result.stderr
     assert not any(command[0] == "kill" for command in state["commands"])
 
 
@@ -372,6 +526,7 @@ def test_changed_process_after_marker_is_not_signalled(drain_cli):
 def test_invalid_budget_is_rejected_before_any_docker_operation(drain_cli, budget):
     result, state = drain_cli(budget=budget)
     assert result.returncode != 0
+    assert "The graceful drain budget must be between 1 and 600 seconds." in result.stderr
     assert not state.get("commands")
 
 
@@ -379,6 +534,12 @@ def test_invalid_budget_is_rejected_before_any_docker_operation(drain_cli, budge
 def test_unknown_destination_is_rejected_before_any_docker_operation(drain_cli, destination):
     result, state = drain_cli(destination=destination)
     assert result.returncode != 0
+    expected = (
+        "Refusing an unknown worker destination."
+        if destination
+        else "Specify production or staging"
+    )
+    assert expected in result.stderr
     assert not state.get("commands")
 
 

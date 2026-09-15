@@ -62,11 +62,13 @@ validate_directory() {
   # GNU stat on the deployment host; BSD stat also supports owned local tests.
   # Permission bits include the ACL mask, so group/other writes cannot bypass it.
   mode=$(stat -c '%a' -- "$directory" 2>/dev/null) \
-    || mode=$(stat -f '%Lp' -- "$directory") \
+    || mode=$(stat -f '%Lp' -- "$directory" 2>/dev/null) \
     || fail "Could not verify drain metadata permissions."
   [[ "$mode" =~ ^[0-7]{3,4}$ ]] || fail "Invalid drain metadata permissions."
   (( (8#$mode & 0022) == 0 )) || fail "Drain metadata has unsafe permissions."
-  [[ "$private" == false || "$mode" == 700 ]] \
+  # Inherited SGID and zero-padded stat output do not change access rights.
+  # Still require all owner permissions and no group/other permissions.
+  [[ "$private" == false ]] || (( (8#$mode & 0777) == 0700 )) \
     || fail "Pending drain receipts must be private."
 }
 
@@ -166,8 +168,14 @@ for index in "${!targets[@]}"; do
     [[ "$container_state" == running ]] || continue
     # Docker records a manual stop for SIGTERM, preventing unless-stopped from
     # restarting the worker after its current jobs finish. Never use SIGKILL.
-    run_docker kill --signal=TERM "$container_id" >/dev/null \
-      || fail "The graceful signal was not confirmed; inspect before retrying."
+    if ! run_docker kill --signal=TERM "$container_id" >/dev/null; then
+      # The process can finish between inspect and signal. Only a verified
+      # clean exit of that exact process resolves this race; never signal twice.
+      inspect_worker "${targets[$index]}"
+      validate_process "${starts[$index]}"
+      [[ "$container_state" == exited ]] \
+        || fail "The graceful signal was not confirmed; inspect before retrying."
+    fi
   else
     # Another serialized/retried invocation may have won the atomic mkdir.
     validate_receipt "$receipt"
@@ -206,11 +214,15 @@ while :; do
     for index in "${!receipts[@]}"; do
       rmdir -- "${receipts[$index]}" || fail "Could not clear the exact completed drain receipt."
     done
-    echo "All selected $destination workers exited cleanly. Queued jobs remain for the new worker."
+    if (( ${#targets[@]} == 0 )); then
+      echo "No active or pending $destination workers were found; verify service/role/destination labels."
+    else
+      echo "All ${#targets[@]} selected $destination workers exited cleanly. Queued jobs remain for the new worker."
+    fi
     exit 0
   fi
   if (( SECONDS >= deadline )); then
-    fail "Graceful worker drain timed out. In-flight jobs may still finish; queued jobs wait."
+    fail "Graceful worker drain timed out; inspect pending receipts in $receipt_directory. In-flight jobs may still finish; queued jobs wait."
   fi
   sleep 1
 done

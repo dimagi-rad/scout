@@ -108,6 +108,33 @@ def test_manual_backend_commands_also_use_role_and_destination_qualified_version
     }
 
 
+def _assert_manual_worker_sequence(block):
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    assert lines[:2] == ["(", "set -e"]
+    assert lines[-1] == ")"
+
+    def position(marker):
+        positions = [index for index, line in enumerate(lines) if marker in line]
+        assert len(positions) == 1, f"Expected one {marker!r} in manual sequence: {lines}"
+        return positions[0]
+
+    drain = position("scripts/drain-workers.sh")
+    api = position('-api-$IMAGE_TAG"')
+    mcp = position("config/deploy-mcp.yml")
+    worker = position("config/deploy-worker.yml")
+    assert drain < api < mcp < worker
+    worker_args = shlex.split(lines[worker])
+    destination = worker_args[worker_args.index("-d") + 1] if "-d" in worker_args else "production"
+    assert destination in {"production", "staging"}
+    assert f"bash -s -- {destination} 600 < scripts/drain-workers.sh" in lines[drain], (
+        f"Drain destination does not match the {destination} worker: {lines[drain]}"
+    )
+    for index in (api, mcp):
+        args = shlex.split(lines[index])
+        selected = args[args.index("-d") + 1] if "-d" in args else "production"
+        assert selected == destination, f"Backend destination mismatch: {lines[index]}"
+
+
 def test_manual_worker_sequences_stop_on_failed_drain_or_api_gate():
     blocks = re.findall(r"```bash\n(.*?)```", (REPO_ROOT / "DEPLOYMENT.md").read_text(), re.DOTALL)
     sequences = [
@@ -115,15 +142,27 @@ def test_manual_worker_sequences_stop_on_failed_drain_or_api_gate():
     ]
     assert len(sequences) == 4  # Setup/deploy, separately for production/staging.
     for block in sequences:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        assert lines[:2] == ["(", "set -e"]
-        assert lines[-1] == ")"
-        drain = next(
-            index for index, line in enumerate(lines) if "scripts/drain-workers.sh" in line
-        )
-        api = next(index for index, line in enumerate(lines) if '-api-$IMAGE_TAG"' in line)
-        mcp = next(index for index, line in enumerate(lines) if "config/deploy-mcp.yml" in line)
-        worker = next(
-            index for index, line in enumerate(lines) if "config/deploy-worker.yml" in line
-        )
-        assert drain < api < mcp < worker
+        _assert_manual_worker_sequence(block)
+
+
+MANUAL_STAGING_SEQUENCE = """(
+set -e
+ssh scout@example.invalid bash -s -- staging 600 < scripts/drain-workers.sh
+kamal deploy -d staging --version="staging-api-$IMAGE_TAG"
+kamal deploy -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
+kamal deploy -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
+)"""
+
+
+def test_manual_sequence_checker_rejects_wrong_destination_drain():
+    wrong = MANUAL_STAGING_SEQUENCE.replace("bash -s -- staging", "bash -s -- production")
+    with pytest.raises(AssertionError, match="Drain destination does not match the staging worker"):
+        _assert_manual_worker_sequence(wrong)
+
+
+@pytest.mark.parametrize("marker", ["scripts/drain-workers.sh", "config/deploy-mcp.yml"])
+def test_manual_sequence_checker_reports_missing_marker(marker):
+    wrong = "\n".join(line for line in MANUAL_STAGING_SEQUENCE.splitlines() if marker not in line)
+    with pytest.raises(AssertionError, match="Expected one") as failure:
+        _assert_manual_worker_sequence(wrong)
+    assert marker in str(failure.value)
