@@ -204,7 +204,7 @@ describe("ArtifactGraphRenderer", () => {
 
       expect(input).toHaveValue("")
       expect(input).toHaveAttribute("aria-invalid", "true")
-      expect(input).toHaveAccessibleDescription(new RegExp(`complete, valid ${field} date.*Still showing`))
+      expect(input).toHaveAccessibleDescription(new RegExp(`complete, valid ${field} date.*Last applied range`))
       expect(view.preset).toHaveDisplayValue("Custom dates")
       expect(mockedPost).not.toHaveBeenCalled()
       expect(screen.getAllByText("12").length).toBeGreaterThan(0)
@@ -295,6 +295,26 @@ describe("ArtifactGraphRenderer", () => {
       expect(end).not.toHaveAttribute("aria-invalid")
       fireEvent.change(preset, { target: { value: "last_30_days" } })
       expect(mockedPost).toHaveBeenCalledTimes(1)
+    })
+
+    it.each(["pending", "failed"])("does not attribute old displayed rows to a newer %s query", async (state) => {
+      const { start, end } = await renderRange()
+      let rejectQuery!: (reason: Error) => void
+      mockedPost.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectQuery = reject }))
+      fireEvent.change(start, { target: { value: "2026-06-01" } })
+      if (state === "failed") {
+        await act(async () => rejectQuery(new Error("New range query failed")))
+        expect(screen.getAllByText(/New range query failed/).length).toBeGreaterThan(0)
+      }
+      fireEvent.change(end, { target: { value: "" } })
+
+      // These rows came from June 24–30. Applying June 1–30 does not mean its
+      // query has produced visible rows, so the hint must describe only the input.
+      expect(screen.getAllByText("12").length).toBeGreaterThan(0)
+      expect(mockedPost).toHaveBeenCalledTimes(1)
+      expectRange("2026-06-01", "2026-06-30")
+      expect(screen.getByRole("status")).toHaveTextContent("Last applied range: Jun 1 – Jun 30, 2026.")
+      expect(screen.getByRole("status")).not.toHaveTextContent("Still showing")
     })
 
     it("keeps newer valid results when an earlier valid date query finishes late", async () => {

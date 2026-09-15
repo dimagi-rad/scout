@@ -293,7 +293,7 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
         </div>
         <p id={hintId} role="status" className="text-sm text-muted-foreground">
           {errors?.message
-            ? `${errors.message} Still showing ${formatDateRange(value)}.`
+            ? `${errors.message} Last applied range: ${formatDateRange(value)}.`
             : "Dates apply automatically when the range is valid."}
         </p>
       </div>
