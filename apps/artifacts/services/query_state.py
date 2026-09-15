@@ -73,6 +73,8 @@ def _model_repair(surface, detail):
 
 def _source_repair(surface, dataset, *, view_schema):
     """Re-establish attribution without guessing a tenant or reloading providers."""
+    if surface["status"] == "recovering":
+        return surface
     action = "view_rebuild" if view_schema else "semantic_rebuild"
     return {
         **surface,
@@ -86,6 +88,22 @@ def _source_repair(surface, dataset, *, view_schema):
             "This repair does not reload provider data."
         ),
     }
+
+
+def _view_excludes_owner(view, owners: set[str], tenant_ids: set[str]) -> bool:
+    """Accept an omitted source only with a scoped, unambiguous exclusion."""
+    coverage = parse_coverage(view.tenant_coverage)
+    if coverage is None or len(owners) != 1 or not owners <= tenant_ids:
+        return False
+    included = {entry["tenant_id"] for entry in coverage["included_tenants"]}
+    excluded = {entry["tenant_id"] for entry in coverage["excluded_tenants"]}
+    return (
+        included | excluded == tenant_ids
+        and not included & excluded
+        and len(included) == len(coverage["included_tenants"])
+        and len(excluded) == len(coverage["excluded_tenants"])
+        and owners <= excluded
+    )
 
 
 def _promoted_members(content):
@@ -207,8 +225,8 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
     }
     coverage = parse_coverage(surface.get("tenant_coverage"))
     included = {entry["tenant_id"] for entry in coverage["included_tenants"]} if coverage else None
-    excluded = {entry["tenant_id"] for entry in coverage["excluded_tenants"]} if coverage else set()
     required_ids = set()
+    unpublished_ids = set()
     for dataset in physical.values():
         view = view_schemas.get(dataset.schema_name)
         try:
@@ -230,16 +248,16 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
             owners = set(provenance)
             if published_source is not None and owners != {published_source.tenant_id}:
                 return _source_repair(surface, dataset, view_schema=True)
-            # A partial rebuild may omit this view. Its previously validated
-            # catalog provenance survives and still identifies the absent source.
-            # A missing entry in an otherwise complete explicit publication is
-            # inconsistent, not permission to fall back around the source map.
-            if (
-                sources is not None
-                and published_source is None
-                and not (owners <= excluded and not owners.intersection(included or set()))
-            ):
-                return _source_repair(surface, dataset, view_schema=True)
+            # Last-good provenance survives a partial/failed rebuild. Attempted
+            # coverage can explain an omission even when views are unavailable;
+            # it cannot prove ownership or readiness. Current ACTIVE schemas below
+            # still decide whether a known excluded source needs loading.
+            if sources is not None and published_source is None:
+                if not _view_excludes_owner(view, owners, tenant_ids):
+                    return _source_repair(surface, dataset, view_schema=True)
+                # A newer explicit omission cannot be erased by the workspace
+                # surface's earlier coverage snapshot, even if the source reloads.
+                unpublished_ids.update(owners)
         elif published_source is not None:
             owners = {published_source.tenant_id}
         elif dataset.schema_name in schema_owners:
@@ -259,7 +277,7 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
             hidden.append(dataset)
 
     missing_sources = required_ids - active_ids
-    missing_views = required_ids - included if included is not None else set()
+    missing_views = unpublished_ids | (required_ids - included if included is not None else set())
     if missing_sources or missing_views:
         action = "materialization" if missing_sources else "view_rebuild"
         if surface["status"] == "recovering":

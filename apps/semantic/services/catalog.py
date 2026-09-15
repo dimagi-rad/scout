@@ -35,7 +35,11 @@ from apps.workspaces.services.pipeline_resolver import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
-from apps.workspaces.services.view_sources import parse_view_sources, validate_published_views
+from apps.workspaces.services.view_sources import (
+    ViewSourcesError,
+    parse_view_sources,
+    validate_published_views,
+)
 from mcp_server.context import load_workspace_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
@@ -309,6 +313,11 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
         # guess outlives the request. Reported as its own message because
         # "refresh workspace data" cannot fix a missing pipeline (#155).
         raise SemanticCatalogUnavailable(str(exc), schema_status="failed") from exc
+    except ViewSourcesError as exc:
+        raise SemanticCatalogUnavailable(
+            "The workspace view source map is invalid. Rebuild the query layer.",
+            schema_status="failed",
+        ) from exc
     except Exception as exc:
         tenant = workspace.tenant
         schema_status = "unavailable"

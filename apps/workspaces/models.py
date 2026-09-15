@@ -403,6 +403,8 @@ class WorkspaceViewSchema(models.Model):
     view_sources = models.JSONField(
         blank=True,
         default=dict,
+        # Older processes omit this column during a rolling deployment.
+        db_default={},
         help_text="Versioned source identities from the last successful physical view publication.",
     )
     last_accessed_at = models.DateTimeField(null=True, blank=True)

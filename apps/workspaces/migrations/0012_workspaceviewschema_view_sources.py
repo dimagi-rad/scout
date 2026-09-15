@@ -11,6 +11,7 @@ class Migration(migrations.Migration):
             field=models.JSONField(
                 blank=True,
                 default=dict,
+                db_default={},
                 help_text="Versioned source identities from the last successful physical view publication.",
             ),
         ),
