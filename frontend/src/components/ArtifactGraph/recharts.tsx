@@ -423,6 +423,12 @@ function applyDefaults(
 ): Record<string, unknown> {
   const out = { ...props }
   const defaultColor = palette[seriesIndex % palette.length]
+  if (SERIES_TYPES.has(type)) {
+    // Data/resize animations can be captured mid-frame by the browser's print
+    // snapshot. Render complete series immediately on screen and in exports;
+    // waiting for or toggling animation at print time introduces another race.
+    out.isAnimationActive = false
+  }
   if (type === "CartesianGrid") {
     out.stroke = out.stroke ?? "var(--border)"
     out.strokeDasharray = out.strokeDasharray ?? "4 6"

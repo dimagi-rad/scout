@@ -1,12 +1,14 @@
 import { readFileSync } from "node:fs"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { AnimationControllerProvider } from "recharts"
 
 import { RechartsFrame } from "@/components/ArtifactGraph/recharts"
 import { useArtifactPrint } from "./useArtifactPrint"
 
 const printCss = readFileSync(`${import.meta.dirname}/artifactPrint.css`, "utf8")
 const testStyles: HTMLStyleElement[] = []
+const observedSizes = new Map<Element, ResizeObserverCallback>()
 
 function addStyle(css: string) {
   const style = document.createElement("style")
@@ -49,8 +51,11 @@ function ChartFixture({ pageWidth }: { pageWidth: number }) {
 describe("artifact print CSS against real renderer DOM", () => {
   beforeEach(() => {
     vi.spyOn(window, "print").mockImplementation(() => {})
+    observedSizes.clear()
     vi.stubGlobal("ResizeObserver", class {
-      observe() {}
+      callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) { this.callback = callback }
+      observe(target: Element) { observedSizes.set(target, this.callback) }
       unobserve() {}
       disconnect() {}
     })
@@ -58,6 +63,41 @@ describe("artifact print CSS against real renderer DOM", () => {
       x: 0, y: 0, width: 1694, height: 280,
       top: 0, left: 0, right: 1694, bottom: 280, toJSON: () => ({}),
     })
+  })
+
+  it("keeps every line point visible immediately after a print-width resize without advancing animation frames", () => {
+    // Hold any attempted Recharts animation at its first frame. The artifact
+    // must show complete geometry without waiting for this controller to tick.
+    const animationController = vi.fn(() => () => {})
+    const rows = [4, 2, 7, 3, 8, 5, 9, 6, 4, 10, 7, 12].map((count, index) => ({ day: index + 1, count }))
+    const { container } = render(
+      <AnimationControllerProvider value={animationController}>
+        <RechartsFrame
+          height={280}
+          rows={rows}
+          tree={{ type: "LineChart", children: [{ type: "Line", props: { dataKey: "count", dot: true, type: "linear" } }] }}
+        />
+      </AnimationControllerProvider>,
+    )
+    const svg = container.querySelector(".recharts-surface")!
+    const responsive = container.querySelector(".recharts-responsive-container")!
+    expect(svg).not.toBeNull()
+    expect(container.querySelectorAll(".recharts-line-dot")).toHaveLength(12)
+    expect(animationController).not.toHaveBeenCalled()
+
+    act(() => observedSizes.get(responsive)!([
+      { target: responsive, contentRect: { width: 760, height: 280 } } as ResizeObserverEntry,
+    ], {} as ResizeObserver))
+
+    expect(container.querySelector(".recharts-surface")).toBe(svg)
+    expect(svg).toHaveAttribute("viewBox", "0 0 760 280")
+    expect(container.querySelectorAll(".recharts-line-dot")).toHaveLength(12)
+    const curve = container.querySelector(".recharts-line-curve")!
+    expect(curve).not.toHaveAttribute("stroke-dasharray")
+    // Last plotted point must already reach the new right edge (5px chart margin).
+    const lastDot = container.querySelectorAll(".recharts-line-dot")[11]
+    expect(lastDot).toHaveAttribute("cx", "755")
+    expect(animationController).not.toHaveBeenCalled()
   })
 
   afterEach(() => {
