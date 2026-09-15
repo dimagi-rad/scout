@@ -1,5 +1,7 @@
 """Tests for the thread-bound semantic canvas changeset."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from apps.chat.models import Thread
@@ -322,6 +324,327 @@ def test_created_measure_supports_calculated_cube_sql(canvas, semantic_model, mo
     )
     assert regression["can_commit"] is False
     assert regression["diagnostics"][0]["code"] == "INTEGER_DIVISION_RISK"
+
+
+@pytest.mark.parametrize("field_type", ["dimension", "time_dimension"])
+@pytest.mark.parametrize("sql_key", ["sql", "cube_sql"])
+def test_calculated_dimension_create_commit_and_query_sql(
+    canvas, semantic_model, monkeypatch, user, field_type, sql_key
+):
+    monkeypatch.setattr(
+        canvas_commit_module,
+        "build_and_promote_cube_schema",
+        lambda ws, model: SimpleNamespace(content_hash="calculated-dimension-test"),
+    )
+    calculation = (
+        "CASE WHEN {CUBE}.\"amount\" > 0 THEN 'Paid' ELSE 'Unpaid' END"
+        if field_type == "dimension"
+        else "CASE WHEN {CUBE}.\"amount\" > 0 THEN DATE '2026-09-01' ELSE NULL END"
+    )
+    before = list(_visits(semantic_model).fields.values())
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "paid_period",
+                    "field_type": field_type,
+                    "data_type": "text" if field_type == "dimension" else "date",
+                    sql_key: calculation,
+                },
+            }
+        ],
+        user,
+    )
+
+    assert "errors" not in result
+    assert result["diagnostics"] == []
+    assert result["can_commit"] is True
+    assert commit_canvas(canvas, user)["blocked"] is False
+    field = _visits(semantic_model).fields.get(name="paid_period")
+    assert field.expression == ""
+    assert field.metadata["cube_sql"] == calculation
+    cube = next(
+        c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits"
+    )
+    dimension = next(d for d in cube["dimensions"] if d["name"] == "paid_period")
+    assert '{CUBE}."amount"' in dimension["sql"]
+    assert '{CUBE}.""' not in dimension["sql"]
+    assert dimension["type"] == ("time" if field_type == "time_dimension" else "string")
+    assert list(_visits(semantic_model).fields.exclude(id=field.id).values()) == before
+    catalog_service._sync_fields(
+        _visits(semantic_model),
+        [
+            {"name": "visit_id", "type": "bigint"},
+            {"name": "username", "type": "text"},
+            {"name": "amount", "type": "numeric"},
+        ],
+        None,
+    )
+    field.refresh_from_db()
+    assert field.is_visible and field.metadata["cube_sql"] == calculation
+
+
+def test_calculated_dimension_set_repairs_saved_field_and_clear_requires_column(
+    canvas, semantic_model, monkeypatch, user
+):
+    monkeypatch.setattr(
+        canvas_commit_module,
+        "build_and_promote_cube_schema",
+        lambda ws, model: SimpleNamespace(content_hash="calculated-dimension-test"),
+    )
+    field = SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="amount_band",
+        field_type="dimension",
+        data_type="text",
+        expression="",
+        metadata={"source": "canvas", "cube_sql": "'Old'"},
+    )
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.amount_band/sql",
+                "value": "CASE WHEN amount > 0 THEN 'Paid' ELSE 'Unpaid' END",
+            }
+        ],
+        user,
+    )
+    assert result["diagnostics"] == []
+    assert commit_canvas(canvas, user)["blocked"] is False
+    cube = next(
+        c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits"
+    )
+    assert '{CUBE}."amount"' in next(
+        d["sql"] for d in cube["dimensions"] if d["name"] == field.name
+    )
+
+    cleared = apply_operations(
+        canvas, [{"op": "set", "target": "field/raw_visits.amount_band/sql", "value": ""}]
+    )
+    assert cleared["can_commit"] is False
+    assert "MISSING_EXPRESSION" in {d["code"] for d in cleared["diagnostics"]}
+    assert commit_canvas(canvas, user)["blocked"] is True
+    field.refresh_from_db()
+    assert field.metadata["cube_sql"]
+
+    repaired = apply_operations(
+        canvas,
+        [{"op": "set", "target": "field/raw_visits.amount_band/expression", "value": "amount"}],
+    )
+    assert repaired["diagnostics"] == []
+    assert commit_canvas(canvas, user)["blocked"] is False
+    field.refresh_from_db()
+    assert field.expression == "amount" and "cube_sql" not in field.metadata
+
+
+@pytest.mark.parametrize("value", ["", "unknown_column"])
+def test_canvas_created_dimension_update_validates_expression(canvas, semantic_model, value):
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="amount_copy",
+        field_type="dimension",
+        data_type="numeric",
+        expression="amount",
+        metadata={"source": "canvas"},
+    )
+    result = apply_operations(
+        canvas, [{"op": "set", "target": "field/raw_visits.amount_copy/expression", "value": value}]
+    )
+    assert result["can_commit"] is False
+    assert commit_canvas(canvas)["blocked"] is True
+
+
+def test_dimension_filters_cannot_be_added_through_set(canvas, semantic_model):
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="amount_copy",
+        field_type="dimension",
+        data_type="numeric",
+        expression="amount",
+        metadata={"source": "canvas"},
+    )
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.amount_copy/filters",
+                "value": [{"sql": "amount > 0"}],
+            }
+        ],
+    )
+    assert result["can_commit"] is False
+    assert "INVALID_FIELD_OPTION" in {d["code"] for d in result["diagnostics"]}
+    assert commit_canvas(canvas)["blocked"] is True
+
+
+def test_calculated_dimension_cannot_become_a_primary_key_by_column_fallback(semantic_model):
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="visit_bucket",
+        field_type="dimension",
+        data_type="numeric",
+        expression="visit_id",
+        metadata={"source": "canvas", "cube_sql": '{CUBE}."visit_id" % 2'},
+    )
+    cube = next(
+        c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits"
+    )
+    dimension = next(d for d in cube["dimensions"] if d["name"] == "visit_bucket")
+    assert "primary_key" not in dimension
+
+
+@pytest.mark.parametrize(
+    "calculation",
+    [
+        "CASE WHEN unknown_column > 0 THEN 'Paid' END",
+        "COUNT(*)",
+        "pg_sleep(1)",
+        "(SELECT username FROM raw_users)",
+        "{count}",
+    ],
+)
+@pytest.mark.parametrize("operation", ["create", "set_draft", "set_saved"])
+def test_calculated_dimension_invalid_sql_blocks_all_authoring_paths(
+    canvas, semantic_model, calculation, operation
+):
+    if operation == "create":
+        operations = [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "amount_band",
+                    "field_type": "dimension",
+                    "data_type": "text",
+                    "sql": calculation,
+                },
+            }
+        ]
+    else:
+        if operation == "set_saved":
+            SemanticField.objects.create(
+                dataset=_visits(semantic_model),
+                name="amount_band",
+                field_type="dimension",
+                data_type="text",
+                expression="amount",
+                metadata={"source": "canvas"},
+            )
+        else:
+            result = apply_operations(
+                canvas,
+                [
+                    {
+                        "op": "create",
+                        "object_type": "field",
+                        "value": {
+                            "dataset": "raw_visits",
+                            "name": "amount_band",
+                            "field_type": "dimension",
+                            "data_type": "text",
+                            "expression": "amount",
+                        },
+                    }
+                ],
+            )
+            assert "errors" not in result
+        operations = [
+            {"op": "set", "target": "field/raw_visits.amount_band/sql", "value": calculation}
+        ]
+    result = apply_operations(canvas, operations)
+    assert "errors" not in result
+    assert result["can_commit"] is False
+    assert "INVALID_DIMENSION_SQL" in {d["code"] for d in result["diagnostics"]}
+    assert commit_canvas(canvas)["blocked"] is True
+
+
+@pytest.mark.parametrize("value", [0, 1, False, True, [], {}, ["amount"], {"sql": "amount"}])
+def test_calculated_dimension_sql_type_is_validated(canvas, value):
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "amount_band",
+                    "field_type": "dimension",
+                    "data_type": "text",
+                    "sql": value,
+                },
+            }
+        ],
+    )
+    assert result["errors"][0]["code"] == "INVALID_CUBE_SQL"
+    assert canvas.changes.count() == 0
+
+
+def test_calculated_sql_stays_protected_on_generated_dimensions(canvas):
+    result = apply_operations(
+        canvas, [{"op": "set", "target": "field/raw_visits.username/sql", "value": "'Hidden'"}]
+    )
+    assert result["errors"][0]["code"] == "PROTECTED_FIELD"
+
+
+def test_saved_invalid_dimension_sql_cannot_be_promoted_by_compiler(semantic_model):
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="amount_band",
+        field_type="dimension",
+        expression="",
+        metadata={"source": "canvas", "cube_sql": "pg_sleep(1)"},
+    )
+    with pytest.raises(ValueError, match="not allowed"):
+        generate_cube_schema(semantic_model)
+
+
+def test_draft_column_dimension_can_be_converted_to_calculated_dimension(
+    canvas, semantic_model, user, monkeypatch
+):
+    monkeypatch.setattr(
+        canvas_commit_module,
+        "build_and_promote_cube_schema",
+        lambda ws, model: SimpleNamespace(content_hash="calculated-dimension-test"),
+    )
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "amount_band",
+                    "field_type": "dimension",
+                    "expression": "amount",
+                    "data_type": "text",
+                },
+            },
+            {
+                "op": "set",
+                "target": "field/raw_visits.amount_band/sql",
+                "value": "CASE WHEN amount > 0 THEN 'Paid' ELSE 'Unpaid' END",
+            },
+        ],
+        user,
+    )
+    assert result["can_commit"] and not result["diagnostics"]
+    assert commit_canvas(canvas, user)["cube_schema"]["ok"]
+    cube = next(
+        c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits"
+    )
+    assert next(d["sql"] for d in cube["dimensions"] if d["name"] == "amount_band").startswith(
+        "CASE WHEN"
+    )
 
 
 def test_created_ratio_measure_can_reference_filtered_measure(
