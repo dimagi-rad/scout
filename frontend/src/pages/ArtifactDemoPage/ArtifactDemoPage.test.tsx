@@ -1,13 +1,39 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { router } from "@/router"
 
 import { ArtifactDemoPage } from "./ArtifactDemoPage"
 
 describe("ArtifactDemoPage", () => {
+  afterEach(() => {
+    window.dispatchEvent(new Event("afterprint"))
+    vi.restoreAllMocks()
+  })
+
+  it("exports only the displayed story, not the surrounding demo page or inactive tabs", async () => {
+    const print = vi.spyOn(window, "print").mockImplementation(() => {})
+    render(<MemoryRouter><ArtifactDemoPage /></MemoryRouter>)
+    const storyTitle = screen.getByText("Community visit operations review")
+    const pageTitle = screen.getByRole("heading", { name: "Artifact showcase" })
+    await userEvent.click(screen.getByTestId("artifact-export-pdf"))
+    expect(document.querySelector('[data-scout-print="target"]')).toContainElement(storyTitle)
+    expect(document.querySelector('[data-scout-print="target"]')).not.toContainElement(pageTitle)
+    expect(print).toHaveBeenCalledTimes(1)
+    act(() => window.dispatchEvent(new Event("afterprint")))
+    expect(document.querySelector("[data-scout-print]")).toBeNull()
+
+    await userEvent.click(screen.getByRole("tab", { name: "Chart gallery" }))
+    expect(screen.getByTestId("artifact-export-pdf")).toBeDisabled()
+    expect(screen.getByTestId("artifact-export-pdf")).toHaveAttribute("title", "Return to the artifact view to export")
+    await userEvent.click(screen.getByRole("tab", { name: "States & formats" }))
+    expect(screen.getByTestId("artifact-export-pdf")).toBeDisabled()
+    await userEvent.click(screen.getByRole("tab", { name: "Full artifact" }))
+    expect(screen.getByTestId("artifact-export-pdf")).toBeEnabled()
+  })
+
   it("shows a production-rendered Story artifact and the demo data contract", async () => {
     const { container } = render(
       <MemoryRouter>
