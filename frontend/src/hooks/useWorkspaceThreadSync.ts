@@ -118,6 +118,12 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     const onChatRoute = urlWorkspaceId === activeDomainId
     if (!onChatRoute) return
     if (!domains.some((d) => d.id === activeDomainId)) return
+    // Store → URL may already have queued a navigation in this effect pass.
+    // Do not replace its thread-bearing target with the still-old URL params.
+    if (
+      syncedRef.current.workspaceId !== urlWorkspaceId ||
+      syncedRef.current.threadId !== (urlThreadId ?? null)
+    ) return
 
     const canonical = chatUrl(activeDomainId, urlThreadId ?? null)
     if (canonical !== location.pathname) {

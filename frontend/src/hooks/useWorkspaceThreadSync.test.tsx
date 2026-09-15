@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, render, screen, waitFor } from "@testing-library/react"
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
+import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes, useLocation } from "react-router-dom"
+import { api } from "@/api/client"
 import { useAppStore } from "@/store/store"
 import { useWorkspaceThreadSync } from "@/hooks/useWorkspaceThreadSync"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
@@ -13,11 +14,11 @@ const WS_B = "22222222-2222-2222-2222-222222222222"
 const THREAD_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 const THREAD_STALE = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
-function domain(id: string): TenantMembership {
+function domain(id: string, name = ""): TenantMembership {
   return {
     id,
-    name: "",
-    display_name: "",
+    name,
+    display_name: name,
     is_auto_created: false,
     role: "manage",
     tenants: [],
@@ -28,10 +29,34 @@ function domain(id: string): TenantMembership {
   }
 }
 
-function Probe() {
-  useWorkspaceThreadSync("")
+function Probe({ pathPrefix = "" }: { pathPrefix?: string }) {
+  useWorkspaceThreadSync(pathPrefix)
   const loc = useLocation()
   return <div data-testid="path">{loc.pathname}</div>
+}
+
+beforeEach(() => {
+  vi.spyOn(api, "get").mockResolvedValue([])
+  vi.spyOn(api, "post").mockResolvedValue(undefined)
+})
+
+afterEach(() => vi.restoreAllMocks())
+
+function renderPrettyChat(initialPath: string, pathPrefix = "") {
+  const router = createMemoryRouter(
+    [
+      "/workspaces/:workspaceId/chat",
+      "/workspaces/:workspaceId/chat/:threadId",
+      "/workspaces/:slug/:workspaceId/chat",
+      "/workspaces/:slug/:workspaceId/chat/:threadId",
+    ].map((path) => ({
+      path: `${pathPrefix}${path}`,
+      element: <Probe pathPrefix={pathPrefix} />,
+    })),
+    { initialEntries: [initialPath] },
+  )
+  render(<RouterProvider router={router} />)
+  return router
 }
 
 describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)", () => {
@@ -108,5 +133,97 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
     )
 
     await waitFor(() => expect(getRecentWorkspaceIds()).toEqual([WS_A]))
+  })
+})
+
+describe("useWorkspaceThreadSync — thread identity during slug canonicalization", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState({
+      domains: [domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B")],
+      domainsStatus: "loaded",
+      activeDomainId: WS_A,
+      threadId: THREAD_A,
+    })
+  })
+
+  it.each(["", "/embed"])("adds the current thread while canonicalizing a bare %s chat URL", async (prefix) => {
+    renderPrettyChat(`${prefix}/workspaces/${WS_A}/chat`, prefix)
+
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(
+      `${prefix}/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    ))
+    expect(useAppStore.getState().threadId).toBe(THREAD_A)
+  })
+
+  it("adds a thread to an already-pretty URL", async () => {
+    renderPrettyChat(`/workspaces/workspace-a/${WS_A}/chat`)
+
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    ))
+  })
+
+  it("adopts a different URL workspace without keeping its previous thread", async () => {
+    renderPrettyChat(`/workspaces/${WS_B}/chat`)
+
+    await waitFor(() => {
+      const { activeDomainId, threadId } = useAppStore.getState()
+      expect(activeDomainId).toBe(WS_B)
+      expect(threadId).not.toBe(THREAD_A)
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        `/workspaces/workspace-b/${WS_B}/chat/${threadId}`,
+      )
+    })
+  })
+
+  it("retains the URL thread while correcting a stale slug and workspace", async () => {
+    renderPrettyChat(`/workspaces/old-name/${WS_B}/chat/${THREAD_STALE}`)
+
+    await waitFor(() => {
+      expect(useAppStore.getState().activeDomainId).toBe(WS_B)
+      expect(useAppStore.getState().threadId).toBe(THREAD_STALE)
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        `/workspaces/workspace-b/${WS_B}/chat/${THREAD_STALE}`,
+      )
+    })
+  })
+
+  it("retains the thread when workspace names load after the route", async () => {
+    useAppStore.setState({ domains: [], domainsStatus: "loading" })
+    renderPrettyChat(`/workspaces/${WS_A}/chat`)
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(
+      `/workspaces/${WS_A}/chat/${THREAD_A}`,
+    ))
+
+    act(() => {
+      useAppStore.setState({ domains: [domain(WS_A, "Workspace A")], domainsStatus: "loaded" })
+    })
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    ))
+  })
+
+  it("keeps new-thread navigation and back/forward in sync after canonicalization", async () => {
+    const router = renderPrettyChat(`/workspaces/${WS_A}/chat`)
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    ))
+
+    act(() => useAppStore.getState().uiActions.newThread())
+    const freshThread = useAppStore.getState().threadId
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(
+      `/workspaces/workspace-a/${WS_A}/chat/${freshThread}`,
+    ))
+    await act(() => router.navigate(-1))
+    expect(useAppStore.getState().threadId).toBe(THREAD_A)
+    expect(screen.getByTestId("path")).toHaveTextContent(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    )
+    await act(() => router.navigate(1))
+    expect(useAppStore.getState().threadId).toBe(freshThread)
+    expect(screen.getByTestId("path")).toHaveTextContent(
+      `/workspaces/workspace-a/${WS_A}/chat/${freshThread}`,
+    )
   })
 })
