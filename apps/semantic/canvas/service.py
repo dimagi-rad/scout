@@ -152,6 +152,7 @@ def apply_operations(canvas: SemanticCanvas, operations: list, user=None) -> dic
         "applied": applied,
         "objects": projection["objects"],
         "diagnostics": projection["diagnostics"],
+        "pending_count": projection["pending_count"],
         "can_commit": projection["can_commit"],
     }
 
@@ -242,6 +243,7 @@ def _op_set(canvas, model, index, raw_op, user) -> dict[str, Any]:
         _stage_update(canvas, ObjectType.DATASET, dataset, key, value)
         return {"op": "set", "target": f"dataset/{dataset.name}/{key}"}
     if object_type == "field":
+        _require_committed_dataset(canvas, index, ref.split(".", 1)[0])
         field = _resolve(index, resolve_field, model, ref)
         allowed = FIELD_DRAFT_KEYS if is_canvas_created(field) else FIELD_CURATION_KEYS
         if key not in allowed:
@@ -399,6 +401,8 @@ def _find_draft(canvas, object_type: str, ref: str) -> SemanticCanvasChange | No
         mapped = ObjectType(object_type)
     except ValueError:
         return None
+    if mapped == ObjectType.DATASET:
+        mapped = ObjectType.CUSTOM_DATASET
     drafts = canvas.changes.filter(object_type=mapped, change_type=ChangeType.CREATE)
     ref_uuid = None
     with contextlib.suppress(TypeError, ValueError):
@@ -414,6 +418,21 @@ def _find_draft(canvas, object_type: str, ref: str) -> SemanticCanvasChange | No
             if dataset_name and ref == f"{dataset_name}.{name}":
                 return draft
     return None
+
+
+def _require_committed_dataset(canvas, index: int, ref: str) -> None:
+    draft = _find_draft(canvas, "dataset", ref)
+    if draft is not None:
+        raise CanvasOperationError(
+            index,
+            "DATASET_NOT_COMMITTED",
+            f"'{draft.fields['name']}' is a pending custom dataset. Its output dimensions "
+            "and count measure are generated on commit; field operations require the saved "
+            "dataset. This atomic batch was not applied. If this batch also creates the "
+            "dataset, retry the create without field operations. Otherwise keep the existing "
+            "draft. Commit only if authorized, then describe_dataset and curate the generated "
+            "fields or add additional measures. Without commit authorization, leave it staged.",
+        )
 
 
 def _find_change(canvas, model, index, object_type: str, ref: str) -> SemanticCanvasChange:
@@ -525,6 +544,7 @@ def _validated_field_draft(canvas, model, index: int, value: dict) -> dict[str, 
             index, "INVALID_VALUE", f"Unknown field keys: {', '.join(sorted(unknown))}."
         )
     dataset_ref = str(value.get("dataset") or "")
+    _require_committed_dataset(canvas, index, dataset_ref)
     dataset = _resolve(index, resolve_dataset, model, dataset_ref)
     name = semantic_name(str(value.get("name") or ""))
     if not name or name == "field":

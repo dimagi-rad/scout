@@ -147,6 +147,7 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
             return {
                 "applied": result["applied"],
                 "diagnostics": result["diagnostics"],
+                "pending_count": result["pending_count"],
                 "can_commit": result["can_commit"],
                 "text": render_projection_text(projection, "all"),
             }

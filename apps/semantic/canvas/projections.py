@@ -20,6 +20,7 @@ def canvas_projection(canvas: SemanticCanvas) -> dict[str, Any]:
     from apps.semantic.canvas.diagnostics import compute_diagnostics
 
     changes = list(canvas.changes.all())
+    diagnostics = compute_diagnostics(canvas, changes)
     objects: list[dict[str, Any]] = []
     for change in changes:
         _base, state, base_fields = base_and_state(canvas, change)
@@ -62,7 +63,6 @@ def canvas_projection(canvas: SemanticCanvas) -> dict[str, Any]:
         )
 
     objects.sort(key=lambda entry: (STATE_ORDER.get(entry["state"], 9), entry["key"]))
-    diagnostics = compute_diagnostics(canvas, changes)
     pending = [entry for entry in objects if entry["state"] != "unchanged"]
     has_errors = any(d["severity"] == "error" for d in diagnostics)
     return {
@@ -110,6 +110,17 @@ def render_projection_text(projection: dict[str, Any], selector: str = "graph") 
         for entry in objects:
             suffix = f" ({entry['dataset']})" if entry["dataset"] else ""
             lines.append(f"{entry['key']}{suffix}  [{entry['state']}]  {entry['summary']}")
+            if entry["object_type"] == ObjectType.CUSTOM_DATASET:
+                columns = entry["fields"].get("columns", [])
+                if columns:
+                    names = ", ".join(str(column.get("name", "")) for column in columns[:20])
+                    if len(columns) > 20:
+                        names += f" (+{len(columns) - 20} more)"
+                    lines.append(f"  Inferred output columns: {names}.")
+                lines.append(
+                    "  Output dimensions and count are generated on commit. "
+                    "Commit only if authorized, then describe_dataset before field operations."
+                )
     if selector in {"diff", "all"}:
         pending = [e for e in objects if e["state"] not in {"unchanged"}]
         if not pending:

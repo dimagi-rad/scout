@@ -1,7 +1,10 @@
 """Tests for the thread-bound semantic canvas changeset."""
 
+from unittest.mock import Mock
+
 import pytest
 
+from apps.agents.tools.canvas_tool import create_canvas_tools
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
     apply_operations,
@@ -11,7 +14,9 @@ from apps.semantic.canvas import (
 )
 from apps.semantic.canvas import commit as canvas_commit_module
 from apps.semantic.canvas import service as canvas_service
+from apps.semantic.canvas.projections import render_projection_text
 from apps.semantic.models import (
+    CubeSchema,
     CustomDataset,
     SemanticCanvasChange,
     SemanticDataset,
@@ -596,6 +601,142 @@ def test_custom_dataset_draft_and_commit(canvas, semantic_model, workspace, monk
         c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "visit_stats"
     )
     assert cube["sql"] == dataset.metadata["cube_sql"]
+
+
+@pytest.fixture
+def pending_dataset_op(monkeypatch):
+    monkeypatch.setattr(
+        canvas_service,
+        "infer_custom_dataset_columns",
+        Mock(return_value=[{"name": "username", "type": "text"}]),
+    )
+    return {
+        "op": "create",
+        "object_type": "custom_dataset",
+        "value": {
+            "name": "visit_stats",
+            "primary_key": "username",
+            "definition_sql": "select distinct username from raw_visits",
+        },
+    }
+
+
+@pytest.mark.parametrize("object_type", ["dataset", "custom_dataset"])
+@pytest.mark.parametrize("use_uuid", [False, True])
+def test_pending_dataset_metadata_resolves_by_name_or_uuid(
+    canvas, pending_dataset_op, object_type, use_uuid
+):
+    created = apply_operations(canvas, [pending_dataset_op])
+    assert created["objects"][0]["fields"]["columns"] == [{"name": "username", "type": "text"}]
+    assert created["pending_count"] == 1
+    ref = str(canvas.changes.get().object_uuid) if use_uuid else "visit_stats"
+
+    result = apply_operations(
+        canvas,
+        [{"op": "set", "target": f"{object_type}/{ref}/description", "value": "Distinct users"}],
+    )
+
+    assert "errors" not in result
+    assert result["diagnostics"] == []
+    assert canvas.changes.get().fields["description"] == "Distinct users"
+    text = render_projection_text(canvas_projection(canvas), "graph")
+    assert "Inferred output columns: username" in text
+    assert "Output dimensions and count are generated on commit" in text
+
+
+@pytest.mark.parametrize(
+    "field_op",
+    [
+        {"op": "set", "target": "field/visit_stats.username/description", "value": "User"},
+        {
+            "op": "create",
+            "object_type": "field",
+            "value": {
+                "dataset": "visit_stats",
+                "name": "distinct_users",
+                "field_type": "measure",
+                "measure_type": "count_distinct",
+                "expression": "username",
+            },
+        },
+    ],
+)
+@pytest.mark.parametrize("same_batch", [False, True])
+def test_pending_dataset_field_error_explains_safe_next_step(
+    canvas, pending_dataset_op, field_op, same_batch
+):
+    if not same_batch:
+        apply_operations(canvas, [pending_dataset_op])
+    result = apply_operations(canvas, [pending_dataset_op, field_op] if same_batch else [field_op])
+
+    error = result["errors"][0]
+    assert error["code"] == "DATASET_NOT_COMMITTED"
+    assert error["op_index"] == int(same_batch)
+    assert "This atomic batch was not applied" in error["message"]
+    assert "Otherwise keep the existing draft" in error["message"]
+    assert "Commit only if authorized" in error["message"]
+    assert canvas.changes.count() == (0 if same_batch else 1)
+    assert not canvas.semantic_model.datasets.filter(name="visit_stats").exists()
+
+
+def test_custom_dataset_create_commit_then_curate_generated_fields(
+    canvas, pending_dataset_op, semantic_model, workspace, user, monkeypatch
+):
+    cube_schema = CubeSchema(workspace=workspace, semantic_model=semantic_model, content_hash="ok")
+    promote = Mock(return_value=cube_schema)
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", promote)
+
+    staged = apply_operations(
+        canvas,
+        [
+            pending_dataset_op,
+            {"op": "set", "target": "dataset/visit_stats/description", "value": "Distinct users"},
+        ],
+        user,
+    )
+    assert staged["can_commit"] is True
+    first_commit = commit_canvas(canvas, user)
+    assert first_commit["committed"]
+    assert first_commit["cube_schema"] == {"ok": True, "content_hash": "ok"}
+    dataset = semantic_model.datasets.get(name="visit_stats")
+    assert dataset.fields.get(name="username").expression == "username"
+    assert dataset.fields.get(name="count").measure_type == "count"
+
+    curated = apply_operations(
+        canvas,
+        [
+            {"op": "set", "target": "field/visit_stats.username/description", "value": "User"},
+            {"op": "set", "target": "field/visit_stats.count/label", "value": "Users"},
+        ],
+        user,
+    )
+    assert curated["can_commit"] is True
+    assert curated["diagnostics"] == []
+    assert curated["pending_count"] == 2
+    second_commit = commit_canvas(canvas, user)
+    assert len(second_commit["committed"]) == 2
+    assert second_commit["cube_schema"]["ok"] is True
+    assert canvas_projection(canvas)["pending_count"] == 0
+    assert dataset.fields.get(name="username").description == "User"
+    assert CustomDataset.objects.filter(workspace=workspace, name="visit_stats").count() == 1
+    assert promote.call_count == 2
+    promote.assert_called_with(workspace, model=semantic_model)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_canvas_apply_tool_exposes_inferred_columns_and_pending_count(
+    canvas, pending_dataset_op, workspace, user
+):
+    tools = {
+        item.name: item for item in create_canvas_tools(workspace, user, str(canvas.thread_id))
+    }
+
+    result = await tools["canvas_apply"].ainvoke({"operations": [pending_dataset_op]})
+
+    assert result["pending_count"] == 1
+    assert "Inferred output columns: username" in result["text"]
+    assert result["can_commit"] is True
 
 
 def test_custom_dataset_fields_can_be_deleted_and_stay_hidden(
