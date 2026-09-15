@@ -23,7 +23,9 @@ export interface WorkspaceListItem {
   // tenant access to. Absent on older cached payloads — treat missing as true.
   has_access?: boolean
   member_count: number
+  // Recorded tenant/view schema state; does not certify semantic query readiness.
   schema_status: SchemaStatus
+  // Latest completed or partial load. A later failure does not erase this history.
   last_synced_at: string | null
   created_at: string
 }
@@ -94,46 +96,29 @@ export interface WorkspaceTenant {
   provider: string
 }
 
-/** Live data-availability state for a workspace's indicator. */
-export type WorkspaceDataState = "loading" | "ready" | "empty"
+/** Recorded load/setup state, not a current query-readiness check. */
+export type WorkspaceLoadState = "loading" | "recorded" | "unavailable" | "failed" | "unknown"
 
 /**
- * Live data-availability state, derived from the backend's `schema_status`:
- *
- * - "ready"   — schema is `available`: the workspace currently has queryable data.
- * - "loading" — schema is `provisioning`/`materializing`: data is being set up.
- * - "empty"   — schema is `unavailable` or `failed`: no queryable data. A
- *   `failed` multi-tenant view schema means the per-tenant data loaded but the
- *   workspace's combined query layer could not be built — there is still
- *   nothing queryable, so it is treated as "empty" rather than "ready".
- *
- * Unlike `last_synced_at` (a *historical* "was synced at least once" signal),
- * `schema_status` reflects the live schema and correctly returns to "empty"
- * when a workspace's data is torn down. We fall back to `last_synced_at` only
- * when `schema_status` is absent (e.g. an older cached payload), so the UI
- * degrades safely rather than showing nothing.
+ * Keep explicit setup problems/progress visible alongside load history.
+ * An `available` schema row can exist without an active semantic model or Cube
+ * schema, and an old completed/partial load can precede a failed refresh.
+ * Neither field proves current data availability or a complete workspace sync.
+ * Older cached payloads without `schema_status` can still show recorded history.
  */
-export function workspaceDataState(ws: {
+export function workspaceLoadState(ws: {
   schema_status?: SchemaStatus
   last_synced_at?: string | null
-}): WorkspaceDataState {
-  if (ws.schema_status === "available") return "ready"
+}): WorkspaceLoadState {
   if (ws.schema_status === "provisioning") return "loading"
-  if (ws.schema_status === "unavailable") return "empty"
-  if (ws.schema_status === "failed") return "empty"
-  return ws.last_synced_at != null ? "ready" : "empty"
+  if (ws.schema_status === "unavailable") return "unavailable"
+  if (ws.schema_status === "failed") return "failed"
+  return workspaceHasRecordedLoad(ws) ? "recorded" : "unknown"
 }
 
-/**
- * Whether a workspace currently has queryable data. Prefers the live
- * `schema_status`; treats only the "ready" state as having data.
- * Single source of truth for the UI's has-data filter.
- */
-export function workspaceHasData(ws: {
-  schema_status?: SchemaStatus
-  last_synced_at?: string | null
-}): boolean {
-  return workspaceDataState(ws) === "ready"
+/** Whether the list payload includes a historical load time, even after failure. */
+export function workspaceHasRecordedLoad(ws: { last_synced_at?: string | null }): boolean {
+  return Boolean(ws.last_synced_at)
 }
 
 /**
