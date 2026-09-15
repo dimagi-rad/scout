@@ -24,6 +24,7 @@ jobs:
       base: ${{ steps.pr.outputs.base }}
       base_ref: ${{ steps.pr.outputs.base_ref }}
       same_repo: ${{ steps.pr.outputs.same_repo }}
+      token_budget: ${{ steps.pr.outputs.token_budget }}
     steps:
       - name: Resolve PR and authorize manual requests
         id: pr
@@ -56,6 +57,15 @@ jobs:
               core.notice('A newer PR update has superseded this event.');
               return;
             }
+            let tokenBudget = 500000;
+            const budgetRequest = manual && /^@ocr\s+budget=(\d+)\s*$/i.exec(context.payload.comment?.body || '');
+            if (budgetRequest) {
+              tokenBudget = Number(budgetRequest[1]);
+              if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > 5000000) {
+                throw new Error('Manual OCR budget must be between 1 and 5000000 tokens');
+              }
+            }
+            core.setOutput('token_budget', String(tokenBudget));
             core.setOutput('number', String(pr.number));
             core.setOutput('head', pr.head.sha);
             core.setOutput('base', pr.base.sha);
@@ -90,7 +100,7 @@ jobs:
           llm_extra_body: '{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}'
           review_concurrency: '2'
           review_task_timeout: '15'
-          max_tokens_budget: '500000'
+          max_tokens_budget: ${{ needs.prepare.outputs.token_budget }}
           effort: medium
           stream_progress: 'true'
           sticky_summary: 'true'
