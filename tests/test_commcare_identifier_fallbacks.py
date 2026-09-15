@@ -6,6 +6,7 @@ slugifier, and the materializer catches the ValueError per tenant, so a single
 non-Latin identifier silently dropped every system asset for that tenant.
 """
 
+import logging
 import re
 
 import pytest
@@ -20,6 +21,8 @@ from apps.users.models import Tenant
 from apps.workspaces.models import TenantMetadata
 
 DIGEST_NAME = r"unnamed_[0-9a-f]{8}"
+COMMCARE_LOGGER = "apps.transformations.services.commcare_staging"
+CONNECT_LOGGER = "apps.transformations.services.connect_staging"
 
 
 @pytest.fixture
@@ -151,3 +154,55 @@ def test_connect_non_slugifiable_question_and_repeat_group(unsaved_tenant):
     assert re.search(rf'AS "{DIGEST_NAME}"', by_name["stg_visits"].sql_content)
     repeat = next(n for n in by_name if n != "stg_visits")
     assert re.fullmatch(rf"stg_visits__repeat_{DIGEST_NAME}", repeat)
+
+
+def info_messages(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+
+
+def test_digest_fallbacks_are_logged_once_for_the_tenant(unsaved_tenant, caplog):
+    metadata = case_metadata(["日本語", "patient"], ["한국어", "name"])
+    metadata["form_definitions"] = {
+        "urn:synthetic:good": {"name": "Household", "questions": [{"value": "/data/name"}]},
+        "urn:synthetic:bad": {
+            "name": {"en": "---"},
+            "questions": [{"value": "/data/📝/x", "repeat": "/data/📝"}],
+        },
+    }
+    with caplog.at_level(logging.INFO, logger=COMMCARE_LOGGER):
+        generate_system_assets(unsaved_tenant, metadata)
+
+    (message,) = info_messages(caplog)
+    assert unsaved_tenant.external_id in message
+    assert "case type='日本語'" in message
+    assert "case property='한국어'" in message
+    assert "form name={'en': '---'}" in message
+    assert "repeat group='📝'" in message
+    assert "'patient'" not in message
+    assert "case property='name'" not in message
+
+
+def test_nothing_is_logged_when_every_identifier_slugs(unsaved_tenant, caplog):
+    with caplog.at_level(logging.INFO, logger=COMMCARE_LOGGER):
+        generate_system_assets(unsaved_tenant, case_metadata(["patient"], ["name"]))
+    assert info_messages(caplog) == []
+
+
+def test_connect_digest_fallbacks_are_logged_for_the_tenant(unsaved_tenant, caplog):
+    unsaved_tenant.provider = "commcare_connect"
+    with caplog.at_level(logging.INFO, logger=CONNECT_LOGGER):
+        generate_connect_assets(
+            {"visit": {"name": "Visit", "questions": [{"value": "/data/日本語"}]}}, unsaved_tenant
+        )
+    (message,) = info_messages(caplog)
+    assert unsaved_tenant.external_id in message
+    assert "question='日本語'" in message
+
+
+def test_nothing_is_logged_for_a_clean_connect_tenant(unsaved_tenant, caplog):
+    unsaved_tenant.provider = "commcare_connect"
+    with caplog.at_level(logging.INFO, logger=CONNECT_LOGGER):
+        generate_connect_assets(
+            {"visit": {"name": "Visit", "questions": [{"value": "/data/name"}]}}, unsaved_tenant
+        )
+    assert info_messages(caplog) == []

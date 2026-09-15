@@ -16,6 +16,7 @@ from apps.common.identifiers import dbt_column_alias, dbt_model_name
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     _leaf_slug,
+    _NameFallbacks,
     _question_path,
     _question_path_to_json_path,
     _sql_escape,
@@ -39,7 +40,9 @@ _VISIT_BASE_COLUMNS = [
 ]
 
 
-def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
+def visit_column_map(
+    form_definitions: dict, fallbacks: _NameFallbacks | None = None
+) -> list[tuple[dict, str]]:
     """Return an ordered list of (question, final_column_name) for stg_visits.
 
     Applies the same base-column seeding and :func:`~apps.common.identifiers.dbt_column_alias` deduplication
@@ -57,12 +60,15 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
             questions.append(q)
 
     seen_aliases: dict[str, int] = {col: 1 for col in _VISIT_BASE_COLUMNS}
-    reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in questions}
+    question_slugs = {
+        q["value"]: _leaf_slug(q["value"], kind="question", fallbacks=fallbacks) for q in questions
+    }
+    reserved_aliases = set(seen_aliases) | set(question_slugs.values())
     return [
         (
             q,
             dbt_column_alias(
-                _leaf_slug(q["value"]),
+                question_slugs[q["value"]],
                 seen_aliases,
                 reserved=reserved_aliases,
             ),
@@ -71,7 +77,9 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
     ]
 
 
-def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
+def _generate_stg_visits(
+    tenant, form_definitions: dict, fallbacks: _NameFallbacks | None = None
+) -> TransformationAsset:
     """Generate the ``stg_visits`` staging asset for all deliver-app forms.
 
     Non-repeat questions from every form definition contribute a typed, aliased
@@ -81,7 +89,7 @@ def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
     lines = ["SELECT"]
     select_parts: list[str] = [f"    {col}" for col in _VISIT_BASE_COLUMNS]
 
-    for q, col_name in visit_column_map(form_definitions):
+    for q, col_name in visit_column_map(form_definitions, fallbacks):
         value_path = q.get("value", "")
         json_path = _question_path_to_json_path(value_path)
         raw_expr = f"form_json #>> {json_path}"
@@ -102,7 +110,7 @@ def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
 
 
 def _generate_connect_repeat_group_asset(
-    tenant, group_path: str, child_questions: list[dict]
+    tenant, group_path: str, child_questions: list[dict], fallbacks: _NameFallbacks | None = None
 ) -> TransformationAsset:
     """Generate a ``stg_visits__repeat_<group>`` asset for a repeat group.
 
@@ -111,7 +119,7 @@ def _generate_connect_repeat_group_asset(
     """
     group_json_path = _question_path_to_json_path(group_path)
     group_leaf = group_path.rsplit("/", 1)[-1]
-    group_slug = _leaf_slug(group_path)
+    group_slug = _leaf_slug(group_path, kind="repeat group", fallbacks=fallbacks)
     parent_model = "stg_visits"
 
     lines = ["SELECT"]
@@ -121,12 +129,18 @@ def _generate_connect_repeat_group_asset(
     ]
     seen_aliases: dict[str, int] = {"visit_id": 1, "repeat_index": 1}
     staged_questions = [q for q in child_questions if _question_path(q)]
-    reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in staged_questions}
+    question_slugs = {
+        q["value"]: _leaf_slug(q["value"], kind="question", fallbacks=fallbacks)
+        for q in staged_questions
+    }
+    reserved_aliases = set(seen_aliases) | set(question_slugs.values())
 
     for q in staged_questions:
         value_path = q["value"]
         leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = dbt_column_alias(_leaf_slug(value_path), seen_aliases, reserved=reserved_aliases)
+        col_name = dbt_column_alias(
+            question_slugs[value_path], seen_aliases, reserved=reserved_aliases
+        )
         raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -215,8 +229,9 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
         - one ``stg_visits__repeat_<group>`` asset per repeat group
     """
     assets: list[TransformationAsset] = []
+    fallbacks = _NameFallbacks()
 
-    assets.append(_generate_stg_visits(tenant, form_definitions))
+    assets.append(_generate_stg_visits(tenant, form_definitions, fallbacks))
 
     repeat_groups: dict[str, list[dict]] = {}
     for _deliver_unit, form_def in form_definitions.items():
@@ -229,6 +244,13 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
             repeat_groups.setdefault(group_path, []).append(q)
 
     for group_path, child_qs in repeat_groups.items():
-        assets.append(_generate_connect_repeat_group_asset(tenant, group_path, child_qs))
+        assets.append(_generate_connect_repeat_group_asset(tenant, group_path, child_qs, fallbacks))
+
+    if summary := fallbacks.summary():
+        logger.info(
+            "Connect staging generation fell back to digest names for tenant %s: %s",
+            tenant.external_id,
+            summary,
+        )
 
     return assets
