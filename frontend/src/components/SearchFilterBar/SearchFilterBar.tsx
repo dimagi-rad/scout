@@ -55,6 +55,12 @@ export function SearchFilterBar({
           placeholder={placeholder}
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
+          onKeyDown={(e) => {
+            // Live filtering must not submit a surrounding form; leave IME confirmation alone.
+            if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
+              e.preventDefault()
+            }
+          }}
           className="pl-9"
           data-testid="search-filter-input"
         />

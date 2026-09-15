@@ -9,6 +9,7 @@ from typing import Any
 from asgiref.sync import async_to_sync
 from django.db import transaction
 
+from apps.common.identifiers import view_name
 from apps.knowledge.models import TableKnowledge
 from apps.semantic.models import (
     CustomDataset,
@@ -554,7 +555,7 @@ def _relationship_endpoints(rel, datasets_by_table: dict[str, list[SemanticDatas
             continue
         prefix = table_name[: -len(suffix)]
         for from_dataset in from_datasets:
-            for to_dataset in datasets_by_table.get(f"{prefix}__{rel.to_table}", []):
+            for to_dataset in datasets_by_table.get(view_name(prefix, rel.to_table), []):
                 yield from_dataset, to_dataset
 
 
