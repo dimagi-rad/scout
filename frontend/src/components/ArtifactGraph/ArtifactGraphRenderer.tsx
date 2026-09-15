@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
@@ -10,9 +10,10 @@ import type { ArtifactDetail, StoryBlock, StoryEngineApi, StoryRuntimeContext } 
 interface ArtifactGraphRendererProps {
   artifact: ArtifactDetail
   workspaceId: string
+  dataRevision?: string
 }
 
-export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRendererProps) {
+export function ArtifactGraphRenderer({ artifact, workspaceId, dataRevision }: ArtifactGraphRendererProps) {
   const registry = useMemo(() => buildStoryRegistry(), [])
   const doc = useMemo(
     () => normalizeStoryDoc(isRecord(artifact.data) ? artifact.data.story_doc : undefined, artifact.title),
@@ -25,6 +26,13 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
     [workspaceId],
   )
   const engine = useStoryEngine(registry, ctx, doc)
+  const lastPublication = useRef({ engine, dataRevision })
+  useEffect(() => {
+    if (lastPublication.current.engine === engine && lastPublication.current.dataRevision !== dataRevision) {
+      engine?.refreshData()
+    }
+    lastPublication.current = { engine, dataRevision }
+  }, [engine, dataRevision])
   const visibleGroups = useMemo(() => groupVisibleBlocks(doc.blocks), [doc.blocks])
 
   if (!engine) {

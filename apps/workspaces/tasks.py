@@ -29,11 +29,12 @@ from apps.semantic.services.cube_schema import (
     record_cube_schema_build_failure,
 )
 from apps.transformations.models import TransformationRunStatus
-from apps.users.models import TenantMembership
+from apps.users.models import TenantMembership, User
 from apps.users.services.credential_resolver import (
     CredentialResolutionError,
     aresolve_credential,
 )
+from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
     VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
@@ -50,6 +51,7 @@ from apps.workspaces.services.data_operation import (
     serialized_workspace_data,
     workspace_data_lock,
 )
+from apps.workspaces.services.data_recovery import recovery_query_surface
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
@@ -57,7 +59,6 @@ from apps.workspaces.services.query_state import (
 from apps.workspaces.services.query_state import (
     semantic_layer_state as _semantic_layer_state,
 )
-from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app, task
@@ -1240,29 +1241,42 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
         async with workspace_data_lock(str(recovery.workspace_id)):
             await _await_in_progress_materializations(str(recovery.workspace_id))
 
-            surface = await workspace_query_surface(recovery.workspace)
-            if surface["status"] == "needs_materialization":
+            requester = await User.objects.filter(id=recovery.requested_by_id).afirst()
+            if (
+                requester is None
+                or not (
+                    await aresolve_workspace_access_ex(requester, recovery.workspace_id)
+                ).granted
+            ):
+                raise ValueError(
+                    "The requesting user no longer has workspace access. Ask a workspace member to retry."
+                )
+
+            surface = await recovery_query_surface(recovery)
+            action = surface.get("recovery_action")
+            if action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
                 result = await materialize_workspace_core(
                     str(recovery.workspace_id),
                     str(recovery.requested_by_id),
                     context.job.id,
                 )
-            elif surface["status"] == "needs_semantic_rebuild":
+            elif action == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD:
                 result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))
-            elif surface["status"] == "needs_view_rebuild":
+            elif action == WorkspaceDataRecovery.RecoveryType.VIEW_REBUILD:
                 result = await rebuild_workspace_view_schema.func(str(recovery.workspace_id))
             elif surface["status"] == "ready":
                 result = {"status": "already_recovered"}
             else:
                 result = {"error": surface["message"]}
 
-            final_surface = await workspace_query_surface(recovery.workspace)
+            final_surface = await recovery_query_surface(recovery)
             # A previously promoted Cube schema can remain readable after a
             # failed rebuild. Serving that fallback is safe, but it must not
             # turn an unsuccessful recovery attempt into a reported success.
             cube_result = result.get("cube_schema") or {}
             if (
                 final_surface["status"] != "ready"
+                or final_surface.get("recovery_action") is not None
                 or result.get("error")
                 or cube_result.get("ok") is False
             ):
@@ -1752,8 +1766,14 @@ async def reconcile_workspace_data_recovery(
             return None
         error = "The background recovery worker stopped responding. Please try again."
     elif status == _PROCRASTINATE_SUCCEEDED_STATUS:
-        surface = await workspace_query_surface(recovery.workspace)
-        if surface["status"] == "ready":
+        surface = await recovery_query_surface(recovery)
+        result = recovery.result or {}
+        if (
+            surface["status"] == "ready"
+            and surface.get("recovery_action") is None
+            and not result.get("error")
+            and (result.get("cube_schema") or {}).get("ok") is not False
+        ):
             updated = await WorkspaceDataRecovery.objects.filter(
                 id=recovery.id,
                 state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),

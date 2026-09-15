@@ -33,6 +33,28 @@ def compile_custom_dataset_sql(
     (Cube's driver and infer_custom_dataset_columns) set search_path to the
     workspace's current schema, so a tenant-schema swap never stales this SQL.
     """
+    statement, tables = _custom_dataset_tables(definition_sql)
+    for table in tables:
+        table_key = table.name.lower()
+        table_name = allowed_tables.get(table_key)
+        if not table_name:
+            raise CustomDatasetError(
+                f"Custom dataset SQL references unknown workspace table '{table_key}'."
+            )
+        if table.name != table_name and not table.alias:
+            table.set("alias", exp.TableAlias(this=table.this.copy()))
+        table.set("this", exp.to_identifier(table_name, quoted=True))
+
+    return statement.sql(dialect="postgres")
+
+
+def custom_dataset_dependencies(definition_sql: str) -> set[str]:
+    """Physical references from the same validated scopes used by compilation."""
+    _statement, tables = _custom_dataset_tables(definition_sql)
+    return {table.name.lower() for table in tables}
+
+
+def _custom_dataset_tables(definition_sql: str):
     if not (definition_sql or "").strip():
         raise CustomDatasetError("Custom dataset SQL is required.")
     try:
@@ -57,18 +79,7 @@ def compile_custom_dataset_sql(
     except OptimizeError as exc:
         raise CustomDatasetError(f"Custom dataset SQL is invalid: {exc}") from exc
 
-    for table in tables:
-        table_key = table.name.lower()
-        table_name = allowed_tables.get(table_key)
-        if not table_name:
-            raise CustomDatasetError(
-                f"Custom dataset SQL references unknown workspace table '{table_key}'."
-            )
-        if table.name != table_name and not table.alias:
-            table.set("alias", exp.TableAlias(this=table.this.copy()))
-        table.set("this", exp.to_identifier(table_name, quoted=True))
-
-    return statement.sql(dialect="postgres")
+    return statement, tables
 
 
 def infer_custom_dataset_columns(workspace, compiled_sql: str) -> list[dict[str, Any]]:

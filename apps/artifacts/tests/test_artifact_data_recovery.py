@@ -10,7 +10,7 @@ from django.test import AsyncClient
 
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.chat.models import Thread, ThreadJob
-from apps.semantic.models import CubeSchema, SemanticModel
+from apps.semantic.models import CubeSchema, SemanticDataset, SemanticField, SemanticModel
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import (
     MaterializationRun,
@@ -130,9 +130,15 @@ async def test_active_physical_and_semantic_surfaces_are_ready(recovery_setup):
         workspace=recovery_setup.workspace,
         semantic_model=model,
         filename="recovery.yaml",
-        content="cubes: []",
+        content="cubes: [{name: visits, measures: [{name: count, type: count}]}]",
         content_hash="ready",
         status=CubeSchema.Status.ACTIVE,
+    )
+    dataset = await SemanticDataset.objects.acreate(
+        workspace=recovery_setup.workspace, semantic_model=model, name="visits", table_name="visits"
+    )
+    await SemanticField.objects.acreate(
+        dataset=dataset, name="count", field_type="measure", measure_type="count"
     )
 
     response = await recovery_setup.client.get(recovery_setup.url)
@@ -281,7 +287,7 @@ async def test_recovery_worker_records_success(recovery_setup):
             new=AsyncMock(),
         ),
         patch(
-            "apps.workspaces.tasks.workspace_query_surface",
+            "apps.workspaces.tasks.recovery_query_surface",
             new=AsyncMock(side_effect=[needs_materialization, ready]),
         ),
         patch(
@@ -323,7 +329,7 @@ async def test_recovery_worker_persists_actionable_failure(
 
     with (
         patch(
-            "apps.workspaces.tasks.workspace_query_surface",
+            "apps.workspaces.tasks.recovery_query_surface",
             new=AsyncMock(
                 side_effect=[
                     needs_semantic,
@@ -368,7 +374,7 @@ async def test_missing_view_keeps_existing_source_data(recovery_setup):
     )
     with (
         patch(
-            "apps.workspaces.tasks.workspace_query_surface",
+            "apps.workspaces.tasks.recovery_query_surface",
             new=AsyncMock(side_effect=[response.json(), {"status": "ready"}]),
         ),
         patch(

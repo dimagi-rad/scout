@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -28,6 +28,7 @@ const endpoint = `/api/workspaces/${WORKSPACE_ID}/artifacts/${ARTIFACT_ID}/recov
 describe("ArtifactDataRecovery", () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it("renders the artifact only after its data surface is ready", async () => {
@@ -141,5 +142,84 @@ describe("ArtifactDataRecovery", () => {
     expect(screen.getByText("Cube rejected schema")).toBeInTheDocument()
     expect(screen.getByTestId("artifact-data-recover")).toHaveTextContent("Try recovery again")
     await waitFor(() => expect(screen.queryByTestId("artifact-data-checking")).not.toBeInTheDocument())
+  })
+
+  it("keeps readable charts mounted through a failed repair, retry, polling error, and later success", async () => {
+    vi.useFakeTimers()
+    const stale = {
+      status: "failed",
+      queryable: true,
+      data_revision: "last-published",
+      recovery_action: "semantic_rebuild",
+      physical_status: "active",
+      semantic_status: "stale",
+      message: "Showing the last available data. The latest repair did not complete.",
+      detail: "Synthetic schema rejection",
+      can_retry: true,
+      recovery: null,
+    }
+    vi.spyOn(api, "get")
+      .mockResolvedValueOnce(stale)
+      .mockRejectedValueOnce(new Error("Temporary status check failure"))
+      .mockResolvedValueOnce({ ...stale, status: "ready", data_revision: "newly-published", semantic_status: "ready", recovery_action: null, detail: undefined })
+    const post = vi.spyOn(api, "post").mockResolvedValue({
+      ...stale,
+      status: "recovering",
+      can_retry: false,
+      recovery: { type: "semantic_rebuild", state: "running", progress: null },
+    })
+    render(<ArtifactCanvas artifactId={ARTIFACT_ID} workspaceId={WORKSPACE_ID} artifact={artifact} isLoading={false} error={null} />)
+    await act(async () => {})
+    const graph = screen.getByTestId("artifact-graph-renderer")
+    expect(screen.getByTestId("artifact-data-warning")).toHaveTextContent("Synthetic schema rejection")
+    expect(screen.queryByTestId("artifact-data-recovery")).not.toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByTestId("artifact-data-recover")) })
+    expect(post).toHaveBeenCalledWith(endpoint, {})
+    expect(screen.getByTestId("artifact-data-warning")).toHaveTextContent("Your artifact remains available while recovery runs.")
+    expect(screen.getByTestId("artifact-graph-renderer")).toBe(graph)
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+    expect(screen.getByTestId("artifact-data-warning")).toHaveTextContent("Temporary status check failure")
+    expect(screen.getByTestId("artifact-graph-renderer")).toBe(graph)
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+    expect(screen.getByTestId("artifact-graph-renderer")).toBe(graph)
+    expect(screen.queryByTestId("artifact-data-warning")).not.toBeInTheDocument()
+  })
+
+  it("discloses stale-but-readable data before any artifact recovery was attempted", async () => {
+    vi.spyOn(api, "get").mockResolvedValue({
+      status: "ready", queryable: true, recovery_action: "semantic_rebuild",
+      semantic_status: "stale", physical_status: "active", can_retry: true, recovery: null,
+      message: "Showing the last available data.", detail: "The latest data model rebuild did not complete.",
+    })
+    render(<ArtifactCanvas artifactId={ARTIFACT_ID} workspaceId={WORKSPACE_ID} artifact={artifact} isLoading={false} error={null} />)
+    expect(await screen.findByTestId("artifact-graph-renderer")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-data-warning")).toHaveTextContent("The latest data model rebuild did not complete.")
+    expect(screen.getByTestId("artifact-data-recover")).toHaveTextContent("Rebuild data model")
+  })
+
+  it("shows model-repair guidance without offering a provider reload", async () => {
+    vi.spyOn(api, "get").mockResolvedValue({
+      status: "model_drift", queryable: false, recovery_action: null,
+      semantic_status: "ready", physical_status: "active", can_retry: false, recovery: null,
+      message: "This artifact references a field that is no longer available.",
+      detail: "Review its data model or update the artifact in chat.",
+    })
+    render(<ArtifactCanvas artifactId={ARTIFACT_ID} workspaceId={WORKSPACE_ID} artifact={artifact} isLoading={false} error={null} />)
+    expect(await screen.findByText("Artifact data model changed")).toBeInTheDocument()
+    expect(screen.getByText("Review its data model or update the artifact in chat.")).toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-data-recover")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-graph-renderer")).not.toBeInTheDocument()
+  })
+
+  it("keeps the iframe sandbox unchanged when readable data has a recovery warning", async () => {
+    vi.spyOn(api, "get").mockResolvedValue({
+      status: "ready", queryable: true, recovery_action: "semantic_rebuild",
+      semantic_status: "stale", physical_status: "active", can_retry: true, recovery: null,
+      message: "Showing the last available data.",
+    })
+    render(<ArtifactCanvas artifactId={ARTIFACT_ID} workspaceId={WORKSPACE_ID} artifact={{ ...artifact, type: "react" }} isLoading={false} error={null} />)
+    const frame = await screen.findByTestId(`artifact-frame-${ARTIFACT_ID}`)
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-modals")
+    expect(screen.getByTestId("artifact-data-warning")).toBeInTheDocument()
   })
 })

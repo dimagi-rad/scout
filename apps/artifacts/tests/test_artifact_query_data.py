@@ -22,6 +22,7 @@ def query_surface_ready():
         new=AsyncMock(
             return_value={
                 "status": "ready",
+                "queryable": True,
                 "message": "Artifact data is ready.",
             }
         ),

@@ -1,5 +1,5 @@
 import { StrictMode } from "react"
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
@@ -104,6 +104,37 @@ describe("ArtifactGraphRenderer", () => {
         granularity: "day",
       }),
     )
+  })
+
+  it("refreshes published data without resetting the selected custom period or renderer DOM", async () => {
+    mockedPost.mockResolvedValue({ columns: ["date", "visits__count"], rows: [["2026-06-24", 12]], row_count: 1 })
+    const graph = artifact()
+    const { container, rerender } = render(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" dataRevision="old" />)
+    await waitFor(() => expect(screen.getAllByText("12").length).toBeGreaterThan(0))
+    const start = screen.getByLabelText("Start date")
+    const end = screen.getByLabelText("End date")
+    fireEvent.change(start, { target: { value: "2026-06-01" } })
+    fireEvent.change(end, { target: { value: "2026-06-30" } })
+    await waitFor(() => expect(mockedPost).toHaveBeenLastCalledWith(
+      "/api/workspaces/workspace-1/semantic-query/",
+      expect.objectContaining({ filters: [expect.objectContaining({ values: ["2026-06-01", "2026-06-30"] })] }),
+    ))
+    const originalRenderer = container.firstElementChild
+    mockedPost.mockClear()
+    mockedPost.mockResolvedValue({ columns: ["date", "visits__count"], rows: [["2026-06-24", 27]], row_count: 1 })
+    rerender(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" dataRevision="new" />)
+    await waitFor(() => expect(screen.getAllByText("27").length).toBeGreaterThan(0))
+    expect(start).toHaveValue("2026-06-01")
+    expect(end).toHaveValue("2026-06-30")
+    expect(screen.getByLabelText("Start date")).toBe(start)
+    expect(container.firstElementChild).toBe(originalRenderer)
+    expect(mockedPost).toHaveBeenCalledTimes(1)
+    expect(mockedPost).toHaveBeenLastCalledWith(
+      "/api/workspaces/workspace-1/semantic-query/",
+      expect.objectContaining({ filters: [expect.objectContaining({ values: ["2026-06-01", "2026-06-30"] })] }),
+    )
+    rerender(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" dataRevision="new" />)
+    expect(mockedPost).toHaveBeenCalledTimes(1)
   })
 
   it("rejects Recharts props.data refs instead of falling back to block rows", async () => {

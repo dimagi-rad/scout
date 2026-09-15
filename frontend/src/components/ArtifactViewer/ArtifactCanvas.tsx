@@ -33,8 +33,14 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
     const recovery = useArtifactDataRecovery(artifactId, workspaceId, hasLiveQueries)
     const dataIsReady =
       !hasLiveQueries ||
-      recovery.state?.status === "ready" ||
-      recovery.state?.status === "not_required"
+      (recovery.state?.queryable ?? (
+        recovery.state?.status === "ready" ||
+        recovery.state?.status === "not_required"
+      ))
+    const showRecovery = !dataIsReady || Boolean(
+      recovery.error || recovery.state?.recovery_action || recovery.state?.status === "recovering",
+    )
+    const dataKey = `${artifactId}:${recovery.state?.data_revision ?? "initial"}`
 
     useImperativeHandle(ref, () => ({
       exportPdf: () => {
@@ -74,8 +80,9 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
             {error}
           </div>
         )}
-        {!isLoading && !error && artifact && hasLiveQueries && !dataIsReady && (
+        {!isLoading && !error && artifact && hasLiveQueries && showRecovery && (
           <ArtifactDataRecovery
+            readable={dataIsReady}
             state={recovery.state}
             error={recovery.error}
             isChecking={recovery.isChecking}
@@ -85,12 +92,12 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
           />
         )}
         {!isLoading && !error && dataIsReady && isGraphArtifact && artifact && (
-          <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} />
+          <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} />
         )}
         {!isLoading && !error && dataIsReady && artifact && !isGraphArtifact && (
           <iframe
             ref={iframeRef}
-            key={artifactId}
+            key={dataKey}
             src={withBasePath(`/api/workspaces/${workspaceId}/artifacts/${artifactId}/sandbox/`)}
             className="flex-1 w-full"
             // SECURITY: deliberately NO allow-same-origin. The sandbox doc is

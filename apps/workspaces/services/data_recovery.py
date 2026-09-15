@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from apps.artifacts.models import Artifact
+from apps.artifacts.services.query_state import artifact_query_surface
 from apps.chat.models import ThreadJob
 from apps.workspaces.models import (
     MaterializationRun,
@@ -27,14 +29,13 @@ async def artifact_data_state(artifact) -> dict[str, Any]:
             "recovery_action": None,
             "physical_status": "not_required",
             "semantic_status": "not_required",
+            "queryable": True,
             "message": "This artifact does not query workspace data.",
             "can_retry": False,
             "recovery": None,
         }
 
-    surface = await workspace_query_surface(artifact.workspace)
-    if surface["status"] == "ready":
-        return {**surface, "can_retry": False, "recovery": None}
+    surface = await artifact_query_surface(artifact)
 
     active_recovery = await (
         WorkspaceDataRecovery.objects.filter(
@@ -105,11 +106,16 @@ async def artifact_data_state(artifact) -> dict[str, Any]:
         latest_recovery is not None
         and latest_recovery.state == WorkspaceDataRecovery.State.FAILED
         and latest_recovery.recovery_type == surface["recovery_action"]
+        and (not surface["queryable"] or latest_recovery.source_id in {None, artifact.id})
     ):
         return {
             **surface,
             "status": "failed",
-            "message": "Scout could not restore this artifact's data.",
+            "message": (
+                "Showing the last available data. The latest repair did not complete."
+                if surface["queryable"]
+                else "Scout could not restore this artifact's data."
+            ),
             **({"detail": latest_recovery.error[:500]} if latest_recovery.error else {}),
             "can_retry": True,
             "recovery": await _serialize_recovery(latest_recovery),
@@ -120,6 +126,30 @@ async def artifact_data_state(artifact) -> dict[str, Any]:
         "can_retry": surface["recovery_action"] is not None,
         "recovery": None,
     }
+
+
+async def recovery_query_surface(recovery) -> dict[str, Any]:
+    """Use the durable request's artifact even after its page has closed."""
+    if recovery.source_id is None:
+        # Older/headless recovery rows predate artifact-scoped requests.
+        return await workspace_query_surface(recovery.workspace)
+    artifact = None
+    if recovery.source_type == "artifact":
+        artifact = (
+            await Artifact.objects.select_related("workspace")
+            .filter(workspace_id=recovery.workspace_id, id=recovery.source_id)
+            .afirst()
+        )
+    if artifact is None:
+        return {
+            "status": "unavailable",
+            "queryable": False,
+            "recovery_action": None,
+            "message": "The artifact that requested recovery is no longer available in this workspace.",
+        }
+    if not artifact.semantic_queries:
+        return {"status": "ready", "queryable": True, "recovery_action": None}
+    return await artifact_query_surface(artifact)
 
 
 async def _active_materialization_run(workspace):
