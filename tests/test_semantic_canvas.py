@@ -645,6 +645,95 @@ def test_pending_dataset_metadata_resolves_by_name_or_uuid(
 
 
 @pytest.mark.parametrize(
+    "ambiguous_op",
+    [
+        {"op": "set", "target": "dataset/raw_visits/description", "value": "Ambiguous"},
+        {"op": "delete_object", "object": "dataset/raw_visits"},
+        {"op": "revert_object", "object": "dataset/raw_visits"},
+        {"op": "remove_from_canvas", "object": "dataset/raw_visits"},
+        {"op": "set", "target": "field/raw_visits.username/label", "value": "Ambiguous"},
+        {
+            "op": "create",
+            "object_type": "field",
+            "value": {
+                "dataset": "raw_visits",
+                "name": "distinct_users",
+                "field_type": "measure",
+                "measure_type": "count_distinct",
+                "expression": "username",
+            },
+        },
+    ],
+)
+def test_dataset_alias_rejects_saved_name_conflicting_with_draft_atomically(
+    canvas, semantic_model, pending_dataset_op, ambiguous_op
+):
+    saved = _visits(semantic_model)
+    apply_operations(
+        canvas, [{"op": "set", "target": f"dataset/{saved.id}/description", "value": "Saved"}]
+    )
+    pending_dataset_op["value"]["name"] = saved.name
+    staged = apply_operations(canvas, [pending_dataset_op])
+    assert "DUPLICATE_DATASET_NAME" in {item["code"] for item in staged["diagnostics"]}
+    before = dict(canvas.changes.values_list("object_uuid", "fields"))
+
+    result = apply_operations(
+        canvas,
+        [
+            {"op": "set", "target": f"dataset/{saved.id}/label", "value": "Must roll back"},
+            ambiguous_op,
+        ],
+    )
+
+    assert result["errors"][0]["code"] == "AMBIGUOUS_OBJECT"
+    assert result["errors"][0]["op_index"] == 1
+    assert "saved-dataset-uuid" in result["errors"][0]["message"]
+    assert "draft-uuid" in result["errors"][0]["message"]
+    assert dict(canvas.changes.values_list("object_uuid", "fields")) == before
+
+
+@pytest.mark.parametrize("draft_type", ["dataset", "custom_dataset"])
+def test_conflicting_dataset_name_can_be_targeted_by_explicit_uuid(
+    canvas, semantic_model, pending_dataset_op, draft_type
+):
+    saved = _visits(semantic_model)
+    pending_dataset_op["value"]["name"] = saved.name
+    apply_operations(canvas, [pending_dataset_op])
+    draft = canvas.changes.get()
+
+    result = apply_operations(
+        canvas,
+        [
+            {"op": "set", "target": f"dataset/{saved.id}/description", "value": "Saved dataset"},
+            {
+                "op": "set",
+                "target": f"{draft_type}/{draft.object_uuid}/description",
+                "value": "Pending dataset",
+            },
+        ],
+    )
+
+    assert "errors" not in result
+    assert canvas.changes.get(object_uuid=saved.id).fields == {"description": "Saved dataset"}
+    draft.refresh_from_db()
+    assert draft.fields["description"] == "Pending dataset"
+    assert draft.change_type == SemanticCanvasChange.ChangeType.CREATE
+
+
+def test_duplicate_pending_dataset_names_require_explicit_draft_uuid(canvas, pending_dataset_op):
+    apply_operations(canvas, [pending_dataset_op, pending_dataset_op])
+    before = dict(canvas.changes.values_list("object_uuid", "fields"))
+
+    result = apply_operations(
+        canvas,
+        [{"op": "set", "target": "custom_dataset/visit_stats/label", "value": "Ambiguous"}],
+    )
+
+    assert result["errors"][0]["code"] == "AMBIGUOUS_OBJECT"
+    assert dict(canvas.changes.values_list("object_uuid", "fields")) == before
+
+
+@pytest.mark.parametrize(
     "field_op",
     [
         {"op": "set", "target": "field/visit_stats.username/description", "value": "User"},
