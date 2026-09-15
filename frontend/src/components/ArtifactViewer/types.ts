@@ -23,6 +23,7 @@ export type ArtifactDataStatus =
   | "recovering"
   | "failed"
   | "unavailable"
+  | "model_drift"
 
 export type ArtifactRecoveryAction = "materialization" | "view_rebuild" | "semantic_rebuild" | null
 
@@ -49,6 +50,8 @@ export interface ArtifactRecoveryJob {
 
 export interface ArtifactDataRecoveryState {
   status: ArtifactDataStatus
+  queryable?: boolean
+  data_revision?: string
   recovery_action: ArtifactRecoveryAction
   physical_status: string
   semantic_status: string

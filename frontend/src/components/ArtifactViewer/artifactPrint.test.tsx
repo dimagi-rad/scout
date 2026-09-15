@@ -48,6 +48,26 @@ function ChartFixture({ pageWidth }: { pageWidth: number }) {
   )
 }
 
+function ReadableStoryFixture() {
+  const { printRef, printArtifact } = useArtifactPrint("readable-story-print")
+  return (
+    <main>
+      <button onClick={printArtifact}>Export readable story</button>
+      <div ref={printRef}>
+        <section>
+          <p>Showing the last available data.</p>
+          <button data-artifact-recovery-control>Retry recovery</button>
+        </section>
+        <div data-artifact-story className="story-scroll">
+          <div data-artifact-story-content className="story-content">
+            <p>Last rendered story content</p>
+          </div>
+        </div>
+      </div>
+    </main>
+  )
+}
+
 describe("artifact print CSS against real renderer DOM", () => {
   beforeEach(() => {
     vi.spyOn(window, "print").mockImplementation(() => {})
@@ -197,5 +217,33 @@ describe("artifact print CSS against real renderer DOM", () => {
     expect(window.getComputedStyle(header).display).toBe("table-header-group")
     expect(window.getComputedStyle(table).tableLayout).toBe("fixed")
     expect(tableRoot).toHaveTextContent("Last rendered row")
+  })
+
+  it("prints the readable warning and nested full story while hiding only repair controls", () => {
+    const { container } = render(<ReadableStoryFixture />)
+    const story = container.querySelector<HTMLElement>("[data-artifact-story]")!
+    const content = container.querySelector<HTMLElement>("[data-artifact-story-content]")!
+    const retry = screen.getByText("Retry recovery")
+    const warning = screen.getByText("Showing the last available data.")
+    addStyle(".story-scroll { height: 400px; overflow: auto } .story-content { max-width: 1000px; padding: 24px }")
+    expect(window.getComputedStyle(story).overflow).toBe("auto")
+    expect(window.getComputedStyle(retry).display).not.toBe("none")
+
+    fireEvent.click(screen.getByText("Export readable story"))
+    applyPrintDeclarations()
+
+    expect(window.getComputedStyle(story).height).toBe("auto")
+    expect(window.getComputedStyle(story).overflow).toBe("visible")
+    expect(window.getComputedStyle(content).maxWidth).toBe("none")
+    expect(window.getComputedStyle(content).padding).toBe("0px")
+    expect(window.getComputedStyle(retry).display).toBe("none")
+    expect(warning).toBeVisible()
+    expect(screen.getByText("Last rendered story content")).toBeVisible()
+
+    act(() => window.dispatchEvent(new Event("afterprint")))
+    expect(window.getComputedStyle(story).height).toBe("400px")
+    expect(window.getComputedStyle(story).overflow).toBe("auto")
+    expect(window.getComputedStyle(retry).display).not.toBe("none")
+    expect(container.querySelector("[data-artifact-story]")).toBe(story)
   })
 })

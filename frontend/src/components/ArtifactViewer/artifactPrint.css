@@ -15,7 +15,8 @@
      prefix also beats Radix's later body[data-scroll-locked] !important rules. */
   html[data-scout-print="ancestor"],
   html[data-scout-print="ancestor"] [data-scout-print="ancestor"],
-  [data-scout-print="target"] {
+  [data-scout-print="target"],
+  [data-scout-print="target"] [data-artifact-story] {
     display: block !important;
     position: static !important;
     inset: auto !important;
@@ -49,9 +50,15 @@
     -webkit-print-color-adjust: exact;
   }
 
-  [data-scout-print="target"] > [data-artifact-story-content] {
+  [data-scout-print="target"] [data-artifact-story-content] {
     max-width: none;
     padding: 0;
+  }
+
+  /* Stale-data context belongs with the chart, but recovery actions are only
+     useful on screen. The story can now be nested under that shared target. */
+  [data-scout-print="target"] [data-artifact-recovery-control] {
+    display: none !important;
   }
 
   /* Keep compact charts and metrics together. Long narrative and table blocks

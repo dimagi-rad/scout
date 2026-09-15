@@ -47,6 +47,10 @@ class ErrorCode(StrEnum):
     # way, so this must never be collapsed into AUTH_TOKEN_EXPIRED (#372).
     AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
 
+    # No credential could be resolved before contacting the provider. Unlike a
+    # 401 or 403, this does not establish anything about upstream access.
+    AUTH_CREDENTIAL_MISSING = "AUTH_CREDENTIAL_MISSING"
+
     # No live membership for this tenant, so this user's refresh never attempted
     # it. Current access checks permit this transitional state; the ALL-of policy
     # in #380 is a separate authorization change. No upstream auth was attempted,

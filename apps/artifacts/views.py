@@ -55,11 +55,12 @@ logger = logging.getLogger(__name__)
 ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
 
 
-def _artifact_query_cache_key(artifact: Artifact) -> str:
+def _artifact_query_cache_key(artifact: Artifact, data_revision: str = "") -> str:
     payload = json.dumps(
         {
             "semantic_queries": artifact.semantic_queries,
             "source_queries": artifact.source_queries,
+            "data_revision": data_revision,
         },
         sort_keys=True,
         default=str,
@@ -925,9 +926,10 @@ class ArtifactQueryDataView(View):
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
+        data_state = {}
         if artifact.semantic_queries:
             data_state = await _current_artifact_data_state(artifact)
-            if data_state["status"] != "ready":
+            if not data_state["queryable"]:
                 return JsonResponse(
                     {
                         "error": data_state["message"],
@@ -940,7 +942,7 @@ class ArtifactQueryDataView(View):
 
         # Serve repeat opens of the same artifact version from a short-lived
         # cache so we don't re-run every source query on every open (09#9).
-        cache_key = _artifact_query_cache_key(artifact)
+        cache_key = _artifact_query_cache_key(artifact, data_state.get("data_revision", ""))
         cached = await cache.aget(cache_key)
         if cached is not None:
             return JsonResponse(
@@ -1055,7 +1057,7 @@ class ArtifactDataRecoveryView(View):
             return err
 
         state = await _current_artifact_data_state(artifact)
-        if state["status"] in {"ready", "not_required"}:
+        if state["status"] in {"ready", "not_required"} and not state.get("recovery_action"):
             return JsonResponse(state)
         if state["status"] == "recovering":
             return JsonResponse(state)
