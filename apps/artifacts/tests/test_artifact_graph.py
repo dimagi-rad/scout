@@ -239,10 +239,21 @@ async def test_graph_manager_description_only_edit(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "edit_args", [{}, {"description": None}, {"description": "Changed", "ops": [{"op": "invalid"}]}]
+    ("edit_args", "expected_message"),
+    [
+        pytest.param({}, "ops or description are required for apply.", id="missing"),
+        pytest.param(
+            {"description": None}, "ops or description are required for apply.", id="null"
+        ),
+        pytest.param(
+            {"description": "Changed", "ops": [{"op": "invalid"}]},
+            "Unsupported op 'invalid'",
+            id="invalid-op",
+        ),
+    ],
 )
 async def test_graph_manager_rejects_missing_or_invalid_description_edit(
-    graph_tools, static_story_doc, edit_args
+    graph_tools, static_story_doc, edit_args, expected_message
 ):
     write = graph_tools["artifact_write"]
     created = await write.ainvoke(
@@ -258,7 +269,8 @@ async def test_graph_manager_rejects_missing_or_invalid_description_edit(
     )
 
     assert result["status"] == "error"
-    assert await Artifact.objects.acount() == 1
+    assert result["message"] == expected_message
+    assert await Artifact.all_objects.acount() == 1
     original = await Artifact.objects.aget(id=created["artifact"]["id"])
     assert original.description == "Original description"
 
