@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils"
 import { ArtifactDataRecovery } from "./ArtifactDataRecovery"
 import type { QueryDataResponse } from "./types"
 import { useArtifactDataRecovery } from "./useArtifactDataRecovery"
+import { useArtifactPrint } from "./useArtifactPrint"
 
 export interface ArtifactCanvasHandle {
   exportPdf: () => void
@@ -28,6 +29,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
     ref,
   ) {
     const iframeRef = useRef<HTMLIFrameElement>(null)
+    const { printRef, printArtifact, printError } = useArtifactPrint(artifactId)
     const isGraphArtifact = artifact?.type === "story"
     const hasLiveQueries = Boolean(artifact?.semantic_queries.length)
     const recovery = useArtifactDataRecovery(artifactId, workspaceId, hasLiveQueries)
@@ -45,7 +47,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
     useImperativeHandle(ref, () => ({
       exportPdf: () => {
         if (isGraphArtifact) {
-          window.print()
+          printArtifact()
           return
         }
         // The sandboxed iframe has an opaque origin, so a concrete targetOrigin
@@ -53,7 +55,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
         // only to this iframe's contentWindow.
         iframeRef.current?.contentWindow?.postMessage({ type: "scout-print" }, "*")
       },
-    }), [isGraphArtifact])
+    }), [isGraphArtifact, printArtifact])
 
     useEffect(() => {
       function handleMessage(event: MessageEvent) {
@@ -69,6 +71,9 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
 
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
+        {printError && (
+          <p role="alert" className="px-4 py-3 text-sm text-destructive">{printError}</p>
+        )}
         {(isLoading || !artifact) && !error && (
           <div className="flex flex-1 items-center justify-center text-muted-foreground">
             <Loader2 className="mr-2 h-5 w-5 animate-spin" />
@@ -92,7 +97,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
           />
         )}
         {!isLoading && !error && dataIsReady && isGraphArtifact && artifact && (
-          <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} />
+          <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} containerRef={printRef} dataRevision={recovery.state?.data_revision} />
         )}
         {!isLoading && !error && dataIsReady && artifact && !isGraphArtifact && (
           <iframe

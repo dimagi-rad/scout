@@ -33,6 +33,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
+import { useArtifactPrint } from "@/components/ArtifactViewer/useArtifactPrint"
 
 import {
   chartTrees,
@@ -107,6 +108,8 @@ const blockGroups = [
 ] as const
 
 export function ArtifactDemoPage() {
+  const [activeTab, setActiveTab] = useState("artifact")
+  const { printRef, printArtifact, printError } = useArtifactPrint(storyArtifact.id)
   const [dataOpen, setDataOpen] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [refreshCount, setRefreshCount] = useState(0)
@@ -154,9 +157,14 @@ export function ArtifactDemoPage() {
         </div>
         <ArtifactActions
           onViewData={() => setDataOpen(true)}
-          onExportPdf={() => window.print()}
+          onExportPdf={printArtifact}
+          exportDisabled={activeTab !== "artifact"}
         />
       </header>
+
+      {printError && (
+        <p role="alert" className="mt-4 text-sm text-destructive">{printError}</p>
+      )}
 
       <dl className="grid border-b border-border sm:grid-cols-3 sm:divide-x sm:divide-border">
         <SummaryFact term="Canonical format" value="Story block graph" />
@@ -164,7 +172,7 @@ export function ArtifactDemoPage() {
         <SummaryFact term="Data contract" value="Queries, results, and manifest" />
       </dl>
 
-      <Tabs defaultValue="artifact" className="mt-8">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-8">
         <TabsList className="grid h-auto w-full grid-cols-3 sm:flex sm:w-fit" aria-label="Artifact showcase sections">
           <TabsTrigger value="artifact" className="min-w-0 whitespace-normal px-2 py-2 text-center leading-tight">
             Full artifact
@@ -189,7 +197,7 @@ export function ArtifactDemoPage() {
               <span className="text-xs text-muted-foreground">Resize the window to test the layout</span>
             </div>
             <div className="min-h-[48rem] overflow-hidden rounded-xl border border-border bg-background">
-              <ArtifactGraphRenderer artifact={storyArtifact} workspaceId={DEMO_WORKSPACE_ID} />
+              <ArtifactGraphRenderer artifact={storyArtifact} workspaceId={DEMO_WORKSPACE_ID} containerRef={printRef} />
             </div>
           </section>
         </TabsContent>

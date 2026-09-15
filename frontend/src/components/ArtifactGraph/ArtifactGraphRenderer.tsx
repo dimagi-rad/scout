@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, type Ref } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
@@ -11,9 +11,10 @@ interface ArtifactGraphRendererProps {
   artifact: ArtifactDetail
   workspaceId: string
   dataRevision?: string
+  containerRef?: Ref<HTMLDivElement>
 }
 
-export function ArtifactGraphRenderer({ artifact, workspaceId, dataRevision }: ArtifactGraphRendererProps) {
+export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dataRevision }: ArtifactGraphRendererProps) {
   const registry = useMemo(() => buildStoryRegistry(), [])
   const doc = useMemo(
     () => normalizeStoryDoc(isRecord(artifact.data) ? artifact.data.story_doc : undefined, artifact.title),
@@ -40,8 +41,8 @@ export function ArtifactGraphRenderer({ artifact, workspaceId, dataRevision }: A
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-background">
-      <div className="mx-auto max-w-5xl px-6 py-6">
+    <div ref={containerRef} className="h-full overflow-y-auto bg-background">
+      <div data-artifact-story-content className="mx-auto max-w-5xl px-6 py-6">
         <Diagnostics engine={engine} />
         {doc.prd && (
           <div className="mb-5 border-l-2 border-primary/40 pl-3 text-xs text-muted-foreground">
