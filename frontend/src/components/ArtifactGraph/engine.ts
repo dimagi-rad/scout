@@ -393,7 +393,12 @@ export class StoryEngine implements StoryEngineApi {
     }
 
     const snapshot = JSON.stringify(values)
-    if (snapshot === node.lastSnapshot && node.lastOk) return
+    // Upstream work can demote cached outputs without changing their values.
+    // Only reuse published ready results, never a pending or blocked snapshot.
+    if (
+      snapshot === node.lastSnapshot && node.lastOk &&
+      node.ports.outputs.every(port => this.getOutput(outputKey(node.id, port.name)).status === "ready")
+    ) return
     this.scheduleEval(node, values, snapshot)
   }
 
