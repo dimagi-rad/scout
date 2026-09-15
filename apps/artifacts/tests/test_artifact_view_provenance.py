@@ -85,6 +85,7 @@ async def published_sources(settings, monkeypatch):
     settings.CUBEJS_API_SECRET = ""
     settings.CUBE_SCHEMA_VALIDATION_REQUIRED = False
     owned_schemas = []
+    view = None
     manager = SchemaManager()
     workspace = await Workspace.objects.acreate(name="Synthetic source provenance")
 
@@ -142,13 +143,42 @@ async def published_sources(settings, monkeypatch):
             dsn=settings.MANAGED_DATABASE_URL,
         )
     finally:
-        await close_all_pools()
-        view = await WorkspaceViewSchema.objects.filter(workspace=workspace).afirst()
-        if view is not None:
-            await sync_to_async(manager.teardown_view_schema)(view)
-        for schema in owned_schemas:
-            await sync_to_async(manager.teardown)(schema)
-        await sync_to_async(connections.close_all)()
+        cleanup_errors = []
+
+        async def attempt_cleanup(stage, operation):
+            try:
+                return await operation()
+            except BaseException as error:
+                # Retain cancellation/interrupts too, but still attempt every
+                # owned cleanup and closing the fixture's connections first.
+                error.add_note(f"Synthetic provenance fixture cleanup: {stage}")
+                cleanup_errors.append(error)
+
+        try:
+            await attempt_cleanup("query pools", close_all_pools)
+            current_view = await attempt_cleanup(
+                "owned view lookup",
+                lambda: WorkspaceViewSchema.objects.filter(workspace=workspace).afirst(),
+            )
+            # A failed lookup must not discard the exact owned view returned
+            # during setup. Do not infer or clean any other workspace's schema.
+            if current_view is not None:
+                view = current_view
+            if view is not None:
+                await attempt_cleanup(
+                    "owned view teardown", lambda: sync_to_async(manager.teardown_view_schema)(view)
+                )
+            for index, schema in enumerate(owned_schemas):
+                await attempt_cleanup(
+                    f"owned source schema {index}",
+                    lambda schema=schema: sync_to_async(manager.teardown)(schema),
+                )
+        finally:
+            await attempt_cleanup(
+                "Django connections", lambda: sync_to_async(connections.close_all)()
+            )
+        if cleanup_errors:
+            raise BaseExceptionGroup("Synthetic provenance fixture cleanup failed", cleanup_errors)
 
 
 async def _assert_recovery(setup, action="materialization"):
