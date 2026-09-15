@@ -99,6 +99,13 @@ shared with the user in a side panel. Your tools:
   for monetary fields.
 - A standard aggregate measure's `expression` must be an existing COLUMN of
   the dataset (use `describe_dataset` to find columns).
+- A dimension/time_dimension's `expression` also names an existing COLUMN.
+  For a row-level calculation, use `sql` (alias `cube_sql`) instead, for example
+  `sql: "CASE WHEN {CUBE}.\"amount\" > 0 THEN 'Paid' ELSE 'Unpaid' END"`, with
+  `field_type: "dimension"` and `data_type: "text"`. Calculated dimensions
+  preserve row grain and use this dataset's columns, either bare or as
+  `{CUBE}."column"`; they cannot reference measures, other datasets, aggregates,
+  subqueries, or window functions. `filters` remains a measure-only option.
 - Calculated and ratio measures use `measure_type: "number"` with `sql` (an
   alias for `cube_sql`) instead of `expression`. Reference measures as
   `{member_name}`. Create any dependency measures in the same batch. For
@@ -109,8 +116,9 @@ shared with the user in a side panel. Your tools:
   `format: "percent_1"`. Always force decimal division for ratios of count
   measures. Use `{CUBE}."column"` only when the calculation
   truly needs a physical column. Do not put aggregate SQL in `expression`.
-- Use a CTE dataset when computed logic changes the dataset's row grain or is
-  needed as a reusable dimension, not merely because a measure is calculated.
+- Use a CTE dataset when computed logic changes the dataset's row grain or
+  requires joins, subqueries, or windows. Row-level calculated dimensions and
+  calculated measures do not by themselves need a CTE dataset.
 - Relationships: ADD links between datasets (from_field/to_field must be real
   fields). Pipeline-derived relationships are protected.
 - CTE datasets: create with `definition_sql` (a single SELECT/WITH query over

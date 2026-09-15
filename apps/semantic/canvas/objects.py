@@ -8,7 +8,7 @@ The canvas edits four object kinds. Policy summary (the user-facing contract):
   (built by ``ensure_semantic_model``) accept label/description/format/currency
   curation but can never be deleted or structurally changed. Canvas-created
   fields (``metadata.source == "canvas"``) are fully editable and deletable,
-  including Cube measure options such as filters and calculated SQL. Fields on
+  including calculated SQL and measure-only filters. Fields on
   custom SQL datasets are also deletable because the whole dataset is
   user-authored; deletes hide generated custom fields persistently instead of
   letting the next refresh recreate them.
@@ -29,13 +29,16 @@ from apps.semantic.models import (
     SemanticField,
     SemanticRelationship,
 )
+from apps.semantic.services.field_sql import dataset_column_names as dataset_column_names
 
 CANVAS_SOURCE = "canvas"
 
 DATASET_EDITABLE_KEYS = frozenset({"label", "description"})
 FIELD_DISPLAY_METADATA_KEYS = frozenset({"format", "currency"})
-FIELD_MEASURE_OPTION_KEYS = frozenset({"filters", "cube_sql"})
-FIELD_METADATA_KEYS = frozenset({*FIELD_DISPLAY_METADATA_KEYS, *FIELD_MEASURE_OPTION_KEYS})
+FIELD_MEASURE_OPTION_KEYS = frozenset({"filters"})
+FIELD_METADATA_KEYS = frozenset(
+    {*FIELD_DISPLAY_METADATA_KEYS, *FIELD_MEASURE_OPTION_KEYS, "cube_sql"}
+)
 FIELD_CURATION_KEYS = frozenset({"label", "description", *FIELD_DISPLAY_METADATA_KEYS})
 FIELD_DRAFT_KEYS = frozenset(
     {
@@ -152,18 +155,6 @@ def resolve_relationship(workspace, ref: str) -> SemanticRelationship:
     if relationship is None:
         raise ObjectResolutionError("OBJECT_NOT_FOUND", f"Unknown relationship '{ref}'.")
     return relationship
-
-
-def dataset_column_names(dataset: SemanticDataset) -> set[str]:
-    """Physical column names usable as a new field's expression."""
-    columns: set[str] = set()
-    for field in dataset.fields.all():
-        source_column = (field.metadata or {}).get("source_column")
-        if source_column:
-            columns.add(source_column)
-        elif field.expression and field.expression != "*":
-            columns.add(field.expression)
-    return columns
 
 
 def serialize_dataset_base(dataset: SemanticDataset) -> dict[str, Any]:

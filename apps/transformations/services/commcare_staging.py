@@ -9,11 +9,20 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 
+from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import dbt_column_alias, dbt_model_name, fit_identifier
 from apps.transformations.models import TransformationAsset, TransformationScope
 
 logger = logging.getLogger(__name__)
+
+
+class CaseModelMigrationRequired(ValueError):
+    """Existing ambiguous models cannot be regenerated without a reviewed migration."""
+
+    code = ErrorCode.SCHEMA_BUILD_FAILED
+
 
 # CommCare question type → PostgreSQL cast suffix (None means TEXT / no cast).
 _TYPE_CAST: dict[str, str | None] = {
@@ -115,8 +124,38 @@ def _collect_case_properties(case_type_name: str, metadata: dict) -> list[str]:
     return sorted(props)
 
 
+def _case_model_names(case_types: list[dict]) -> dict[str, str]:
+    """Keep unambiguous names, disambiguating collisions by source identity.
+
+    Case types are case-sensitive upstream, but PostgreSQL model slugs are not.
+    Hash every member of a collision rather than letting metadata order choose
+    which case type owns the old, ambiguous name. Reserve literal names too so
+    a generated digest cannot overwrite an unrelated case type's model.
+    """
+    names = {
+        item["name"]: dbt_model_name(f"stg_case_{slugify_model_name(item['name'])}")
+        for item in case_types
+        if item.get("name")
+    }
+    counts = Counter(names.values())
+    used = set(names.values())
+    for case_type, base in sorted(names.items()):
+        if counts[base] == 1:
+            continue
+        attempt = 0
+        while True:
+            identity = f"case:{case_type}" + (f"\0{attempt}" if attempt else "")
+            candidate = fit_identifier(base, unique_key=identity, always_hash=True)
+            if candidate not in used:
+                break
+            attempt += 1
+        names[case_type] = candidate
+        used.add(candidate)
+    return names
+
+
 def _generate_case_type_asset(
-    tenant, case_type_name: str, properties: list[str], metadata: dict
+    tenant, case_type_name: str, properties: list[str], metadata: dict, *, model_name: str
 ) -> TransformationAsset:
     """Generate a staging asset for a single case type."""
     lines = ["SELECT"]
@@ -139,7 +178,6 @@ def _generate_case_type_asset(
     lines.append("FROM raw_cases")
     lines.append(f"WHERE case_type = '{_sql_escape(case_type_name)}'")
 
-    model_name = dbt_model_name(f"stg_case_{slugify_model_name(case_type_name)}")
     return TransformationAsset(
         name=model_name,
         description=f"Staging model for {case_type_name} cases",
@@ -264,12 +302,11 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
     """
     assets: list[TransformationAsset] = []
 
-    for ct in metadata.get("case_types", []):
-        name = ct.get("name", "")
-        if not name:
-            continue
+    for name, model_name in _case_model_names(metadata.get("case_types", [])).items():
         props = _collect_case_properties(name, metadata)
-        assets.append(_generate_case_type_asset(tenant, name, props, metadata))
+        assets.append(
+            _generate_case_type_asset(tenant, name, props, metadata, model_name=model_name)
+        )
 
     seen_form_slugs: dict[str, int] = {}  # slug → count for disambiguation
     form_definitions = metadata.get("form_definitions", {})
@@ -329,6 +366,30 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
     """
     metadata = tenant_metadata.metadata
     assets = generate_system_assets(tenant, metadata)
+
+    # A legacy collision may already have SQL/artifact references or `replaces`
+    # links whose intended source case type cannot be inferred safely. The
+    # ordinary orphan sweep below would delete it and SET_NULL those links.
+    # Require an explicit migration before any writes; never guess an alias.
+    renamed_case_models = {
+        old_name
+        for name, model_name in _case_model_names(metadata.get("case_types", [])).items()
+        if (old_name := dbt_model_name(f"stg_case_{slugify_model_name(name)}")) != model_name
+    }
+    if renamed_case_models:
+        existing = list(
+            TransformationAsset.objects.filter(
+                tenant=tenant,
+                scope=TransformationScope.SYSTEM,
+                name__in=renamed_case_models,
+            ).values_list("name", flat=True)
+        )
+        if existing:
+            raise CaseModelMigrationRequired(
+                "An explicit migration is required for existing ambiguous case-type models: "
+                f"{', '.join(sorted(existing))}. Review SQL/artifact references and replaces "
+                "links before rebuilding; no assets were changed."
+            )
 
     created = 0
     updated = 0

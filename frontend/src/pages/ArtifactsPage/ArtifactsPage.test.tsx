@@ -34,6 +34,7 @@ describe("ArtifactsPage navigation", () => {
   beforeEach(() => {
     useAppStore.setState({
       activeDomainId: WORKSPACE_ID,
+      domains: [],
       artifacts: [],
       artifactsStatus: "idle",
       artifactSearch: "",
@@ -94,6 +95,7 @@ describe("ArtifactsPage navigation", () => {
         <Routes>
           <Route path="/artifacts" element={<><LocationProbe /><ArtifactsPage /></>} />
           <Route path="/artifacts/:artifactId" element={<><LocationProbe /><ArtifactDetailPage /></>} />
+          <Route path="/workspaces/:workspaceId/artifacts/:artifactId" element={<><LocationProbe /><ArtifactDetailPage /></>} />
         </Routes>
       </MemoryRouter>,
     )
@@ -104,7 +106,7 @@ describe("ArtifactsPage navigation", () => {
     await userEvent.click(screen.getByTestId(`artifact-open-${ARTIFACT_ID}`))
 
     await waitFor(() => {
-      expect(screen.getByTestId("location")).toHaveTextContent(`/artifacts/${ARTIFACT_ID}`)
+      expect(screen.getByTestId("location")).toHaveTextContent(`/workspaces/${WORKSPACE_ID}/artifacts/${ARTIFACT_ID}`)
     })
     expect(screen.getByTestId("artifact-detail-page")).toBeInTheDocument()
     expect(await screen.findByTestId("artifact-detail-title")).toHaveTextContent("Alpha Dashboard")

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button"
 
 export function ArtifactsPage() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const domains = useAppStore((s) => s.domains)
   const artifacts = useAppStore((s) => s.artifacts)
   const artifactsStatus = useAppStore((s) => s.artifactsStatus)
   const artifactSearch = useAppStore((s) => s.artifactSearch)
@@ -74,8 +75,9 @@ export function ArtifactsPage() {
         </div>
       )}
 
-      {artifactsStatus === "loaded" && (
+      {artifactsStatus === "loaded" && activeDomainId && (
         <ArtifactList
+          workspace={domains.find((workspace) => workspace.id === activeDomainId) ?? { id: activeDomainId }}
           items={artifacts}
           search={artifactSearch}
           onSearchChange={handleSearchChange}

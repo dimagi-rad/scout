@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "bunx playwright test",
+    "test:e2e:artifact-links": "bunx playwright test --config playwright.artifact-links.config.ts",
     "test:e2e:widget": "bunx playwright test --project=widget-sdk",
     "test:e2e:integration": "bunx playwright test --project=embed-integration"
   },
