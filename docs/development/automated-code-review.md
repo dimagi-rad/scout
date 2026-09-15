@@ -55,3 +55,7 @@ Inspect the Actions log, OCR JSON artifact and sticky gate comment when a run bl
 - [OCR CI integration](https://github.com/alibaba/open-code-review/blob/v1.12.2/pages/src/content/docs/en/integrations/ci.md)
 - [Pinned action inputs and outputs](https://github.com/alibaba/open-code-review/blob/v1.12.2/action.yml)
 - [Anthropic Opus 5](https://platform.claude.com/docs/en/models/opus-5/whats-new-opus-5)
+
+### Larger manual reviews
+
+An authorized collaborator can request a one-run token budget with `@ocr budget=5000000` (maximum 5 million). The default remains 500,000 for automatic runs and plain `@ocr`. This is a soft limit: in-flight work can overshoot it. A larger budget does not relax finding severity or completeness checks.
