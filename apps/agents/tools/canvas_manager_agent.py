@@ -254,9 +254,10 @@ def create_canvas_manager_tool(
                         # Node outputs can contain only the newest AI message, not the history.
                         messages = add_messages(messages, maybe_messages)
             result = _summarize_result(messages)
+            failed = result["status"] in {"blocked", "error"}
             await forwarder.status(
-                phase="completed",
-                message="Canvas Manager completed.",
+                phase="failed" if failed else "completed",
+                message=result["message"] if failed else "Canvas Manager completed.",
                 committed=result.get("committed"),
             )
             result["subagent_trace"] = forwarder.trace()
@@ -445,6 +446,7 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
     last_commit: dict[str, Any] = {}
     last_state: dict[str, Any] = {}
     last_errors: list = []
+    pending_count = None
     for message in messages:
         if not isinstance(message, ToolMessage) or message.name not in {
             "canvas_apply",
@@ -452,9 +454,22 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
         }:
             continue
         report = _parse_json_object(message.content) or {}
+        if not report:
+            continue
         last_errors = report.get("errors") or []
         if "diagnostics" in report or "committed" in report:
             last_state = report
+        if "pending_count" in report:
+            pending_count = report["pending_count"]
+        elif (
+            "committed" in report
+            and not report.get("blocked")
+            and not report.get("conflicts")
+            and not last_errors
+        ):
+            pending_count = 0
+        elif "committed" in report and pending_count == 0:
+            pending_count = None
         committed = report.get("committed")
         if message.name != "canvas_commit" or not isinstance(committed, list) or not committed:
             continue
@@ -467,22 +482,13 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
                 committed_objects.append(obj)
                 seen_commits.add(identity)
 
-    diagnostics = (
-        last_state.get("blocking_diagnostics")
-        or last_state.get("diagnostics")
-        or last_state.get("conflicts")
-        or []
-    )
+    diagnostics = [
+        *(last_state.get("blocking_diagnostics") or last_state.get("diagnostics") or []),
+        *(last_state.get("conflicts") or []),
+    ]
     if not last_state and isinstance(parsed_final.get("diagnostics"), list):
         diagnostics = parsed_final["diagnostics"]
     diagnostics = [*diagnostics, *last_errors]
-    pending_count = last_state.get("pending_count")
-    if (
-        "committed" in last_state
-        and not last_state.get("blocked")
-        and not last_state.get("conflicts")
-    ):
-        pending_count = 0
     result = {
         "status": parsed_final.get("status") or ("done" if final_text else "error"),
         "message": str(parsed_final.get("message") or final_text or "Canvas manager completed.")[
@@ -498,14 +504,34 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
         "committed_objects": committed_objects,
         "pending_count": pending_count,
     }
+    problems = []
+    blocked = (
+        last_state.get("blocked")
+        or last_state.get("blocking_diagnostics")
+        or last_state.get("conflicts")
+        or last_state.get("can_commit") is False
+    )
+    if blocked:
+        result["status"] = "blocked"
+        problems.append("Remaining canvas changes are blocked by diagnostics or conflicts.")
+    if last_errors:
+        result["status"] = "error"
+        problems.append("The latest canvas operation failed.")
     if last_commit.get("cube_schema"):
         result["cube_schema"] = last_commit["cube_schema"]
         if result["cube_schema"].get("ok") is False:
             result["status"] = "error"
-            result["message"] = (
-                "Semantic changes were committed, but Cube schema promotion failed. "
-                "Verify saved members and the active Cube schema before continuing."
-            )
+            problems.append("Cube schema promotion failed.")
+    if problems:
+        commit_state = (
+            "Some semantic changes were committed and were not rolled back. "
+            if committed_objects
+            else "No successful commit was observed during this delegation. "
+        )
+        result["message"] = (
+            commit_state + " ".join(problems) + " Inspect the remaining diagnostics and verify "
+            "saved members and the active Cube schema before continuing."
+        )
     return result
 
 

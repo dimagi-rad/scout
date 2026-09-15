@@ -348,6 +348,184 @@ def test_canvas_manager_summary_preserves_cube_failure_after_commit():
     assert "promotion failed" in result["message"]
 
 
+@pytest.mark.parametrize(
+    ("later_report", "expected_status", "expected_code"),
+    [
+        (
+            {
+                "committed": [],
+                "blocked": True,
+                "blocking_diagnostics": [{"code": "UNKNOWN_COLUMN", "severity": "error"}],
+            },
+            "blocked",
+            "UNKNOWN_COLUMN",
+        ),
+        (
+            {"committed": [], "blocked": False, "conflicts": [{"code": "CONFLICT"}]},
+            "blocked",
+            "CONFLICT",
+        ),
+        ({"errors": [{"code": "FORBIDDEN"}]}, "error", "FORBIDDEN"),
+    ],
+)
+@pytest.mark.parametrize("prior_commit", [False, True])
+def test_canvas_manager_latest_failed_commit_overrides_success_prose(
+    later_report, expected_status, expected_code, prior_commit
+):
+    messages = []
+    committed = [{"object_type": "dataset", "name": "topics"}]
+    if prior_commit:
+        messages.append(
+            ToolMessage(
+                name="canvas_commit",
+                tool_call_id="commit-1",
+                content=json.dumps(
+                    {"committed": committed, "blocked": False, "cube_schema": {"ok": True}}
+                ),
+            )
+        )
+    messages.extend(
+        [
+            ToolMessage(
+                name="canvas_apply",
+                tool_call_id="apply-2",
+                content=json.dumps(
+                    {
+                        "applied": [{"op": "create"}],
+                        "diagnostics": [{"code": "UNKNOWN_COLUMN", "severity": "error"}],
+                        "pending_count": 1,
+                        "can_commit": False,
+                    }
+                ),
+            ),
+            ToolMessage(
+                name="canvas_commit", tool_call_id="commit-2", content=json.dumps(later_report)
+            ),
+            AIMessage(
+                content=json.dumps(
+                    {"status": "done", "message": "All changes committed and queryable."}
+                )
+            ),
+        ]
+    )
+
+    result = _summarize_result(messages)
+
+    assert result["status"] == expected_status
+    assert result["committed"] is prior_commit
+    assert result["committed_objects"] == (committed if prior_commit else [])
+    assert result["pending_count"] == 1
+    assert expected_code in {item["code"] for item in result["diagnostics"]}
+    assert "All changes committed" not in result["message"]
+    if prior_commit:
+        assert "were not rolled back" in result["message"]
+        assert result["cube_schema"] == {"ok": True}
+    else:
+        assert "No successful commit was observed" in result["message"]
+
+
+def test_canvas_manager_later_success_clears_resolved_commit_failure():
+    result = _summarize_result(
+        [
+            ToolMessage(
+                name="canvas_commit",
+                tool_call_id="commit-1",
+                content=json.dumps({"committed": [], "blocked": True}),
+            ),
+            ToolMessage(
+                name="canvas_commit",
+                tool_call_id="commit-2",
+                content=json.dumps(
+                    {
+                        "committed": [{"name": "topics"}],
+                        "blocked": False,
+                        "cube_schema": {"ok": True},
+                    }
+                ),
+            ),
+            AIMessage(content=json.dumps({"status": "done", "message": "Saved."})),
+        ]
+    )
+
+    assert result["status"] == "done"
+    assert result["pending_count"] == 0
+    assert result["diagnostics"] == []
+
+
+def test_canvas_manager_blocked_commit_does_not_claim_zero_pending_changes():
+    result = _summarize_result(
+        [
+            ToolMessage(
+                name="canvas_commit",
+                tool_call_id="commit-1",
+                content=json.dumps({"committed": [{"name": "topics"}], "blocked": False}),
+            ),
+            ToolMessage(
+                name="canvas_commit",
+                tool_call_id="commit-2",
+                content=json.dumps({"committed": [], "blocked": True}),
+            ),
+        ]
+    )
+
+    assert result["status"] == "blocked"
+    assert result["committed"] is True
+    assert result["pending_count"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "commit_report",
+    [
+        {"committed": [{"name": "topics"}], "blocked": False, "cube_schema": {"ok": False}},
+        {"committed": [], "blocked": True},
+        {"errors": [{"code": "FORBIDDEN"}]},
+    ],
+)
+async def test_canvas_manager_failed_result_closes_lifecycle_as_failed(monkeypatch, commit_report):
+    class FailedGraph:
+        async def astream_events(self, *_args, **_kwargs):
+            yield {
+                "event": "on_tool_end",
+                "name": "canvas_commit",
+                "run_id": "commit-1",
+                "data": {
+                    "output": ToolMessage(
+                        name="canvas_commit",
+                        tool_call_id="commit-1",
+                        content=json.dumps(commit_report),
+                    )
+                },
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "agent",
+                "data": {
+                    "output": {
+                        "messages": [
+                            AIMessage(content=json.dumps({"status": "done", "message": "Saved."}))
+                        ]
+                    }
+                },
+            }
+
+    monkeypatch.setattr(
+        "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
+        lambda *_args: FailedGraph(),
+    )
+    queue = asyncio.Queue()
+    manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")
+
+    result = await manager.ainvoke({"task": "Commit", "subagent_event_queue": queue})
+
+    assert result["status"] in {"blocked", "error"}
+    events = [queue.get_nowait()["event"] for _ in range(queue.qsize())]
+    assert events[-1]["data"]["phase"] == "failed"
+    assert events[-1]["data"]["message"] == result["message"]
+    assert result["subagent_trace"]["events"][0]["data"]["phase"] == "failed"
+    assert get_subagent_event_queue() is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("commit_started", [False, True])
 async def test_canvas_manager_failure_before_confirmed_commit_is_truthful(
