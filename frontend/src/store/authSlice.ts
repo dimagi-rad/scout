@@ -23,48 +23,74 @@ export interface AuthSlice {
   }
 }
 
-export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set) => ({
-  user: null,
-  authStatus: "idle",
-  authError: null,
-  authActions: {
-    fetchMe: async () => {
-      set({ authStatus: "loading", authError: null })
-      try {
-        // GET sets the CSRF cookie as a side effect
-        await api.get("/api/auth/csrf/")
-        const user = await api.get<User>("/api/auth/me/")
-        set({ user, authStatus: "authenticated" })
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 401) {
-          set({ user: null, authStatus: "unauthenticated" })
-        } else {
-          set({ user: null, authStatus: "unauthenticated", authError: "Failed to check auth" })
+export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set) => {
+  let requestId = 0
+  let pendingMutations = 0
+  let mutationQueue = Promise.resolve()
+
+  function mutateSession(operation: () => Promise<void>) {
+    pendingMutations += 1
+    const result = mutationQueue.then(operation)
+    mutationQueue = result.catch(() => undefined)
+    return result.finally(() => { pendingMutations -= 1 })
+  }
+
+  return {
+    user: null,
+    authStatus: "idle",
+    authError: null,
+    authActions: {
+      fetchMe: async () => {
+        // A visibility refresh must not rediscover A while logout is pending,
+        // or supersede an explicit login that has not established its cookie yet.
+        if (pendingMutations > 0) return
+        const request = ++requestId
+        set({ authStatus: "loading", authError: null })
+        try {
+          // GET sets the CSRF cookie as a side effect
+          await api.get("/api/auth/csrf/")
+          if (request !== requestId) return
+          const user = await api.get<User>("/api/auth/me/")
+          if (request !== requestId) return
+          set({ user, authStatus: "authenticated" })
+        } catch (e) {
+          if (request !== requestId) return
+          if (e instanceof ApiError && e.status === 401) {
+            set({ user: null, authStatus: "unauthenticated" })
+          } else {
+            set({ user: null, authStatus: "unauthenticated", authError: "Failed to check auth" })
+          }
         }
-      }
-    },
+      },
 
-    login: async (email: string, password: string) => {
-      set({ authStatus: "loading", authError: null })
-      try {
-        // Refresh CSRF cookie before login to avoid stale token (e.g. from admin session)
-        await api.get("/api/auth/csrf/")
-        const user = await api.post<User>("/api/auth/login/", { email, password })
-        set({ user, authStatus: "authenticated", authError: null })
-      } catch (e) {
-        const message = e instanceof ApiError ? e.message : "Login failed"
-        set({ authStatus: "unauthenticated", authError: message })
-        throw e
-      }
-    },
+      login: async (email: string, password: string) => {
+        const request = ++requestId
+        set({ user: null, authStatus: "loading", authError: null })
+        try {
+          await mutateSession(async () => {
+            if (request !== requestId) return
+            // Wait for older cookie mutations before refreshing the CSRF token.
+            await api.get("/api/auth/csrf/")
+            if (request !== requestId) return
+            const user = await api.post<User>("/api/auth/login/", { email, password })
+            if (request !== requestId) return
+            set({ user, authStatus: "authenticated", authError: null })
+          })
+        } catch (e) {
+          if (request !== requestId) return
+          const message = e instanceof ApiError ? e.message : "Login failed"
+          set({ authStatus: "unauthenticated", authError: message })
+          throw e
+        }
+      },
 
-    logout: async () => {
-      try {
-        await api.post("/api/auth/logout/")
-      } finally {
+      logout: async () => {
+        ++requestId
         clearUserTenantsCache()
         set({ user: null, authStatus: "unauthenticated", authError: null })
-      }
+        // Serialize cookie writes so an older logout cannot erase B's new login.
+        await mutateSession(() => api.post<void>("/api/auth/logout/"))
+      },
     },
-  },
-})
+  }
+}
