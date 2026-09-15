@@ -32,6 +32,8 @@ export const router = createBrowserRouter([
       { path: "artifacts", element: <ArtifactsPage /> },
       { path: "artifacts/demo", element: <ArtifactDemoPage /> },
       { path: "artifacts/:artifactId", element: <ArtifactDetailPage /> },
+      { path: "workspaces/:workspaceId/artifacts/:artifactId", element: <ArtifactDetailPage /> },
+      { path: "workspaces/:slug/:workspaceId/artifacts/:artifactId", element: <ArtifactDetailPage /> },
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "knowledge/new", element: <KnowledgePage /> },
       { path: "knowledge/:id", element: <KnowledgePage /> },
