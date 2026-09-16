@@ -194,7 +194,7 @@ async def test_denial_between_new_identity_binding_and_sync_wins(user, httpx_moc
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_ocs_denial_preserves_legacy_other_team_rows(user, httpx_mock):
-    account, token, conn, _tm = await identity(user, "ocs", "team-a")
+    account, token, conn, tm = await identity(user, "ocs", "team-a")
     other_tenant = await Tenant.objects.acreate(
         provider="ocs", external_id="legacy-b", canonical_name="B"
     )
@@ -208,6 +208,7 @@ async def test_ocs_denial_preserves_legacy_other_team_rows(user, httpx_mock):
     ):
         with pytest.raises(OCSAuthError):
             await resolve_ocs_chatbots(user, token.token, social_account=account)
+    assert not await TenantMembership.objects.filter(pk=tm.pk).aexists()
     assert await TenantMembership.objects.filter(pk=sibling.pk).aexists()
 
 

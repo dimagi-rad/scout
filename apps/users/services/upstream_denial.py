@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 def credential_is_current(connection, credential, token_snapshot=None):
+    """Check the observed credential inside a transaction holding the user lock."""
     if connection.credential_type == TenantConnection.API_KEY:
         return True  # The caller's encrypted credential snapshot is checked under the lock.
     tokens = (
-        SocialToken.objects.select_for_update()
+        SocialToken.objects.select_for_update(of=("self",))
         .filter(
             account__in=provider_accounts(connection.user_id, connection.provider), token=credential
         )
