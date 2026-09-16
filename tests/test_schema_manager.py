@@ -236,7 +236,10 @@ class TestProvisionCollisionSafety:
         )
         # In-flight refresh row: PROVISIONING, last_accessed_at left NULL.
         TenantSchema.objects.create(
-            tenant=tenant, schema_name="dom_r1a2b3c4", state=SchemaState.PROVISIONING
+            tenant=tenant,
+            schema_name="dom_r1a2b3c4",
+            state=SchemaState.PROVISIONING,
+            refresh_claimed_at=timezone.now(),
         )
 
         mgr = SchemaManager()
