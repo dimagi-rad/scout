@@ -122,9 +122,10 @@ def _canonical_query(
         or tree.expressions[:core_count] != expected.expressions
     ):
         return False
-    seen = {column.alias_or_name for column in expected.expressions}
     # Added, removed or reordered questions may change projections, but never
     # admit arbitrary SQL or changes to the source, row filter, or repeat index.
+    # Alias text is inert and unconstrained: generators before cede159 and #426
+    # persisted overlong, digit-led and duplicate aliases (SCOUT-DJANGO-3F).
     for column in tree.expressions[core_count:]:
         if not isinstance(column, exp.Alias):
             return False
@@ -132,9 +133,6 @@ def _canonical_query(
         if (
             not isinstance(alias, exp.Identifier)
             or not alias.args.get("quoted")
-            or not _NAME.fullmatch(alias.name)
-            or len(alias.name.encode()) > 63
-            or alias.name in seen
             or not _generated_projection(
                 column,
                 json_column=json_column,
@@ -143,7 +141,6 @@ def _canonical_query(
             )
         ):
             return False
-        seen.add(alias.name)
     return True
 
 
