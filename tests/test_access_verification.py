@@ -22,11 +22,16 @@ from apps.users.services.access_verification import (
     LEASE_DURATION,
     ClaimStatus,
     PublicationStatus,
+    VerificationDeadlineExceeded,
     claim_verification,
     proof_is_fresh,
     publish_verification,
+    rebase_verification_claim,
+    release_verification,
+    snapshot_credential,
 )
 from apps.users.services.access_verification_types import VerificationResult
+from apps.users.services.token_refresh import PersistedTokenSnapshot
 
 
 @pytest.fixture
@@ -76,6 +81,108 @@ def _hold_user_lock(user_id, acquired, release):
         connection.close()
 
 
+def _hold_control_lock(connection_id, acquired, release):
+    try:
+        with transaction.atomic():
+            VerificationControl.objects.select_for_update().get(connection_id=connection_id)
+            acquired.set()
+            assert release.wait(timeout=10)
+    finally:
+        connection.close()
+
+
+@pytest.mark.django_db
+def test_snapshot_credential_builds_observation_from_loaded_connection(
+    user, verification_connection
+):
+    conn, _membership = verification_connection
+
+    snapshot = snapshot_credential(conn)
+
+    assert snapshot.observation.connection_id == conn.id
+    assert snapshot.observation.user_id == user.id
+    assert snapshot.credential == "secret-one"
+    assert "secret-one" not in repr(snapshot)
+
+
+@pytest.mark.django_db
+def test_direct_empty_claim_is_denied_without_electing_lease(user, verification_connection):
+    conn, _membership = verification_connection
+
+    claim = claim_verification(user.id, conn.id, set())
+
+    assert claim.status == ClaimStatus.DENIED
+    assert not VerificationControl.objects.filter(connection=conn).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("tenant_provider", "expected"),
+    [("ocs", ClaimStatus.DENIED), ("commcare-custom", ClaimStatus.CLAIMED)],
+)
+def test_claim_requires_same_canonical_provider(
+    user, verification_connection, tenant_provider, expected
+):
+    conn, _membership = verification_connection
+    mismatched = Tenant.objects.create(
+        provider=tenant_provider,
+        external_id=f"provider-{tenant_provider}",
+        canonical_name="Provider scope",
+    )
+    TenantMembership.objects.create(user=user, tenant=mismatched, connection=conn)
+
+    claim = claim_verification(user.id, conn.id, {mismatched.id})
+
+    assert claim.status == expected
+    assert VerificationControl.objects.filter(connection=conn).exists() is (
+        expected == ClaimStatus.CLAIMED
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({}, ClaimStatus.CLAIMED),
+        ({"team_slug": ""}, ClaimStatus.CLAIMED),
+        ({"team_slug": "acme"}, ClaimStatus.CLAIMED),
+        ({"team_slug": "other-team"}, ClaimStatus.DENIED),
+    ],
+)
+def test_ocs_claim_allows_legacy_team_history_but_denies_explicit_other_team(
+    user, metadata, expected
+):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id=f"scope-{metadata!s}", canonical_name="Scoped"
+    )
+    conn, membership = _ocs_connection(user, tenant, scope="acme")
+    membership.provider_metadata = metadata
+    membership.save(update_fields=["provider_metadata"])
+
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+
+    assert claim.status == expected
+    assert VerificationControl.objects.filter(connection=conn).exists() is (
+        expected == ClaimStatus.CLAIMED
+    )
+
+
+@pytest.mark.django_db
+def test_oauth_claim_without_social_account_is_denied(user, tenant):
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.OAUTH,
+        social_account=None,
+    )
+    TenantMembership.objects.create(user=user, tenant=tenant, connection=conn)
+
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+
+    assert claim.status == ClaimStatus.DENIED
+    assert not VerificationControl.objects.filter(connection=conn).exists()
+
+
 @pytest.mark.django_db(transaction=True)
 def test_disjoint_requests_elect_one_connection_winner(user, tenant, verification_connection):
     conn, _membership = verification_connection
@@ -103,6 +210,145 @@ def test_disjoint_requests_elect_one_connection_winner(user, tenant, verificatio
 
     assert statuses == {ClaimStatus.CLAIMED, ClaimStatus.IN_PROGRESS}
     assert VerificationControl.objects.get(connection=conn).lease_token is not None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_user_lock_wait_stops_at_deadline(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
+    locker.start()
+    assert acquired.wait(timeout=2)
+    timer = threading.Timer(0.4, release.set)
+    timer.start()
+
+    started = time.monotonic()
+    claim = claim_verification(
+        user.id,
+        conn.id,
+        {tenant.id},
+        deadline=started + 0.1,
+    )
+    elapsed = time.monotonic() - started
+    locker.join(timeout=2)
+    timer.cancel()
+
+    assert claim.status == ClaimStatus.DEADLINE
+    assert elapsed < 0.3
+    assert not VerificationControl.objects.filter(connection=conn).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_rebase_user_lock_wait_stops_at_deadline(user):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id="deadline", canonical_name="Deadline"
+    )
+    conn, _membership = _ocs_connection(user, tenant)
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    token = SocialToken.objects.get(account_id=conn.social_account_id)
+    persisted = PersistedTokenSnapshot(
+        token_id=token.id,
+        account_id=token.account_id,
+        app_id=token.app_id,
+        access_token=token.token,
+        refresh_token=token.token_secret,
+        expires_at=token.expires_at,
+    )
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
+    locker.start()
+    assert acquired.wait(timeout=2)
+    timer = threading.Timer(0.4, release.set)
+    timer.start()
+
+    started = time.monotonic()
+    with pytest.raises(VerificationDeadlineExceeded):
+        rebase_verification_claim(
+            claim,
+            persisted,
+            deadline=started + 0.1,
+        )
+    elapsed = time.monotonic() - started
+    locker.join(timeout=2)
+    timer.cancel()
+    release_verification(claim)
+
+    assert elapsed < 0.3
+    assert VerificationControl.objects.get(connection=conn).lease_token is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_release_is_bounded_when_control_row_is_locked(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
+    locker.start()
+    assert acquired.wait(timeout=2)
+
+    started = time.monotonic()
+    released = release_verification(claim)
+    elapsed = time.monotonic() - started
+
+    assert released is False
+    assert elapsed < 0.2
+    release.set()
+    locker.join(timeout=2)
+    assert VerificationControl.objects.get(connection=conn).lease_token == claim.lease_token
+    assert release_verification(claim) is True
+
+
+@pytest.mark.django_db
+def test_release_never_clears_replacement_lease(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    successor = uuid4()
+    VerificationControl.objects.filter(connection=conn).update(lease_token=successor)
+
+    assert release_verification(claim) is False
+    assert VerificationControl.objects.get(connection=conn).lease_token == successor
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_recomputes_remaining_deadline_before_control_lock(
+    user, tenant, verification_connection, monkeypatch
+):
+    from apps.users.services import access_verification
+
+    conn, _membership = verification_connection
+    VerificationControl.objects.create(connection=conn)
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
+    locker.start()
+    assert acquired.wait(timeout=2)
+    timer = threading.Timer(0.5, release.set)
+    timer.start()
+    original = access_verification._locked_snapshot
+
+    def delayed_snapshot(*args, **kwargs):
+        time.sleep(0.08)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(access_verification, "_locked_snapshot", delayed_snapshot)
+    started = time.monotonic()
+    claim = claim_verification(
+        user.id,
+        conn.id,
+        {tenant.id},
+        deadline=started + 0.15,
+    )
+    elapsed = time.monotonic() - started
+    release.set()
+    locker.join(timeout=2)
+    timer.cancel()
+
+    assert claim.status == ClaimStatus.DEADLINE
+    assert elapsed < 0.25
+    assert VerificationControl.objects.get(connection=conn).lease_token is None
 
 
 @pytest.mark.django_db
