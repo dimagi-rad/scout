@@ -24,7 +24,7 @@ from apps.users.models import (
     TenantMembership,
 )
 from apps.users.rate_limiting import check_rate_limit, record_attempt
-from apps.users.services.credential_resolver import aiter_social_tokens
+from apps.users.services.credential_resolver import aiter_fresh_access_tokens
 from apps.users.services.oauth_scope import (
     canonical_provider,
     is_active_identity,
@@ -83,10 +83,10 @@ async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
     team's chatbots undiscovered (#156). One team failing must not skip the rest.
     """
     resolved_any = False
-    for token_obj in await aiter_social_tokens(user, provider):
+    for account, access_token in await aiter_fresh_access_tokens(user, provider):
         try:
             resolved = await resolve_fn(
-                user, token_obj.token, social_account=token_obj.account, allow_replace=False
+                user, access_token, social_account=account, allow_replace=False
             )
         except Exception:
             logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)

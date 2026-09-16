@@ -22,6 +22,7 @@ from apps.users.services.api_key_providers import (
     CredentialVerificationError,
 )
 from apps.users.services.credential_resolver import (
+    _aresolve_oauth_credential,
     aconnection_status,
     aiter_social_tokens,
 )
@@ -65,8 +66,9 @@ async def _arefresh_all_identities(user) -> None:
             if await cache.aget(cache_key):
                 continue
             try:
+                credential = await _aresolve_oauth_credential(token_obj, provider)
                 await resolve(
-                    user, token_obj.token, social_account=token_obj.account, allow_replace=False
+                    user, credential["value"], social_account=token_obj.account, allow_replace=False
                 )
             except Exception:
                 logger.warning(
