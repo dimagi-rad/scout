@@ -9,6 +9,7 @@ from enum import StrEnum
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
@@ -241,28 +242,41 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
             if current.upstream_denial_code:
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
-            owned_memberships = TenantMembership.all_objects.filter(
+            owned_history = TenantMembership.all_objects.filter(
                 user_id=current.user_id,
                 connection=current,
                 tenant__provider=current.provider,
             )
-            if (
+            scoped_ocs_oauth = (
                 canonical_provider(current.provider) == "ocs"
                 and current.credential_type == TenantConnection.OAUTH
-            ):
-                owned_memberships = owned_memberships.filter(
+            )
+            returned_memberships = owned_history.filter(tenant_id__in=result.tenant_ids)
+            if scoped_ocs_oauth:
+                returned_memberships = returned_memberships.filter(
+                    Q(provider_metadata__team_slug=current.scope_key)
+                    | Q(provider_metadata__team_slug__isnull=True)
+                    | Q(provider_metadata__team_slug="")
+                )
+                returned = list(returned_memberships)
+                for membership in returned:
+                    membership.archived_at = None
+                    membership.provider_metadata = {
+                        **(membership.provider_metadata or {}),
+                        "team_slug": current.scope_key,
+                    }
+                    membership.save(update_fields=["archived_at", "provider_metadata"])
+                omission_scope = owned_history.filter(
                     provider_metadata__team_slug=current.scope_key
                 )
-            memberships = owned_memberships.filter(
-                tenant_id__in=result.tenant_ids,
-            )
-            memberships.update(archived_at=None)
-            owned_memberships.filter(archived_at__isnull=True).exclude(
+            else:
+                returned_memberships.update(archived_at=None)
+                returned = list(returned_memberships)
+                omission_scope = owned_history
+            omission_scope.filter(archived_at__isnull=True).exclude(
                 tenant_id__in=result.tenant_ids
             ).update(archived_at=decision_now)
-            live_ids = set(
-                memberships.filter(archived_at__isnull=True).values_list("tenant_id", flat=True)
-            )
+            live_ids = {membership.tenant_id for membership in returned}
             for tenant_id in live_ids:
                 UpstreamAccessProof.objects.update_or_create(
                     connection=current,

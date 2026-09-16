@@ -339,6 +339,36 @@ def test_ocs_complete_publication_preserves_other_team_memberships(user):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("provider_metadata", [{}, {"team_slug": ""}])
+def test_ocs_complete_publication_recovers_legacy_team_tombstone(user, provider_metadata):
+    current = Tenant.objects.create(
+        provider="ocs", external_id=f"current-{bool(provider_metadata)}", canonical_name="Current"
+    )
+    legacy = Tenant.objects.create(
+        provider="ocs", external_id=f"legacy-{bool(provider_metadata)}", canonical_name="Legacy"
+    )
+    conn, _membership = _ocs_connection(user, current, scope="acme")
+    tombstone = TenantMembership.objects.create(
+        user=user,
+        tenant=legacy,
+        connection=conn,
+        provider_metadata=provider_metadata,
+        archived_at=timezone.now(),
+    )
+    claim = claim_verification(user.id, conn.id, {legacy.id})
+
+    assert (
+        publish_verification(claim, VerificationResult.complete({legacy.id}))
+        == PublicationStatus.PUBLISHED
+    )
+
+    tombstone.refresh_from_db()
+    assert tombstone.archived_at is None
+    assert tombstone.team_slug == "acme"
+    assert UpstreamAccessProof.objects.filter(connection=conn, tenant=legacy).exists()
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("identity", ["blank_scope", "wrong_user", "wrong_provider"])
 def test_ocs_oauth_claim_quarantines_untrusted_identity(user, other_user, identity):
     tenant = Tenant.objects.create(provider="ocs", external_id=identity, canonical_name=identity)
