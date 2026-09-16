@@ -141,14 +141,18 @@ class TestCredentialResolverTokenRefresh:
 class TestSyncTokenRefresh:
     @pytest.fixture(autouse=True)
     def _mock_connection_health_storage(self, mocker):
-        connections = mocker.patch(
-            "apps.users.services.token_refresh._token_connections"
-        ).return_value
-        connections.aupdate = AsyncMock()
-        connections.filter.return_value.aupdate = AsyncMock()
+        preflight = mocker.patch("apps.users.services.token_refresh._preflight_token").return_value
+        preflight.refresh_token = "old-refresh"
+        preflight.expires_at = None
+        mocker.patch("apps.users.services.token_refresh._persist_refresh_failure")
 
     def test_refresh_oauth_token_sync_updates_and_persists(self):
-        from apps.users.services.token_refresh import refresh_oauth_token_sync
+        from apps.users.services.token_refresh import (
+            PersistedTokenSnapshot,
+            TokenRefreshResult,
+            TokenRefreshStatus,
+            refresh_oauth_token_sync,
+        )
 
         social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token_secret = "old-refresh"
@@ -161,15 +165,29 @@ class TestSyncTokenRefresh:
             "refresh_token": "rotated-refresh",
             "expires_in": 900,
         }
-        with patch(
-            "apps.users.services.token_refresh.requests.post", return_value=response
-        ) as mock_post:
+        persisted = PersistedTokenSnapshot(
+            token_id=1,
+            account_id=1,
+            app_id=1,
+            access_token="brand-new",
+            refresh_token="rotated-refresh",
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        with (
+            patch(
+                "apps.users.services.token_refresh.requests.post", return_value=response
+            ) as mock_post,
+            patch(
+                "apps.users.services.token_refresh._persist_refresh_response",
+                return_value=TokenRefreshResult(TokenRefreshStatus.APPLIED, persisted),
+            ),
+        ):
             new = refresh_oauth_token_sync(social_token, "https://token/")
 
         assert new == "brand-new"
         assert social_token.token == "brand-new"
         assert social_token.token_secret == "rotated-refresh"
-        social_token.save.assert_called_once()
+        social_token.save.assert_not_called()
         mock_post.assert_called_once()
 
     def test_refresh_oauth_token_sync_raises_on_http_error(self):
