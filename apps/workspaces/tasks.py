@@ -6,10 +6,12 @@ import logging
 import time
 from collections.abc import Iterable
 from datetime import timedelta
+from functools import wraps
 from typing import NamedTuple
 
 import sentry_sdk
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import close_old_connections
 from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
@@ -34,7 +36,11 @@ from apps.users.services.credential_resolver import (
     CredentialResolutionError,
     aresolve_credential,
 )
-from apps.workspaces.access import aresolve_workspace_access_ex
+from apps.workspaces.access import (
+    aresolve_workspace_access_ex,
+    aworkspace_write_allowed,
+    tool_write_denied,
+)
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
     VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
@@ -43,6 +49,7 @@ from apps.workspaces.models import (
     TenantSchema,
     Workspace,
     WorkspaceDataRecovery,
+    WorkspaceRole,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
@@ -413,7 +420,36 @@ def _preflight_failure(tenant, error: str, code: str = "") -> dict:
     }
 
 
-@serialized_workspace_data
+async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict | None:
+    if not user_id:
+        return tool_write_denied()
+    try:
+        user = await User.objects.filter(id=user_id).afirst()
+    except (TypeError, ValueError, ValidationError):
+        user = None
+    if user is None or not await aworkspace_write_allowed(user, workspace_id):
+        return tool_write_denied()
+    return None
+
+
+def serialized_workspace_materialization(function):
+    """Serialize a user load and recheck authority on both sides of the lock wait."""
+
+    @wraps(function)
+    async def wrapped(workspace_id, user_id="", *args, **kwargs):
+        denial = await _materialization_write_denial(workspace_id, user_id)
+        if denial is not None:
+            return denial
+        async with workspace_data_lock(workspace_id):
+            denial = await _materialization_write_denial(workspace_id, user_id)
+            if denial is not None:
+                return denial
+            return await function(workspace_id, user_id, *args, **kwargs)
+
+    return wrapped
+
+
+@serialized_workspace_materialization
 async def materialize_workspace_core(
     workspace_id: str,
     user_id: str = "",
@@ -770,6 +806,9 @@ async def materialize_workspace_blocking(
     materialization against the same tenant schema (which the interactive path
     avoids by telling the agent not to). Returns the core summary shape.
     """
+    denial = await _materialization_write_denial(workspace_id, user_id)
+    if denial is not None:
+        return denial
     await _await_in_progress_materializations(workspace_id)
     return await materialize_workspace_core(workspace_id, user_id, job_id)
 
@@ -792,16 +831,32 @@ async def materialize_workspace(
     preflight_failures = None
     try:
         result = await materialize_workspace_core(workspace_id, user_id, job_id)
-        preflight_failures = [
-            {
-                "tenant_id": entry["tenant_id"],
-                "provider": entry["provider"],
-                "error": str(entry["error"])[:1000],
-                "error_code": str(entry.get("error_code") or ""),
-            }
-            for entry in result.get("tenants", [])
-            if entry.get("state") == TENANT_NOT_RUN
-        ]
+        if result.get("status") == "denied":
+            error = result.get("error") or {}
+            message = str(error.get("message") or result.get("message") or "Access denied")
+            error_code = str(error.get("code") or "FORBIDDEN")
+            preflight_failures = [
+                {
+                    "tenant_id": str(tenant_id),
+                    "provider": provider,
+                    "error": message[:1000],
+                    "error_code": error_code,
+                }
+                async for tenant_id, provider in WorkspaceTenant.objects.filter(
+                    workspace_id=workspace_id
+                ).values_list("tenant_id", "tenant__provider")
+            ]
+        else:
+            preflight_failures = [
+                {
+                    "tenant_id": entry["tenant_id"],
+                    "provider": entry["provider"],
+                    "error": str(entry["error"])[:1000],
+                    "error_code": str(entry.get("error_code") or ""),
+                }
+                for entry in result.get("tenants", [])
+                if entry.get("state") == TENANT_NOT_RUN
+            ]
         return result
     finally:
         await _defer_resume_for_job(job_id, preflight_failures)
@@ -1257,11 +1312,16 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             if (
                 requester is None
                 or not (
-                    await aresolve_workspace_access_ex(requester, recovery.workspace_id)
+                    await aresolve_workspace_access_ex(
+                        requester,
+                        recovery.workspace_id,
+                        minimum_role=WorkspaceRole.READ_WRITE,
+                    )
                 ).granted
             ):
                 raise ValueError(
-                    "The requesting user no longer has workspace access. Ask a workspace member to retry."
+                    "The requesting user no longer has a read-write or manage workspace role. "
+                    "Ask a workspace member with write access to retry."
                 )
 
             surface = await recovery_query_surface(recovery)
@@ -1352,7 +1412,10 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
             + " ".join(f"{', '.join(labels)}: {error}" for error, labels in source_errors.items())
         )[:1000]
     if result.get("error"):
-        return str(result["error"])[:1000]
+        error = result["error"]
+        if isinstance(error, dict):
+            return str(error.get("message") or "Workspace data recovery failed.")[:1000]
+        return str(error)[:1000]
     cube_result = result.get("cube_schema") or {}
     cube_error = cube_result.get("error") or cube_result.get("reason")
     if cube_error:
