@@ -8,7 +8,7 @@ function harness() {
  h.comments=[{id:1,user:{login:'github-actions[bot]',type:'Bot'},body:'<!-- scout-ocr-gate -->\nOriginal OCR explanation\n'+encodeState({version:1,head:HEAD,base:BASE,policy:POLICY,run:'123',passed:true,claudeHead:null})}];
  h.core={setOutput:(k,v)=>h.outputs[k]=v,info(){},warning(){},setFailed:r=>h.failures.push(r),summary:{addRaw(s){h.summary=s;return this;},async write(){}}};
  h.fs={writeFileSync:(p,s)=>h.files[p]=s,readFileSync:p=>{if(!(p in h.files))throw Error('PRIVATE PATH');return h.files[p];}};
- const publish=async p=>{if(h.publishError)throw Error('PRIVATE MESSAGE');h.writes.push(p);const id=p.comment_id||100+h.comments.length;const value={id,user:{login:'github-actions[bot]',type:'Bot'},body:p.body};h.comments=h.comments.filter(c=>c.id!==id).concat(value);return {data:value};};
+ const publish=async p=>{if(h.publishError)throw Error('PRIVATE MESSAGE');h.writes.push(p);const id=p.comment_id||100+h.comments.length;const value={id,user:{login:'github-actions[bot]',type:'Bot'},body:p.body};h.comments=h.comments.filter(c=>c.id!==id).concat(value);if(h.afterPublish)await h.afterPublish(p);return {data:value};};
  h.github={rest:{issues:{listComments(){},createComment:publish,updateComment:publish},pulls:{get:async()=>({data:h.pr}),listReviewComments(){},listReviews(){}}},paginate:async method=>method===h.github.rest.issues.listComments?h.comments:[]};
  return h;
 }
@@ -20,3 +20,30 @@ test('failed action, missing SDK, malformed output and absent artifact visibly b
 test('positive blocking findings and changed base never advance checkpoint',async()=>{for(const mutate of [h=>h.env.CLAUDE_RESULT=JSON.stringify({complete:true,reviewed_head:HEAD,blocking_findings:1}),h=>h.pr.base.sha=HEAD]){const h=await prepared();reviewed(h);mutate(h);await finishClaude(h);assert.equal(readState(h.comments).claudeHead,null);assert.ok(h.failures.length);assert.match(h.summary,/blocked/);}});
 test('publication failure cannot advance checkpoint or disclose exception content',async()=>{const h=await prepared();reviewed(h);h.publishError=true;await finishClaude(h);assert.equal(readState(h.comments).claudeHead,null);assert.ok(h.failures.length);assert.doesNotMatch(h.failures.join(),/PRIVATE/);assert.notEqual(h.outputs.claude_verified,'true');});
 test('late older attempt never overwrites a newer pending receipt',async()=>{const h=await prepared();reviewed(h);const newer={...h,env:{...h.env,GITHUB_RUN_ATTEMPT:'2'}};await prepareClaude(newer);const pending=h.comments.find(c=>c.body.startsWith('<!-- scout-claude-review -->')).body;h.writes=[];await finishClaude(h);assert.equal(h.writes.length,0);assert.equal(h.comments.find(c=>c.body.startsWith('<!-- scout-claude-review -->')).body,pending);assert.equal(readState(h.comments).claudeHead,null);});
+
+test('preparation failures replace an earlier verified receipt with blocked', async () => {
+ for (const stage of ['stale', 'prefetch', 'write']) {
+  const h = await prepared(); reviewed(h); await finishClaude(h);
+  h.env.GITHUB_RUN_ATTEMPT = '2';
+  if (stage === 'stale') h.pr.base.sha = HEAD;
+  if (stage === 'prefetch') { const prior = h.github.paginate; h.github.paginate = async method => { if (method === h.github.rest.pulls.listReviews) throw Error('PRIVATE API'); return prior(method); }; }
+  if (stage === 'write') h.fs.writeFileSync = () => { throw Error('PRIVATE DISK'); };
+  await assert.rejects(prepareClaude(h), /preparation failed/i);
+  const receipt = h.comments.find(c => c.body.startsWith('<!-- scout-claude-review -->'));
+  assert.match(receipt.body, /blocked/); assert.doesNotMatch(receipt.body, /PRIVATE/);
+ }
+});
+test('newer pending between verification publication and checkpoint write fences the older attempt', async () => {
+ const h = await prepared(); reviewed(h);
+ h.afterPublish = async payload => {
+  if (!payload.body.includes('Claude review: verified')) return;
+  h.afterPublish = null;
+  await prepareClaude({ ...h, env: { ...h.env, GITHUB_RUN_ATTEMPT: '2' } });
+ };
+ h.writes = [];
+ await finishClaude(h);
+ assert.equal(readState(h.comments).claudeHead, null);
+ assert.equal(h.writes.filter(w => w.body.startsWith('<!-- scout-ocr-gate -->')).length, 0);
+ assert.match(h.comments.find(c => c.body.startsWith('<!-- scout-claude-review -->')).body, /pending/);
+ assert.notEqual(h.outputs.claude_verified, 'true');
+});

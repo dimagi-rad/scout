@@ -222,7 +222,7 @@ jobs:
             --allowedTools "Bash(git diff*),Bash(git log*),Bash(git show*),Bash(gh pr view:*),Bash(gh pr comment:*),Read"
 
       - name: Verify Claude receipt and record completed checkpoint
-        if: ${{ !cancelled() && steps.gate.outputs.passed == 'true' && needs.prepare.outputs.same_repo == 'true' && steps.claude_baseline.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.gate.outputs.passed == 'true' && needs.prepare.outputs.same_repo == 'true' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           POLICY: ${{ steps.baseline.outputs.policy }}
