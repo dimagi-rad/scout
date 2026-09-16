@@ -22,7 +22,9 @@ from apps.users.services.api_key_providers import (
     CredentialVerificationError,
 )
 from apps.users.services.credential_resolver import (
+    _aresolve_oauth_credential,
     aconnection_status,
+    aiter_fresh_access_tokens,
     aiter_social_tokens,
 )
 from apps.users.services.oauth_scope import scope_account_ids
@@ -65,8 +67,9 @@ async def _arefresh_all_identities(user) -> None:
             if await cache.aget(cache_key):
                 continue
             try:
+                credential = await _aresolve_oauth_credential(token_obj, provider)
                 await resolve(
-                    user, token_obj.token, social_account=token_obj.account, allow_replace=False
+                    user, credential["value"], social_account=token_obj.account, allow_replace=False
                 )
             except Exception:
                 logger.warning(
@@ -420,20 +423,24 @@ async def tenant_ensure_view(request):
         )
     except TenantMembership.DoesNotExist:
         if provider == "commcare_connect":
-            tokens = await aiter_social_tokens(user, "commcare_connect")
-            connect_token = tokens[0] if tokens else None
-            if not connect_token:
+            credentials = await aiter_fresh_access_tokens(user, "commcare_connect")
+            if not credentials:
                 return JsonResponse(
                     {"error": "No Connect OAuth token. Please log in with Connect first."},
                     status=404,
                 )
 
+            account, access_token = credentials[0]
             # Resolve the user's actual opportunities from the Connect API
             # to verify they have access to the requested tenant_id.
             memberships = await resolve_connect_opportunities(
-                user, connect_token.token, social_account=connect_token.account, allow_replace=False
+                user, access_token, social_account=account, allow_replace=False
             )
-            tm = next((m for m in memberships if m.tenant.external_id == tenant_id), None)
+            tm = (
+                await TenantMembership.objects.select_related("tenant")
+                .filter(pk__in=[m.pk for m in memberships], tenant__external_id=tenant_id)
+                .afirst()
+            )
             if tm is None:
                 return JsonResponse(
                     {"error": "Opportunity not found for this user"},

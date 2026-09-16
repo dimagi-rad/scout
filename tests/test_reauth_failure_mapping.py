@@ -91,7 +91,7 @@ def test_summary_tells_the_user_reconnecting_will_not_fix_a_403():
     summary = _compose_failure_summary(
         [_run({"sessions": _failed(_DENIED_ERROR, ErrorCode.AUTH_ACCESS_DENIED)})]
     )
-    assert "will not restore it" in summary.lower()
+    assert "alone does not change upstream permissions" in summary.lower()
     # The loop #372 is about: a 403 must never draw reconnect advice.
     assert "reconnect the affected account" not in summary.lower()
 

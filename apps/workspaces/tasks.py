@@ -118,9 +118,13 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
         "expired or revoked sign-in — reconnect the affected account "
         "(Settings → Connections) and re-run materialization."
     ),
+    ErrorCode.AUTH_REFRESH_FAILED: (
+        "sign-in refresh could not complete — retry shortly. If the problem persists, "
+        "ask an administrator to check the provider connection settings."
+    ),
     ErrorCode.AUTH_ACCESS_DENIED: (
-        "access was removed upstream, not an expired sign-in — reconnecting will "
-        "NOT restore it, because it mints a token with exactly the same access. "
+        "access was removed upstream or this resource is restricted — reconnecting "
+        "alone does not change upstream permissions. "
         "Ask an admin on the affected provider to restore access, or remove that "
         "data source from the workspace."
     ),

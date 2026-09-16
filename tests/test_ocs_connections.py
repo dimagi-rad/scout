@@ -281,9 +281,10 @@ async def test_detect_team_none_when_no_sessions(mocker):
 @pytest.mark.django_db(transaction=True)
 async def test_oauth_import_links_team_and_connection(user, mocker):
 
-    await SocialAccount.objects.acreate(
+    account = await SocialAccount.objects.acreate(
         user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
     )
+    await SocialToken.objects.acreate(account=account, token="tok")
     experiments = [{"id": "exp-1", "name": "Bot 1"}, {"id": "exp-2", "name": "Bot 2"}]
 
     async def fake_get(url, headers=None, params=None):

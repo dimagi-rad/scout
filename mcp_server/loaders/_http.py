@@ -7,15 +7,13 @@ throttles without pinning the sole materialization worker thread (arch #252).
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 
 import requests
 from urllib3.util.retry import Retry
 
+from apps.common.errors import UpstreamRefreshFailed
 from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
-
-logger = logging.getLogger(__name__)
 
 # urllib3 honours a server ``Retry-After`` header verbatim when
 # ``respect_retry_after_header=True`` — with NO upper bound (``backoff_max``
@@ -84,8 +82,9 @@ def get_with_auth_refresh(
     reactive refresh that lets a load outlive a short-lived OAuth token
     (arch #252, finding 14#3). It is consulted only on a 401 (an expiry
     signal); a 403 is a permission error left to the caller. On refresh
-    failure the original 401 response is returned so the caller raises its
-    provider ``AuthError`` (fail closed — never a stale retry).
+    failure the refresh exception propagates: a transient refresh outage is
+    not evidence that the credential was revoked. A refresher that returns
+    no token raises an expected refresh failure for the same reason.
     """
     policy = ProviderURLPolicy(trusted_origin)
     url = policy.resolve(url)
@@ -107,12 +106,8 @@ def get_with_auth_refresh(
         if resp.status_code != 401 or refresh is None or refreshed:
             return resp
         refreshed = True
-        try:
-            new_token = refresh()
-        except Exception:
-            logger.warning("Mid-run token refresh failed; surfacing auth error", exc_info=True)
-            return resp
-        if not new_token:
-            return resp
         resp.close()
+        new_token = refresh()
+        if not new_token:
+            raise UpstreamRefreshFailed("Mid-run token refresh returned no access token")
         session.headers["Authorization"] = f"Bearer {new_token}"

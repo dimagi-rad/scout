@@ -51,12 +51,14 @@ from django.utils import timezone
 from psycopg import sql as psql
 
 from apps.common.error_codes import code_of
+from apps.common.errors import DenialScope, UpstreamAccessDenied, UpstreamTokenExpired
 from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset, TransformationRunStatus
 from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
+from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
@@ -132,6 +134,8 @@ def run_pipeline(
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
+    observed_connection = tenant_membership.connection
+
     # provision + discover + N sources + transform/skip
     total_steps = 2 + len(pipeline.sources) + 1
     step = 0
@@ -460,6 +464,19 @@ def run_pipeline(
                     "error": _summarize_error(e),
                     "error_code": code_of(e),
                 },
+            )
+        if (
+            isinstance(e, (UpstreamTokenExpired, UpstreamAccessDenied))
+            and e.denial_scope != DenialScope.UNKNOWN
+            and not e.denial_handled
+        ):
+            record_upstream_denial(
+                observed_connection,
+                credential=credential["value"],
+                code=e.code,
+                tenant_id=tenant_membership.tenant_id
+                if isinstance(e, UpstreamAccessDenied)
+                else None,
             )
         raise
 

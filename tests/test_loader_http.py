@@ -5,8 +5,13 @@ from __future__ import annotations
 import io
 from unittest.mock import MagicMock
 
+import pytest
 from urllib3.response import HTTPResponse
 
+from apps.common.error_codes import code_of
+from apps.common.errors import ExpectedStateError, UpstreamRefreshFailed
+from apps.users.services.token_refresh import TokenRefreshUnavailable
+from apps.workspaces.tasks import _CREDENTIAL_GUIDANCE
 from mcp_server.loaders._http import (
     MAX_RETRY_AFTER_SECONDS,
     RETRY_STATUS_FORCELIST,
@@ -98,23 +103,34 @@ class TestGetWithAuthRefresh:
         refresh.assert_not_called()
         assert session.get.call_count == 1
 
-    def test_refresh_failure_returns_original_401(self):
+    def test_refresh_failure_propagates_without_claiming_authoritative_denial(self):
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
         refresh = MagicMock(side_effect=RuntimeError("boom"))
-        result = get_with_auth_refresh(
-            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
-        )
-        # Original 401 returned so the caller raises its provider AuthError.
-        assert result is resp401
+        with pytest.raises(RuntimeError, match="boom"):
+            get_with_auth_refresh(
+                session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+            )
         assert session.get.call_count == 1
 
     def test_empty_new_token_does_not_retry(self):
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
         refresh = MagicMock(return_value=None)
-        result = get_with_auth_refresh(
-            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
-        )
-        assert result is resp401
+        with pytest.raises(UpstreamRefreshFailed, match="no access token"):
+            get_with_auth_refresh(
+                session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+            )
         assert session.get.call_count == 1
+
+
+@pytest.mark.parametrize("failure", [TokenRefreshUnavailable("provider unavailable"), None])
+def test_refresh_outage_has_expected_actionable_error(failure):
+    session = _fake_session([MagicMock(status_code=401)])
+    refresh = MagicMock(side_effect=failure, return_value=None)
+    with pytest.raises(Exception) as caught:
+        get_with_auth_refresh(session, "https://x/y", trusted_origin="https://x", refresh=refresh)
+    assert isinstance(caught.value, ExpectedStateError)
+    assert code_of(caught.value) == "AUTH_REFRESH_FAILED"
+    assert "retry" in _CREDENTIAL_GUIDANCE[code_of(caught.value)]
+    assert session.get.call_count == 1

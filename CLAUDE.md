@@ -117,6 +117,10 @@ Make each commit one logical change — a single feature-level unit that is inte
 
 A "change" is one logical thing, not one edit. Split separable work — a bug fix, an unrelated refactor, a new helper — into a commit each, ordered so prerequisites land first. If the commit message needs an "and," it's probably two commits.
 
+## Pull request review process
+
+Submit the PR, then complete both Claude's automatic review and an independent internal critical review. Verify that the automatic reviewer actually produced a review; a green workflow with blocked tools or no review output is not sufficient. Evaluate findings, fix confirmed issues, run relevant checks, and repeat the review cycle until there is high confidence the current changes are clean. Only then request review from GitHub user `snopoke`. Do not hand off to the human reviewer before completing this automated iteration.
+
 ## Testing conventions
 
 ### data-testid attributes
