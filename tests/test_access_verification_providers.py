@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier, Lock
+from unittest.mock import Mock
 from uuid import uuid4
 
 import httpx
 import pytest
+from asgiref.sync import async_to_sync
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantConnection
-from apps.users.services.access_verification_providers import verify_provider
+from apps.users.services.access_verification_providers import ProcessNetworkLimiter, verify_provider
 from apps.users.services.access_verification_types import (
     CredentialObservation,
     CredentialRequestSnapshot,
@@ -265,7 +269,7 @@ async def test_401_is_credential_rejection_and_collection_403_is_indeterminate(
     "payload",
     [
         {},
-        {"results": {}},
+        {"results": {}, "next": None},
         {"results": [{"name": "missing id"}], "next": None},
         {"results": [{"id": "same", "name": "A"}, {"id": "same", "name": "B"}], "next": None},
     ],
@@ -353,3 +357,171 @@ async def test_invalid_commcare_api_key_shape_is_indeterminate_without_network(s
     result, requests = await _verify(request, [], settings=settings)
     assert result.outcome == VerificationOutcome.INDETERMINATE
     assert requests == []
+
+
+def test_default_process_limiter_survives_successive_contended_event_loops(settings):
+    settings.OCS_URL = "https://ocs.example"
+
+    async def burst():
+        active = 0
+        peak = 0
+
+        class DelayedClient(_Client):
+            async def get(self, url, **kwargs):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0.01)
+                    return _response(payload={"results": [], "next": None})
+                finally:
+                    active -= 1
+
+        results = await asyncio.gather(
+            *(
+                verify_provider(
+                    _request("ocs"),
+                    settings=settings,
+                    client_factory=lambda: DelayedClient([]),
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
+                for _ in range(8)
+            )
+        )
+        assert all(result.outcome == VerificationOutcome.COMPLETE for result in results)
+        assert peak == 4
+
+    async_to_sync(burst)()
+    async_to_sync(burst)()
+
+
+def test_default_limiter_bounds_concurrent_loops_process_wide(settings):
+    settings.OCS_URL = "https://ocs.example"
+    start = Barrier(2)
+    lock = Lock()
+    active = 0
+    peak = 0
+
+    class DelayedClient(_Client):
+        async def get(self, url, **kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.02)
+                return _response(payload={"results": [], "next": None})
+            finally:
+                with lock:
+                    active -= 1
+
+    async def burst():
+        return await asyncio.gather(
+            *(
+                verify_provider(
+                    _request("ocs"),
+                    settings=settings,
+                    client_factory=lambda: DelayedClient([]),
+                    deadline=asyncio.get_running_loop().time() + 2,
+                )
+                for _ in range(8)
+            )
+        )
+
+    def run():
+        start.wait(timeout=2)
+        return asyncio.run(burst())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(run) for _ in range(2)]
+        for future in futures:
+            assert all(r.outcome == VerificationOutcome.COMPLETE for r in future.result(timeout=3))
+    assert peak == 4
+    assert active == 0
+
+
+@pytest.mark.asyncio
+async def test_limiter_wait_deadline_does_not_start_network_or_leak_permit(settings):
+    settings.OCS_URL = "https://ocs.example"
+    limiter = ProcessNetworkLimiter(1)
+    await limiter.acquire()
+    factory = Mock()
+    result = await verify_provider(
+        _request("ocs"),
+        settings=settings,
+        limiter=limiter,
+        client_factory=factory,
+        deadline=asyncio.get_running_loop().time() + 0.03,
+    )
+    assert result.outcome == VerificationOutcome.UNAVAILABLE
+    factory.assert_not_called()
+    limiter.release()
+    assert await asyncio.wait_for(limiter.acquire(), timeout=0.1)
+    limiter.release()
+    with pytest.raises(ValueError):
+        limiter.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_limiter_cancellation_preserves_capacity(settings, waiting):
+    settings.OCS_URL = "https://ocs.example"
+    limiter = ProcessNetworkLimiter(1)
+    network_started = asyncio.Event()
+    network_stopped = asyncio.Event()
+
+    class HangingClient(_Client):
+        async def get(self, url, **kwargs):
+            network_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                network_stopped.set()
+
+    if waiting:
+        await limiter.acquire()
+    task = asyncio.create_task(
+        verify_provider(
+            _request("ocs"),
+            settings=settings,
+            limiter=limiter,
+            client_factory=lambda: HangingClient([]),
+        )
+    )
+    if waiting:
+        await asyncio.sleep(0.02)
+        assert not network_started.is_set()
+    else:
+        await asyncio.wait_for(network_started.wait(), timeout=0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    if waiting:
+        limiter.release()
+    else:
+        assert network_stopped.is_set()
+    assert await asyncio.wait_for(limiter.acquire(), timeout=0.1)
+    limiter.release()
+    with pytest.raises(ValueError):
+        limiter.release()
+
+
+@pytest.mark.asyncio
+async def test_ocs_oauth_without_scope_is_indeterminate_without_network(settings):
+    snapshot = _request("ocs")
+    snapshot = replace(snapshot, observation=replace(snapshot.observation, scope_key=""))
+    result, requests = await _verify(snapshot, [], settings=settings)
+    assert result.outcome == VerificationOutcome.INDETERMINATE
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_exact_row_bound_is_complete(settings):
+    settings.OCS_URL = "https://ocs.example"
+    result, _ = await _verify(
+        _request("ocs"),
+        [_response(payload={"results": [{"id": str(i)} for i in range(10000)], "next": None})],
+        settings=settings,
+    )
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert len(result.external_ids) == 10000

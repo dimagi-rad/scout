@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from threading import BoundedSemaphore
 from typing import Any
 
 import httpx
@@ -21,7 +22,32 @@ PROVIDER_BUDGET_SECONDS = 20.0
 PER_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_PAGES = 100
 MAX_ROWS = 10_000
-NETWORK_LIMITER = asyncio.Semaphore(4)
+
+
+class ProcessNetworkLimiter:
+    """Bound network work across threads and successive async_to_sync loops.
+
+    Never block an event loop or delegate a blocking acquisition to an executor:
+    a cancelled executor waiter could acquire a permit after its caller exits.
+    Nonblocking acquisition has no suspension between acquiring and returning;
+    callers own release after a successful await, as with asyncio.Semaphore.
+    """
+
+    def __init__(self, capacity: int):
+        self._permits = BoundedSemaphore(capacity)
+
+    async def acquire(self) -> bool:
+        # asyncio.Event/Semaphore cannot coordinate waiters on different loops.
+        while not self._permits.acquire(blocking=False):  # noqa: ASYNC110
+            # Cancellable backoff keeps the caller's wait_for deadline effective.
+            await asyncio.sleep(0.01)
+        return True
+
+    def release(self) -> None:
+        self._permits.release()
+
+
+NETWORK_LIMITER = ProcessNetworkLimiter(4)
 
 _UNAVAILABLE = "verification_unavailable"
 _INDETERMINATE = "verification_indeterminate"
@@ -147,7 +173,7 @@ async def verify_provider(
     clock: Callable[[], float] = time.monotonic,
     client_factory: Callable[[], Any] = _default_client_factory,
     settings=django_settings,
-    limiter: asyncio.Semaphore = NETWORK_LIMITER,
+    limiter: ProcessNetworkLimiter | asyncio.Semaphore = NETWORK_LIMITER,
 ) -> ProviderVerificationResult:
     """Return a complete, bounded provider listing without touching the database."""
     deadline = min(
