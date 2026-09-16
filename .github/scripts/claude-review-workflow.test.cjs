@@ -59,7 +59,7 @@ function harness() {
     },
   ];
   h.core = {
-    setSecret() {},
+    setSecret: (value) => (h.secrets = (h.secrets || []).concat(value)),
     setOutput: (k, v) => (h.outputs[k] = v),
     info() {},
     warning() {},
@@ -73,7 +73,10 @@ function harness() {
     },
   };
   h.fs = {
-    writeFileSync: (p, s) => (h.files[p] = s),
+    writeFileSync: (p, s, options) => {
+      h.writeOptions = { ...h.writeOptions, [p]: options };
+      h.files[p] = s;
+    },
     readFileSync: (p) => {
       if (!(p in h.files)) throw Error("PRIVATE PATH");
       return h.files[p];
@@ -329,6 +332,8 @@ test("malformed or duplicate receipt state cannot be overwritten as trusted hist
 test("receipt nonce stays in private runner file rather than echoed step inputs", async () => {
   const h = await prepared();
   assert.equal(h.outputs.receipt, undefined);
+  assert.deepEqual(h.secrets, [JSON.parse(h.env.CLAUDE_RECEIPT).nonce]);
+  assert.equal(h.writeOptions["/tmp/scout-claude-receipt.json"].mode, 0o600);
   assert.equal(
     JSON.parse(h.files["/tmp/scout-claude-receipt.json"]).nonce,
     JSON.parse(h.env.CLAUDE_RECEIPT).nonce,
