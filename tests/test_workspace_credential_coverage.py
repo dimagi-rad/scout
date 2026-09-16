@@ -345,6 +345,20 @@ def test_nonrenewable_expired_oauth_token_is_not_covered(user):
     assert _only_report(workspace, user).gaps[0].code == "oauth_token_expired"
 
 
+def test_nonrenewable_near_expiry_oauth_token_is_not_covered(user):
+    workspace = _workspace()
+    _member(workspace, user)
+    tenant = _tenant(workspace, "commcare", "domain", "Domain")
+    _oauth_membership(
+        user,
+        tenant,
+        refresh_token="",
+        expires_at=timezone.now() + timedelta(seconds=30),
+    )
+
+    assert _only_report(workspace, user).gaps[0].code == "oauth_token_expired"
+
+
 def test_renewable_near_expiry_oauth_token_is_locally_covered(user):
     workspace = _workspace()
     _member(workspace, user)

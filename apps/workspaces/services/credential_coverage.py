@@ -18,7 +18,12 @@ from allauth.socialaccount.models import SocialToken
 from apps.users.adapters import decrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.oauth_scope import account_scope, canonical_provider, is_active_identity
-from apps.users.services.token_refresh import credential_fingerprint, token_health
+from apps.users.services.token_refresh import (
+    credential_fingerprint,
+    get_token_url,
+    token_health,
+    token_needs_refresh,
+)
 from apps.workspaces.models import WorkspaceMembership, WorkspaceTenant
 
 LOCAL_CREDENTIAL_READINESS = "local_credential_readiness"
@@ -230,7 +235,10 @@ def _oauth_gap(membership, connection, tokens, bindings):
     health = token_health(token, connection.provider, refresh_failed=refresh_failed)
     if refresh_failed:
         return _gap(CredentialGapCode.OAUTH_REFRESH_FAILED, membership.tenant, membership)
-    if health != "connected":
+    can_refresh = bool(get_token_url(connection.provider) and token.token_secret and token.app)
+    if health != "connected" or (
+        token_needs_refresh(token.expires_at, can_refresh=can_refresh) and not can_refresh
+    ):
         return _gap(CredentialGapCode.OAUTH_CREDENTIAL_EXPIRED, membership.tenant, membership)
     return None
 
