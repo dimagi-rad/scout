@@ -90,6 +90,19 @@ def source_names(tenant, assets):
     }
 
 
+LEGACY_ALIASES = {
+    # _unique_alias (before cede159) never capped or digit-prefixed an alias;
+    # dbt_column_alias before #426 could emit one literal alias twice.
+    "overlong": lambda first: "x" * 75,
+    "leading_digit": lambda first: "1st_" + first,
+    "duplicate": lambda first: first,
+}
+
+
+def question_aliases(sql):
+    return re.findall(r'AS "([^"]+)"', sql)
+
+
 @pytest.mark.parametrize("paths", [PATHS, (FALLBACK, LITERAL)])
 def test_preserves_legacy_source_across_unchanged_reordered_and_extended_metadata(
     repeat_tenant, paths
@@ -275,6 +288,15 @@ def test_canonical_case_removal_accepts_quoted_keys_and_reserved_aliases():
     assert generate_system_assets(tenant, {}, existing_assets=old) == []
 
 
+@pytest.mark.parametrize("legacy", LEGACY_ALIASES.values(), ids=LEGACY_ALIASES)
+def test_legacy_case_property_aliases_do_not_block_case_removal(legacy):
+    tenant = Tenant(provider="commcare", external_id="synthetic-case-removal")
+    old = case_assets(tenant)
+    first, *_, last = question_aliases(old[0].sql_content)
+    old[0].sql_content = old[0].sql_content.replace(f'AS "{last}"', f'AS "{legacy(first)}"')
+    assert generate_system_assets(tenant, {}, existing_assets=old) == []
+
+
 @pytest.mark.parametrize(
     "edit",
     [
@@ -385,19 +407,6 @@ def test_historical_connect_parent_does_not_accept_arbitrary_core_columns(replac
     old[0].sql_content = old[0].sql_content.replace("    username,", f"    {replacement},")
     with pytest.raises(RepeatModelMigrationRequired, match="original parent source"):
         generate(tenant, metadata(tenant), old)
-
-
-LEGACY_ALIASES = {
-    # _unique_alias (before cede159) never capped or digit-prefixed an alias;
-    # dbt_column_alias before #426 could emit one literal alias twice.
-    "overlong": lambda first: "x" * 75,
-    "leading_digit": lambda first: "1st_" + first,
-    "duplicate": lambda first: first,
-}
-
-
-def question_aliases(sql):
-    return re.findall(r'AS "([^"]+)"', sql)
 
 
 @pytest.mark.parametrize("legacy", LEGACY_ALIASES.values(), ids=LEGACY_ALIASES)
