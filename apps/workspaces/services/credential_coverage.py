@@ -17,7 +17,12 @@ from allauth.socialaccount.models import SocialToken
 
 from apps.users.adapters import decrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
-from apps.users.services.oauth_scope import account_scope, canonical_provider, is_active_identity
+from apps.users.services.oauth_scope import (
+    account_scope,
+    canonical_provider,
+    is_active_identity,
+    oauth_membership_scope_mismatch,
+)
 from apps.users.services.token_refresh import (
     credential_fingerprint,
     get_token_url,
@@ -46,6 +51,7 @@ class CredentialGapCode(StrEnum):
     OAUTH_CREDENTIAL_EMPTY = "oauth_token_empty"
     OAUTH_CREDENTIAL_EXPIRED = "oauth_token_expired"
     OAUTH_REFRESH_FAILED = "oauth_refresh_failed"
+    OAUTH_SCOPE_MISMATCH = "oauth_scope_mismatch"
     OCS_TEAM_MISSING = "ocs_team_missing"
     OCS_CONNECTION_SCOPE_MISSING = "ocs_connection_scope_missing"
     OCS_CONNECTION_SCOPE_MISMATCH = "ocs_connection_scope_mismatch"
@@ -163,6 +169,10 @@ def _normalized_team_slug(membership) -> str:
     return str(membership.team_slug or "").strip()
 
 
+def _normalized_team_name(membership) -> str:
+    return str(membership.team_name or "").strip()
+
+
 def _gap(code: CredentialGapCode, tenant, membership=None) -> CredentialCoverageGap:
     return CredentialCoverageGap(
         code=code,
@@ -171,8 +181,8 @@ def _gap(code: CredentialGapCode, tenant, membership=None) -> CredentialCoverage
         tenant_name=tenant.canonical_name,
         provider=tenant.provider,
         membership_id=str(membership.id) if membership else None,
-        team_slug=membership.team_slug if membership else "",
-        team_name=membership.team_name if membership else "",
+        team_slug=_normalized_team_slug(membership) if membership else "",
+        team_name=_normalized_team_name(membership) if membership else "",
     )
 
 
@@ -232,6 +242,8 @@ def _oauth_gap(membership, connection, tokens, bindings):
     token = next(iter(tokens.get(account.pk, ())), None)
     if token is None:
         return _gap(CredentialGapCode.OAUTH_CREDENTIAL_MISSING, membership.tenant, membership)
+    if oauth_membership_scope_mismatch(membership, connection, token.account):
+        return _gap(CredentialGapCode.OAUTH_SCOPE_MISMATCH, membership.tenant, membership)
     if not token.token:
         return _gap(CredentialGapCode.OAUTH_CREDENTIAL_EMPTY, membership.tenant, membership)
     refresh_failed = bool(
@@ -389,7 +401,8 @@ def get_tenant_credential_readiness(
 
     ``Tenant`` instances carry the affected source metadata into structured
     gaps. Callers can use this for proposed membership changes before writing
-    either a ``WorkspaceMembership`` or ``WorkspaceTenant``.
+    either a ``WorkspaceMembership`` or ``WorkspaceTenant``. Duplicate pairs
+    are evaluated once in first-occurrence order.
     """
     return _get_tenant_credential_readiness(_normalize_pairs(user_tenant_pairs))
 

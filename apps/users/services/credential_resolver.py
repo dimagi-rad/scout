@@ -9,7 +9,11 @@ from allauth.socialaccount.models import SocialToken
 
 from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantConnection
-from apps.users.services.oauth_scope import is_active_identity, provider_accounts
+from apps.users.services.oauth_scope import (
+    is_active_identity,
+    oauth_membership_scope_mismatch,
+    provider_accounts,
+)
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     credential_fingerprint,
@@ -130,26 +134,6 @@ async def aiter_fresh_access_tokens(user, provider: str) -> list[tuple]:
     return pairs
 
 
-def _oauth_team_mismatch(membership, conn, token_obj) -> bool:
-    """True when the chatbot's team is known and this connection is scoped elsewhere.
-
-    The chatbot's team lives on the membership (``team_slug``). The team the
-    connection speaks for is ``conn.scope_key``, recorded when the credential was
-    authorised; the OIDC ``team`` claim on the token's own account is the fallback
-    for connections predating that field. When they differ we must not use this
-    token — fail closed.
-
-    Still needed after multi-token OAuth: memberships that a single shared
-    connection accumulated across two teams keep pointing at it until the user
-    re-authorises the second team, and serving them team A's token would be the
-    cross-team read this check was written to stop.
-    """
-    if not membership.team_slug:
-        return False
-    current = conn.scope_key or (getattr(token_obj.account, "extra_data", None) or {}).get("team")
-    return bool(current) and current != membership.team_slug
-
-
 async def aresolve_credential(membership) -> dict | None:
     """Resolve a credential dict for a TenantMembership, or return None.
 
@@ -174,7 +158,7 @@ async def aresolve_credential(membership) -> dict | None:
     token_obj = await aget_connection_token(conn)
     if not token_obj:
         return None
-    if _oauth_team_mismatch(membership, conn, token_obj):
+    if oauth_membership_scope_mismatch(membership, conn, token_obj.account):
         # This connection's credential belongs to a different team than this
         # chatbot. Fail closed (never serve another team's token), but surface a
         # distinct, actionable error so the user is told to connect that team —

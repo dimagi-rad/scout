@@ -14,7 +14,12 @@ from django.utils import timezone
 
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
-from apps.users.services.credential_resolver import aget_connection_token
+from apps.users.services.credential_resolver import (
+    CredentialResolutionError,
+    aget_connection_token,
+    aresolve_credential,
+)
+from apps.users.services.oauth_scope import oauth_membership_scope_mismatch
 from apps.users.services.token_refresh import credential_fingerprint
 from apps.workspaces.models import (
     Workspace,
@@ -518,6 +523,54 @@ def test_ocs_oauth_rejects_connection_and_account_scope_mismatches(user):
     assert _only_report(workspace, user).gaps[0].code == "ocs_account_scope_mismatch"
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("team_slug", "connection_scope", "account_team", "expected_gap"),
+    [
+        ("acme", "globex", "acme", "oauth_scope_mismatch"),
+        ("acme", "", "globex", "oauth_scope_mismatch"),
+        ("acme", "", "acme", None),
+        ("", "globex", "globex", None),
+        ("acme", "acme", "globex", None),
+        (" acme ", "acme", "acme", "oauth_scope_mismatch"),
+    ],
+)
+def test_non_ocs_oauth_scope_matches_runtime_in_sync_and_async_audits(
+    user,
+    team_slug,
+    connection_scope,
+    account_team,
+    expected_gap,
+):
+    workspace = _workspace()
+    _member(workspace, user)
+    tenant = _tenant(workspace, "commcare", "domain", "Domain")
+    membership, connection, _account, token = _oauth_membership(
+        user,
+        tenant,
+        team_slug=team_slug,
+        connection_scope=connection_scope,
+        account_team=account_team,
+    )
+
+    sync_readiness = get_tenant_credential_readiness([(user.id, tenant)])
+    async_readiness = async_to_sync(aget_tenant_credential_readiness)([(user.id, tenant)])
+
+    assert async_readiness == sync_readiness
+    assert oauth_membership_scope_mismatch(membership, connection, token.account) is bool(
+        expected_gap
+    )
+    if expected_gap:
+        assert sync_readiness[0].usable is False
+        assert sync_readiness[0].gap.code == expected_gap
+        with pytest.raises(CredentialResolutionError):
+            async_to_sync(aresolve_credential)(membership)
+    else:
+        assert sync_readiness[0].usable is True
+        assert sync_readiness[0].gap is None
+        assert async_to_sync(aresolve_credential)(membership)["type"] == "oauth"
+
+
 def test_unsupported_credential_type_is_not_covered(user):
     workspace = _workspace()
     _member(workspace, user)
@@ -722,6 +775,8 @@ def test_management_command_json_reports_only_ids_names_and_structured_gaps(user
     _member(workspace, user)
     tenant = _tenant(workspace, "commcare", "broken-domain", "Broken Domain")
     membership, conn = _api_membership(user, tenant, key="discarded-key")
+    membership.provider_metadata = {"team_slug": None, "team_name": None}
+    membership.save(update_fields=["provider_metadata"])
     conn.encrypted_credential = "not-fernet"
     conn.save(update_fields=["encrypted_credential"])
     usable_tenant = _tenant(workspace, "commcare", "usable-domain", "Usable Domain")
@@ -748,6 +803,8 @@ def test_management_command_json_reports_only_ids_names_and_structured_gaps(user
     assert payload[0]["user_id"] == user.id
     assert payload[0]["gaps"][0]["membership_id"] == str(membership.id)
     assert payload[0]["gaps"][0]["code"] == "api_key_decrypt_failed"
+    assert payload[0]["gaps"][0]["team_slug"] == ""
+    assert payload[0]["gaps"][0]["team_name"] == ""
     assert "email" not in raw
     assert "never-print-this" not in raw
     assert ciphertext not in raw
