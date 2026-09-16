@@ -220,6 +220,12 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
             VerificationControl.DoesNotExist,
             ValueError,
         ):
+            # Snapshot failure must not delay a repaired credential. Match the
+            # original lease so an obsolete publisher cannot release a successor.
+            VerificationControl.objects.filter(
+                connection_id=claim.observation.connection_id,
+                lease_token=claim.lease_token,
+            ).update(lease_token=None, lease_expires_at=None)
             return PublicationStatus.REJECTED
         if control.lease_token != claim.lease_token:
             return PublicationStatus.REJECTED

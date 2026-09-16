@@ -2,6 +2,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
@@ -436,6 +437,13 @@ def test_corrupt_api_key_after_claim_rejects_publication(user, tenant, verificat
     )
     assert not UpstreamAccessProof.objects.exists()
 
+    control = VerificationControl.objects.get(connection=conn)
+    assert control.lease_token is None
+    assert control.lease_expires_at is None
+    conn.encrypted_credential = encrypt_credential("repaired-key")
+    conn.save(update_fields=["encrypted_credential"])
+    assert claim_verification(user.id, conn.id, {tenant.id}).status == ClaimStatus.CLAIMED
+
 
 @pytest.mark.django_db
 def test_empty_oauth_access_token_claim_is_safely_denied(user):
@@ -462,6 +470,12 @@ def test_empty_oauth_access_token_after_claim_rejects_publication(user):
         == PublicationStatus.REJECTED
     )
     assert not UpstreamAccessProof.objects.exists()
+
+    control = VerificationControl.objects.get(connection=conn)
+    assert control.lease_token is None
+    assert control.lease_expires_at is None
+    SocialToken.objects.filter(account_id=conn.social_account_id).update(token="repaired-token")
+    assert claim_verification(user.id, conn.id, {tenant.id}).status == ClaimStatus.CLAIMED
 
 
 @pytest.mark.django_db
@@ -576,3 +590,27 @@ def test_invalid_authoritative_code_cannot_archive_membership(
     assert status == PublicationStatus.REJECTED
     assert membership.archived_at is None
     assert conn.upstream_denied_at is None
+
+
+@pytest.mark.django_db
+def test_invalid_snapshot_publication_preserves_successor_lease(
+    user, tenant, verification_connection
+):
+    conn, _membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    successor = uuid4()
+    expires = timezone.now() + LEASE_DURATION
+    VerificationControl.objects.filter(connection=conn).update(
+        lease_token=successor, lease_expires_at=expires
+    )
+    conn.encrypted_credential = "not-fernet"
+    conn.save(update_fields=["encrypted_credential"])
+
+    assert (
+        publish_verification(claim, VerificationResult.complete({tenant.id}))
+        == PublicationStatus.REJECTED
+    )
+    control = VerificationControl.objects.get(connection=conn)
+    assert control.lease_token == successor
+    assert control.lease_expires_at == expires
+    assert not UpstreamAccessProof.objects.exists()
