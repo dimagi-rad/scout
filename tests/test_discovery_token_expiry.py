@@ -6,6 +6,7 @@ import httpx
 import pytest
 from allauth.socialaccount.models import SocialApp
 from django.core.cache import cache
+from django.test import AsyncClient
 from django.utils import timezone
 
 from apps.users.auth_views import _atry_resolve_provider
@@ -18,7 +19,7 @@ from tests.test_upstream_denial import identity
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("caller", ["onboarding", "tenant_list"])
+@pytest.mark.parametrize("caller", ["onboarding", "tenant_list", "tenant_ensure"])
 @pytest.mark.parametrize("refresh_status", [200, 400, 503])
 async def test_lazy_discovery_preserves_memberships_with_expired_access_token(
     user, httpx_mock, caller, refresh_status
@@ -41,7 +42,9 @@ async def test_lazy_discovery_preserves_memberships_with_expired_access_token(
             )
             return httpx.Response(refresh_status, json=payload)
         if request.headers.get("Authorization") == "Bearer fresh":
-            return httpx.Response(200, json={"opportunities": [{"id": 1, "name": "A"}]})
+            return httpx.Response(
+                200, json={"opportunities": [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]}
+            )
         return httpx.Response(401)
 
     httpx_mock.add_callback(upstream, is_reusable=True)
@@ -49,8 +52,19 @@ async def test_lazy_discovery_preserves_memberships_with_expired_access_token(
         await _atry_resolve_provider(
             user, "commcare_connect", resolve_connect_opportunities, "Connect"
         )
-    else:
+    elif caller == "tenant_list":
         await _arefresh_all_identities(user)
+    else:
+        client = AsyncClient()
+        await client.aforce_login(user)
+        response = await client.post(
+            "/api/auth/tenants/ensure/",
+            {"provider": "commcare_connect", "tenant_id": "2"},
+            content_type="application/json",
+        )
+        assert response.status_code == (200 if refresh_status == 200 else 404)
+        if refresh_status == 200:
+            assert response.json()["tenant_id"] == "2"
 
     assert await TenantMembership.objects.filter(pk=membership.pk).aexists()
     await conn.arefresh_from_db()
