@@ -201,6 +201,15 @@ async def test_run_materialization_advertises_all_injected_params():
     )
 
 
+async def test_cancel_materialization_advertises_injected_actor():
+    async with mcp_wire() as (session, _tools):
+        resp = await session.list_tools()
+    schema = next(t.inputSchema for t in resp.tools if t.name == "cancel_materialization")
+    props = set((schema or {}).get("properties", {}))
+
+    assert {"workspace_id", "user_id"} <= props
+
+
 # --------------------------------------------------------------------------- #
 # Contract 3: prompt-vs-tool-schema drift — the live `pipeline=` instruction
 # --------------------------------------------------------------------------- #

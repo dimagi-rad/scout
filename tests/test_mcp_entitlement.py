@@ -17,6 +17,7 @@ scoped to the calling workspace.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -28,6 +29,8 @@ from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
     Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
     WorkspaceTenant,
 )
 from mcp_server.server import (
@@ -48,6 +51,9 @@ async def _make_workspace_with_run(*, email, ext_id, schema_name, run_state):
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await WorkspaceMembership.objects.aupdate_or_create(
+        workspace=ws, user=user, defaults={"role": WorkspaceRole.MANAGE}
+    )
     ts = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name=schema_name, state=SchemaState.ACTIVE
     )
@@ -85,7 +91,34 @@ async def test_run_materialization_denies_empty_user_id():
     )
 
     assert result["success"] is False
-    assert result["error"]["code"] in {"VALIDATION_ERROR", "NOT_FOUND"}
+    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_materialization_denies_read_before_dispatch():
+    user, ws, _ = await _make_workspace_with_run(
+        email="reader-run@b.c",
+        ext_id="reader-run",
+        schema_name="reader_run",
+        run_state=MaterializationRun.RunState.COMPLETED,
+    )
+    await WorkspaceMembership.objects.filter(workspace=ws, user=user).aupdate(
+        role=WorkspaceRole.READ
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+
+    with patch("mcp_server.server.materialize_workspace.defer_async", new=AsyncMock()) as defer:
+        result = await run_materialization(
+            workspace_id=str(ws.id),
+            user_id=str(user.id),
+            thread_id=str(thread.id),
+            tool_call_id="tc-read",
+        )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+    defer.assert_not_awaited()
 
 
 # --- cancel_materialization scoping ---
@@ -94,7 +127,7 @@ async def test_run_materialization_denies_empty_user_id():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_materialization_rejects_run_from_other_workspace():
-    _, _ws_a, _ = await _make_workspace_with_run(
+    user_a, _ws_a, _ = await _make_workspace_with_run(
         email="a@b.c", ext_id="ta", schema_name="t_a", run_state=MaterializationRun.RunState.STARTED
     )
     _, ws_b, run_b = await _make_workspace_with_run(
@@ -102,7 +135,9 @@ async def test_cancel_materialization_rejects_run_from_other_workspace():
     )
 
     # Caller is scoped to workspace A but supplies workspace B's run_id.
-    result = await cancel_materialization(run_id=str(run_b.id), workspace_id=str(_ws_a.id))
+    result = await cancel_materialization(
+        run_id=str(run_b.id), workspace_id=str(_ws_a.id), user_id=str(user_a.id)
+    )
 
     assert result["success"] is False
     assert result["error"]["code"] == "NOT_FOUND"
@@ -115,18 +150,61 @@ async def test_cancel_materialization_rejects_run_from_other_workspace():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_materialization_allows_run_in_own_workspace():
-    _, ws, run = await _make_workspace_with_run(
+    user, ws, run = await _make_workspace_with_run(
         email="own@b.c",
         ext_id="to",
         schema_name="t_o",
         run_state=MaterializationRun.RunState.STARTED,
     )
 
-    result = await cancel_materialization(run_id=str(run.id), workspace_id=str(ws.id))
+    result = await cancel_materialization(
+        run_id=str(run.id), workspace_id=str(ws.id), user_id=str(user.id)
+    )
 
     assert result["success"] is True
     await run.arefresh_from_db()
     assert run.state == MaterializationRun.RunState.CANCELLED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_materialization_denies_missing_actor_before_run_lookup():
+    _user, ws, run = await _make_workspace_with_run(
+        email="missing-cancel@b.c",
+        ext_id="missing-cancel",
+        schema_name="missing_cancel",
+        run_state=MaterializationRun.RunState.STARTED,
+    )
+
+    result = await cancel_materialization(run_id=str(run.id), workspace_id=str(ws.id), user_id="")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+    await run.arefresh_from_db()
+    assert run.state == MaterializationRun.RunState.STARTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_materialization_denies_read_before_run_mutation():
+    user, ws, run = await _make_workspace_with_run(
+        email="reader-cancel@b.c",
+        ext_id="reader-cancel",
+        schema_name="reader_cancel",
+        run_state=MaterializationRun.RunState.STARTED,
+    )
+    await WorkspaceMembership.objects.filter(workspace=ws, user=user).aupdate(
+        role=WorkspaceRole.READ
+    )
+
+    result = await cancel_materialization(
+        run_id=str(run.id), workspace_id=str(ws.id), user_id=str(user.id)
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+    await run.arefresh_from_db()
+    assert run.state == MaterializationRun.RunState.STARTED
 
 
 # --- get_materialization_status scoping ---

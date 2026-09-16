@@ -46,7 +46,7 @@ from apps.semantic.services.catalog import (
 from apps.semantic.services.query import run_semantic_query
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import TenantMembership, User
-from apps.workspaces.access import aresolve_workspace_access
+from apps.workspaces.access import aresolve_workspace_access, aresolve_workspace_access_ex
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -54,6 +54,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceDataRecovery,
     WorkspaceMembership,
+    WorkspaceRole,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
@@ -70,6 +71,7 @@ from config.procrastinate import app as procrastinate_app
 from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
+    AUTH_ACCESS_DENIED,
     INTERNAL_ERROR,
     NOT_FOUND,
     PIPELINE_UNRESOLVED,
@@ -1099,8 +1101,26 @@ async def get_materialization_status(
         return tc["result"]
 
 
+async def _authorize_materialization_write(workspace_id: str, user_id: str):
+    """Resolve the injected actor through the central minimum-role authorizer."""
+    if not workspace_id or not user_id:
+        return None
+    try:
+        user = await User.objects.aget(id=user_id)
+    except (User.DoesNotExist, ValueError, _ValidationError):
+        return None
+    access = await aresolve_workspace_access_ex(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    )
+    return access.workspace if access.granted else None
+
+
 @mcp.tool()
-async def cancel_materialization(run_id: str, workspace_id: str = "") -> dict:
+async def cancel_materialization(
+    run_id: str,
+    workspace_id: str = "",
+    user_id: str = "",
+) -> dict:
     """Cancel a running materialization pipeline.
 
     Marks the run as CANCELLED in the database. This is a best-effort
@@ -1112,8 +1132,18 @@ async def cancel_materialization(run_id: str, workspace_id: str = "") -> dict:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
             The run is scoped to this workspace (arch #253, 01#6) so a run in
             another workspace cannot be cancelled from here.
+        user_id: Acting user UUID (injected server-side).
     """
-    async with tool_context("cancel_materialization", run_id, workspace_id=workspace_id) as tc:
+    async with tool_context(
+        "cancel_materialization", run_id, workspace_id=workspace_id, user_id=user_id
+    ) as tc:
+        if await _authorize_materialization_write(workspace_id, user_id) is None:
+            tc["result"] = error_response(
+                AUTH_ACCESS_DENIED,
+                "Read-write or manage role required to cancel materialization.",
+            )
+            return tc["result"]
+
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
@@ -1270,6 +1300,13 @@ async def run_materialization(
         except (ValueError, AttributeError, TypeError):
             tc["result"] = error_response(
                 VALIDATION_ERROR, "thread_id must be a valid thread identifier"
+            )
+            return tc["result"]
+
+        if await _authorize_materialization_write(workspace_id, user_id) is None:
+            tc["result"] = error_response(
+                AUTH_ACCESS_DENIED,
+                "Read-write or manage role required to run materialization.",
             )
             return tc["result"]
 
