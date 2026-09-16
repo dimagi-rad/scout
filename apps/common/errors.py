@@ -77,7 +77,15 @@ class ExpectedStateError(Exception):
     """
 
 
+class TokenRefreshError(Exception):
+    """OAuth refresh failed; unclassified defects remain reportable."""
+
+    code = ErrorCode.AUTH_REFRESH_FAILED
+
+
 class DenialScope(StrEnum):
+    """TENANT permits scoped archival; UNKNOWN cannot establish lost membership."""
+
     TENANT = "tenant"
     UNKNOWN = "unknown"
 
@@ -94,6 +102,8 @@ class ExpectedUpstreamError(ExpectedStateError):
     provider: str | None = None
     code: ErrorCode | None = None
     denial_scope: DenialScope = DenialScope.TENANT
+    # Refresh-grant rejection has its own persistence policy, not resource archival.
+    denial_handled: bool = False
 
 
 class UpstreamTokenExpired(ExpectedUpstreamError):
@@ -115,6 +125,7 @@ class UpstreamRefreshFailed(ExpectedUpstreamError):
     """Refresh could not complete; retry or reconnect without revoking memberships."""
 
     code = ErrorCode.AUTH_REFRESH_FAILED
+    denial_scope = DenialScope.UNKNOWN
 
 
 class UpstreamAccessDenied(ExpectedUpstreamError):

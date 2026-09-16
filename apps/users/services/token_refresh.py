@@ -26,7 +26,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
-from apps.common.errors import UpstreamRefreshFailed, UpstreamTokenExpired
+from apps.common.errors import TokenRefreshError, UpstreamRefreshFailed, UpstreamTokenExpired
 from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import canonical_provider
 
@@ -57,12 +57,6 @@ def get_token_url(provider: str) -> str | None:
     if provider == "commcare_connect":
         return _connect_token_url()
     return PROVIDER_TOKEN_URLS.get(provider)
-
-
-class TokenRefreshError(Exception):
-    """Raised when token refresh fails."""
-
-    code = ErrorCode.AUTH_REFRESH_FAILED
 
 
 class TokenRefreshUnavailable(TokenRefreshError, UpstreamRefreshFailed):

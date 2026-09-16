@@ -468,7 +468,7 @@ def run_pipeline(
         if (
             isinstance(e, (UpstreamTokenExpired, UpstreamAccessDenied))
             and e.denial_scope != DenialScope.UNKNOWN
-            and not getattr(e, "denial_handled", False)
+            and not e.denial_handled
         ):
             record_upstream_denial(
                 observed_connection,

@@ -3,7 +3,12 @@ from unittest import mock
 import pytest
 import requests_mock as rm
 
-from apps.common.errors import ConnectAccessDeniedError, ConnectTokenExpiredError
+from apps.common.errors import (
+    ConnectAccessDeniedError,
+    ConnectTokenExpiredError,
+    UpstreamRefreshFailed,
+)
+from apps.users.services.token_refresh import TokenRefreshError, TokenRefreshUnavailable
 from mcp_server.loaders.connect_metadata import ConnectMetadataLoader
 
 BASE = "https://connect.example.com"
@@ -167,3 +172,20 @@ def test_opportunity_denial_retains_tenant_scope(loader):
         with pytest.raises(ConnectAccessDeniedError) as caught:
             loader.load()
     assert caught.value.denial_scope == "tenant"
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "configuration", "empty"])
+def test_app_structure_propagates_refresh_failure(loader, failure):
+    errors = {
+        "unavailable": TokenRefreshUnavailable("provider unavailable"),
+        "configuration": TokenRefreshError("invalid client"),
+        "empty": None,
+    }
+    refresh = mock.Mock(side_effect=errors[failure], return_value=None)
+    loader._refresh = refresh
+    with rm.Mocker() as m:
+        m.get(f"{BASE}/export/opp_org_program_list/", json={})
+        m.get(f"{BASE}/export/opportunity/814/", json={"id": 814})
+        m.get(f"{BASE}/export/opportunity/814/app_structure/", status_code=401)
+        with pytest.raises((TokenRefreshError, UpstreamRefreshFailed)):
+            loader.load()

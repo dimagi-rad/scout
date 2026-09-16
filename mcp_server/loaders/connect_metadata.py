@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import logging
 
-from apps.common.errors import DenialScope, UpstreamAccessDenied, UpstreamTokenExpired
+from apps.common.errors import (
+    DenialScope,
+    ExpectedUpstreamError,
+    TokenRefreshError,
+    UpstreamAccessDenied,
+)
 from mcp_server.loaders.commcare_metadata import _extract_case_types, _extract_form_definitions
 from mcp_server.loaders.connect_base import ConnectBaseLoader
 
@@ -32,7 +37,7 @@ class ConnectMetadataLoader(ConnectBaseLoader):
             ]
             form_definitions = _extract_form_definitions(apps)
             case_types = _extract_case_types(apps)
-        except (UpstreamTokenExpired, UpstreamAccessDenied):
+        except (ExpectedUpstreamError, TokenRefreshError):
             raise
         except Exception:
             logger.exception(
