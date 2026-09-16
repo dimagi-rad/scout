@@ -91,7 +91,8 @@ def source_names(tenant, assets):
 
 
 LEGACY_ALIASES = {
-    # _unique_alias (before cede159) never capped or digit-prefixed an alias;
+    # _unique_alias (before #235 for CommCare, cede159 for Connect) never capped
+    # or digit-prefixed an alias;
     # dbt_column_alias before #426 could emit one literal alias twice.
     "overlong": lambda _first: "x" * 75,
     "leading_digit": lambda first: "1st_" + first,

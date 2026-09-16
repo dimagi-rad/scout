@@ -124,8 +124,9 @@ def _canonical_query(
         return False
     # Added, removed or reordered questions may change projections, but never
     # admit arbitrary SQL or changes to the source, row filter, or repeat index.
-    # Alias text is inert and unconstrained: generators before cede159 and #426
-    # persisted overlong, digit-led and duplicate aliases (SCOUT-DJANGO-3F).
+    # Alias text is inert and unconstrained: generators before #235 (CommCare),
+    # cede159 (Connect) and #426 persisted overlong, digit-led and duplicate
+    # aliases (SCOUT-DJANGO-3F).
     for column in tree.expressions[core_count:]:
         if not isinstance(column, exp.Alias):
             return False
