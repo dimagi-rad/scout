@@ -243,6 +243,41 @@ class TenantConnection(models.Model):
         return f"{self.user_id}:{self.provider}:{self.credential_type}"
 
 
+class VerificationControl(models.Model):
+    connection = models.OneToOneField(
+        TenantConnection, on_delete=models.CASCADE, related_name="verification_control"
+    )
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"VerificationControl({self.connection_id})"
+
+
+class UpstreamAccessProof(models.Model):
+    connection = models.ForeignKey(
+        TenantConnection, on_delete=models.CASCADE, related_name="access_proofs"
+    )
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="access_proofs")
+    credential_fingerprint = models.CharField(max_length=64)
+    account_identity = models.CharField(max_length=64, blank=True, default="", db_default="")
+    scope_key = models.CharField(max_length=255, blank=True, default="", db_default="")
+    observed_denied_at = models.DateTimeField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_result = models.CharField(max_length=40, blank=True, default="", db_default="")
+    last_error_code = models.CharField(max_length=80, blank=True, default="", db_default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection", "tenant"], name="unique_access_proof_connection_tenant"
+            )
+        ]
+
+    def __str__(self):
+        return f"UpstreamAccessProof({self.connection_id}, {self.tenant_id})"
+
+
 class LiveTenantMembershipManager(models.Manager):
     """Default manager: hides archived (upstream-revoked) memberships.
 
