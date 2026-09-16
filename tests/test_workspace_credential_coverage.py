@@ -6,14 +6,15 @@ from io import StringIO
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-from asgiref.sync import sync_to_async
-from django.core.management import call_command
+from asgiref.sync import async_to_sync, sync_to_async
+from django.core.management import CommandError, call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.credential_resolver import aget_connection_token
 from apps.users.services.token_refresh import credential_fingerprint
 from apps.workspaces.models import (
     Workspace,
@@ -235,6 +236,16 @@ def test_ocs_api_key_with_blank_team_is_locally_ready_after_tenant_discovery(use
     assert report.covered is True
 
 
+@pytest.mark.parametrize("team_slug", [None, " acme "])
+def test_ocs_api_key_normalizes_legacy_membership_team_metadata(user, team_slug):
+    workspace = _workspace()
+    _member(workspace, user)
+    tenant = _tenant(workspace, "ocs", "bot-a", "Legacy Bot")
+    _api_membership(user, tenant, team_slug=team_slug)
+
+    assert _only_report(workspace, user).covered is True
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
@@ -415,7 +426,7 @@ def test_oauth_readiness_uses_same_first_token_as_runtime_resolver(user):
     workspace = _workspace()
     _member(workspace, user)
     tenant = _tenant(workspace, "commcare", "domain", "Domain")
-    _membership, _conn, account, first_token = _oauth_membership(
+    _membership, conn, account, first_token = _oauth_membership(
         user,
         tenant,
         refresh_token="",
@@ -436,6 +447,7 @@ def test_oauth_readiness_uses_same_first_token_as_runtime_resolver(user):
     )
 
     assert first_token.pk < second_token.pk
+    assert async_to_sync(aget_connection_token)(conn).pk == first_token.pk
     assert _only_report(workspace, user).gaps[0].code == "oauth_token_expired"
 
 
@@ -452,7 +464,37 @@ def test_old_token_refresh_failure_does_not_poison_replacement(user):
     assert _only_report(workspace, user).covered is True
 
 
-def test_ocs_oauth_requires_matching_nonempty_connection_and_account_scopes(user):
+def test_ocs_oauth_requires_connection_scope(user):
+    workspace = _workspace()
+    _member(workspace, user)
+    tenant = _tenant(workspace, "ocs", "bot-a", "Acme Bot")
+    _oauth_membership(
+        user,
+        tenant,
+        team_slug="acme",
+        account_team="acme",
+        connection_scope="",
+    )
+
+    assert _only_report(workspace, user).gaps[0].code == "ocs_connection_scope_missing"
+
+
+def test_ocs_oauth_requires_account_scope(user):
+    workspace = _workspace()
+    _member(workspace, user)
+    tenant = _tenant(workspace, "ocs", "bot-a", "Acme Bot")
+    _oauth_membership(
+        user,
+        tenant,
+        team_slug="acme",
+        account_team="",
+        connection_scope="acme",
+    )
+
+    assert _only_report(workspace, user).gaps[0].code == "ocs_account_scope_missing"
+
+
+def test_ocs_oauth_rejects_connection_and_account_scope_mismatches(user):
     workspace = _workspace()
     _member(workspace, user)
     tenant = _tenant(workspace, "ocs", "bot-a", "Acme Bot")
@@ -474,6 +516,20 @@ def test_ocs_oauth_requires_matching_nonempty_connection_and_account_scopes(user
     account.extra_data = {"team": "globex"}
     account.save(update_fields=["uid", "extra_data"])
     assert _only_report(workspace, user).gaps[0].code == "ocs_account_scope_mismatch"
+
+
+def test_unsupported_credential_type_is_not_covered(user):
+    workspace = _workspace()
+    _member(workspace, user)
+    tenant = _tenant(workspace, "commcare", "domain", "Domain")
+    membership, conn = _api_membership(user, tenant)
+    conn.credential_type = "legacy"
+    conn.save(update_fields=["credential_type"])
+
+    gap = _only_report(workspace, user).gaps[0]
+
+    assert gap.code == "credential_type_unsupported"
+    assert gap.membership_id == str(membership.id)
 
 
 def test_superseded_oauth_identity_is_not_covered(user):
@@ -506,6 +562,22 @@ def test_superseded_oauth_identity_is_not_covered(user):
     assert _only_report(workspace, user).gaps[0].code == "oauth_connection_inactive"
 
 
+def test_unbound_provider_alias_does_not_poison_bound_oauth_identity(user):
+    workspace = _workspace()
+    _member(workspace, user)
+    tenant = _tenant(workspace, "commcare", "domain", "Domain")
+    _oauth_membership(user, tenant)
+    TenantConnection.objects.create(
+        user=user,
+        provider="commcare_legacy",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="",
+        social_account=None,
+    )
+
+    assert _only_report(workspace, user).covered is True
+
+
 def test_ocs_api_key_memberships_on_one_connection_must_have_one_team(user):
     workspace = _workspace()
     _member(workspace, user)
@@ -530,7 +602,7 @@ def test_ocs_api_key_memberships_on_one_connection_must_have_one_team(user):
     assert report.covered is False
     assert {gap.code for gap in report.gaps} == {"ocs_api_key_team_ambiguous"}
     assert all(gap.membership_id for gap in report.gaps)
-    assert membership.id
+    assert str(membership.id) in {gap.membership_id for gap in report.gaps}
 
 
 def test_archived_membership_is_not_covered(user):
@@ -553,10 +625,55 @@ async def test_sync_and_async_results_match(user):
         user=user,
         role=WorkspaceRole.READ,
     )
-    tenant = await Tenant.objects.acreate(
-        provider="commcare", external_id="domain", canonical_name="Domain"
+    api_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="api-domain", canonical_name="API Domain"
     )
-    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=api_tenant)
+    api_connection = await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("api-key"),
+    )
+    await TenantMembership.objects.acreate(
+        user=user,
+        tenant=api_tenant,
+        connection=api_connection,
+    )
+
+    oauth_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="oauth-domain", canonical_name="OAuth Domain"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=oauth_tenant)
+    account = await SocialAccount.objects.acreate(
+        user=user,
+        provider="commcare",
+        uid="parity-identity",
+    )
+    app = await SocialApp.objects.acreate(
+        provider="commcare",
+        name="parity-app",
+        client_id="client",
+        secret="secret",
+    )
+    await SocialToken.objects.acreate(
+        account=account,
+        app=app,
+        token="access-token",
+        token_secret="refresh-token",
+        expires_at=timezone.now() + timedelta(hours=1),
+    )
+    oauth_connection = await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.OAUTH,
+        social_account=account,
+    )
+    await TenantMembership.objects.acreate(
+        user=user,
+        tenant=oauth_tenant,
+        connection=oauth_connection,
+    )
 
     sync_reports = await sync_to_async(get_workspace_credential_coverage)(
         workspace_ids=[workspace.id], user_ids=[user.id]
@@ -564,48 +681,83 @@ async def test_sync_and_async_results_match(user):
     async_reports = await aget_workspace_credential_coverage(
         workspace_ids=[workspace.id], user_ids=[user.id]
     )
-    sync_readiness = await sync_to_async(get_tenant_credential_readiness)([(user.id, tenant)])
-    async_readiness = await aget_tenant_credential_readiness([(user.id, tenant)])
+    pairs = [(user.id, api_tenant), (user.id, oauth_tenant)]
+    sync_readiness = await sync_to_async(get_tenant_credential_readiness)(pairs)
+    async_readiness = await aget_tenant_credential_readiness(pairs)
 
     assert async_reports == sync_reports
     assert async_readiness == sync_readiness
+    assert sync_reports[0].covered is True
+    assert all(item.usable for item in sync_readiness)
 
 
 def test_bulk_query_count_does_not_grow_per_workspace(user):
+    workspace_ids = []
     for i in range(6):
         workspace = _workspace(f"Workspace {i}")
+        workspace_ids.append(workspace.id)
         _member(workspace, user)
         tenant = _tenant(workspace, "commcare", f"domain-{i}", f"Domain {i}")
         _api_membership(user, tenant)
+        if i == 0:
+            with CaptureQueriesContext(connection) as small_queries:
+                small_reports = get_workspace_credential_coverage(
+                    workspace_ids=workspace_ids,
+                    user_ids=[user.id],
+                )
 
-    with CaptureQueriesContext(connection) as queries:
-        reports = get_workspace_credential_coverage()
+    with CaptureQueriesContext(connection) as large_queries:
+        large_reports = get_workspace_credential_coverage(
+            workspace_ids=workspace_ids,
+            user_ids=[user.id],
+        )
 
-    assert len(reports) >= 6
-    assert len(queries) <= 6
+    assert len(small_reports) == 1
+    assert len(large_reports) == 6
+    assert len(large_queries) == len(small_queries)
 
 
 def test_management_command_json_reports_only_ids_names_and_structured_gaps(user):
     workspace = _workspace("Audit Workspace")
     _member(workspace, user)
-    tenant = _tenant(workspace, "commcare", "private-domain", "Private Domain")
-    membership, conn = _api_membership(user, tenant, key="never-print-this")
+    tenant = _tenant(workspace, "commcare", "broken-domain", "Broken Domain")
+    membership, conn = _api_membership(user, tenant, key="discarded-key")
     conn.encrypted_credential = "not-fernet"
     conn.save(update_fields=["encrypted_credential"])
+    usable_tenant = _tenant(workspace, "commcare", "usable-domain", "Usable Domain")
+    _usable_membership, usable_conn = _api_membership(
+        user,
+        usable_tenant,
+        key="never-print-this",
+    )
+    ciphertext = usable_conn.encrypted_credential
 
     stdout = StringIO()
-    call_command("report_workspace_credential_coverage", "--json", stdout=stdout)
+    call_command(
+        "report_workspace_credential_coverage",
+        "--json",
+        "--workspace-id",
+        str(workspace.id),
+        stdout=stdout,
+    )
     raw = stdout.getvalue()
     payload = json.loads(raw)
 
+    assert len(payload) == 1
     assert payload[0]["workspace_name"] == "Audit Workspace"
     assert payload[0]["user_id"] == user.id
     assert payload[0]["gaps"][0]["membership_id"] == str(membership.id)
     assert payload[0]["gaps"][0]["code"] == "api_key_decrypt_failed"
     assert "email" not in raw
     assert "never-print-this" not in raw
+    assert ciphertext not in raw
     assert "not-fernet" not in raw
     assert "fingerprint" not in raw
+
+
+def test_management_command_rejects_malformed_workspace_id():
+    with pytest.raises(CommandError, match="invalid UUID value"):
+        call_command("report_workspace_credential_coverage", "--workspace-id", "not-a-uuid")
 
 
 def test_management_command_readable_output_explains_local_readiness(user):

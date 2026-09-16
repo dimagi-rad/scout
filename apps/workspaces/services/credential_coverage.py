@@ -147,6 +147,8 @@ def _connection_membership_queryset(connection_ids):
 def _bindings_by_user(connections) -> dict[int, dict[tuple[str, str], int | None]]:
     result: dict[int, dict[tuple[str, str], int | None]] = defaultdict(dict)
     for connection in connections:
+        if connection.social_account_id is None:
+            continue
         key = (canonical_provider(connection.provider), connection.scope_key)
         bindings = result[connection.user_id]
         bound_id = bindings.get(key)
@@ -155,6 +157,10 @@ def _bindings_by_user(connections) -> dict[int, dict[tuple[str, str], int | None
         else:
             bindings[key] = connection.social_account_id
     return result
+
+
+def _normalized_team_slug(membership) -> str:
+    return str(membership.team_slug or "").strip()
 
 
 def _gap(code: CredentialGapCode, tenant, membership=None) -> CredentialCoverageGap:
@@ -173,7 +179,7 @@ def _gap(code: CredentialGapCode, tenant, membership=None) -> CredentialCoverage
 def _api_key_gap(membership, connection, connection_teams):
     if canonical_provider(connection.provider) == "ocs" and connection_teams.get(
         connection.pk, set()
-    ) != {membership.team_slug}:
+    ) != {_normalized_team_slug(membership)}:
         return _gap(CredentialGapCode.OCS_API_KEY_TEAM_AMBIGUOUS, membership.tenant, membership)
     if not connection.encrypted_credential:
         return _gap(CredentialGapCode.API_KEY_MISSING, membership.tenant, membership)
@@ -232,12 +238,12 @@ def _oauth_gap(membership, connection, tokens, bindings):
         connection.oauth_refresh_failure_fingerprint
         and connection.oauth_refresh_failure_fingerprint == credential_fingerprint(token)
     )
-    health = token_health(token, connection.provider, refresh_failed=refresh_failed)
     if refresh_failed:
         return _gap(CredentialGapCode.OAUTH_REFRESH_FAILED, membership.tenant, membership)
+    health = token_health(token, connection.provider)
     can_refresh = bool(get_token_url(connection.provider) and token.token_secret and token.app)
     if health != "connected" or (
-        token_needs_refresh(token.expires_at, can_refresh=can_refresh) and not can_refresh
+        not can_refresh and token_needs_refresh(token.expires_at, can_refresh=False)
     ):
         return _gap(CredentialGapCode.OAUTH_CREDENTIAL_EXPIRED, membership.tenant, membership)
     return None
@@ -300,9 +306,7 @@ def _evaluate_tenant_readiness(
     bindings = _bindings_by_user(oauth_connections)
     connection_teams = defaultdict(set)
     for membership in connection_memberships:
-        connection_teams[membership.connection_id].add(
-            str((membership.provider_metadata or {}).get("team_slug") or "").strip()
-        )
+        connection_teams[membership.connection_id].add(_normalized_team_slug(membership))
 
     readiness = []
     for user_id, tenant in pairs:
@@ -398,7 +402,8 @@ def get_workspace_credential_coverage(
     """Return local credential readiness for selected workspace members.
 
     The query count is bounded independently of the number of workspaces,
-    members, tenants, or credentials in the result.
+    members, tenants, or credentials in the result. Memory use grows with the
+    selected inventory, so large audits should pass workspace or user filters.
     """
     workspace_memberships = list(
         _workspace_membership_queryset(workspace_ids=workspace_ids, user_ids=user_ids)

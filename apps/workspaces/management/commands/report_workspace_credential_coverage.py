@@ -1,6 +1,7 @@
 """Report local credential readiness for every workspace member."""
 
 import json
+import uuid
 
 from django.core.management.base import BaseCommand
 
@@ -22,6 +23,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--workspace-id",
             action="append",
+            type=uuid.UUID,
             dest="workspace_ids",
             help="Limit the report to a workspace UUID. May be repeated.",
         )
