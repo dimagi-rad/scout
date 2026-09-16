@@ -33,6 +33,7 @@ Manual command authorization happens before the per-PR cancellation group. New a
 
 Configuration lives in `.github/workflows/ocr.yml`:
 
+- Self-updates disabled with job-level `OCR_NO_UPDATE=1`, including the initial version check. Without this, the npm launcher can replace the pinned install while later workflow steps are using it.
 - OCR action pinned to commit `b3dbcb634cbb39344e0a3c48ccb1cef3ecd51532`, CLI `1.12.2`.
 - Anthropic Opus 5, adaptive thinking, high model effort; medium OCR review effort.
 - Two concurrent OCR tasks, 15-minute per-task timeout, 500,000 total-token budget.
