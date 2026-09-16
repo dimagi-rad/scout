@@ -93,13 +93,13 @@ def source_names(tenant, assets):
 LEGACY_ALIASES = {
     # _unique_alias (before cede159) never capped or digit-prefixed an alias;
     # dbt_column_alias before #426 could emit one literal alias twice.
-    "overlong": lambda first: "x" * 75,
+    "overlong": lambda _first: "x" * 75,
     "leading_digit": lambda first: "1st_" + first,
     "duplicate": lambda first: first,
 }
 
 
-def question_aliases(sql):
+def quoted_aliases(sql):
     return re.findall(r'AS "([^"]+)"', sql)
 
 
@@ -292,7 +292,7 @@ def test_canonical_case_removal_accepts_quoted_keys_and_reserved_aliases():
 def test_legacy_case_property_aliases_do_not_block_case_removal(legacy):
     tenant = Tenant(provider="commcare", external_id="synthetic-case-removal")
     old = case_assets(tenant)
-    first, *_, last = question_aliases(old[0].sql_content)
+    first, *_, last = quoted_aliases(old[0].sql_content)
     old[0].sql_content = old[0].sql_content.replace(f'AS "{last}"', f'AS "{legacy(first)}"')
     assert generate_system_assets(tenant, {}, existing_assets=old) == []
 
@@ -420,7 +420,7 @@ def test_legacy_projection_aliases_never_change_source_identity(repeat_tenant, m
     surviving = repeats[-1]
     surviving.name = _repeat_base_model_name(parent.name, PATHS[-1])
     edited = parent if model == "parent" else surviving
-    first, *_, last = [a for a in question_aliases(edited.sql_content) if a != "repeat_index"]
+    first, *_, last = [a for a in quoted_aliases(edited.sql_content) if a != "repeat_index"]
     edited.sql_content = edited.sql_content.replace(f'AS "{last}"', f'AS "{legacy(first)}"')
     result = generate(repeat_tenant, data, [parent, surviving])
     assert source_names(repeat_tenant, result)[("data", "right", "a")] == surviving.name
@@ -437,7 +437,7 @@ def test_legacy_projection_aliases_do_not_block_parent_removal(repeat_tenant, le
     (old,) = generate(repeat_tenant, data)
     if repeat_tenant.provider == "commcare_connect":
         old.name = "retired_visits"
-    first, *_, last = [a for a in question_aliases(old.sql_content) if a != "received_on"]
+    first, *_, last = [a for a in quoted_aliases(old.sql_content) if a != "received_on"]
     old.sql_content = old.sql_content.replace(f'AS "{last}"', f'AS "{legacy(first)}"')
     result = generate(repeat_tenant, {"form_definitions": {}}, [old])
     assert old.name not in {asset.name for asset in result}
