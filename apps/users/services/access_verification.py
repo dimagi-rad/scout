@@ -8,6 +8,7 @@ from enum import StrEnum
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
+from cryptography.fernet import InvalidToken
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -47,6 +48,10 @@ class PublicationStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class CredentialSnapshotError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class VerificationClaim:
     status: ClaimStatus
@@ -59,7 +64,12 @@ class VerificationClaim:
 
 def _snapshot(connection, token=None) -> CredentialRequestSnapshot:
     if connection.credential_type == TenantConnection.API_KEY:
-        secret = decrypt_credential(connection.encrypted_credential)
+        try:
+            secret = decrypt_credential(connection.encrypted_credential)
+        except InvalidToken as exc:
+            raise CredentialSnapshotError("API credential cannot be decoded") from exc
+        if not secret:
+            raise CredentialSnapshotError("API credential is empty")
         fingerprint = hashlib.sha256(secret.encode()).hexdigest()
         token_snapshot = None
         account_identity = ""
@@ -67,6 +77,8 @@ def _snapshot(connection, token=None) -> CredentialRequestSnapshot:
         if token is None:
             raise ValueError("OAuth connection has no current token")
         secret = token.token
+        if not secret:
+            raise CredentialSnapshotError("OAuth access token is empty")
         fingerprint = credential_fingerprint(token)
         token_snapshot = (token.id, token.token_secret, token.app_id)
         account_identity = str(token.account_id)

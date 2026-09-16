@@ -412,6 +412,59 @@ def test_blank_scope_ocs_api_key_can_claim(user):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("encrypted", ["not-fernet", encrypt_credential("")])
+def test_corrupt_or_empty_api_key_claim_is_safely_denied(
+    user, tenant, verification_connection, encrypted
+):
+    conn, _membership = verification_connection
+    conn.encrypted_credential = encrypted
+    conn.save(update_fields=["encrypted_credential"])
+
+    assert claim_verification(user.id, conn.id, {tenant.id}).status == ClaimStatus.DENIED
+
+
+@pytest.mark.django_db
+def test_corrupt_api_key_after_claim_rejects_publication(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    conn.encrypted_credential = "not-fernet"
+    conn.save(update_fields=["encrypted_credential"])
+
+    assert (
+        publish_verification(claim, VerificationResult.complete({tenant.id}))
+        == PublicationStatus.REJECTED
+    )
+    assert not UpstreamAccessProof.objects.exists()
+
+
+@pytest.mark.django_db
+def test_empty_oauth_access_token_claim_is_safely_denied(user):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id="empty-token", canonical_name="Empty"
+    )
+    conn, _membership = _ocs_connection(user, tenant)
+    SocialToken.objects.filter(account_id=conn.social_account_id).update(token="")
+
+    assert claim_verification(user.id, conn.id, {tenant.id}).status == ClaimStatus.DENIED
+
+
+@pytest.mark.django_db
+def test_empty_oauth_access_token_after_claim_rejects_publication(user):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id="empty-token-publish", canonical_name="Empty"
+    )
+    conn, _membership = _ocs_connection(user, tenant)
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    SocialToken.objects.filter(account_id=conn.social_account_id).update(token="")
+
+    assert (
+        publish_verification(claim, VerificationResult.complete({tenant.id}))
+        == PublicationStatus.REJECTED
+    )
+    assert not UpstreamAccessProof.objects.exists()
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "result", [VerificationResult.unavailable("timeout"), VerificationResult.indeterminate("shape")]
 )
