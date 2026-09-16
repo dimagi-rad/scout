@@ -24,7 +24,10 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from apps.agents.graph.state import AgentState, prune_messages
-from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
+from apps.agents.prompts.artifact_prompt import (
+    ARTIFACT_PROMPT_ADDITION,
+    ARTIFACT_READ_ONLY_PROMPT_ADDITION,
+)
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
@@ -32,12 +35,13 @@ from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
+from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
-from apps.workspaces.access import aresolve_workspace_access
+from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -86,6 +90,7 @@ MCP_TOOL_NAMES = frozenset(
 )
 
 LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
+ARTIFACT_READ_TOOL_NAMES = frozenset({"artifact_graph_overview", "get_artifact_semantic_queries"})
 
 # MCP tools the server advertises but that must NEVER be exposed to the agent.
 #
@@ -102,6 +107,7 @@ LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 # therefore filtered out before tools are bound to the LLM. The MCP server still
 # defines the tool so operator/HTTP callers are unaffected.
 AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
+AGENT_WRITE_MCP_TOOLS = frozenset({"run_materialization", "cancel_materialization"})
 
 # Context params the graph injects into every MCP tool call server-side. They
 # are hidden from the LLM-facing tool schema (so the model never sets them) and
@@ -225,6 +231,7 @@ def _system_prompt_cache_key(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
+    write_capable: bool = True,
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
@@ -244,7 +251,8 @@ def _system_prompt_cache_key(
     user_id = getattr(user, "id", "anon")
     mode = "i" if interactive else "h"
     canvas_mode = "cw" if canvas_write else "cr"
-    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}"
+    tool_mode = "rw" if write_capable else "ro"
+    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}:{tool_mode}"
 
 
 async def _semantic_catalog_context(workspace) -> str:
@@ -259,7 +267,9 @@ async def _semantic_catalog_context(workspace) -> str:
     )
 
 
-async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
+async def _fetch_semantic_model_context(
+    workspace, interactive: bool = True, write_capable: bool = True
+) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
     active_runs = MaterializationRun.objects.filter(
@@ -316,6 +326,8 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                         "Do not promise an automatic follow-up based on this status.\n\n"
                         f"{ready_context}"
                     )
+        if not write_capable:
+            return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
         return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
@@ -323,6 +335,8 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
     try:
         return await _semantic_catalog_context(workspace)
     except SemanticCatalogUnavailable:
+        if not write_capable:
+            return _READ_ONLY_MATERIALIZE_GUIDANCE
         tenant_count = await workspace.tenants.acount()
         if tenant_count == 1:
             tenant = await workspace.tenants.afirst()
@@ -407,6 +421,17 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
     "`run_materialization` to ensure fresh data — it WAITS for the in-progress "
     "load to finish (it does not start a parallel one) and returns when the data "
     "is ready. Then continue with the requested analysis in the same run."
+)
+
+_READ_ONLY_MATERIALIZE_GUIDANCE = (
+    "Data is not currently queryable, and this user's workspace role is read-only. "
+    "A read-write workspace role is required to load data or rebuild the semantic catalog."
+)
+
+_READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
+    "A data load is already in progress for this workspace. This user's workspace "
+    "role is read-only, so they cannot start or wait through another load. Report that "
+    "the data is still loading and suggest checking back later."
 )
 
 
@@ -812,17 +837,13 @@ async def build_agent_graph(
     """
     logger.info("Building agent graph for workspace %s (interactive=%s)", workspace.id, interactive)
 
-    # Same policy as the canvas REST endpoints: only members above the read
-    # role can stage/commit canvas changes, so read-only members never get the
-    # canvas_manager tool (the tool closures re-check as the hard boundary).
-    canvas_membership = None
-    if interactive and conversation_id and user is not None:
-        _authorized_workspace, canvas_membership = await aresolve_workspace_access(
-            user, workspace.id
+    write_access = None
+    if user is not None and getattr(user, "is_authenticated", False):
+        write_access = await aresolve_workspace_access_ex(
+            user, workspace.id, minimum_role=WorkspaceRole.READ_WRITE
         )
-    canvas_write = bool(
-        canvas_membership is not None and canvas_membership.role != WorkspaceRole.READ
-    )
+    write_capable = bool(write_access is not None and write_access.granted)
+    canvas_write = bool(interactive and conversation_id and write_capable)
 
     # --- Build tools ---
     tools = _build_tools(
@@ -833,6 +854,7 @@ async def build_agent_graph(
         interactive=interactive,
         job_id=job_id,
         canvas_write=canvas_write,
+        write_capable=write_capable,
     )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
@@ -859,6 +881,7 @@ async def build_agent_graph(
         user,
         interactive=interactive,
         canvas_write=canvas_write,
+        write_capable=write_capable,
     )
     logger.debug(
         "System prompt assembled: %d stable + %d volatile chars for workspace %s",
@@ -1000,6 +1023,7 @@ def _build_tools(
     interactive: bool = True,
     job_id: int | None = None,
     canvas_write: bool = False,
+    write_capable: bool = False,
 ) -> list:
     """Build the tool list: MCP data tools plus local artifact/recipe/learning
     tools, and a blocking materialization tool in headless mode.
@@ -1012,6 +1036,8 @@ def _build_tools(
     # blocking materialize tool, which runs the pipeline inline and returns when
     # data is ready.
     excluded = set(AGENT_EXCLUDED_MCP_TOOLS)
+    if not write_capable:
+        excluded.update(AGENT_WRITE_MCP_TOOLS)
     if not interactive:
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
@@ -1019,22 +1045,29 @@ def _build_tools(
     from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
     from apps.agents.tools.canvas_tool import create_canvas_read_tool
 
-    tools.append(create_save_learning_tool(workspace, user))
-    tools.append(
-        create_artifact_manager_tool(
-            workspace,
-            user,
-            mcp_tools or [],
-            conversation_id=conversation_id,
+    if write_capable:
+        tools.append(create_save_learning_tool(workspace, user))
+        tools.append(
+            create_artifact_manager_tool(
+                workspace,
+                user,
+                mcp_tools or [],
+                conversation_id=conversation_id,
+            )
         )
-    )
+    else:
+        tools.extend(
+            item
+            for item in create_artifact_graph_tools(workspace, user, conversation_id)
+            if item.name in ARTIFACT_READ_TOOL_NAMES
+        )
     if interactive and conversation_id:
         # The canvas is thread-bound; headless (recipe) runs have no thread.
         # The parent keeps a read-only canvas_read for cheap draft questions;
         # all canvas writes are delegated to the Canvas Manager subagent,
         # which read-only workspace members do not get at all.
         tools.append(create_canvas_read_tool(workspace, user, conversation_id))
-        if canvas_write:
+        if canvas_write and write_capable:
             tools.append(
                 create_canvas_manager_tool(
                     workspace,
@@ -1043,8 +1076,9 @@ def _build_tools(
                     conversation_id=conversation_id,
                 )
             )
-    tools.append(create_recipe_tool(workspace, user))
-    if not interactive:
+    if write_capable:
+        tools.append(create_recipe_tool(workspace, user))
+    if not interactive and write_capable:
         tools.append(create_materialization_tool(workspace, user, job_id))
     return tools
 
@@ -1054,6 +1088,7 @@ async def _build_system_prompt(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
+    write_capable: bool = True,
 ) -> tuple[str, str]:
     """Assemble the workspace system prompt as a (stable, volatile) split.
 
@@ -1068,11 +1103,13 @@ async def _build_system_prompt(
     """
     has_tenants = await workspace.tenants.aexists()
     stable = await _build_stable_system_prompt(
-        workspace, user, has_tenants, interactive, canvas_write
+        workspace, user, has_tenants, interactive, canvas_write, write_capable
     )
     volatile = ""
     if has_tenants:
-        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
+        semantic_context = await _fetch_semantic_model_context(
+            workspace, interactive, write_capable
+        )
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
         if await workspace.tenants.acount() > 1:
             coverage = (
@@ -1094,10 +1131,9 @@ async def _build_stable_system_prompt(
     has_tenants: bool,
     interactive: bool,
     canvas_write: bool,
+    write_capable: bool,
 ) -> str:
-    cache_key = (
-        f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write)}:{has_tenants}"
-    )
+    cache_key = f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write, write_capable)}:{has_tenants}"
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
@@ -1105,7 +1141,10 @@ async def _build_stable_system_prompt(
             return value
 
     # Stable sections (cacheable prefix)
-    stable_sections = [BASE_SYSTEM_PROMPT, ARTIFACT_PROMPT_ADDITION]
+    artifact_prompt = (
+        ARTIFACT_PROMPT_ADDITION if write_capable else ARTIFACT_READ_ONLY_PROMPT_ADDITION
+    )
+    stable_sections = [BASE_SYSTEM_PROMPT, artifact_prompt]
 
     if workspace.system_prompt:
         stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")

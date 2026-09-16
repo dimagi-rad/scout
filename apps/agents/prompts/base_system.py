@@ -138,9 +138,9 @@ If `list_datasets` or `semantic_catalog` reports a dataset but `describe_dataset
 against it returns `NOT_FOUND` or `VALIDATION_ERROR`, the catalog and the data
 have drifted. STOP exploring. Do exactly one of:
 
-1. Call `run_materialization` to rebuild the data.
-2. Tell the user the data isn't currently queryable and ask whether to
-   re-materialize.
+1. If `run_materialization` is available, use it to rebuild the data.
+2. If it is unavailable, tell the user the data isn't currently queryable. A
+   read-write workspace role is required to re-materialize it.
 
 Do NOT:
 
