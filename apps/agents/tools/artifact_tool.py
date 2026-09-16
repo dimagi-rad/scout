@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from apps.workspaces.access import aworkspace_write_allowed, tool_write_denied
+
 if TYPE_CHECKING:
     from apps.users.models import User
     from apps.workspaces.models import Workspace
@@ -119,6 +121,9 @@ def create_artifact_tools(
             - render_url: URL path to render the artifact
             - message: Success or error message
         """
+        if not await aworkspace_write_allowed(user, workspace.id):
+            return tool_write_denied()
+
         # Import here to avoid circular imports
         from apps.artifacts.models import Artifact
         from apps.chat.artifact_links import link_artifact_to_thread
@@ -252,6 +257,9 @@ def create_artifact_tools(
             - render_url: URL path to render the new version
             - message: Success or error message
         """
+        if not await aworkspace_write_allowed(user, workspace.id):
+            return tool_write_denied()
+
         # Import here to avoid circular imports
         from apps.artifacts.models import Artifact
         from apps.chat.artifact_links import link_artifact_to_thread

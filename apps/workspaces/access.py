@@ -38,6 +38,8 @@ _ROLE_RANK = {
 }
 
 _GENERIC_DENIED = "Workspace not found or access denied."
+TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
+TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
 
 
 @dataclass(frozen=True)
@@ -210,3 +212,48 @@ async def aresolve_workspace_access(user, workspace_id, *, minimum_role: str = W
     """Async: return ``(workspace, WorkspaceMembership)`` on access, else ``(None, None)``."""
     result = await aresolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
     return result.workspace, result.membership
+
+
+def workspace_write_allowed(user, workspace_id) -> bool:
+    """Return whether an actor currently has shared-write authority."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return resolve_workspace_access_ex(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    ).granted
+
+
+async def aworkspace_read_allowed(user, workspace_id) -> bool:
+    """Return whether an actor currently has workspace read authority."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return (await aresolve_workspace_access_ex(user, workspace_id)).granted
+
+
+async def aworkspace_write_allowed(user, workspace_id) -> bool:
+    """Async twin of ``workspace_write_allowed``."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return (
+        await aresolve_workspace_access_ex(
+            user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+    ).granted
+
+
+def tool_write_denied() -> dict:
+    """Structured denial returned by local LangChain mutation tools."""
+    return {
+        "status": "denied",
+        "message": TOOL_WRITE_DENIED_MESSAGE,
+        "error": {"code": "FORBIDDEN", "message": TOOL_WRITE_DENIED_MESSAGE},
+    }
+
+
+def tool_read_denied() -> dict:
+    """Structured denial returned by local LangChain read tools."""
+    return {
+        "status": "denied",
+        "message": TOOL_READ_DENIED_MESSAGE,
+        "error": {"code": "FORBIDDEN", "message": TOOL_READ_DENIED_MESSAGE},
+    }
