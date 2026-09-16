@@ -25,7 +25,7 @@ from django.views import View
 
 from apps.artifacts.services.query_context import resolve_artifact_queries
 from apps.common.utils import creator_display_name
-from apps.semantic.services.date_context import date_context
+from apps.semantic.services.date_context import DateContextError, date_context
 from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceDataRecovery
@@ -965,8 +965,13 @@ class ArtifactQueryDataView(View):
                 queries, resolved_context = resolve_artifact_queries(doc, runtime)
             else:
                 queries, resolved_context = artifact.semantic_queries, None
-        except ValueError as exc:
-            return JsonResponse({"error": str(exc)}, status=400)
+        except (DateContextError, json.JSONDecodeError):
+            return JsonResponse(
+                {
+                    "error": "Invalid artifact date context. Check the dates, timezone, and date-control bindings."
+                },
+                status=400,
+            )
 
         # Serve repeat opens of the same artifact version from a short-lived
         # cache so we don't re-run every source query on every open (09#9).

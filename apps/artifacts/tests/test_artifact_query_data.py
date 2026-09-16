@@ -69,6 +69,9 @@ async def test_inspector_invalid_binding_does_not_fall_back_to_all_time(
             content_type="application/json",
         )
     assert response.status_code == 400
+    assert response.json() == {
+        "error": "Invalid artifact date context. Check the dates, timezone, and date-control bindings."
+    }
     run.assert_not_awaited()
 
 
