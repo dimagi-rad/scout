@@ -2,20 +2,33 @@
 
 Scout runs **Open Code Review (OCR)** first on PR creation, updates and reopening, including fork PRs. It uses the existing `ANTHROPIC_API_KEY` Actions secret and Anthropic `claude-opus-5`.
 
-OCR posts inline findings and maintains a summary. A separate sticky **OCR gate** comment explains whether the Claude follow-up can run:
+OCR posts actionable inline findings, routes low-severity findings to its sticky summary, and maintains review checkpoints. A separate sticky **OCR gate** comment explains whether the Claude follow-up can run:
 
 - **High or critical findings:** block Claude; address the findings and push again.
 - **Low or medium findings only:** allow Claude to run.
 - **Failed, partial, budget-limited, waived-file, malformed or unclassified results:** block Claude until a complete review can establish the outcome.
 - **Fork PRs:** receive OCR feedback; automatic Claude follow-up is disabled.
 
-The gate considers all findings in the current full PR review, including findings whose duplicate inline comments were suppressed. It validates the reviewed head and merge-base against the captured PR commits. If the PR changes during review, rerun against the new commits. Files OCR excludes before selection are outside its coverage guarantee.
+The first review covers the full PR. After a complete review passes the gate, the next push can review only changes since that accepted head. The gate validates both ends of that range, the originating workflow run and Git ancestry. Duplicate-comment suppression is separate from incremental review: it reduces noise, not the amount of code reviewed.
+
+A blocked or incomplete review forces the next run back to a full review. OCR itself can save checkpoints even when it finds blockers; Scout deliberately does not trust those as clean baselines. This prevents an unrelated clean delta from silently clearing earlier high/critical findings. Missing or malformed state, changed base commits, changed review policy, rewritten history and explicit full requests also cause a full review. A same-head rerun is treated as an explicit re-review.
+
+The accepted state is stored in the bot-owned sticky gate comment. The gate considers all findings in the selected range, including findings whose duplicate inline comments were suppressed. If the PR changes during review, rerun against the new commits. Files OCR excludes before selection remain outside its coverage guarantee.
+
+Claude uses the same delta only if it also completed a non-blocking review of the accepted checkpoint. Otherwise Claude reviews the full PR. Its focused prompt additionally revisits prior unresolved findings. A failed, partial or budget-limited Claude run never advances that separate checkpoint.
 
 The gate controls the Claude follow-up. It does not add a required branch-protection check or replace human review.
 
 ## Manual runs
 
-Post a new PR conversation comment beginning with **`@ocr`** (for example, `@ocr` or `@ocr please review again`). The command must be followed by whitespace or the end of the comment. It runs the same pipeline, including the eligible Claude follow-up.
+Post a new PR conversation comment using one of these commands:
+
+- `@ocr`: use an eligible checkpoint, otherwise review the full PR.
+- `@ocr full`: deliberately review the entire PR again.
+- `@ocr budget=1000000`: override the token budget for this run.
+- `@ocr full budget=1000000`: combine a full review and a one-run budget.
+
+`full` and `budget=N` may appear in either order. Unknown or repeated options are rejected. Each command runs the same pipeline, including the eligible Claude follow-up.
 
 Only users whose current repository permission is write, maintain or admin can trigger manual OCR runs. Bot comments, unrelated comments, closed PRs and unauthorized commands do not start a review or cancel an active one. Editing an existing comment does not trigger a run.
 
@@ -23,7 +36,7 @@ Manual **`@claude`** requests retain their existing workflow and operate indepen
 
 ## Trust and credentials
 
-The OCR workflow uses `pull_request_target` so fork PRs can be reviewed with the repository secret. The pinned upstream action checks out the trusted base branch, fetches PR Git objects and reads the diff without checking out or executing fork code. The automatic Claude step also keeps the trusted checkout and uses Git/PR reads to inspect the requested commits; it runs only on same-repository PRs.
+The OCR workflow uses `pull_request_target` so fork PRs can be reviewed with the repository secret. The pinned upstream action checks out the trusted base branch, fetches PR Git objects and reads the diff without checking out or executing fork code. Scout snapshots the gate scripts from the captured base before the upstream checkout and fingerprints the workflow and validation policy. The automatic Claude step also keeps the trusted checkout and uses Git/PR reads to inspect the requested commits; it runs only on same-repository PRs.
 
 Do not change this workflow to check out a fork head or execute its install/build/test scripts while credentials are available. Review text is still untrusted input to the models.
 
@@ -37,6 +50,8 @@ Configuration lives in `.github/workflows/ocr.yml`:
 - OCR action pinned to commit `b3dbcb634cbb39344e0a3c48ccb1cef3ecd51532`, CLI `1.12.2`.
 - Anthropic Opus 5, adaptive thinking, high model effort; medium OCR review effort.
 - Two concurrent OCR tasks, 15-minute per-task timeout, 500,000 total-token budget.
+- Native cross-push checkpoints enabled, subject to Scout’s accepted-state validation.
+- Low-severity findings go to the summary; their severity is still evaluated by the gate.
 - 45-minute job timeout, including the Claude follow-up.
 - Claude follow-up uses Opus 5 with a $10 CLI budget.
 
@@ -45,7 +60,7 @@ The OCR token limit stops further dispatch after it is exceeded; in-flight work 
 The release and provider settings are explicit to make upgrades reviewable. When upgrading OCR, verify its output contract and run:
 
 ```sh
-node --test .github/scripts/ocr-gate.test.cjs
+node --test .github/scripts/ocr-*.test.cjs
 actionlint .github/workflows/ocr.yml .github/workflows/claude.yml .github/workflows/ci.yml
 ```
 
@@ -60,3 +75,9 @@ Inspect the Actions log, OCR JSON artifact and sticky gate comment when a run bl
 ### Larger manual reviews
 
 An authorized collaborator can request a one-run token budget with `@ocr budget=5000000` (maximum 5 million). The default remains 500,000 for automatic runs and plain `@ocr`. This is a soft limit: in-flight work can overshoot it. A larger budget does not relax finding severity or completeness checks.
+
+## Grouping and remaining limits
+
+The pinned CLI already bundles small change sets without an LLM grouping call. Narrowing follow-up reviews makes that path more useful and reduces repeated context. Larger change sets use its semantic grouping model. If that model returns malformed JSON, OCR falls back to per-file tasks; Scout reports that fallback in the gate summary because it can inflate token usage.
+
+Version 1.12.2 exposes no action input or CLI configuration for changing that fallback or grouping thresholds. Fixing the large-review fallback requires an upstream change, rather than an undocumented local override. Checkpointing does not resume a partially completed first review: a complete accepted baseline is required. Cached input is included in the reported token budget, so high token counts do not all represent newly generated text or full-price input.
