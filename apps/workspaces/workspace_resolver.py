@@ -15,36 +15,37 @@ from apps.workspaces.access import (
     aresolve_workspace_access_ex,
     resolve_workspace_access_ex,
 )
+from apps.workspaces.models import WorkspaceRole
 
 
-def resolve_workspace_drf(request, workspace_id):
+def resolve_workspace_drf(request, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
     """Resolve Workspace from workspace_id URL path parameter (DRF views).
 
     Returns (workspace, membership, None) on success or (None, None, Response(403)) on error.
     """
-    result = resolve_workspace_access_ex(request.user, workspace_id)
+    result = resolve_workspace_access_ex(request.user, workspace_id, minimum_role=minimum_role)
     if not result.granted:
         return None, None, Response(access_denied_body(result), status=status.HTTP_403_FORBIDDEN)
     return result.workspace, result.membership, None
 
 
-def resolve_workspace(user, workspace_id):
+def resolve_workspace(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
     """Resolve Workspace for non-DRF views (sync).
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.
     """
-    result = resolve_workspace_access_ex(user, workspace_id)
+    result = resolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
     if not result.granted:
         return None, JsonResponse(access_denied_body(result), status=403)
     return result.workspace, None
 
 
-async def aresolve_workspace(user, workspace_id):
+async def aresolve_workspace(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
     """Resolve Workspace for async non-DRF views.
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.
     """
-    result = await aresolve_workspace_access_ex(user, workspace_id)
+    result = await aresolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
     if not result.granted:
         return None, JsonResponse(access_denied_body(result), status=403)
     return result.workspace, None
