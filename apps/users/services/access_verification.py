@@ -9,9 +9,9 @@ from enum import StrEnum
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.users.adapters import decrypt_credential
 from apps.users.models import (
     TenantConnection,
@@ -26,8 +26,9 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
-from apps.users.services.oauth_scope import account_scope
+from apps.users.services.oauth_scope import account_scope, canonical_provider, provider_accounts
 from apps.users.services.token_refresh import credential_fingerprint
+from apps.users.services.upstream_denial import record_validated_upstream_denial
 
 PROOF_MAX_AGE = timedelta(minutes=5)
 LEASE_DURATION = timedelta(seconds=30)
@@ -89,7 +90,10 @@ def _locked_snapshot(actor_user_id, connection_id):
         token = (
             SocialToken.objects.select_for_update(of=("self",))
             .select_related("account")
-            .filter(account_id=initial.social_account_id)
+            .filter(
+                account_id=initial.social_account_id,
+                account__in=provider_accounts(actor_user_id, initial.provider),
+            )
             .first()
         )
         if token is None:
@@ -97,11 +101,16 @@ def _locked_snapshot(actor_user_id, connection_id):
     current = TenantConnection.objects.select_for_update().get(
         pk=connection_id, user_id=actor_user_id
     )
-    if token is not None and (
-        current.social_account_id != token.account_id
-        or account_scope(token.account) != current.scope_key
-    ):
-        raise ValueError("OAuth identity changed")
+    if token is not None:
+        observed_scope = account_scope(token.account)
+        if (
+            token.account.user_id != actor_user_id
+            or canonical_provider(token.account.provider) != canonical_provider(current.provider)
+            or current.social_account_id != token.account_id
+            or observed_scope != current.scope_key
+            or (canonical_provider(current.provider) == "ocs" and not observed_scope)
+        ):
+            raise ValueError("OAuth identity changed")
     return current, _snapshot(current, token)
 
 
@@ -118,7 +127,6 @@ def proof_is_fresh(proof, observation, *, now=None) -> bool:
 
 
 def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
-    now = now or timezone.now()
     requested = frozenset(tenant_ids)
     with transaction.atomic():
         try:
@@ -130,22 +138,30 @@ def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
             ValueError,
         ):
             return VerificationClaim(ClaimStatus.DENIED, requested)
-        owned = set(
+        history = list(
             TenantMembership.all_objects.filter(
                 user_id=actor_user_id, connection=current, tenant_id__in=requested
-            ).values_list("tenant_id", flat=True)
+            ).values_list("tenant_id", "archived_at")
         )
+        owned = {tenant_id for tenant_id, _archived_at in history}
         if owned != requested:
             return VerificationClaim(ClaimStatus.DENIED, requested)
+        all_memberships_live = all(archived_at is None for _tenant_id, archived_at in history)
         proofs = {
             proof.tenant_id: proof
             for proof in UpstreamAccessProof.objects.filter(
                 connection=current, tenant_id__in=requested
             )
         }
-        if requested and all(
-            tenant_id in proofs and proof_is_fresh(proofs[tenant_id], request.observation, now=now)
-            for tenant_id in requested
+        fresh_now = now or timezone.now()
+        if (
+            requested
+            and all_memberships_live
+            and all(
+                tenant_id in proofs
+                and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now)
+                for tenant_id in requested
+            )
         ):
             return VerificationClaim(
                 ClaimStatus.FRESH, requested, observation=request.observation, request=request
@@ -153,10 +169,15 @@ def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
         control, _ = VerificationControl.objects.select_for_update().get_or_create(
             connection=current
         )
-        if control.lease_token and control.lease_expires_at and now < control.lease_expires_at:
+        lease_now = now or timezone.now()
+        if (
+            control.lease_token
+            and control.lease_expires_at
+            and lease_now < control.lease_expires_at
+        ):
             return VerificationClaim(ClaimStatus.IN_PROGRESS, requested)
         lease_token = uuid.uuid4()
-        expires_at = now + LEASE_DURATION
+        expires_at = lease_now + LEASE_DURATION
         control.lease_token = lease_token
         control.lease_expires_at = expires_at
         control.save(update_fields=["lease_token", "lease_expires_at"])
@@ -171,7 +192,6 @@ def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
 
 
 def publish_verification(claim, result: VerificationResult, *, now=None):
-    now = now or timezone.now()
     if claim.status != ClaimStatus.CLAIMED or claim.observation is None:
         return PublicationStatus.REJECTED
     with transaction.atomic():
@@ -190,9 +210,10 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
             return PublicationStatus.REJECTED
         if control.lease_token != claim.lease_token:
             return PublicationStatus.REJECTED
+        decision_now = now or timezone.now()
         if (
             not control.lease_expires_at
-            or now >= control.lease_expires_at
+            or decision_now >= control.lease_expires_at
             or request.observation != claim.observation
         ):
             control.lease_token = None
@@ -207,6 +228,15 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
             control.lease_expires_at = None
             control.save(update_fields=["lease_token", "lease_expires_at"])
             return PublicationStatus.REJECTED
+        expected_denial_code = {
+            VerificationOutcome.TENANT_DENIED: ErrorCode.AUTH_ACCESS_DENIED,
+            VerificationOutcome.CREDENTIAL_REJECTED: ErrorCode.AUTH_TOKEN_EXPIRED,
+        }.get(result.outcome)
+        if expected_denial_code is not None and result.error_code != expected_denial_code:
+            control.lease_token = None
+            control.lease_expires_at = None
+            control.save(update_fields=["lease_token", "lease_expires_at"])
+            return PublicationStatus.REJECTED
         if result.outcome == VerificationOutcome.COMPLETE:
             if current.upstream_denial_code:
                 current.upstream_denial_code = ""
@@ -216,13 +246,20 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                 connection=current,
                 tenant__provider=current.provider,
             )
+            if (
+                canonical_provider(current.provider) == "ocs"
+                and current.credential_type == TenantConnection.OAUTH
+            ):
+                owned_memberships = owned_memberships.filter(
+                    provider_metadata__team_slug=current.scope_key
+                )
             memberships = owned_memberships.filter(
                 tenant_id__in=result.tenant_ids,
             )
             memberships.update(archived_at=None)
             owned_memberships.filter(archived_at__isnull=True).exclude(
                 tenant_id__in=result.tenant_ids
-            ).update(archived_at=now)
+            ).update(archived_at=decision_now)
             live_ids = set(
                 memberships.filter(archived_at__isnull=True).values_list("tenant_id", flat=True)
             )
@@ -235,7 +272,7 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                         "account_identity": request.observation.account_identity,
                         "scope_key": request.observation.scope_key,
                         "observed_denied_at": request.observation.upstream_denied_at,
-                        "verified_at": now,
+                        "verified_at": decision_now,
                         "last_attempt_result": result.outcome.value,
                         "last_error_code": result.error_code,
                     },
@@ -264,41 +301,36 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                 proof.last_error_code = result.error_code
                 proof.save(update_fields=["last_attempt_result", "last_error_code"])
         elif result.outcome == VerificationOutcome.TENANT_DENIED:
-            TenantMembership.all_objects.filter(
-                user_id=current.user_id,
-                connection=current,
+            denial_count = record_validated_upstream_denial(
+                current,
+                code=result.error_code,
                 tenant_id=result.denied_tenant_id,
-                archived_at__isnull=True,
-            ).update(archived_at=now)
+                now=decision_now,
+            )
+            if denial_count is None:
+                control.lease_token = None
+                control.lease_expires_at = None
+                control.save(update_fields=["lease_token", "lease_expires_at"])
+                return PublicationStatus.REJECTED
             UpstreamAccessProof.objects.filter(
                 connection=current, tenant_id=result.denied_tenant_id
             ).update(
                 last_attempt_result=result.outcome.value,
                 last_error_code=result.error_code,
             )
-            current.upstream_denied_at = now
-            current.save(update_fields=["upstream_denied_at"])
         elif result.outcome == VerificationOutcome.CREDENTIAL_REJECTED:
-            memberships = TenantMembership.all_objects.filter(
-                user_id=current.user_id,
-                connection=current,
-                tenant__provider=current.provider,
-                archived_at__isnull=True,
+            denial_count = record_validated_upstream_denial(
+                current, code=result.error_code, now=decision_now
             )
-            if current.provider == "ocs" and current.credential_type == TenantConnection.OAUTH:
-                memberships = memberships.filter(
-                    Q(provider_metadata__team_slug=current.scope_key)
-                    | Q(provider_metadata__team_slug__isnull=True)
-                    | Q(provider_metadata__team_slug="")
-                )
-            memberships.update(archived_at=now)
+            if denial_count is None:
+                control.lease_token = None
+                control.lease_expires_at = None
+                control.save(update_fields=["lease_token", "lease_expires_at"])
+                return PublicationStatus.REJECTED
             UpstreamAccessProof.objects.filter(connection=current).update(
                 last_attempt_result=result.outcome.value,
                 last_error_code=result.error_code,
             )
-            current.upstream_denial_code = result.error_code
-            current.upstream_denied_at = now
-            current.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
         control.lease_token = None
         control.lease_expires_at = None
         control.save(update_fields=["lease_token", "lease_expires_at"])

@@ -14,6 +14,10 @@ from apps.users.services.oauth_scope import account_scope, provider_accounts
 
 logger = logging.getLogger(__name__)
 
+_AUTHORITATIVE_DENIAL_CODES = frozenset(
+    {ErrorCode.AUTH_TOKEN_EXPIRED, ErrorCode.AUTH_ACCESS_DENIED}
+)
+
 
 def credential_is_current(connection, credential, token_snapshot=None):
     """Check the observed credential inside a transaction holding the user lock."""
@@ -43,10 +47,7 @@ def record_upstream_denial(connection, *, credential, code, tenant_id=None, toke
     if connection is None:
         logger.info("Skipping upstream denial: missing connection id=None")
         return 0
-    if code not in (
-        ErrorCode.AUTH_TOKEN_EXPIRED,
-        ErrorCode.AUTH_ACCESS_DENIED,
-    ):
+    if code not in _AUTHORITATIVE_DENIAL_CODES:
         logger.info("Skipping upstream denial: unsupported code for connection=%s", connection.pk)
         return 0
     with transaction.atomic():
@@ -68,28 +69,34 @@ def record_upstream_denial(connection, *, credential, code, tenant_id=None, toke
                 "Skipping upstream denial: stale credential for connection=%s", connection.pk
             )
             return 0
-        now = timezone.now()
-        memberships = TenantMembership.all_objects.filter(
-            connection=current,
-            user_id=current.user_id,
-            tenant__provider=current.provider,
-            archived_at__isnull=True,
-        )
-        if tenant_id is not None:
-            memberships = memberships.filter(tenant_id=tenant_id)
-        else:
-            if current.provider == "ocs" and current.credential_type == TenantConnection.OAUTH:
-                # Legacy connections may still carry rows explicitly owned by another team (#379).
-                memberships = memberships.filter(
-                    Q(provider_metadata__team_slug=current.scope_key)
-                    | Q(provider_metadata__team_slug__isnull=True)
-                    | Q(provider_metadata__team_slug="")
-                )
-            current.upstream_denial_code = code
-        # Resource denials also fence discovery responses that were already in flight.
-        current.upstream_denied_at = now
-        current.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
-        return memberships.update(archived_at=now)
+        return record_validated_upstream_denial(current, code=code, tenant_id=tenant_id)
+
+
+def record_validated_upstream_denial(connection, *, code, tenant_id=None, now=None):
+    """Persist denial after the caller has locked and validated the credential."""
+    if code not in _AUTHORITATIVE_DENIAL_CODES:
+        logger.info("Skipping upstream denial: unsupported code for connection=%s", connection.pk)
+        return None
+    now = now or timezone.now()
+    memberships = TenantMembership.all_objects.filter(
+        connection=connection,
+        user_id=connection.user_id,
+        tenant__provider=connection.provider,
+        archived_at__isnull=True,
+    )
+    if tenant_id is not None:
+        memberships = memberships.filter(tenant_id=tenant_id)
+    else:
+        if connection.provider == "ocs" and connection.credential_type == TenantConnection.OAUTH:
+            memberships = memberships.filter(
+                Q(provider_metadata__team_slug=connection.scope_key)
+                | Q(provider_metadata__team_slug__isnull=True)
+                | Q(provider_metadata__team_slug="")
+            )
+        connection.upstream_denial_code = code
+    connection.upstream_denied_at = now
+    connection.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
+    return memberships.update(archived_at=now)
 
 
 arecord_upstream_denial = sync_to_async(record_upstream_denial)
