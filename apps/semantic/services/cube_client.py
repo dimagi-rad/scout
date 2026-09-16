@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -20,6 +22,22 @@ logger = logging.getLogger(__name__)
 CONTINUE_WAIT_ERROR = "continue wait"
 QUERY_TOTAL_TIMEOUT_SECONDS = 60.0
 CONTINUE_WAIT_POLL_DELAY_SECONDS = 0.5
+MAX_TRANSIENT_ATTEMPTS = 3
+RETRY_BASE_DELAY_SECONDS = 0.5
+RETRYABLE_HTTP_STATUSES = {429, 502, 503, 504}
+TRANSIENT_ERROR_MARKERS = (
+    "connection terminated due to connection timeout",
+    "connection terminated unexpectedly",
+    "connection reset by peer",
+    "connection refused",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
+    "eai_again",
+    "too many clients already",
+    "the database system is starting up",
+    "the database system is shutting down",
+)
 
 
 class CubeConfigurationError(RuntimeError):
@@ -28,6 +46,10 @@ class CubeConfigurationError(RuntimeError):
 
 class CubeQueryError(RuntimeError):
     """Raised when Cube accepts the request but rejects the query payload."""
+
+
+class CubeConnectionError(RuntimeError):
+    """A transient Cube failure, distinct from an invalid semantic query."""
 
 
 class CubeClient:
@@ -64,31 +86,15 @@ class CubeClient:
         url = f"{self.base_url}/cubejs-api/v1/load"
         headers = self._headers(security_context)
         deadline = time.monotonic() + QUERY_TOTAL_TIMEOUT_SECONDS
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            while True:
-                response = await client.post(url, json={"query": cube_query}, headers=headers)
-                if response.is_error:
-                    try:
-                        error_payload = response.json()
-                    except ValueError:
-                        error_payload = {}
-                    error = error_payload.get("error")
-                    if error:
-                        raise CubeQueryError(str(error))
-                response.raise_for_status()
-                payload = response.json()
-                error = payload.get("error")
-                if isinstance(error, str) and error.strip().lower() == CONTINUE_WAIT_ERROR:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError(
-                            "Cube query timed out: results were still pending after "
-                            f"{QUERY_TOTAL_TIMEOUT_SECONDS:.0f}s."
-                        )
-                    await asyncio.sleep(CONTINUE_WAIT_POLL_DELAY_SECONDS)
-                    continue
-                if error:
-                    raise CubeQueryError(str(error))
-                break
+        # One wall-clock budget includes HTTP calls, transient retries, and
+        # Continue-wait polling. Never multiply the timeout by the attempts.
+        try:
+            async with asyncio.timeout(QUERY_TOTAL_TIMEOUT_SECONDS):
+                payload = await self._load(url, headers, cube_query, deadline)
+        except TimeoutError as exc:
+            raise CubeConnectionError(
+                f"Cube query timed out after {QUERY_TOTAL_TIMEOUT_SECONDS:.0f}s."
+            ) from exc
         data = payload.get("data") or []
         if not isinstance(data, list):
             raise TypeError("Cube returned an unexpected data payload.")
@@ -99,6 +105,81 @@ class CubeClient:
             "rows": rows,
             "row_count": len(rows),
         }
+
+    async def _load(self, url, headers, cube_query, deadline) -> dict[str, Any]:
+        transient_failures = 0
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                retry_reason = None
+                retry_after = None
+                try:
+                    response = await client.post(
+                        url,
+                        json={"query": cube_query},
+                        headers=headers,
+                        timeout=min(30.0, remaining),
+                    )
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = {}
+                    error = payload.get("error") if isinstance(payload, dict) else None
+                    # Authentication and malformed requests always fail fast,
+                    # even if their message happens to mention a connection.
+                    if response.status_code in {400, 401, 403, 404, 422}:
+                        if error:
+                            raise CubeQueryError(str(error))
+                        response.raise_for_status()
+                    if response.status_code in RETRYABLE_HTTP_STATUSES:
+                        retry_reason = f"http_{response.status_code}"
+                        with suppress(ValueError):
+                            retry_after = max(0.0, float(response.headers.get("Retry-After", "")))
+                    elif error and any(
+                        marker in str(error).lower() for marker in TRANSIENT_ERROR_MARKERS
+                    ):
+                        retry_reason = "upstream_connection"
+                    else:
+                        response.raise_for_status()
+                        if isinstance(error, str) and error.strip().lower() == CONTINUE_WAIT_ERROR:
+                            await asyncio.sleep(CONTINUE_WAIT_POLL_DELAY_SECONDS)
+                            continue
+                        if error:
+                            raise CubeQueryError(str(error))
+                        if not isinstance(payload, dict) or "data" not in payload:
+                            raise CubeQueryError("Cube returned an invalid query response.")
+                        if transient_failures:
+                            logger.info(
+                                "Cube query recovered after %s transient failure(s)",
+                                transient_failures,
+                            )
+                        return payload
+                except httpx.TransportError:
+                    retry_reason = "transport"
+
+                transient_failures += 1
+                if transient_failures >= MAX_TRANSIENT_ATTEMPTS:
+                    logger.warning("Cube query exhausted transient retries (%s)", retry_reason)
+                    raise CubeConnectionError(
+                        "Cube is temporarily unavailable. Please retry the query."
+                    )
+                # This is a read-only /load operation despite using POST. Keep
+                # the identical query and authorization context across retries.
+                delay = RETRY_BASE_DELAY_SECONDS * (2 ** (transient_failures - 1))
+                delay *= random.uniform(0.5, 1.5)  # noqa: S311 -- retry jitter, not security
+                if retry_after is not None:
+                    delay = max(delay, retry_after)
+                logger.warning(
+                    "Retrying Cube query after transient failure (%s), retry %s/%s",
+                    retry_reason,
+                    transient_failures,
+                    MAX_TRANSIENT_ATTEMPTS - 1,
+                )
+                if delay >= deadline - time.monotonic():
+                    raise TimeoutError
+                await asyncio.sleep(delay)
 
     async def invalidate_schema_cache(self, *, security_context: dict[str, Any]) -> None:
         """Force Cube to observe the latest schemaVersion for this context."""
