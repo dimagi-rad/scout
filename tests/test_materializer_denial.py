@@ -138,11 +138,15 @@ def test_midrun_denial_uses_rotated_credential(denial_context, final_status):
         return "rotated"
 
     def load(*args, **kwargs):
-        loader = OCSBaseLoader(experiment_id="0", credential=credential)
+        loader = OCSBaseLoader(
+            experiment_id="0", credential=credential, base_url="https://ocs.example"
+        )
         responses = []
         for status in [401, final_status]:
             response = requests.Response()
             response.status_code = status
+            response._content = b""
+            response._content_consumed = True
             responses.append(response)
         with patch.object(loader._session, "get", side_effect=responses):
             loader._get("https://ocs.example/api/experiments/0/")
