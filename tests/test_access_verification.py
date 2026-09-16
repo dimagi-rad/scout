@@ -127,6 +127,32 @@ def test_proof_freshness_requires_exact_identity_and_five_minute_boundary(
 
 
 @pytest.mark.django_db
+def test_direct_archival_cannot_consume_still_fresh_proof(user, tenant, verification_connection):
+    conn, membership = verification_connection
+    now = timezone.now()
+    claim = claim_verification(user.id, conn.id, {tenant.id}, now=now)
+    assert (
+        publish_verification(claim, VerificationResult.complete({tenant.id}), now=now)
+        == PublicationStatus.PUBLISHED
+    )
+    retry_at = now + timedelta(minutes=1)
+    assert (
+        claim_verification(user.id, conn.id, {tenant.id}, now=retry_at).status == ClaimStatus.FRESH
+    )
+
+    # Direct archival changes membership liveness without invalidating the proof.
+    membership.archived_at = retry_at
+    membership.save(update_fields=["archived_at"])
+    proof = UpstreamAccessProof.objects.get(connection=conn, tenant=tenant)
+    assert proof.verified_at == now
+    assert proof_is_fresh(proof, claim.observation, now=retry_at)
+
+    retry = claim_verification(user.id, conn.id, {tenant.id}, now=retry_at)
+
+    assert retry.status == ClaimStatus.CLAIMED
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("legacy_restores", [False, True])
 def test_archived_membership_cannot_consume_fresh_proof(
     user, tenant, verification_connection, legacy_restores
