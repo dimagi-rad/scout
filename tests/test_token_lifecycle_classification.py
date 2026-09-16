@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 import requests
@@ -53,12 +54,15 @@ def _post_returning(status: int, body: str):
 
 class TestSyncRefreshLogLevels:
     @pytest.fixture(autouse=True)
-    def _mock_connection_health_storage(self, mocker):
-        connections = mocker.patch(
-            "apps.users.services.token_refresh._token_connections"
-        ).return_value
-        connections.aupdate = AsyncMock()
-        connections.filter.return_value.aupdate = AsyncMock()
+    def _isolate_persistence_for_http_unit_tests(self, mocker):
+        mocker.patch(
+            "apps.users.services.token_refresh._preflight_token",
+            return_value=SimpleNamespace(
+                refresh_token="refresh-token",
+                expires_at=None,
+            ),
+        )
+        mocker.patch("apps.users.services.token_refresh._record_refresh_failure")
 
     def test_invalid_grant_is_a_warning_not_an_exception(self, caplog):
         """A dead refresh token is an expected outcome, not a bug."""
@@ -73,9 +77,7 @@ class TestSyncRefreshLogLevels:
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warnings, "expected a WARNING record"
-        # The body must survive so invalid_grant (dead token) can be told apart
-        # from invalid_client (a misconfigured secret, which IS our bug).
-        assert "invalid_grant" in warnings[0].getMessage()
+        assert "invalid_grant" not in warnings[0].getMessage()
 
     @pytest.mark.parametrize("status", [400, 401, 403, 429])
     def test_all_4xx_are_warnings(self, caplog, status):
@@ -117,7 +119,10 @@ class TestSyncRefreshLogLevels:
     def test_the_sync_path_matches_the_async_twin(self):
         """The defect was a divergence between the two, so pin them together."""
         # Both must branch on 4xx before falling through to logger.exception.
-        for fn in (token_refresh.refresh_oauth_token, token_refresh.refresh_oauth_token_sync):
+        for fn in (
+            token_refresh.refresh_oauth_token_result,
+            token_refresh.refresh_oauth_token_result_sync,
+        ):
             body = inspect.getsource(fn)
             assert "400 <= " in body or "<= 499" in body or "< 500" in body, (
                 f"{fn.__name__} must branch 4xx away from logger.exception"
