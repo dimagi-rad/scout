@@ -14,6 +14,21 @@ class VerificationOutcome(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
+class AccessVerificationStatus(StrEnum):
+    VERIFIED = "verified"
+    DENIED = "denied"
+    UNAVAILABLE = "unavailable"
+    INDETERMINATE = "indeterminate"
+    IN_PROGRESS = "in_progress"
+    RETRY = "retry"
+
+
+@dataclass(frozen=True)
+class AccessVerificationResult:
+    status: AccessVerificationStatus
+    error_code: str = ""
+
+
 @dataclass(frozen=True)
 class CredentialObservation:
     connection_id: UUID
@@ -65,4 +80,36 @@ class VerificationResult:
 
     @classmethod
     def indeterminate(cls, error_code: str) -> VerificationResult:
+        return cls(VerificationOutcome.INDETERMINATE, error_code=error_code)
+
+
+@dataclass(frozen=True)
+class ProviderVerificationResult:
+    outcome: VerificationOutcome
+    external_ids: frozenset[str] = frozenset()
+    denied_external_id: str | None = None
+    error_code: str = ""
+
+    @classmethod
+    def complete(cls, external_ids) -> ProviderVerificationResult:
+        return cls(VerificationOutcome.COMPLETE, frozenset(external_ids))
+
+    @classmethod
+    def credential_rejected(cls, error_code: str) -> ProviderVerificationResult:
+        return cls(VerificationOutcome.CREDENTIAL_REJECTED, error_code=error_code)
+
+    @classmethod
+    def tenant_denied(cls, external_id: str, error_code: str) -> ProviderVerificationResult:
+        return cls(
+            VerificationOutcome.TENANT_DENIED,
+            denied_external_id=external_id,
+            error_code=error_code,
+        )
+
+    @classmethod
+    def unavailable(cls, error_code: str) -> ProviderVerificationResult:
+        return cls(VerificationOutcome.UNAVAILABLE, error_code=error_code)
+
+    @classmethod
+    def indeterminate(cls, error_code: str) -> ProviderVerificationResult:
         return cls(VerificationOutcome.INDETERMINATE, error_code=error_code)
