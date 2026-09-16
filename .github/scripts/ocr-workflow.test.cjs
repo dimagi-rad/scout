@@ -225,3 +225,16 @@ test('prior review context is fetched with fixed read APIs before Claude, not an
   h.github.paginate = async () => { throw new Error('API unavailable'); };
   await assert.rejects(prepareClaude(h), /API unavailable/);
 });
+
+
+test('policy checkouts use the executing workflow revision even when PR base predates the helpers', () => {
+  const workflow = require('node:fs').readFileSync(path.join(__dirname, '../workflows/ocr.yml'), 'utf8');
+  const checkouts = workflow.split(/      - name: /).filter(step => step.includes('uses: actions/checkout@'));
+  assert.equal(checkouts.length, 2);
+  for (const checkout of checkouts) {
+    assert.match(checkout, /ref: \$\{\{ github\.workflow_sha \}\}/);
+    assert.doesNotMatch(checkout, /ref:.*(?:outputs\.base|outputs\.head|pull_request)/);
+  }
+  // The PR comparison base remains separate from the policy source revision.
+  assert.match(workflow, /REVIEW_BASE: \$\{\{ needs\.prepare\.outputs\.base \}\}/);
+});

@@ -17,6 +17,8 @@ The accepted state is stored in the bot-owned sticky gate comment. The gate cons
 
 Claude uses the same delta only if it also completed a non-blocking review of the accepted checkpoint. Otherwise Claude reviews the full PR. Its focused prompt additionally revisits prior unresolved findings. A failed, partial or budget-limited Claude run never advances that separate checkpoint.
 
+The separate Claude receipt starts as **pending** and changes to **verified** or **blocked**. Verification requires a successful action and final SDK result, no reported tool permission denials, complete structured output for the exact head, and a new trusted bot comment bearing the run's unique receipt. The receipt binds repository, PR, run attempt, head and base; another concurrent `@claude` comment cannot satisfy it. High/critical findings block checkpoint advancement even when the review itself completed. Missing or malformed evidence also blocks. Failed attempts update the visible receipt; older attempts cannot replace a newer receipt. Diagnostics omit raw transcripts, tool arguments and exception content. A verified receipt and successful checkpoint publication are required before a future delta can reuse the Claude baseline.
+
 The gate controls the Claude follow-up. It does not add a required branch-protection check or replace human review.
 
 ## Manual runs
@@ -36,7 +38,7 @@ Manual **`@claude`** requests retain their existing workflow and operate indepen
 
 ## Trust and credentials
 
-The OCR workflow uses `pull_request_target` so fork PRs can be reviewed with the repository secret. The pinned upstream action checks out the trusted base branch, fetches PR Git objects and reads the diff without checking out or executing fork code. Scout snapshots the gate scripts from the captured base before the upstream checkout and fingerprints the workflow and validation policy. Prior review text is fetched through fixed read-only SDK methods and supplied as untrusted JSON data; Claude does not receive a general `gh api` shell grant. The automatic Claude step also keeps the trusted checkout and uses Git/PR reads to inspect the requested commits; it runs only on same-repository PRs.
+The OCR workflow uses `pull_request_target` so fork PRs can be reviewed with the repository secret. The pinned upstream action checks out the trusted base branch, fetches PR Git objects and reads the diff without checking out or executing fork code. Scout loads and snapshots the gate scripts from the immutable `github.workflow_sha` revision before the upstream checkout (an older PR comparison base can predate those scripts) and fingerprints the workflow and validation policy. Prior review text is fetched through fixed read-only SDK methods and supplied as untrusted JSON data; Claude does not receive a general `gh api` shell grant. The automatic Claude step also keeps the trusted checkout and uses Git/PR reads to inspect the requested commits; it runs only on same-repository PRs.
 
 Do not change this workflow to check out a fork head or execute its install/build/test scripts while credentials are available. Review text is still untrusted input to the models.
 
@@ -60,7 +62,7 @@ The OCR token limit stops further dispatch after it is exceeded; in-flight work 
 The release and provider settings are explicit to make upgrades reviewable. When upgrading OCR, verify its output contract and run:
 
 ```sh
-node --test .github/scripts/ocr-*.test.cjs
+node --test .github/scripts/ocr-*.test.cjs .github/scripts/claude-review-*.test.cjs
 actionlint .github/workflows/ocr.yml .github/workflows/claude.yml .github/workflows/ci.yml
 ```
 
