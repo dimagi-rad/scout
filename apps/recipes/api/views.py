@@ -20,6 +20,7 @@ from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner, VariableValidationError
 from apps.recipes.tasks import run_recipe
 from apps.users.decorators import async_login_required
+from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
 from apps.workspaces.workspace_resolver import aresolve_workspace
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
@@ -58,8 +59,17 @@ class RecipeDetailView(APIView):
     DELETE /api/recipes/<recipe_id>/ - Delete a recipe.
     """
 
-    def _get_recipe(self, request, workspace_id, recipe_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+    def _get_recipe(
+        self,
+        request,
+        workspace_id,
+        recipe_id,
+        *,
+        minimum_role: str = WorkspaceRole.READ,
+    ):
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=minimum_role
+        )
         if err:
             return None, err
         try:
@@ -75,7 +85,12 @@ class RecipeDetailView(APIView):
         return Response(RecipeDetailSerializer(recipe).data)
 
     def put(self, request, workspace_id, recipe_id):
-        recipe, err = self._get_recipe(request, workspace_id, recipe_id)
+        recipe, err = self._get_recipe(
+            request,
+            workspace_id,
+            recipe_id,
+            minimum_role=WorkspaceRole.READ_WRITE,
+        )
         if err:
             return err
         serializer = RecipeUpdateSerializer(recipe, data=request.data, partial=True)
@@ -85,7 +100,12 @@ class RecipeDetailView(APIView):
         return Response(RecipeDetailSerializer(recipe).data)
 
     def delete(self, request, workspace_id, recipe_id):
-        recipe, err = self._get_recipe(request, workspace_id, recipe_id)
+        recipe, err = self._get_recipe(
+            request,
+            workspace_id,
+            recipe_id,
+            minimum_role=WorkspaceRole.READ_WRITE,
+        )
         if err:
             return err
         recipe.soft_delete(deleted_by=request.user)
@@ -182,7 +202,9 @@ class RecipeRunDetailView(APIView):
     """
 
     def patch(self, request, workspace_id, recipe_id, run_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
         if err:
             return err
         try:
