@@ -1,6 +1,6 @@
 'use strict';
 
-const RECEIPT_PREFIX = '<!-- scout-claude-artifact:';
+const RECEIPT_PREFIX = '<!-- scout-claude-artifact:v1 ';
 const RECEIPT_FIELDS = ['nonce', 'repository', 'pr', 'run', 'attempt', 'head', 'base'];
 const SHA = /^[0-9a-f]{40}$/;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);

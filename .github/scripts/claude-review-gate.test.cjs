@@ -11,7 +11,7 @@ function input(overrides = {}) {
     actionOutcome: 'success', actionConclusion: 'success',
     structuredResult: { complete: true, reviewed_head: HEAD, blocking_findings: 0 },
     sdkMessages: [{ type: 'result', subtype: 'success', is_error: false, permission_denials: [] }],
-    baselineIssueCommentIds: [10], baselineReviewCommentIds: [], reviewComments: [], issueComments: [comment()], ...overrides };
+    baselineIssueCommentIds: [10], issueComments: [comment()], ...overrides };
 }
 function blocked(value) {
   const result = evaluateClaudeReview(value);
@@ -23,8 +23,10 @@ test('matching new receipt, structured completion and SDK success pass', () => {
   assert.deepEqual(evaluateClaudeReview(input()), { passed: true, outcome: 'no_blocking_findings', newIssueCommentIds: [11], blockingFindings: 0 });
 });
 test('SDK success cannot substitute for the exact run receipt', () => {
-  for (const field of ['nonce', 'repository', 'pr', 'run', 'attempt', 'head', 'base']) {
-    const wrong = { ...RECEIPT, [field]: field === 'pr' ? 43 : 'wrong' };
+  const alternates = { nonce: 'd'.repeat(64), repository: 'owner/other', pr: 43,
+    run: '124', attempt: '2', head: 'e'.repeat(40), base: 'f'.repeat(40) };
+  for (const [field, value] of Object.entries(alternates)) {
+    const wrong = { ...RECEIPT, [field]: value };
     blocked(input({ issueComments: [comment(11, wrong)] }));
   }
   blocked(input({ issueComments: [] }));
@@ -69,4 +71,11 @@ test('changed revisions, closed PR and malformed expected receipt block', () => 
   for (const expectedReceipt of [null, {}, { ...RECEIPT, nonce: '' }, { ...RECEIPT, run: '0' }, { ...RECEIPT, attempt: '-1' }, { ...RECEIPT, head: BASE }, { ...RECEIPT, extra: true }]) blocked(input({ expectedReceipt }));
   for (const expectedHead of [null, undefined, 'main', 'z'.repeat(40)]) blocked(input({ expectedHead }));
   blocked(null); blocked(undefined);
+});
+
+
+test('quoting the generic marker prefix is not a second receipt artifact', () => {
+  const c = comment();
+  c.body = 'The generic prefix `<!-- scout-claude-artifact:` is validated.\n' + c.body;
+  assert.equal(evaluateClaudeReview(input({ issueComments: [c] })).passed, true);
 });
