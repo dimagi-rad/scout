@@ -8,8 +8,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-staging
+  # Must match production: both destinations deploy to the same host.
+  group: scout-deploy-host
   cancel-in-progress: false
+  # GitHub supports up to 100 pending runs with this optional queue property:
+  # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+  queue: max
 
 permissions:
   id-token: write
@@ -18,6 +22,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Bound setup/prebuild hangs too; post-drain steps have tighter limits.
+    timeout-minutes: 90
     # Load-bearing for auth, not just bookkeeping: it switches the OIDC token's
     # sub claim from `ref:refs/heads/<branch>` to `environment:staging`, which is
     # the subject scout-github-deploy trusts for non-main refs. Remove it and
@@ -103,28 +109,79 @@ jobs:
           docker push "$SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG"
 
       - name: Install Kamal
-        run: gem install kamal
+        # Keep the worker labels and API health-polling contract reproducible.
+        run: gem install kamal --version 2.12.0
 
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      # Role-specific Kamal builds retain the correct service labels without
+      # making a build/push failure pause the existing worker queue.
+      - name: Build and push API image
+        run: kamal build push -d staging --version="$API_TAG"
+
+      - name: Build and push MCP image
+        run: kamal build push -c config/deploy-mcp.yml -d staging --version="$MCP_TAG"
+
+      - name: Build and push Worker image
+        run: kamal build push -c config/deploy-worker.yml -d staging --version="$WORKER_TAG"
+
       - name: Deploy Cube
         run: kamal deploy -c config/deploy-cube.yml -d staging --version="$CUBE_TAG"
 
-      - name: Deploy MCP
-        run: kamal deploy -c config/deploy-mcp.yml -d staging --version="$MCP_TAG"
+      - name: Drain old workers
+        id: drain_workers
+        timeout-minutes: 12
+        run: |
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "scout@$SCOUT_EC2_IP" bash -s -- staging 600 < scripts/drain-workers.sh
 
       - name: Deploy API
-        run: kamal deploy -d staging --version="$API_TAG"
+        # Migrate and pass the API's container health check before starting
+        # new MCP/worker code that can select newly added columns.
+        timeout-minutes: 10
+        run: kamal deploy -d staging --skip-push --version="$API_TAG"
+
+      - name: Deploy MCP
+        timeout-minutes: 10
+        run: kamal deploy -c config/deploy-mcp.yml -d staging --skip-push --version="$MCP_TAG"
 
       - name: Deploy Worker
-        run: kamal deploy -c config/deploy-worker.yml -d staging --version="$WORKER_TAG"
+        id: deploy_worker
+        # Never service-prune another destination's pending-drain evidence.
+        # app:boot refreshes this role's secret file and clear env each time.
+        timeout-minutes: 10
+        run: kamal redeploy -c config/deploy-worker.yml -d staging --skip-push --version="$WORKER_TAG"
 
       - name: Deploy Frontend
         # Preserve the staging image's baked-in nginx, environment, and release.
+        timeout-minutes: 10
         run: kamal deploy -c config/deploy-frontend.yml -d staging --skip-push --version="$FRONTEND_TAG"
+
+      - name: Report interrupted backend handoff
+        if: >-
+          ${{ (failure() || cancelled()) &&
+              (steps.drain_workers.outcome == 'success' ||
+               steps.drain_workers.outcome == 'failure' ||
+               steps.drain_workers.outcome == 'cancelled') &&
+              steps.deploy_worker.outcome != 'success' }}
+        shell: bash
+        run: |
+          echo "::error title=Backend handoff interrupted::Staging workers may be draining or stopped; queued jobs may be paused. Inspect the recovery steps in this run's summary before retrying."
+          printf '%s\n' \
+            '### Staging backend handoff interrupted' \
+            '' \
+            'Staging workers may be draining or stopped; queued jobs may be paused until a compatible worker is deployed.' \
+            '' \
+            '1. Inspect worker state, in-flight jobs, and pending receipts in the scout account home at .scout-worker-drains-v1/staging/.' \
+            'If a timeout or cancellation left a Kamal lock, run kamal lock status with the same config and destination as the failed step. Release only a verified stale lock after confirming no deployment or remote operation is active.' \
+            '2. Resolve the failed drain, migration, health, or deployment step; then roll forward by rerunning the complete staging deployment once the worker/job state is safe.' \
+            '3. Do not blindly reboot old workers, force-stop them, or delete receipts. An old publisher can invalidate newly published source mappings; unconfirmed drains require operator inspection.' \
+            '' \
+            'See DEPLOYMENT.md: Migration-safe backend handoff. No automatic worker restart was attempted.' \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary
         run: |

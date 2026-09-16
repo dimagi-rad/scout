@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
+
 from apps.common.identifiers import dbt_column_alias
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
@@ -23,6 +25,8 @@ from apps.transformations.services.commcare_staging import (
     _sql_escape,
     _typed_expression,
 )
+from apps.transformations.services.repeat_identity import GeneratedRepeat, preserve_repeat_names
+from apps.users.models import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +171,7 @@ def _generate_connect_repeat_group_asset(
     )
 
 
+@transaction.atomic
 def upsert_connect_assets(tenant, tenant_metadata) -> dict:
     """Generate and upsert system staging TransformationAssets for a Connect tenant.
 
@@ -183,8 +188,12 @@ def upsert_connect_assets(tenant, tenant_metadata) -> dict:
 
     Returns ``{"created": int, "updated": int, "deleted": int, "total": int}``.
     """
+    Tenant.objects.select_for_update().get(pk=tenant.pk)
+    existing_assets = list(
+        TransformationAsset.objects.filter(tenant=tenant, scope=TransformationScope.SYSTEM)
+    )
     form_definitions = (tenant_metadata.metadata or {}).get("form_definitions", {})
-    assets = generate_connect_assets(form_definitions, tenant)
+    assets = generate_connect_assets(form_definitions, tenant, existing_assets=existing_assets)
 
     created = 0
     updated = 0
@@ -215,7 +224,9 @@ def upsert_connect_assets(tenant, tenant_metadata) -> dict:
     return {"created": created, "updated": updated, "deleted": deleted, "total": len(assets)}
 
 
-def generate_connect_assets(form_definitions: dict, tenant) -> list[TransformationAsset]:
+def generate_connect_assets(
+    form_definitions: dict, tenant, *, existing_assets: list[TransformationAsset] | None = None
+) -> list[TransformationAsset]:
     """Generate unsaved TransformationAsset instances for Connect staging.
 
     Args:
@@ -233,6 +244,7 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
         - one ``stg_visits__repeat_<group>`` asset per repeat group
     """
     assets: list[TransformationAsset] = []
+    repeats: list[GeneratedRepeat] = []
     fallbacks = _NameFallbacks()
 
     assets.append(_generate_stg_visits(tenant, form_definitions, fallbacks))
@@ -249,11 +261,11 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
 
     model_names = _repeat_model_names("stg_visits", repeat_groups, fallbacks)
     for group_path, child_qs in repeat_groups.items():
-        assets.append(
-            _generate_connect_repeat_group_asset(
-                tenant, group_path, child_qs, fallbacks, model_name=model_names[group_path]
-            )
+        asset = _generate_connect_repeat_group_asset(
+            tenant, group_path, child_qs, fallbacks, model_name=model_names[group_path]
         )
+        assets.append(asset)
+        repeats.append(GeneratedRepeat(asset, "stg_visits", group_path))
 
     if summary := fallbacks.summary():
         logger.info(
@@ -262,4 +274,6 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
             summary,
         )
 
+    if existing_assets is not None:
+        preserve_repeat_names(assets, repeats, existing_assets, provider="commcare_connect")
     return assets

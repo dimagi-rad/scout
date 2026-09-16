@@ -5,6 +5,8 @@ import pytest
 from django.utils import timezone
 
 from apps.common.errors import ExpectedUpstreamError
+from apps.transformations.services.commcare_staging import CaseModelMigrationRequired
+from apps.transformations.services.staging_identity import RepeatModelMigrationRequired
 from apps.users.models import Tenant
 from apps.workspaces.models import MaterializationRun, TenantSchema
 from mcp_server.loaders.commcare_base import CommCareBaseLoader
@@ -450,27 +452,37 @@ class TestRunPipeline:
         connect_assets.assert_not_called()
         assert "Skipping asset generation for 123: tenant metadata is unavailable" in caplog.text
 
-    def test_case_model_migration_guard_stops_before_load_and_records_failure(self):
-        from apps.transformations.services.commcare_staging import CaseModelMigrationRequired
+    @pytest.mark.parametrize(
+        ("provider", "error_type"),
+        [
+            ("commcare", CaseModelMigrationRequired),
+            ("commcare", RepeatModelMigrationRequired),
+            ("commcare_connect", RepeatModelMigrationRequired),
+        ],
+    )
+    def test_staging_migration_guard_stops_before_load_and_records_failure(
+        self, provider, error_type
+    ):
         from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
         from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
-            name="commcare_sync",
+            name=f"{provider}_sync",
             description="",
             version="1.0",
-            provider="commcare",
+            provider=provider,
             sources=[SourceConfig(name="cases")],
         )
-        message = "An explicit migration is required for existing ambiguous case-type models"
+        message = "An explicit migration is required for an existing ambiguous staging model"
+        upsert_name = "upsert_system_assets" if provider == "commcare" else "upsert_connect_assets"
         with (
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer._run_discover_phase"),
             patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch(
-                "mcp_server.services.materializer.upsert_system_assets",
-                side_effect=CaseModelMigrationRequired(message),
+                f"mcp_server.services.materializer.{upsert_name}",
+                side_effect=error_type(message),
             ),
             patch("mcp_server.services.materializer._load_and_commit_source") as mock_load,
             patch("mcp_server.services.materializer._run_transform_phase") as mock_transform,
@@ -480,8 +492,8 @@ class TestRunPipeline:
             run = self._setup_run_mock(mock_run_cls)
             run.completed_at = None
 
-            with pytest.raises(CaseModelMigrationRequired, match="explicit migration"):
-                run_pipeline(self._make_tm(), {}, pipeline)
+            with pytest.raises(error_type, match="explicit migration"):
+                run_pipeline(self._make_tm(tenant_id="123"), {}, pipeline)
 
         mock_load.assert_not_called()
         mock_transform.assert_not_called()
@@ -490,7 +502,7 @@ class TestRunPipeline:
         terminal_write = mock_run_cls.objects.filter.return_value.update.call_args.kwargs
         assert terminal_write["state"] == "failed"
         assert terminal_write["completed_at"] is not None
-        assert terminal_write["result"]["error"] == f"CaseModelMigrationRequired: {message}"
+        assert terminal_write["result"]["error"] == f"{error_type.__name__}: {message}"
         assert terminal_write["result"]["error_code"] == "SCHEMA_BUILD_FAILED"
         assert terminal_write["result"]["sources"] == {}
 

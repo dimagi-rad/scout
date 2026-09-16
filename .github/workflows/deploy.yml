@@ -6,8 +6,13 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-production
+  # Both destinations share a host. Preserve pending deployments as well as
+  # the active handoff instead of letting one destination cancel the other.
+  group: scout-deploy-host
   cancel-in-progress: false
+  # GitHub supports up to 100 pending runs with this optional queue property:
+  # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+  queue: max
 
 permissions:
   id-token: write
@@ -20,6 +25,8 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
+    # Bound setup/prebuild hangs too; post-drain steps have tighter limits.
+    timeout-minutes: 90
     env:
       IMAGE_TAG: ${{ github.sha }}
       # Kamal adds a different service label to each backend image. Never let
@@ -85,26 +92,80 @@ jobs:
           docker push "$SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG"
 
       - name: Install Kamal
-        run: gem install kamal
+        # Drain label selection and non-proxied health polling are verified
+        # against this version; upgrades require the same rollout checks.
+        run: gem install kamal --version 2.12.0
 
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      # Finish every backend build/push while existing workers still run.
+      # Kamal supplies each role's service label; do not use a shared raw build.
+      - name: Build and push API image
+        run: kamal build push --version="$API_TAG"
+
+      - name: Build and push MCP image
+        run: kamal build push -c config/deploy-mcp.yml --version="$MCP_TAG"
+
+      - name: Build and push Worker image
+        run: kamal build push -c config/deploy-worker.yml --version="$WORKER_TAG"
+
       - name: Deploy Cube
         run: kamal deploy -c config/deploy-cube.yml --version="$CUBE_TAG"
 
-      - name: Deploy MCP
-        run: kamal deploy -c config/deploy-mcp.yml --version="$MCP_TAG"
+      - name: Drain old workers
+        id: drain_workers
+        timeout-minutes: 12
+        run: |
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "scout@$SCOUT_EC2_IP" bash -s -- production 600 < scripts/drain-workers.sh
 
       - name: Deploy API
-        run: kamal deploy --version="$API_TAG"
+        # The API applies migrations before its health gate opens. Schema-
+        # dependent MCP/worker code must not start before that succeeds.
+        timeout-minutes: 10
+        run: kamal deploy --skip-push --version="$API_TAG"
+
+      - name: Deploy MCP
+        timeout-minutes: 10
+        run: kamal deploy -c config/deploy-mcp.yml --skip-push --version="$MCP_TAG"
 
       - name: Deploy Worker
-        run: kamal deploy -c config/deploy-worker.yml --version="$WORKER_TAG"
+        id: deploy_worker
+        # Kamal's automatic prune is service-wide, not destination-scoped.
+        # Preserve stopped workers referenced by either destination's receipts.
+        # Pinned Kamal's app:boot refreshes this role's secret file and clear
+        # env on every redeploy; there is no separate env push in Kamal 2.
+        timeout-minutes: 10
+        run: kamal redeploy -c config/deploy-worker.yml --skip-push --version="$WORKER_TAG"
 
       - name: Deploy Frontend
         # Preserve the image built above, including its Sentry settings and maps.
         # A default Kamal deploy rebuilds this tag without those build inputs.
+        timeout-minutes: 10
         run: kamal deploy -c config/deploy-frontend.yml --skip-push --version="$IMAGE_TAG"
+
+      - name: Report interrupted backend handoff
+        if: >-
+          ${{ (failure() || cancelled()) &&
+              (steps.drain_workers.outcome == 'success' ||
+               steps.drain_workers.outcome == 'failure' ||
+               steps.drain_workers.outcome == 'cancelled') &&
+              steps.deploy_worker.outcome != 'success' }}
+        shell: bash
+        run: |
+          echo "::error title=Backend handoff interrupted::Production workers may be draining or stopped; queued jobs may be paused. Inspect the recovery steps in this run's summary before retrying."
+          printf '%s\n' \
+            '### Production backend handoff interrupted' \
+            '' \
+            'Production workers may be draining or stopped; queued jobs may be paused until a compatible worker is deployed.' \
+            '' \
+            '1. Inspect worker state, in-flight jobs, and pending receipts in the scout account home at .scout-worker-drains-v1/production/.' \
+            'If a timeout or cancellation left a Kamal lock, run kamal lock status with the same config and destination as the failed step. Release only a verified stale lock after confirming no deployment or remote operation is active.' \
+            '2. Resolve the failed drain, migration, health, or deployment step; then roll forward by rerunning the complete production deployment once the worker/job state is safe.' \
+            '3. Do not blindly reboot old workers, force-stop them, or delete receipts. An old publisher can invalidate newly published source mappings; unconfirmed drains require operator inspection.' \
+            '' \
+            'See DEPLOYMENT.md: Migration-safe backend handoff. No automatic worker restart was attempted.' \
+            >> "$GITHUB_STEP_SUMMARY"

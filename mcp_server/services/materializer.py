@@ -54,12 +54,10 @@ from apps.common.error_codes import code_of
 from apps.common.errors import DenialScope, UpstreamAccessDenied, UpstreamTokenExpired
 from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset, TransformationRunStatus
-from apps.transformations.services.commcare_staging import (
-    CaseModelMigrationRequired,
-    upsert_system_assets,
-)
+from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
+from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
@@ -226,7 +224,7 @@ def run_pipeline(
                 discovered_metadata, int(tenant_membership.tenant.external_id)
             )
 
-        # Asset generation failures are isolated — load can proceed without assets.
+        # Unrelated generation failures stay isolated; unsafe identity changes do not.
         if pipeline.provider == "commcare":
             try:
                 tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
@@ -243,7 +241,7 @@ def run_pipeline(
                         "Skipping asset generation for %s: tenant metadata is unavailable",
                         tenant_membership.tenant.external_id,
                     )
-            except CaseModelMigrationRequired:
+            except StagingModelMigrationRequired:
                 # Continuing would run stale, ambiguous assets and report an
                 # incomplete rebuild as successful. The outer handler records
                 # this actionable failure before any provider rows are loaded.
@@ -254,7 +252,7 @@ def run_pipeline(
                     tenant_membership.tenant.external_id,
                 )
 
-        # Asset generation failures are isolated — the pipeline continues regardless.
+        # Connect must stop on the same unsafe identity changes as CommCare.
         if pipeline.provider == "commcare_connect":
             try:
                 tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
@@ -274,6 +272,8 @@ def run_pipeline(
                         "Skipping asset generation for %s: tenant metadata is unavailable",
                         tenant_membership.tenant.external_id,
                     )
+            except StagingModelMigrationRequired:
+                raise
             except Exception:
                 logger.exception(
                     "Failed to generate Connect assets for %s; continuing pipeline",

@@ -29,6 +29,7 @@ from apps.common.identifiers import (
 )
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
+from apps.workspaces.services.view_sources import VIEW_SOURCES_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -406,9 +407,7 @@ class SchemaManager:
 
             # Detect collisions on the FINAL (bounded) prefixes.
             prefix_to_tenant: dict[str, str] = {}
-            tenant_prefixes: list[
-                tuple[str, str, str]
-            ] = []  # (schema_name, tenant_external_id, prefix)
+            tenant_prefixes: list[tuple[str, Tenant, str]] = []
             for schema_name, tenant_obj in tenant_schemas:
                 tenant_external_id = tenant_obj.external_id
                 # Use the threaded tenant object, NOT a lookup by external_id —
@@ -420,15 +419,17 @@ class SchemaManager:
                         f"'{tenant_external_id}' both sanitize to prefix '{prefix}'"
                     )
                 prefix_to_tenant[prefix] = tenant_external_id
-                tenant_prefixes.append((schema_name, tenant_external_id, prefix))
+                tenant_prefixes.append((schema_name, tenant_obj, prefix))
 
             # Check full-name collisions on FINAL (fitted) names before any DDL.
             # The collision check catches ambiguous __ delimiters ("foo__bar"+"baz"
             # vs "foo"+"bar__baz"); view_name keeps every name within the
             # 63-byte limit so Postgres never silently truncates two into one.
             planned_views: list[tuple[str, str, str]] = []
+            planned_sources: dict[str, dict[str, str]] = {}
             seen_view_names: dict[str, str] = {}  # fitted view name → tenant_external_id
-            for schema_name, tenant_external_id, prefix in tenant_prefixes:
+            for schema_name, tenant_obj, prefix in tenant_prefixes:
+                tenant_external_id = tenant_obj.external_id
                 cursor.execute(
                     "SELECT table_name FROM information_schema.tables "
                     "WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')",
@@ -443,6 +444,10 @@ class SchemaManager:
                         )
                     seen_view_names[name] = tenant_external_id
                     planned_views.append((name, schema_name, table_name))
+                    planned_sources[name] = {
+                        "tenant_id": str(tenant_obj.id),
+                        "source_table_name": table_name,
+                    }
 
             # DROP + recreate (not CREATE OR REPLACE VIEW) so a rebuild after an
             # underlying column change never hits "cannot change name of view
@@ -526,7 +531,10 @@ class SchemaManager:
         vs.state = SchemaState.ACTIVE
         vs.last_error = ""
         vs.last_accessed_at = timezone.now()
-        vs.save(update_fields=["state", "last_error", "last_accessed_at"])
+        # Publish provenance with ACTIVE, never during plan capture or failed DDL.
+        # Failed rebuilds retain the last-good identities for artifact recovery.
+        vs.view_sources = {"version": VIEW_SOURCES_VERSION, "views": planned_sources}
+        vs.save(update_fields=["state", "last_error", "last_accessed_at", "view_sources"])
 
         logger.info(
             "Built view schema '%s' for workspace '%s' (%d tenants, %d views)",

@@ -9,6 +9,9 @@ service: scout
 
 image: scout/api
 
+# Include migration time, not just the time needed to start an HTTP listener.
+deploy_timeout: 180
+
 servers:
   web:
     hosts:
@@ -16,6 +19,13 @@ servers:
     options:
       network: "scout_shared"
       network-alias: "scout-web"
+      # Non-proxied roles otherwise become "ready" while migrations are still
+      # running. Check this exact container, never the shared network alias.
+      health-cmd: "sh scripts/api-healthcheck.sh"
+      health-interval: "5s"
+      health-timeout: "5s"
+      health-start-period: "120s"
+      health-retries: 3
     # --no-access-log: uvicorn's access log writes the full request line —
     # including share tokens (/api/chat/threads/shared/<token>/,
     # /api/recipes/runs/shared/<token>/) and OAuth ?code= values — and ships it

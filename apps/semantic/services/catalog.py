@@ -35,6 +35,11 @@ from apps.workspaces.services.pipeline_resolver import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
+from apps.workspaces.services.view_sources import (
+    ViewSourcesError,
+    parse_view_sources,
+    validate_published_views,
+)
 from mcp_server.context import load_workspace_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
@@ -222,11 +227,12 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
     ctx = await load_workspace_context(str(workspace.id))
     schema_name = ctx.schema_name
 
-    is_view_schema = await WorkspaceViewSchema.objects.filter(
+    view_schema = await WorkspaceViewSchema.objects.filter(
         workspace_id=workspace.id,
         schema_name=schema_name,
         state=SchemaState.ACTIVE,
-    ).aexists()
+    ).afirst()
+    is_view_schema = view_schema is not None
 
     ts = None
     if not is_view_schema:
@@ -257,6 +263,13 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
 
     primary_keys = await pipeline_table_primary_keys(ctx)
     tenants = [tenant async for tenant in workspace.tenants.all()] if is_view_schema else []
+    sources = (
+        parse_view_sources(view_schema.view_sources, {str(tenant.id) for tenant in tenants})
+        if view_schema is not None
+        else None
+    )
+    if sources is not None:
+        validate_published_views(sources, {entry.get("name", "") for entry in table_entries})
     physical_tables: list[PhysicalTable] = []
     for entry in table_entries:
         table_name = entry.get("name", "")
@@ -282,6 +295,8 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 source_tenant_ids=(
                     (str(ts.tenant_id),)
                     if ts is not None
+                    else (sources[table_name].tenant_id,)
+                    if sources is not None
                     else SchemaManager().tenant_ids_for_view(table_name, tenants)
                 ),
             )
@@ -298,6 +313,11 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
         # guess outlives the request. Reported as its own message because
         # "refresh workspace data" cannot fix a missing pipeline (#155).
         raise SemanticCatalogUnavailable(str(exc), schema_status="failed") from exc
+    except ViewSourcesError as exc:
+        raise SemanticCatalogUnavailable(
+            "The workspace view source map is invalid. Rebuild the query layer.",
+            schema_status="failed",
+        ) from exc
     except Exception as exc:
         tenant = workspace.tenant
         schema_status = "unavailable"

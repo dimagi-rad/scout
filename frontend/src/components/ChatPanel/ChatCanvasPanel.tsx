@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useParams } from "react-router-dom"
 import {
@@ -52,70 +52,120 @@ export function ChatCanvasPanel({ workspaceId, threadId, className }: ChatCanvas
   const params = useParams<{ threadId?: string }>()
   const activeThreadId = threadId ?? params.threadId ?? null
 
+  return (
+    <CanvasSession
+      key={JSON.stringify([workspaceId, activeThreadId])}
+      workspaceId={workspaceId}
+      activeThreadId={activeThreadId}
+      className={className}
+    />
+  )
+}
+
+function CanvasSession({ workspaceId, activeThreadId, className }: {
+  workspaceId: string
+  activeThreadId: string | null
+  className?: string
+}) {
   const [status, setStatus] = useState<LoadStatus>("idle")
   const [error, setError] = useState<string | null>(null)
   const [projection, setProjection] = useState<CanvasProjection | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const mounted = useRef(false)
+  const requestSequence = useRef(0)
+  const readInFlight = useRef<number | null>(null)
+  const mutationInFlight = useRef(false)
+
+  const isCurrent = useCallback((request: number) => (
+    mounted.current && requestSequence.current === request
+  ), [])
 
   const loadCanvas = useCallback(
     async (silent = false) => {
-      if (!activeThreadId) return
+      if (!activeThreadId || !mounted.current || mutationInFlight.current) return
+      if (silent && readInFlight.current !== null) return
+      const request = ++requestSequence.current
+      readInFlight.current = request
       if (!silent) setStatus("loading")
       try {
         const next = await fetchCanvas(workspaceId, activeThreadId)
+        if (!isCurrent(request)) return
         setProjection(next)
         setStatus("loaded")
         setError(null)
       } catch (loadError) {
-        if (!silent) {
+        if (isCurrent(request) && !silent) {
           setStatus("error")
           setError(loadError instanceof Error ? loadError.message : "Failed to load canvas")
         }
+      } finally {
+        if (isCurrent(request)) readInFlight.current = null
       }
     },
-    [workspaceId, activeThreadId],
+    [workspaceId, activeThreadId, isCurrent],
   )
 
   useEffect(() => {
-    setProjection(null)
-    setNotice(null)
-    if (!activeThreadId) {
-      setStatus("idle")
-      return
-    }
+    const sequence = requestSequence
+    mounted.current = true
     void loadCanvas()
     // Agent edits land server-side mid-conversation; poll to keep the panel live.
-    const timer = window.setInterval(() => void loadCanvas(true), POLL_INTERVAL_MS)
-    return () => window.clearInterval(timer)
-  }, [workspaceId, activeThreadId, loadCanvas])
+    const timer = activeThreadId
+      ? window.setInterval(() => void loadCanvas(true), POLL_INTERVAL_MS)
+      : null
+    return () => {
+      mounted.current = false
+      ++sequence.current
+      if (timer !== null) window.clearInterval(timer)
+    }
+  }, [activeThreadId, loadCanvas])
+
+  const beginMutation = useCallback(() => {
+    if (!activeThreadId || !mounted.current || mutationInFlight.current) return null
+    mutationInFlight.current = true
+    // Discard every older read, and do not let polling supersede this mutation.
+    const request = ++requestSequence.current
+    readInFlight.current = null
+    setBusy(true)
+    setStatus("loaded")
+    setNotice(null)
+    return request
+  }, [activeThreadId])
 
   const runOps = useCallback(
     async (operations: CanvasOp[]): Promise<boolean> => {
       if (!activeThreadId) return false
-      setBusy(true)
-      setNotice(null)
+      const request = beginMutation()
+      if (request === null) return false
       try {
         const next = await applyCanvasOps(workspaceId, activeThreadId, operations)
+        if (!isCurrent(request)) return false
         setProjection(next)
         setError(null)
         return true
       } catch (applyError) {
-        setError(applyError instanceof ApiError ? applyError.message : "Canvas change failed")
+        if (isCurrent(request)) {
+          setError(applyError instanceof ApiError ? applyError.message : "Canvas change failed")
+        }
         return false
       } finally {
-        setBusy(false)
+        if (isCurrent(request)) {
+          mutationInFlight.current = false
+          setBusy(false)
+        }
       }
     },
-    [workspaceId, activeThreadId],
+    [workspaceId, activeThreadId, beginMutation, isCurrent],
   )
 
   const handleCommit = useCallback(async () => {
     if (!activeThreadId) return
-    setBusy(true)
-    setNotice(null)
+    const request = beginMutation()
+    if (request === null) return
     try {
       const report = await commitCanvas(workspaceId, activeThreadId)
+      if (!isCurrent(request)) return
       if (report.projection) setProjection(report.projection)
       if (report.blocked) {
         setError("Save blocked — fix the problems listed below first.")
@@ -132,11 +182,16 @@ export function ChatCanvasPanel({ workspaceId, threadId, className }: ChatCanvas
         )
       }
     } catch (commitError) {
-      setError(commitError instanceof Error ? commitError.message : "Canvas save failed")
+      if (isCurrent(request)) {
+        setError(commitError instanceof Error ? commitError.message : "Canvas save failed")
+      }
     } finally {
-      setBusy(false)
+      if (isCurrent(request)) {
+        mutationInFlight.current = false
+        setBusy(false)
+      }
     }
-  }, [workspaceId, activeThreadId])
+  }, [workspaceId, activeThreadId, beginMutation, isCurrent])
 
   const pendingCount = useMemo(() => pendingObjects(projection).length, [projection])
   const groups = useMemo(() => groupByDataset(projection), [projection])
@@ -167,7 +222,7 @@ export function ChatCanvasPanel({ workspaceId, threadId, className }: ChatCanvas
             variant="ghost"
             size="icon-xs"
             onClick={() => void loadCanvas()}
-            disabled={status === "loading"}
+            disabled={busy || status === "loading"}
             aria-label="Refresh canvas"
             data-testid="canvas-refresh-button"
           >
