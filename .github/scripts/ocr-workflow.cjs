@@ -2,11 +2,12 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { evaluateClaudeReview } = require('./claude-review-gate.cjs');
 const { evaluateReview } = require('./ocr-gate.cjs');
 const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheckpointMatches } = require('./ocr-state.cjs');
 
 const policyFiles = ['.github/workflows/ocr.yml', '.github/scripts/ocr-gate.cjs',
-  '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs'];
+  '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs', '.github/scripts/claude-review-gate.cjs'];
 const trustedComment = (comment) => comment?.user?.login === 'github-actions[bot]'
   && comment.user?.type === 'Bot'
   && (!comment.performed_via_github_app || comment.performed_via_github_app.slug === 'github-actions')
@@ -35,7 +36,11 @@ async function prepareReview({ github, context, core, fs, env }) {
   const policy = hash.digest('hex');
   const comments = await commentsFor(github, context, env.PR_NUMBER);
   const previous = readState(comments);
-  let selection = chooseReview(previous, {
+  const receipt = readClaudeReceiptState(comments);
+  const claudeReusable = previous?.claudeHead && receipt?.status === 'verified'
+    && receipt.run === previous.run && receipt.head === previous.claudeHead && receipt.base === previous.base;
+  const accepted = previous && !claudeReusable ? { ...previous, claudeHead: null } : previous;
+  let selection = chooseReview(accepted, {
     head: env.REVIEW_HEAD, base: env.REVIEW_BASE, policy, forceFull: env.FORCE_FULL === 'true',
   });
   if (!selection.full && !nativeCheckpointMatches(comments, {
@@ -120,45 +125,167 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
   if (!decision.passed) core.setFailed(decision.reason);
 }
 
-async function prepareClaude({ github, context, fs, env }) {
-  await currentPR(github, context, env);
-  // Fetch untrusted review text as data with fixed read-only SDK methods. A
-  // shell prefix such as `gh api --method GET:*` also permits a later --method
-  // POST flag, so the model must not receive that general API capability.
-  const [discussion, inline, reviews] = await Promise.all([
-    commentsFor(github, context, env.PR_NUMBER),
-    github.paginate(github.rest.pulls.listReviewComments, {
-      ...context.repo, pull_number: Number(env.PR_NUMBER), per_page: 100,
-    }),
-    github.paginate(github.rest.pulls.listReviews, {
-      ...context.repo, pull_number: Number(env.PR_NUMBER), per_page: 100,
-    }),
-  ]);
-  fs.writeFileSync(path.join(env.RUNNER_TEMP, 'scout-prior-review.json'),
-    JSON.stringify({ discussion, inline, reviews }));
+const CLAUDE_MARKER = '<!-- scout-claude-review -->';
+const trustedClaudeReceipt = comment => comment?.user?.login === 'github-actions[bot]'
+  && comment.user.type === 'Bot'
+  && (!comment.performed_via_github_app || comment.performed_via_github_app.slug === 'github-actions')
+  && typeof comment.body === 'string' && comment.body.startsWith(CLAUDE_MARKER);
+
+async function publishClaudeReceipt({ github, context, core, env }, status, reason, summarize = true) {
+  const comments = await commentsFor(github, context, env.PR_NUMBER);
+  const receipts = comments.filter(trustedClaudeReceipt);
+  if (receipts.length > 1) throw new Error('Ambiguous Claude receipt state.');
+  const previous = receipts[0];
+  const run = String(context.runId), attempt = env.GITHUB_RUN_ATTEMPT;
+  if (!/^[1-9][0-9]*$/.test(run) || !/^[1-9][0-9]*$/.test(attempt)) throw new Error('Invalid review run identity.');
+  if (previous) {
+    const state = parseClaudeReceiptBody(previous.body);
+    if (!state) throw new Error('Malformed Claude receipt state.');
+    if (BigInt(state.run) > BigInt(run) || (state.run === run && BigInt(state.attempt) > BigInt(attempt))) return false;
+  }
+  let nonce = null;
+  try { if (status === 'verified') nonce = JSON.parse(env.CLAUDE_RECEIPT).nonce; } catch { /* Blocked preparation can have no artifact identity. */ }
+  const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${run}/attempts/${attempt}`;
+  const body = `${CLAUDE_MARKER}\n### Claude review: ${status}\n\n${reason}\n\nReviewed commit: \`${env.REVIEW_HEAD}\` · [Workflow run](${runUrl})\n\n<!-- scout-claude-state:v1 ${JSON.stringify({ run, attempt, status, head: env.REVIEW_HEAD, base: env.REVIEW_BASE, nonce })} -->`;
+  if (previous) await github.rest.issues.updateComment({ ...context.repo, comment_id: previous.id, body });
+  else await github.rest.issues.createComment({ ...context.repo, issue_number: Number(env.PR_NUMBER), body });
+  if (summarize) await core.summary.addRaw(body).write();
+  return body;
 }
 
-async function finishClaude({ github, context, core, env }) {
-  // Action completion alone is not evidence the model finished the requested
-  // review: budget exhaustion or an incomplete/blocked report cannot advance it.
-  if (env.CLAUDE_OUTCOME !== 'success' || env.CLAUDE_CONCLUSION !== 'success') return;
-  let result;
-  try { result = JSON.parse(env.CLAUDE_RESULT); } catch { return; }
-  if (result?.complete !== true || result.reviewed_head !== env.REVIEW_HEAD || result.blocking_findings !== 0) return;
-  await currentPR(github, context, env);
-  const comments = await commentsFor(github, context, env.PR_NUMBER);
-  const state = readState(comments);
-  if (!state || !state.passed || state.head !== env.REVIEW_HEAD || state.base !== env.REVIEW_BASE
-      || state.policy !== env.POLICY || state.run !== String(context.runId)) return;
-  const comment = comments.find(trustedComment);
-  const previousMarker = encodeState(state);
-  state.claudeHead = env.REVIEW_HEAD;
-  // Replace only the state, retaining the gate's visible explanation.
-  if (!comment.body.includes(previousMarker)) return;
-  await github.rest.issues.updateComment({
-    ...context.repo, comment_id: comment.id, body: comment.body.replace(previousMarker, encodeState(state)),
-  });
-  core.info('Recorded completed Claude review for future incremental follow-ups.');
+async function prepareClaude({ github, context, core, fs, env }) {
+  const receipt = { nonce: crypto.randomBytes(32).toString('hex'), repository: env.GITHUB_REPOSITORY,
+    pr: Number(env.PR_NUMBER), run: String(context.runId), attempt: env.GITHUB_RUN_ATTEMPT,
+    head: env.REVIEW_HEAD, base: env.REVIEW_BASE };
+  core.setSecret(receipt.nonce);
+  const receiptEnv = { ...env, CLAUDE_RECEIPT: JSON.stringify(receipt) };
+  let stage = 'receipt-state publication';
+  try {
+    const published = await publishClaudeReceipt({ github, context, core, env: receiptEnv }, 'pending',
+      'Review preparation has started; completion is not yet verified.');
+    if (!published) throw new Error('A newer review attempt exists.');
+    stage = 'PR recheck';
+    await currentPR(github, context, env);
+    stage = 'receipt-file write';
+    fs.writeFileSync(path.join(env.RUNNER_TEMP, 'scout-claude-receipt.json'), JSON.stringify(receipt), { mode: 0o600 });
+    stage = 'context fetch';
+    // Fixed read-only methods: no broad model gh-api capability.
+    const [discussion, inline, reviews] = await Promise.all([
+      commentsFor(github, context, env.PR_NUMBER),
+      github.paginate(github.rest.pulls.listReviewComments, { ...context.repo, pull_number: Number(env.PR_NUMBER), per_page: 100 }),
+      github.paginate(github.rest.pulls.listReviews, { ...context.repo, pull_number: Number(env.PR_NUMBER), per_page: 100 }),
+    ]);
+    stage = 'context-file write';
+    fs.writeFileSync(path.join(env.RUNNER_TEMP, 'scout-prior-review.json'), JSON.stringify({ discussion, inline, reviews }));
+    core.setOutput('issue_ids', JSON.stringify(discussion.map(comment => comment.id)));
+  } catch {
+    const reason = 'Claude review preparation failed; no completed review was established.';
+    core.warning(`Claude preparation stopped during ${stage}.`);
+    try { await publishClaudeReceipt({ github, context, core, env: receiptEnv }, 'blocked', reason); }
+    catch { core.warning('The blocked Claude receipt could not be published.'); }
+    throw new Error(reason);
+  }
+}
+
+function readClaudeReceiptState(comments) {
+  const receipts = comments.filter(trustedClaudeReceipt);
+  if (receipts.length !== 1) return null;
+  return parseClaudeReceiptBody(receipts[0].body);
+}
+
+function parseClaudeReceiptBody(body) {
+  if (typeof body !== 'string' || body.split('<!-- scout-claude-state:').length !== 2) return null;
+  const match = body.match(/<!-- scout-claude-state:v1 (\{[^\r\n]*\}) -->\s*$/);
+  if (!match || match[1].length > 2048) return null;
+  try {
+    const state = JSON.parse(match[1]);
+    if (!state || Array.isArray(state) || Object.keys(state).length !== 6
+        || typeof state.run !== 'string' || !/^[1-9][0-9]*$/.test(state.run)
+        || typeof state.attempt !== 'string' || !/^[1-9][0-9]*$/.test(state.attempt)
+        || typeof state.head !== 'string' || !/^[a-f0-9]{40}$/.test(state.head)
+        || typeof state.base !== 'string' || !/^[a-f0-9]{40}$/.test(state.base)
+        || !['pending', 'blocked', 'verified'].includes(state.status)
+        || (state.status === 'verified'
+          ? typeof state.nonce !== 'string' || !/^[a-f0-9]{64}$/.test(state.nonce)
+          : state.nonce !== null)) return null;
+    return state;
+  } catch { return null; }
+}
+
+function currentVerifiedReceipt(comments, env, context) {
+  const state = readClaudeReceiptState(comments);
+  if (!state) return false;
+  try {
+    return state.run === String(context.runId) && state.attempt === env.GITHUB_RUN_ATTEMPT
+      && state.status === 'verified' && state.head === env.REVIEW_HEAD && state.base === env.REVIEW_BASE
+      && state.nonce === JSON.parse(env.CLAUDE_RECEIPT).nonce;
+  } catch { return false; }
+}
+
+async function finishClaude({ github, context, core, fs, env }) {
+  core.setOutput('claude_verified', 'false');
+  let decision = { passed: false, reason: 'Claude review evidence could not be loaded or validated.' };
+  let comments, state;
+  try {
+    const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
+    comments = await commentsFor(github, context, env.PR_NUMBER);
+    const receipt = JSON.parse(fs.readFileSync(path.join(env.RUNNER_TEMP, 'scout-claude-receipt.json'), 'utf8'));
+    env = { ...env, CLAUDE_RECEIPT: JSON.stringify(receipt) };
+    if (receipt.run !== String(context.runId) || receipt.attempt !== env.GITHUB_RUN_ATTEMPT
+        || receipt.repository !== env.GITHUB_REPOSITORY || receipt.pr !== Number(env.PR_NUMBER)) throw new Error('Receipt identity mismatch.');
+    decision = evaluateClaudeReview({
+      expectedHead: env.REVIEW_HEAD, expectedBase: env.REVIEW_BASE, expectedReceipt: receipt,
+      currentPr: { state: pr.state, head: pr.head.sha, base: pr.base.sha },
+      actionOutcome: env.CLAUDE_OUTCOME, actionConclusion: env.CLAUDE_CONCLUSION,
+      sdkMessages: JSON.parse(fs.readFileSync(env.EXECUTION_FILE, 'utf8')),
+      structuredResult: JSON.parse(env.CLAUDE_RESULT),
+      baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments,
+    });
+    state = readState(comments);
+    if (decision.passed && (!state || !state.passed || state.head !== env.REVIEW_HEAD || state.base !== env.REVIEW_BASE
+        || state.policy !== env.POLICY || state.run !== String(context.runId))) {
+      decision = { passed: false, reason: 'The accepted OCR checkpoint no longer matches this Claude review.' };
+    }
+  } catch { /* Deliberately do not log raw transcript, tool inputs or exceptions. */ }
+  try {
+    const published = await publishClaudeReceipt({ github, context, core, env }, decision.passed ? 'verified' : 'blocked',
+      decision.passed ? 'Review completed with no high or critical findings.' : decision.reason, false);
+    if (!published) {
+      core.setFailed('A newer Claude review attempt superseded this run.');
+      return;
+    }
+    if (!decision.passed) {
+      await core.summary.addRaw(published).write();
+      core.setFailed(decision.reason);
+      return;
+    }
+    // Re-read after receipt publication; no stale checkpoint may be advanced.
+    await currentPR(github, context, env);
+    comments = await commentsFor(github, context, env.PR_NUMBER);
+    const latest = readState(comments);
+    if (!latest || JSON.stringify(latest) !== JSON.stringify(state)
+        || !currentVerifiedReceipt(comments, env, context)) throw new Error('Review checkpoint or attempt changed.');
+    const comment = comments.find(trustedComment);
+    const previousMarker = encodeState(state);
+    if (!comment.body.includes(previousMarker)) throw new Error('Accepted OCR marker is not replaceable.');
+    state.claudeHead = env.REVIEW_HEAD;
+    await github.rest.issues.updateComment({ ...context.repo, comment_id: comment.id,
+      body: comment.body.replace(previousMarker, encodeState(state)) });
+    const persistedComments = await commentsFor(github, context, env.PR_NUMBER);
+    const persisted = readState(persistedComments);
+    if (!persisted || JSON.stringify(persisted) !== JSON.stringify(state)
+        || !currentVerifiedReceipt(persistedComments, env, context)) {
+      throw new Error('Review checkpoint persistence could not be confirmed.');
+    }
+    await core.summary.addRaw(published).write();
+    core.setOutput('claude_verified', 'true');
+    core.info('Recorded verified Claude review for future incremental follow-ups.');
+  } catch {
+    const reason = 'Claude review receipt or checkpoint could not be published safely.';
+    core.setFailed(reason);
+    try { await publishClaudeReceipt({ github, context, core, env }, 'blocked', reason); }
+    catch { core.warning('The blocked Claude receipt could not be published.'); }
+  }
 }
 
 module.exports = { prepareReview, finishReview, prepareClaude, finishClaude };

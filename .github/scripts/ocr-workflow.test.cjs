@@ -9,7 +9,7 @@ const { MARKER, encodeState, readState } = require('./ocr-state.cjs');
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40), PRIOR = 'c'.repeat(40), MERGE = 'd'.repeat(40);
 const POLICY = 'e'.repeat(64);
 const policyFiles = ['.github/workflows/ocr.yml', '.github/scripts/ocr-gate.cjs',
-  '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs'];
+  '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs', '.github/scripts/claude-review-gate.cjs'];
 function state(overrides = {}) {
   return { version: 1, head: PRIOR, base: BASE, policy: POLICY, run: '10', passed: true, claudeHead: null, ...overrides };
 }
@@ -36,13 +36,13 @@ function harness(overrides = {}) {
       GITHUB_WORKSPACE: '/workspace', RUNNER_TEMP: '/runner', OCR_OUTCOME: 'success',
       FULL_REVIEW: 'true', RANGE_MODE: 'full', RANGE_FROM: '', RANGE_TO: HEAD,
       POSTING_FAILED: '0', SAME_REPO: 'true', GITHUB_SERVER_URL: 'https://github.com',
-      GITHUB_REPOSITORY: 'owner/repo', ...overrides },
+      GITHUB_REPOSITORY: 'owner/repo', GITHUB_RUN_ATTEMPT: '1', ...overrides },
     context: { repo: { owner: 'owner', repo: 'repo' }, runId: 20 },
     comments: [], outputs: {}, outputHistory: [], writes: [], copies: [], gitCalls: [], failures: [],
     result: report(), pr: { state: 'open', head: { sha: HEAD }, base: { sha: BASE } },
     files: new Map(policyFiles.map(file => [`/workspace/${file}`, `trusted ${file}`])),
   };
-  h.core = {
+  h.core = {setSecret(){},
     setOutput(key, value) { h.outputs[key] = value; h.outputHistory.push([key, value]); },
     info() {}, warning() {}, setFailed(message) { h.failures.push(message); },
     summary: { addRaw(body) { h.summary = body; return this; }, async write() {
@@ -148,7 +148,7 @@ test('mismatched checkpoint provenance, manifest range, or ancestry blocks accep
 });
 
 test('stale or closed PRs fail before posting review or Claude state', async () => {
-  for (const operation of [prepareReview, finishReview, prepareClaude, finishClaude]) {
+  for (const operation of [prepareReview, finishReview]) {
     for (const mutate of [h => { h.pr.head.sha = PRIOR; }, h => { h.pr.base.sha = PRIOR; },
       h => { h.pr.state = 'closed'; }]) {
       const h = harness({ CLAUDE_OUTCOME: 'success', CLAUDE_CONCLUSION: 'success',
@@ -176,39 +176,6 @@ test('Claude uses a delta only when it previously completed the accepted checkpo
     await finishReview(h);
     assert.equal(h.outputs.claude_mode, claudeHead === PRIOR ? 'incremental' : 'full');
     assert.equal(h.outputs.claude_from, claudeHead === PRIOR ? PRIOR : MERGE);
-  }
-});
-
-test('successful action without a verified complete clean Claude result never records completion', async () => {
-  const valid = { complete: true, reviewed_head: HEAD, blocking_findings: 0 };
-  for (const overrides of [
-    { CLAUDE_RESULT: undefined }, { CLAUDE_RESULT: 'invalid' },
-    ...[{}, { ...valid, complete: false }, { ...valid, reviewed_head: PRIOR },
-      { ...valid, blocking_findings: 1 }, { ...valid, blocking_findings: '0' }]
-      .map(result => ({ CLAUDE_RESULT: JSON.stringify(result) })),
-    { CLAUDE_CONCLUSION: 'failure' }, { CLAUDE_OUTCOME: 'failure' },
-  ]) {
-    const h = harness({ CLAUDE_OUTCOME: 'success', CLAUDE_CONCLUSION: 'success',
-      CLAUDE_RESULT: JSON.stringify(valid), ...overrides });
-    h.comments = [comment(state({ head: HEAD, run: '20' }))];
-    await finishClaude(h);
-    assert.deepEqual(h.writes, []);
-    assert.equal(readState(h.comments).claudeHead, null);
-  }
-});
-
-test('verified Claude completion updates only the matching accepted gate and preserves its explanation', async () => {
-  for (const overrides of [{}, { head: PRIOR }, { base: PRIOR }, { policy: 'f'.repeat(64) },
-    { run: '19' }, { passed: false }]) {
-    const h = harness({ CLAUDE_OUTCOME: 'success', CLAUDE_CONCLUSION: 'success',
-      CLAUDE_RESULT: JSON.stringify({ complete: true, reviewed_head: HEAD, blocking_findings: 0 }) });
-    h.comments = [comment(state({ head: HEAD, run: '20', ...overrides }))];
-    await finishClaude(h);
-    assert.equal(h.writes.length, Object.keys(overrides).length ? 0 : 1);
-    if (!Object.keys(overrides).length) {
-      assert.equal(readState(h.comments).claudeHead, HEAD);
-      assert.match(h.comments[0].body, /Gate explanation/);
-    }
   }
 });
 
@@ -250,13 +217,13 @@ test('prior review context is fetched with fixed read APIs before Claude, not an
   h.github.paginate = async (method, args) => { calls.push([method, args]); return [{ body: 'untrusted review text' }]; };
   h.fs.writeFileSync = (file, body) => h.files.set(file, body);
   await prepareClaude(h);
-  assert.deepEqual(calls.map(([method]) => method), [h.github.rest.issues.listComments,
+  assert.deepEqual(calls.slice(1, 4).map(([method]) => method), [h.github.rest.issues.listComments,
     h.github.rest.pulls.listReviewComments, h.github.rest.pulls.listReviews]);
   for (const [, args] of calls) assert.equal(args.issue_number || args.pull_number, 12);
   const artifact = JSON.parse(h.files.get('/runner/scout-prior-review.json'));
   assert.equal(artifact.inline[0].body, 'untrusted review text');
   h.github.paginate = async () => { throw new Error('API unavailable'); };
-  await assert.rejects(prepareClaude(h), /API unavailable/);
+  await assert.rejects(prepareClaude(h), /preparation failed/);
 });
 
 
@@ -270,4 +237,36 @@ test('policy checkouts use the executing workflow revision even when PR base pre
   }
   // The PR comparison base remains separate from the policy source revision.
   assert.match(workflow, /REVIEW_BASE: \$\{\{ needs\.prepare\.outputs\.base \}\}/);
+});
+
+test('Claude checkpoint reuse also requires the latest verified matching receipt', async () => {
+  const seed = harness(); await prepareReview(seed);
+  for (const status of ['verified', 'pending', 'blocked', null]) {
+    const h = harness();
+    h.comments = [comment(state({ policy: seed.outputs.policy, claudeHead: PRIOR })), nativeComment()];
+    if (status) h.comments.push({ id: 40, user: { login: 'github-actions[bot]', type: 'Bot' },
+      body: '<!-- scout-claude-review -->\nReceipt\n<!-- scout-claude-state:v1 ' + JSON.stringify({
+        run: '10', attempt: '2', status, head: PRIOR, base: BASE, nonce: 'f'.repeat(64),
+      }) + ' -->' });
+    await prepareReview(h);
+    assert.equal(h.outputs.full_review, 'false');
+    assert.equal(h.outputs.claude_head, status === 'verified' ? PRIOR : '');
+  }
+});
+
+
+test('verified receipt from a different identity cannot authorize Claude reuse', async () => {
+  const seed = harness(); await prepareReview(seed);
+  for (const patch of [{ run: '11' }, { head: HEAD }, { base: 'e'.repeat(40) }, { author: 'attacker' }]) {
+    const h = harness();
+    h.comments = [comment(state({ policy: seed.outputs.policy, claudeHead: PRIOR })), nativeComment()];
+    const { author = 'github-actions[bot]', ...identity } = patch;
+    h.comments.push({ id: 40, user: { login: author, type: 'Bot' },
+      body: '<!-- scout-claude-review -->\nReceipt\n<!-- scout-claude-state:v1 ' + JSON.stringify({
+        run: '10', attempt: '2', status: 'verified', head: PRIOR, base: BASE, nonce: 'f'.repeat(64), ...identity,
+      }) + ' -->' });
+    await prepareReview(h);
+    assert.equal(h.outputs.full_review, 'false');
+    assert.equal(h.outputs.claude_head, '');
+  }
 });

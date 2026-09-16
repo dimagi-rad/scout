@@ -175,13 +175,14 @@ jobs:
             await finishReview({ github, context, core, fs: require('node:fs'),
               execFileSync: require('node:child_process').execFileSync, env: process.env });
 
-      - name: Fetch prior review context with read-only APIs
+      - name: Prepare Claude receipt and fetch prior review context
+        id: claude_baseline
         if: steps.gate.outputs.passed == 'true' && needs.prepare.outputs.same_repo == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const { prepareClaude } = require(`${process.env.RUNNER_TEMP}/scout-ocr-policy/ocr-workflow.cjs`);
-            await prepareClaude({ github, context, fs: require('node:fs'), env: process.env });
+            await prepareClaude({ github, context, core, fs: require('node:fs'), env: process.env });
 
       - name: Run Claude review after OCR passes
         id: claude
@@ -208,6 +209,10 @@ jobs:
             Before posting one concise PR comment, verify BOTH the PR head and base are still
             ${{ needs.prepare.outputs.head }} and ${{ needs.prepare.outputs.base }} respectively.
             If either changed or the review is incomplete, stop and report complete=false.
+            Read the private runner file ${{ runner.temp }}/scout-claude-receipt.json.
+            End the review comment with <!-- scout-claude-artifact:v1 RECEIPT_JSON -->
+            on its own line, substituting the exact JSON from that file for RECEIPT_JSON.
+            Do not quote or repeat artifact markers elsewhere in the review.
             Return structured reviewed_head, complete, and blocking_findings (high/critical count).
             Only report complete=true after examining the requested range and earlier unresolved
             findings and successfully posting the review. Report blocking_findings=0 only when
@@ -218,15 +223,18 @@ jobs:
             --json-schema '{"type":"object","properties":{"reviewed_head":{"type":"string"},"complete":{"type":"boolean"},"blocking_findings":{"type":"integer","minimum":0}},"required":["reviewed_head","complete","blocking_findings"],"additionalProperties":false}'
             --allowedTools "Bash(git diff*),Bash(git log*),Bash(git show*),Bash(gh pr view:*),Bash(gh pr comment:*),Read"
 
-      - name: Record completed Claude checkpoint
-        if: steps.gate.outputs.passed == 'true' && steps.claude.outcome == 'success'
+      - name: Verify Claude receipt and record completed checkpoint
+        id: claude_verify
+        if: ${{ !cancelled() && steps.gate.outputs.passed == 'true' && needs.prepare.outputs.same_repo == 'true' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           POLICY: ${{ steps.baseline.outputs.policy }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           CLAUDE_CONCLUSION: ${{ steps.claude.outputs.conclusion }}
           CLAUDE_RESULT: ${{ steps.claude.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          BASELINE_ISSUE_IDS: ${{ steps.claude_baseline.outputs.issue_ids }}
         with:
           script: |
             const { finishClaude } = require(`${process.env.RUNNER_TEMP}/scout-ocr-policy/ocr-workflow.cjs`);
-            await finishClaude({ github, context, core, env: process.env });
+            await finishClaude({ github, context, core, fs: require('node:fs'), env: process.env });
