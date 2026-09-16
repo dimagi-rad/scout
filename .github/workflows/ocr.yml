@@ -30,6 +30,7 @@ jobs:
       - name: Checkout trusted workflow policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Resolve PR and authorize manual requests
         id: pr
@@ -100,10 +101,12 @@ jobs:
       group: ocr-review-${{ needs.prepare.outputs.number }}
       cancel-in-progress: true
     steps:
-      - name: Checkout captured trusted base
+      - name: Checkout trusted workflow policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.base }}
+          # Older PR bases may predate the policy helpers. Use the immutable
+          # revision that supplied this trusted workflow, never the PR head.
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Select accepted review checkpoint

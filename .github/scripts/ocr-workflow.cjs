@@ -45,7 +45,8 @@ async function prepareReview({ github, context, core, fs, env }) {
       reason: 'native checkpoint does not match accepted gate' };
   }
   // The upstream action performs another checkout. Keep the validated policy from
-  // the captured trusted base, not whatever happens to be checked out afterward.
+  // the executing trusted workflow revision, not the PR comparison base or
+  // whatever happens to be checked out afterward.
   const snapshot = path.join(env.RUNNER_TEMP, 'scout-ocr-policy');
   fs.mkdirSync(snapshot, { recursive: true });
   for (const file of policyFiles.filter((file) => file.endsWith('.cjs'))) {
