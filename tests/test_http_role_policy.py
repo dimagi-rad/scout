@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, RequestFactory
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 
 from apps.artifacts.models import Artifact, ArtifactType
@@ -14,10 +15,12 @@ from apps.chat.models import Thread, ThreadJob
 from apps.knowledge.models import KnowledgeEntry
 from apps.recipes.models import Recipe, RecipeRun
 from apps.recipes.tasks import run_recipe
+from apps.users.models import TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     TenantSchema,
     WorkspaceDataRecovery,
+    WorkspaceMembership,
     WorkspaceRole,
 )
 from apps.workspaces.tasks import materialize_workspace, recover_workspace_data
@@ -178,6 +181,133 @@ def test_read_write_member_can_update_shared_content(write_user, workspace):
     recipe.refresh_from_db()
     assert recipe.name == "After"
     assert share_response.status_code == 200
+    thread.refresh_from_db()
+    assert thread.is_shared
+
+
+@pytest.mark.django_db
+def test_thread_owner_can_disable_share_after_role_downgrade(write_user, workspace):
+    thread = Thread.objects.create(workspace=workspace, user=write_user, title="Share")
+    client = Client(enforce_csrf_checks=False)
+    client.force_login(write_user)
+    url = f"/api/workspaces/{workspace.id}/threads/{thread.id}/share/"
+
+    enabled = client.patch(
+        url,
+        data=json.dumps({"is_shared": True}),
+        content_type="application/json",
+    )
+    membership = WorkspaceMembership.objects.get(workspace=workspace, user=write_user)
+    membership.role = WorkspaceRole.READ
+    membership.save(update_fields=["role"])
+    disabled = client.patch(
+        url,
+        data=json.dumps({"is_shared": False}),
+        content_type="application/json",
+    )
+
+    assert enabled.status_code == 200
+    assert disabled.status_code == 200
+    thread.refresh_from_db()
+    assert not thread.is_shared
+    assert thread.share_token is None
+
+
+@pytest.mark.django_db
+def test_read_thread_owner_cannot_enable_share(read_user, workspace):
+    thread = Thread.objects.create(workspace=workspace, user=read_user, title="Private")
+    client = Client(enforce_csrf_checks=False)
+    client.force_login(read_user)
+
+    response = client.patch(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/share/",
+        data=json.dumps({"is_shared": True}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+    thread.refresh_from_db()
+    assert not thread.is_shared
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("is_shared", [None, 0, 1, "", "false", [], {}])
+def test_thread_share_rejects_non_boolean_values_before_role_selection(
+    read_user, workspace, is_shared
+):
+    thread = Thread.objects.create(
+        workspace=workspace, user=read_user, title="Shared", is_shared=True
+    )
+    client = Client(enforce_csrf_checks=False)
+    client.force_login(read_user)
+
+    response = client.patch(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/share/",
+        data=json.dumps({"is_shared": is_shared}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "is_shared must be a boolean"}
+    thread.refresh_from_db()
+    assert thread.is_shared
+
+
+@pytest.mark.django_db
+def test_read_member_cannot_disable_another_owners_share(read_user, user, workspace):
+    thread = Thread.objects.create(workspace=workspace, user=user, title="Shared", is_shared=True)
+    client = Client(enforce_csrf_checks=False)
+    client.force_login(read_user)
+
+    response = client.patch(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/share/",
+        data=json.dumps({"is_shared": False}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 404
+    thread.refresh_from_db()
+    assert thread.is_shared
+
+
+@pytest.mark.django_db
+def test_read_owner_keeps_share_get_access(read_user, workspace):
+    thread = Thread.objects.create(
+        workspace=workspace, user=read_user, title="Shared", is_shared=True
+    )
+    client = Client(enforce_csrf_checks=False)
+    client.force_login(read_user)
+
+    response = client.get(f"/api/workspaces/{workspace.id}/threads/{thread.id}/share/")
+
+    assert response.status_code == 200
+    assert response.json()["is_shared"] is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("lost_access", ["workspace", "upstream"])
+def test_share_revocation_still_requires_live_workspace_access(
+    read_user, workspace, tenant, lost_access
+):
+    thread = Thread.objects.create(
+        workspace=workspace, user=read_user, title="Shared", is_shared=True
+    )
+    if lost_access == "workspace":
+        WorkspaceMembership.objects.filter(workspace=workspace, user=read_user).delete()
+    else:
+        TenantMembership.objects.filter(user=read_user, tenant=tenant).update(
+            archived_at=timezone.now()
+        )
+    client = Client(enforce_csrf_checks=False)
+    client.force_login(read_user)
+
+    response = client.patch(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/share/",
+        data=json.dumps({"is_shared": False}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
     thread.refresh_from_db()
     assert thread.is_shared
 

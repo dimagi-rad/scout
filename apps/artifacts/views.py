@@ -1227,7 +1227,7 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
         workspace_id,
         artifact_id: str,
         *,
-        minimum_role: str = WorkspaceRole.READ,
+        minimum_role: str,
     ):
         workspace, err = resolve_workspace(request.user, workspace_id, minimum_role=minimum_role)
         if err:
