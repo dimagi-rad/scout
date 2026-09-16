@@ -23,7 +23,9 @@ from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
+from apps.artifacts.services.query_context import resolve_artifact_queries
 from apps.common.utils import creator_display_name
+from apps.semantic.services.date_context import date_context
 from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceDataRecovery
@@ -55,12 +57,24 @@ logger = logging.getLogger(__name__)
 ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
 
 
-def _artifact_query_cache_key(artifact: Artifact, data_revision: str = "") -> str:
+def _artifact_query_cache_key(
+    artifact: Artifact, data_revision: str = "", resolved_queries=None
+) -> str:
+    # A new clock instant with identical resolved bounds must not defeat the
+    # short-lived cache. Timezone and the compiled date filters remain in it.
+    if resolved_queries is not None:
+        resolved_queries = [
+            {**query, "query_context": {"timezone": query["query_context"]["timezone"]}}
+            if query.get("query_context")
+            else query
+            for query in resolved_queries
+        ]
     payload = json.dumps(
         {
             "semantic_queries": artifact.semantic_queries,
             "source_queries": artifact.source_queries,
             "data_revision": data_revision,
+            "resolved_queries": resolved_queries,
         },
         sort_keys=True,
         default=str,
@@ -861,6 +875,7 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             "semantic_queries": artifact.semantic_queries,
             "semantic_query_manifest": artifact.semantic_query_manifest,
             "version": artifact.version,
+            "date_context": date_context(),
         }
 
 
@@ -887,6 +902,9 @@ class ArtifactQueryDataView(View):
     are returned in a format the artifact sandbox can consume directly via
     mergeQueryResults().
     """
+
+    async def post(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
+        return await self.get(request, workspace_id, artifact_id)
 
     async def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
         user = await request.auser()
@@ -940,14 +958,27 @@ class ArtifactQueryDataView(View):
 
         static_data = artifact.data or {}
 
+        try:
+            runtime = json.loads(request.body) if request.method == "POST" else None
+            doc = static_data.get("story_doc")
+            if isinstance(doc, dict) and doc.get("blocks"):
+                queries, resolved_context = resolve_artifact_queries(doc, runtime)
+            else:
+                queries, resolved_context = artifact.semantic_queries, None
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+
         # Serve repeat opens of the same artifact version from a short-lived
         # cache so we don't re-run every source query on every open (09#9).
-        cache_key = _artifact_query_cache_key(artifact, data_state.get("data_revision", ""))
+        cache_key = _artifact_query_cache_key(
+            artifact, data_state.get("data_revision", ""), queries
+        )
         cached = await cache.aget(cache_key)
         if cached is not None:
             return JsonResponse(
                 {
                     "queries": cached,
+                    "query_context": resolved_context,
                     "static_data": static_data,
                     "semantic_query_manifest": artifact.semantic_query_manifest or {},
                 }
@@ -988,9 +1019,7 @@ class ArtifactQueryDataView(View):
             }
 
         results = list(
-            await asyncio.gather(
-                *(_run_one(i, entry) for i, entry in enumerate(artifact.semantic_queries))
-            )
+            await asyncio.gather(*(_run_one(i, entry) for i, entry in enumerate(queries)))
         )
 
         for i, entry in enumerate(artifact.source_queries):
@@ -1011,6 +1040,7 @@ class ArtifactQueryDataView(View):
         return JsonResponse(
             {
                 "queries": results,
+                "query_context": resolved_context,
                 "static_data": static_data,
                 "semantic_query_manifest": artifact.semantic_query_manifest or {},
             }

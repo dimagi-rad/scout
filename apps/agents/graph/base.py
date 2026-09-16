@@ -37,6 +37,7 @@ from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
+from apps.semantic.services.date_context import agent_date_context
 from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
@@ -915,7 +916,10 @@ async def build_agent_graph(
                         )
                         answered_ids.add(tc_id)
 
-        messages = [_build_cached_system_message(stable_prompt, volatile_prompt), *repaired]
+        messages = [
+            _build_cached_system_message(stable_prompt, volatile_prompt + agent_date_context()),
+            *repaired,
+        ]
         # cache_control lands on the last eligible message block, caching the
         # (pruned) conversation-history prefix (arch #254, 02#3).
         response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)

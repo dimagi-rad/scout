@@ -1,6 +1,7 @@
 import { useRef, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import type { DateRange } from "@/components/ArtifactGraph/types"
 import { ArtifactActions } from "./ArtifactActions"
 import { ArtifactCanvas, type ArtifactCanvasHandle } from "./ArtifactCanvas"
 import { ArtifactDataDialog } from "./ArtifactDataDialog"
@@ -16,6 +17,7 @@ interface ArtifactViewerProps {
 
 export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: ArtifactViewerProps) {
   const [dataOpen, setDataOpen] = useState(false)
+  const [dateSources, setDateSources] = useState<Record<string, DateRange>>({})
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
   const {
@@ -24,7 +26,9 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
     error: dataError,
     refetch: refetchData,
     setQueryData,
-  } = useArtifactQueryData(artifactId, workspaceId)
+  } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
+    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
+  } : undefined)
 
   function handleViewData() {
     setDataOpen(true)
@@ -57,6 +61,7 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
         isLoading={isLoading}
         error={error}
         onQueryData={setQueryData}
+        onDateSourcesChange={setDateSources}
       />
       <ArtifactDataDialog
         open={dataOpen}
