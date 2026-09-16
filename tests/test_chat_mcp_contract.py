@@ -407,6 +407,52 @@ async def test_injecting_tool_node_flows_workspace_id_to_real_server(db):
     assert env["data"]["state"] == "not_provisioned"
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("role", [WorkspaceRole.READ_WRITE, WorkspaceRole.MANAGE])
+async def test_cancel_injects_actor_over_real_wire_and_rechecks_revocation(role):
+    user = await _make_user("cancel-wire@example.com")
+    ws = await Workspace.objects.acreate(name="Cancel wire", created_by=user)
+    membership = await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=role)
+    async with mcp_wire() as (_session, tools):
+        node = _make_injecting_tool_node(
+            ToolNode(list(tools.values())),
+            {"workspace_id": "workspace_id", "user_id": "user_id", "thread_id": "thread_id"},
+        )
+        graph = StateGraph(AgentState)
+        graph.add_node("tools", node)
+        graph.set_entry_point("tools")
+        graph.add_edge("tools", END)
+        compiled = graph.compile()
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "cancel_materialization",
+                            "args": {"run_id": "00000000-0000-0000-0000-000000000000"},
+                            "id": "cancel_call",
+                        }
+                    ],
+                )
+            ],
+            "workspace_id": str(ws.id),
+            "user_id": str(user.id),
+            "thread_id": "",
+        }
+        allowed = await compiled.ainvoke(state)
+        envelope = parse_tool_result(allowed["messages"][-1].content)
+        # Passing authorization reaches the nonexistent-run check, without needing managed data.
+        assert envelope["error"]["code"] == "NOT_FOUND"
+        membership.role = WorkspaceRole.READ
+        await membership.asave(update_fields=["role"])
+        denied = await compiled.ainvoke(state)
+        assert (
+            parse_tool_result(denied["messages"][-1].content)["error"]["code"]
+            == "AUTH_ACCESS_DENIED"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
