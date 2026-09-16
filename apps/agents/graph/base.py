@@ -335,8 +335,6 @@ async def _fetch_semantic_model_context(
     try:
         return await _semantic_catalog_context(workspace)
     except SemanticCatalogUnavailable:
-        if not write_capable:
-            return _READ_ONLY_MATERIALIZE_GUIDANCE
         tenant_count = await workspace.tenants.acount()
         if tenant_count == 1:
             tenant = await workspace.tenants.afirst()
@@ -345,6 +343,8 @@ async def _fetch_semantic_model_context(
                 state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
             ).afirst()
             if ts is None:
+                if not write_capable:
+                    return _READ_ONLY_MATERIALIZE_GUIDANCE
                 return (
                     _HEADLESS_MATERIALIZE_GUIDANCE
                     if not interactive
@@ -357,11 +357,15 @@ async def _fetch_semantic_model_context(
                     )
                 )
             if ts.state == SchemaState.MATERIALIZING:
+                if not write_capable:
+                    return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
                     else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
+            if not write_capable:
+                return _READ_ONLY_LOADED_SQL_GUIDANCE
             return (
                 "Data is loaded, but no semantic datasets are available yet. "
                 "Run materialization to rebuild the semantic catalog, then use "
@@ -370,16 +374,27 @@ async def _fetch_semantic_model_context(
         if tenant_count > 1:
             vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
             if vs is not None and vs.state == SchemaState.MATERIALIZING:
+                if not write_capable:
+                    return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
                     else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
+            if not write_capable:
+                guidance = (
+                    _READ_ONLY_LOADED_SQL_GUIDANCE
+                    if vs is not None and vs.state == SchemaState.ACTIVE
+                    else _READ_ONLY_MATERIALIZE_GUIDANCE
+                )
+                return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}"
             return (
                 f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
                 "No semantic datasets are available yet. Call `run_materialization` "
                 "to load workspace data and rebuild the semantic catalog."
             )
+        if not write_capable:
+            return _READ_ONLY_MATERIALIZE_GUIDANCE
         return (
             _HEADLESS_MATERIALIZE_GUIDANCE
             if not interactive
@@ -421,6 +436,13 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
     "`run_materialization` to ensure fresh data — it WAITS for the in-progress "
     "load to finish (it does not start a parallel one) and returns when the data "
     "is ready. Then continue with the requested analysis in the same run."
+)
+
+_READ_ONLY_LOADED_SQL_GUIDANCE = (
+    "Data is loaded, but no semantic datasets are available yet. "
+    "Use `list_tables` and `describe_table` to inspect the loaded tables, then "
+    "read-only `query` SQL to analyze them. This user's workspace role is read-only; "
+    "a read-write workspace role is required to rebuild the semantic catalog."
 )
 
 _READ_ONLY_MATERIALIZE_GUIDANCE = (
