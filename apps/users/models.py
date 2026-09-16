@@ -249,6 +249,12 @@ class VerificationControl(models.Model):
     )
     lease_token = models.UUIDField(null=True, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_lease_token = models.UUIDField(null=True, blank=True)
+    last_attempt_outcome = models.CharField(max_length=40, blank=True, default="", db_default="")
+    last_attempt_error_code = models.CharField(max_length=80, blank=True, default="", db_default="")
+    last_attempt_observation_hash = models.CharField(
+        max_length=64, blank=True, default="", db_default=""
+    )
 
     def __str__(self):
         return f"VerificationControl({self.connection_id})"
