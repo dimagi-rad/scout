@@ -163,7 +163,7 @@ async def test_permanent_errors_are_never_retried(monkeypatch, status):
         return httpx.Response(status, json={"error": "Member not found: visits.missing"})
 
     _patched_async_client(monkeypatch, handler)
-    with pytest.raises((CubeQueryError, httpx.HTTPStatusError)):
+    with pytest.raises(CubeQueryError, match="Member not found"):
         await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
             {}, security_context={}
         )
@@ -203,20 +203,25 @@ async def test_continue_wait_does_not_consume_transient_retry_budget(monkeypatch
         {}, security_context={}
     )
     assert result["rows"] == []
+    assert next(responses, None) is None
 
 
 @pytest.mark.asyncio
 async def test_overall_deadline_bounds_in_flight_http_request(monkeypatch):
+    entered = asyncio.Event()
+
     async def handler(request):
+        entered.set()
         await asyncio.sleep(10)
         return httpx.Response(200, json={"data": []})
 
     _patched_async_client(monkeypatch, handler)
-    monkeypatch.setattr(cube_client_module, "QUERY_TOTAL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(cube_client_module, "QUERY_TOTAL_TIMEOUT_SECONDS", 0.1)
     with pytest.raises(CubeConnectionError, match="timed out"):
         await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
             {}, security_context={}
         )
+    assert entered.is_set()
 
 
 @pytest.mark.asyncio
@@ -228,7 +233,14 @@ async def test_retry_after_cannot_extend_deadline(monkeypatch):
         return httpx.Response(429, headers={"Retry-After": "120"})
 
     _patched_async_client(monkeypatch, handler)
-    with pytest.raises(CubeConnectionError, match="timed out"):
+    monkeypatch.setattr(cube_client_module, "QUERY_TOTAL_TIMEOUT_SECONDS", 1.0)
+    # A regression must fail immediately, never sleep for two minutes in CI.
+    monkeypatch.setattr(
+        cube_client_module.asyncio,
+        "sleep",
+        AsyncMock(side_effect=AssertionError("Unexpected backoff sleep")),
+    )
+    with pytest.raises(CubeConnectionError, match="retry delay exceeds"):
         await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
             {}, security_context={}
         )
@@ -237,7 +249,10 @@ async def test_retry_after_cannot_extend_deadline(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cancellation_is_not_retried(monkeypatch):
+    calls = []
+
     def handler(request):
+        calls.append(request)
         raise asyncio.CancelledError
 
     _patched_async_client(monkeypatch, handler)
@@ -245,10 +260,44 @@ async def test_cancellation_is_not_retried(monkeypatch):
         await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
             {}, security_context={}
         )
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_retry_exhaustion_is_reported_as_connection_not_validation(monkeypatch):
+@pytest.mark.parametrize("body", ["<html>Gateway failure</html>", "{}", "[]"])
+async def test_malformed_success_body_is_a_connection_error(monkeypatch, body):
+    _patched_async_client(monkeypatch, lambda request: httpx.Response(200, text=body))
+    with pytest.raises(CubeConnectionError, match="invalid query response"):
+        await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
+            {}, security_context={}
+        )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_transport_error_keeps_its_cause(monkeypatch):
+    def handler(request):
+        raise httpx.ReadTimeout("upstream timed out", request=request)
+
+    _patched_async_client(monkeypatch, handler)
+    monkeypatch.setattr(cube_client_module, "RETRY_BASE_DELAY_SECONDS", 0)
+    with pytest.raises(CubeConnectionError) as raised:
+        await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
+            {}, security_context={}
+        )
+    assert isinstance(raised.value.__cause__, httpx.ReadTimeout)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (CubeConnectionError("temporary"), "CONNECTION_ERROR"),
+        (CubeQueryError("invalid member"), "VALIDATION_ERROR"),
+    ],
+)
+async def test_retry_exhaustion_is_reported_as_connection_not_validation(
+    monkeypatch, failure, code
+):
     from apps.semantic.services import query
 
     monkeypatch.setattr(
@@ -262,9 +311,8 @@ async def test_retry_exhaustion_is_reported_as_connection_not_validation(monkeyp
     )
     monkeypatch.setattr(query, "load_workspace_context", AsyncMock(return_value=None))
     monkeypatch.setattr(query, "build_cube_security_context", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        CubeClient, "execute_query", AsyncMock(side_effect=CubeConnectionError("temporary"))
-    )
+    monkeypatch.setattr(CubeClient, "execute_query", AsyncMock(side_effect=failure))
     result = await query.run_semantic_query(SimpleNamespace(id="workspace"), {})
     assert result["success"] is False
-    assert result["error"]["code"] == "CONNECTION_ERROR"
+    assert result["error"]["code"] == code
+    assert str(failure) in result["error"]["message"]

@@ -106,7 +106,13 @@ class CubeClient:
             "row_count": len(rows),
         }
 
-    async def _load(self, url, headers, cube_query, deadline) -> dict[str, Any]:
+    async def _load(
+        self,
+        url: str,
+        headers: dict[str, str],
+        cube_query: dict[str, Any],
+        deadline: float,
+    ) -> dict[str, Any]:
         transient_failures = 0
         async with httpx.AsyncClient(timeout=30.0) as client:
             while True:
@@ -115,6 +121,7 @@ class CubeClient:
                     raise TimeoutError
                 retry_reason = None
                 retry_after = None
+                last_error = None
                 try:
                     response = await client.post(
                         url,
@@ -142,29 +149,34 @@ class CubeClient:
                     ):
                         retry_reason = "upstream_connection"
                     else:
-                        response.raise_for_status()
-                        if isinstance(error, str) and error.strip().lower() == CONTINUE_WAIT_ERROR:
+                        if (
+                            response.is_success
+                            and isinstance(error, str)
+                            and error.strip().lower() == CONTINUE_WAIT_ERROR
+                        ):
                             await asyncio.sleep(CONTINUE_WAIT_POLL_DELAY_SECONDS)
                             continue
                         if error:
                             raise CubeQueryError(str(error))
+                        response.raise_for_status()
                         if not isinstance(payload, dict) or "data" not in payload:
-                            raise CubeQueryError("Cube returned an invalid query response.")
+                            raise CubeConnectionError("Cube returned an invalid query response.")
                         if transient_failures:
                             logger.info(
                                 "Cube query recovered after %s transient failure(s)",
                                 transient_failures,
                             )
                         return payload
-                except httpx.TransportError:
+                except httpx.TransportError as exc:
                     retry_reason = "transport"
+                    last_error = exc
 
                 transient_failures += 1
                 if transient_failures >= MAX_TRANSIENT_ATTEMPTS:
                     logger.warning("Cube query exhausted transient retries (%s)", retry_reason)
                     raise CubeConnectionError(
                         "Cube is temporarily unavailable. Please retry the query."
-                    )
+                    ) from last_error
                 # This is a read-only /load operation despite using POST. Keep
                 # the identical query and authorization context across retries.
                 delay = RETRY_BASE_DELAY_SECONDS * (2 ** (transient_failures - 1))
@@ -178,7 +190,9 @@ class CubeClient:
                     MAX_TRANSIENT_ATTEMPTS - 1,
                 )
                 if delay >= deadline - time.monotonic():
-                    raise TimeoutError
+                    raise CubeConnectionError(
+                        "Cube retry delay exceeds the remaining query timeout budget. Please retry later."
+                    ) from last_error
                 await asyncio.sleep(delay)
 
     async def invalidate_schema_cache(self, *, security_context: dict[str, Any]) -> None:
