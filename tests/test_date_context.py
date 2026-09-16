@@ -220,6 +220,9 @@ async def test_chat_tool_forwards_date_intent(monkeypatch):
     from mcp_server import server
 
     workspace = object()
+    # This is an argument-forwarding unit test, not a DB lifecycle test. Earlier
+    # integration tests can leave a connection in the shared async worker thread.
+    monkeypatch.setattr("mcp_server.envelope._aclose_old_connections", AsyncMock())
     monkeypatch.setattr(server, "_resolve_accessible_workspace", AsyncMock(return_value=workspace))
     run = AsyncMock(return_value={"columns": [], "rows": [], "row_count": 0})
     monkeypatch.setattr(server, "run_semantic_query", run)
