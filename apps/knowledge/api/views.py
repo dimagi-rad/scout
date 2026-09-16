@@ -16,6 +16,7 @@ from rest_framework.views import APIView
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry
 from apps.knowledge.utils import parse_frontmatter, render_frontmatter
+from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 from .serializers import AgentLearningSerializer, KnowledgeEntrySerializer
@@ -132,7 +133,9 @@ class KnowledgeListCreateView(APIView):
         )
 
     def post(self, request, workspace_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
         if err:
             return err
 
@@ -206,7 +209,9 @@ class KnowledgeDetailView(APIView):
         return Response(serializer.data)
 
     def put(self, request, workspace_id, item_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
         if err:
             return err
 
@@ -229,7 +234,9 @@ class KnowledgeDetailView(APIView):
         return Response(serializer.data)
 
     def delete(self, request, workspace_id, item_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
         if err:
             return err
 
@@ -298,7 +305,9 @@ class KnowledgeImportView(APIView):
     parser_classes = [MultiPartParser]
 
     def post(self, request, workspace_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
         if err:
             return err
 

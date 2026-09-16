@@ -10,7 +10,7 @@ from django.http import JsonResponse
 from apps.chat.models import Thread, ThreadJob
 from apps.users.decorators import async_login_required
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
-from apps.workspaces.models import MaterializationRun
+from apps.workspaces.models import MaterializationRun, WorkspaceRole
 from apps.workspaces.tasks import materialize_workspace
 from apps.workspaces.workspace_resolver import aresolve_workspace
 from config.procrastinate import app
@@ -31,7 +31,9 @@ async def materialization_cancel_view(request, workspace_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    workspace, err = await aresolve_workspace(user, workspace_id)
+    workspace, err = await aresolve_workspace(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    )
     if err is not None:
         return err
 
@@ -121,7 +123,9 @@ async def materialization_retry_view(request, workspace_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    workspace, err = await aresolve_workspace(user, workspace_id)
+    workspace, err = await aresolve_workspace(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    )
     if err is not None:
         return err
 

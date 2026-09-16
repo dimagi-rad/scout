@@ -19,6 +19,8 @@ from apps.chat.helpers import (
 )
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
+from apps.workspaces.models import WorkspaceRole
+from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -332,9 +334,14 @@ async def thread_share_view(request, workspace_id, thread_id):
     """
     user = request._authenticated_user
 
-    workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    if request.method == "PATCH":
+        _workspace, err = await aresolve_workspace(
+            user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+    else:
+        _workspace, err = await aresolve_workspace(user, workspace_id)
+    if err is not None:
+        return err
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
