@@ -171,7 +171,26 @@ jobs:
             await core.summary.addRaw(body).write();
             if (!decision.passed) core.setFailed(decision.reason);
 
+      - name: Capture Claude review comment baseline
+        id: claude_baseline
+        if: steps.gate.outputs.passed == 'true' && needs.prepare.outputs.same_repo == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+        with:
+          script: |
+            const pullNumber = Number(process.env.PR_NUMBER);
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: pullNumber, per_page: 100,
+            });
+            const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
+              ...context.repo, pull_number: pullNumber, per_page: 100,
+            });
+            core.setOutput('issue_ids', JSON.stringify(issueComments.map(comment => comment.id)));
+            core.setOutput('review_ids', JSON.stringify(reviewComments.map(comment => comment.id)));
+
       - name: Run Claude review after OCR passes
+        id: claude
         if: steps.gate.outputs.passed == 'true' && needs.prepare.outputs.same_repo == 'true'
         uses: anthropics/claude-code-action@d83be68a4bc216d6335debdfbc18d2cb22cf7bdb # v1
         with:
@@ -179,10 +198,13 @@ jobs:
           github_token: ${{ github.token }}
           allowed_bots: '*' # This step is restricted to OCR-passed, same-repository PRs.
           prompt: |
-            /code-review:code-review --comment ${{ github.repository }}/pull/${{ needs.prepare.outputs.number }}
+            /code-review:code-review --comment
 
+            Review pull request https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.number }}.
             OCR completed without high or critical findings for head ${{ needs.prepare.outputs.head }}.
             Review exactly that head against base ${{ needs.prepare.outputs.base }}.
+            This required review must run even if prior Claude/OCR comments exist or the change appears trivial.
+            Do not apply the plugin preflight skips for previous comments or trivial changes.
             Before posting feedback, verify the PR head is still ${{ needs.prepare.outputs.head }};
             if it changed, stop without posting a review of the newer code.
           plugin_marketplaces: https://github.com/anthropics/claude-code.git
@@ -190,4 +212,83 @@ jobs:
           claude_args: |
             --model claude-opus-5
             --max-budget-usd 10
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(git diff*),Bash(git log*),Bash(git show*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(bun run lint:*),Bash(uv run ruff check:*),Read"
+            --allowedTools "Agent,TaskCreate,TaskGet,TaskList,TaskUpdate,Read,Glob,Grep,mcp__github_inline_comment__create_inline_comment,Bash(git diff*),Bash(git log*),Bash(git show*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"
+
+      - name: Verify Claude review receipt
+        if: ${{ !cancelled() && steps.claude.outcome == 'success' }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          REVIEW_HEAD: ${{ needs.prepare.outputs.head }}
+          REVIEW_BASE: ${{ needs.prepare.outputs.base }}
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+          BASELINE_ISSUE_IDS: ${{ steps.claude_baseline.outputs.issue_ids }}
+          BASELINE_REVIEW_IDS: ${{ steps.claude_baseline.outputs.review_ids }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { execFileSync } = require('node:child_process');
+
+            let evaluateClaudeReview;
+            let sdkMessages;
+            let baselineIssueCommentIds;
+            let baselineReviewCommentIds;
+            try {
+              const source = execFileSync(
+                'git',
+                ['show', `${process.env.REVIEW_BASE}:.github/scripts/claude-review-gate.cjs`],
+                { encoding: 'utf8' },
+              );
+              const helperPath = path.join(process.env.RUNNER_TEMP, `claude-review-gate-${context.runId}.cjs`);
+              fs.writeFileSync(helperPath, source, { mode: 0o600 });
+              ({ evaluateClaudeReview } = require(helperPath));
+              sdkMessages = JSON.parse(fs.readFileSync(process.env.EXECUTION_FILE, 'utf8'));
+              baselineIssueCommentIds = JSON.parse(process.env.BASELINE_ISSUE_IDS);
+              baselineReviewCommentIds = JSON.parse(process.env.BASELINE_REVIEW_IDS);
+            } catch {
+              core.setFailed('Claude review evidence could not be loaded or validated.');
+              return;
+            }
+
+            const pullNumber = Number(process.env.PR_NUMBER);
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo, pull_number: pullNumber,
+            });
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: pullNumber, per_page: 100,
+            });
+            const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
+              ...context.repo, pull_number: pullNumber, per_page: 100,
+            });
+            const decision = evaluateClaudeReview({
+              expectedHead: process.env.REVIEW_HEAD,
+              expectedBase: process.env.REVIEW_BASE,
+              currentPr: { state: pr.state, head: pr.head.sha, base: pr.base.sha },
+              sdkMessages,
+              baselineIssueCommentIds,
+              baselineReviewCommentIds,
+              issueComments,
+              reviewComments,
+            });
+            if (!decision.passed) {
+              core.setFailed(decision.reason);
+              return;
+            }
+
+            const marker = '<!-- scout-claude-review -->';
+            const outcome = decision.outcome === 'no_issues'
+              ? 'No issues found.'
+              : 'Inline findings posted—resolve before merge.';
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${context.runId}`;
+            const body = `${marker}\n### Claude review: verified\n\n${outcome}\n\nReviewed commit: \`${process.env.REVIEW_HEAD}\` · [Workflow run](${runUrl})`;
+            const previous = issueComments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' && comment.body?.startsWith(marker));
+            if (previous) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: previous.id, body });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: pullNumber, body,
+              });
+            }
+            await core.summary.addRaw(body).write();
