@@ -25,6 +25,12 @@ from apps.artifacts.services.graph_manifest import (
 from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.chat.artifact_links import link_artifact_to_thread
 from apps.chat.models import ThreadArtifact
+from apps.workspaces.access import (
+    aworkspace_read_allowed,
+    aworkspace_write_allowed,
+    tool_read_denied,
+    tool_write_denied,
+)
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -86,6 +92,8 @@ def create_artifact_graph_tools(
     @tool(args_schema=ArtifactGraphOverviewInput)
     async def artifact_graph_overview(artifact_id: str | None = None) -> dict[str, Any]:
         """Read a graph artifact's full doc, summary, diagnostics, and dependencies."""
+        if not await aworkspace_read_allowed(user, workspace.id):
+            return tool_read_denied()
         artifact = await _load_graph_artifact(workspace, artifact_id, conversation_id)
         if artifact is None:
             return {"status": "not_found", "message": "No graph artifact found."}
@@ -114,6 +122,8 @@ def create_artifact_graph_tools(
         offset: int = 0,
     ) -> dict[str, Any]:
         """Read paginated semantic query dependencies for a graph artifact."""
+        if not await aworkspace_read_allowed(user, workspace.id):
+            return tool_read_denied()
         artifact = await _load_graph_artifact(workspace, artifact_id, conversation_id=None)
         if artifact is None:
             return {"status": "not_found", "message": "Graph artifact not found."}
@@ -161,6 +171,9 @@ def create_artifact_graph_tools(
         atomic: if validation introduces diagnostics, no new artifact version is
         saved.
         """
+        if not await aworkspace_write_allowed(user, workspace.id):
+            return tool_write_denied()
+
         normalized_action = (action or "").strip().lower()
         try:
             if normalized_action == "create":

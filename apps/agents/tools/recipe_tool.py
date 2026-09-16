@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
 
+from apps.workspaces.access import aworkspace_write_allowed, tool_write_denied
+
 if TYPE_CHECKING:
     from apps.users.models import User
     from apps.workspaces.models import Workspace
@@ -78,6 +80,9 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
             - variable_names: List of variable names defined
             - message: Success or error message
         """
+        if not await aworkspace_write_allowed(user, workspace.id):
+            return tool_write_denied()
+
         from apps.recipes.models import Recipe  # avoid circular import
 
         if not name or not name.strip():

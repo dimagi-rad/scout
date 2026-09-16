@@ -28,8 +28,7 @@ from apps.semantic.canvas import (
 )
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.sample_rows import sample_dataset_rows
-from apps.workspaces.access import resolve_workspace_access
-from apps.workspaces.models import WorkspaceRole
+from apps.workspaces.access import aworkspace_read_allowed, workspace_write_allowed
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -47,11 +46,8 @@ FORBIDDEN_ERROR = {
 
 
 def can_write_canvas(workspace, user) -> bool:
-    """Same policy as the canvas REST endpoints: any role above read."""
-    if user is None or not getattr(user, "is_authenticated", True):
-        return False
-    _authorized_workspace, membership = resolve_workspace_access(user, workspace.id)
-    return membership is not None and membership.role != WorkspaceRole.READ
+    """Use the central minimum-role authorizer at the mutation boundary."""
+    return workspace_write_allowed(user, workspace.id)
 
 
 def _resolve_canvas_sync(workspace, user, conversation_id: str):
@@ -75,6 +71,8 @@ def create_canvas_read_tool(workspace: Workspace, user: User | None, conversatio
         selector: 'graph' (objects + states), 'diff' (field-level pending
         changes), 'diagnostics' (validation problems), or 'all'.
         """
+        if not await aworkspace_read_allowed(user, workspace.id):
+            return "Canvas unavailable: workspace access denied."
 
         def _read() -> str:
             try:
@@ -110,6 +108,9 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
         field names or dataset.field members; otherwise visible dimensions are
         sampled.
         """
+
+        if not await aworkspace_read_allowed(user, workspace.id):
+            return {"errors": [{"code": "FORBIDDEN", "message": "Workspace read access required."}]}
 
         def _sample() -> dict[str, Any]:
             try:
