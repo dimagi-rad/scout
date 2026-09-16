@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { prepareReview, finishReview, finishClaude } = require('./ocr-workflow.cjs');
+const { prepareReview, finishReview, prepareClaude, finishClaude } = require('./ocr-workflow.cjs');
 const { MARKER, encodeState, readState } = require('./ocr-state.cjs');
 
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40), PRIOR = 'c'.repeat(40), MERGE = 'd'.repeat(40);
@@ -148,7 +148,7 @@ test('mismatched checkpoint provenance, manifest range, or ancestry blocks accep
 });
 
 test('stale or closed PRs fail before posting review or Claude state', async () => {
-  for (const operation of [prepareReview, finishReview, finishClaude]) {
+  for (const operation of [prepareReview, finishReview, prepareClaude, finishClaude]) {
     for (const mutate of [h => { h.pr.head.sha = PRIOR; }, h => { h.pr.base.sha = PRIOR; },
       h => { h.pr.state = 'closed'; }]) {
       const h = harness({ CLAUDE_OUTCOME: 'success', CLAUDE_CONCLUSION: 'success',
@@ -222,7 +222,7 @@ test('prepare snapshots every trusted script and fingerprints changes to each po
   }
   for (const file of policyFiles) {
     const changed = harness(); changed.files.set(`/workspace/${file}`, 'changed policy');
-    changed.comments = [comment(state({ policy: original.outputs.policy }))];
+    changed.comments = [comment(state({ policy: original.outputs.policy })), nativeComment()];
     await prepareReview(changed);
     assert.notEqual(changed.outputs.policy, original.outputs.policy);
     assert.equal(changed.outputs.full_review, 'true');
@@ -240,4 +240,21 @@ test('cancelled native advancement forces full before spending on an unusable de
     assert.equal(h.outputs.full_review, 'true');
     assert.equal(h.outputs.checkpoint, '');
   }
+});
+
+test('prior review context is fetched with fixed read APIs before Claude, not an open CLI API grant', async () => {
+  const h = harness();
+  const calls = [];
+  h.github.rest.pulls.listReviewComments = () => {};
+  h.github.rest.pulls.listReviews = () => {};
+  h.github.paginate = async (method, args) => { calls.push([method, args]); return [{ body: 'untrusted review text' }]; };
+  h.fs.writeFileSync = (file, body) => h.files.set(file, body);
+  await prepareClaude(h);
+  assert.deepEqual(calls.map(([method]) => method), [h.github.rest.issues.listComments,
+    h.github.rest.pulls.listReviewComments, h.github.rest.pulls.listReviews]);
+  for (const [, args] of calls) assert.equal(args.issue_number || args.pull_number, 12);
+  const artifact = JSON.parse(h.files.get('/runner/scout-prior-review.json'));
+  assert.equal(artifact.inline[0].body, 'untrusted review text');
+  h.github.paginate = async () => { throw new Error('API unavailable'); };
+  await assert.rejects(prepareClaude(h), /API unavailable/);
 });

@@ -28,7 +28,7 @@ Post a new PR conversation comment using one of these commands:
 - `@ocr budget=1000000`: override the token budget for this run.
 - `@ocr full budget=1000000`: combine a full review and a one-run budget.
 
-`full` and `budget=N` may appear in either order. Unknown or repeated options are rejected. Each command runs the same pipeline, including the eligible Claude follow-up.
+`full` and `budget=N` may appear in either order. Commands are case-insensitive. Unknown or repeated options are rejected with a notice before starting or cancelling a review. Each command runs the same pipeline, including the eligible Claude follow-up.
 
 Only users whose current repository permission is write, maintain or admin can trigger manual OCR runs. Bot comments, unrelated comments, closed PRs and unauthorized commands do not start a review or cancel an active one. Editing an existing comment does not trigger a run.
 
@@ -36,7 +36,7 @@ Manual **`@claude`** requests retain their existing workflow and operate indepen
 
 ## Trust and credentials
 
-The OCR workflow uses `pull_request_target` so fork PRs can be reviewed with the repository secret. The pinned upstream action checks out the trusted base branch, fetches PR Git objects and reads the diff without checking out or executing fork code. Scout snapshots the gate scripts from the captured base before the upstream checkout and fingerprints the workflow and validation policy. The automatic Claude step also keeps the trusted checkout and uses Git/PR reads to inspect the requested commits; it runs only on same-repository PRs.
+The OCR workflow uses `pull_request_target` so fork PRs can be reviewed with the repository secret. The pinned upstream action checks out the trusted base branch, fetches PR Git objects and reads the diff without checking out or executing fork code. Scout snapshots the gate scripts from the captured base before the upstream checkout and fingerprints the workflow and validation policy. Prior review text is fetched through fixed read-only SDK methods and supplied as untrusted JSON data; Claude does not receive a general `gh api` shell grant. The automatic Claude step also keeps the trusted checkout and uses Git/PR reads to inspect the requested commits; it runs only on same-repository PRs.
 
 Do not change this workflow to check out a fork head or execute its install/build/test scripts while credentials are available. Review text is still untrusted input to the models.
 
@@ -51,7 +51,7 @@ Configuration lives in `.github/workflows/ocr.yml`:
 - Anthropic Opus 5, adaptive thinking, high model effort; medium OCR review effort.
 - Two concurrent OCR tasks, 15-minute per-task timeout, 500,000 total-token budget.
 - Native cross-push checkpoints enabled, subject to Scout’s accepted-state validation.
-- Low-severity findings go to the summary; their severity is still evaluated by the gate.
+- Low-severity findings go to the summary; their severity is still evaluated by the gate. The review prompt asks for demonstrated defects rather than speculative API mismatches or style/test-coverage requests without a concrete failure.
 - 45-minute job timeout, including the Claude follow-up.
 - Claude follow-up uses Opus 5 with a $10 CLI budget.
 

@@ -7,10 +7,10 @@ const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheck
 
 const policyFiles = ['.github/workflows/ocr.yml', '.github/scripts/ocr-gate.cjs',
   '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs'];
-const trustedComment = (comment) => comment.user?.login === 'github-actions[bot]'
+const trustedComment = (comment) => comment?.user?.login === 'github-actions[bot]'
   && comment.user?.type === 'Bot'
   && (!comment.performed_via_github_app || comment.performed_via_github_app.slug === 'github-actions')
-  && comment.body?.startsWith(MARKER);
+  && typeof comment.body === 'string' && comment.body.startsWith(MARKER);
 
 async function commentsFor(github, context, number) {
   return github.paginate(github.rest.issues.listComments, {
@@ -82,7 +82,8 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
     decision = evaluateReview(result, env.REVIEW_HEAD, from, env.POSTING_FAILED);
   } catch (error) {
     core.warning(error.message);
-    decision = { passed: false, reason: error.message };
+    from = '';
+    decision = { passed: false, reason: 'OCR output could not be validated. See the run logs and review artifacts.' };
   }
   await currentPR(github, context, env);
   const comments = await commentsFor(github, context, env.PR_NUMBER);
@@ -118,6 +119,24 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
   if (!decision.passed) core.setFailed(decision.reason);
 }
 
+async function prepareClaude({ github, context, fs, env }) {
+  await currentPR(github, context, env);
+  // Fetch untrusted review text as data with fixed read-only SDK methods. A
+  // shell prefix such as `gh api --method GET:*` also permits a later --method
+  // POST flag, so the model must not receive that general API capability.
+  const [discussion, inline, reviews] = await Promise.all([
+    commentsFor(github, context, env.PR_NUMBER),
+    github.paginate(github.rest.pulls.listReviewComments, {
+      ...context.repo, pull_number: Number(env.PR_NUMBER), per_page: 100,
+    }),
+    github.paginate(github.rest.pulls.listReviews, {
+      ...context.repo, pull_number: Number(env.PR_NUMBER), per_page: 100,
+    }),
+  ]);
+  fs.writeFileSync(path.join(env.RUNNER_TEMP, 'scout-prior-review.json'),
+    JSON.stringify({ discussion, inline, reviews }));
+}
+
 async function finishClaude({ github, context, core, env }) {
   // Action completion alone is not evidence the model finished the requested
   // review: budget exhaustion or an incomplete/blocked report cannot advance it.
@@ -141,4 +160,4 @@ async function finishClaude({ github, context, core, env }) {
   core.info('Recorded completed Claude review for future incremental follow-ups.');
 }
 
-module.exports = { prepareReview, finishReview, finishClaude };
+module.exports = { prepareReview, finishReview, prepareClaude, finishClaude };

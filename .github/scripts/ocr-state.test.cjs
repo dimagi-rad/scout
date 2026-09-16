@@ -57,6 +57,7 @@ test('forged ranges and run IDs, invalid modes and nonancestor fail closed', () 
 });
 test('manual commands allow full and a bounded budget in either order', () => {
   assert.deepEqual(parseCommand('@ocr'), { full: false, budget: 500000 });
+  assert.deepEqual(parseCommand('@OCR FULL BUDGET=750000'), { full: true, budget: 750000 });
   assert.deepEqual(parseCommand('@ocr full budget=750000'), { full: true, budget: 750000 });
   assert.deepEqual(parseCommand('@ocr budget=5000000 full\n'), { full: true, budget: 5000000 });
   for (const command of ['@ocrx', '@ocr please', '@ocr full full', '@ocr budget=1 budget=2', '@ocr budget=0', '@ocr budget=5000001', '@ocr budget=-1', '@ocr budget=1.5']) assert.throws(() => parseCommand(command));
