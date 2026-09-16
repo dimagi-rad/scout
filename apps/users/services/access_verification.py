@@ -291,9 +291,19 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                 returned_memberships.update(archived_at=None)
                 returned = list(returned_memberships)
                 omission_scope = owned_history
-            omission_scope.filter(archived_at__isnull=True).exclude(
-                tenant_id__in=result.tenant_ids
-            ).update(archived_at=decision_now)
+            omitted_ids = list(
+                omission_scope.exclude(tenant_id__in=result.tenant_ids).values_list(
+                    "tenant_id", flat=True
+                )
+            )
+            omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
+                archived_at=decision_now
+            )
+            # Legacy discovery can restore a tombstone without our lease; it must
+            # not revive an older positive proof after authoritative omission.
+            UpstreamAccessProof.objects.filter(
+                connection=current, tenant_id__in=omitted_ids
+            ).update(verified_at=None)
             live_ids = {membership.tenant_id for membership in returned}
             for tenant_id in live_ids:
                 UpstreamAccessProof.objects.update_or_create(

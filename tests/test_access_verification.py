@@ -127,7 +127,10 @@ def test_proof_freshness_requires_exact_identity_and_five_minute_boundary(
 
 
 @pytest.mark.django_db
-def test_archived_membership_cannot_consume_fresh_proof(user, tenant, verification_connection):
+@pytest.mark.parametrize("legacy_restores", [False, True])
+def test_archived_membership_cannot_consume_fresh_proof(
+    user, tenant, verification_connection, legacy_restores
+):
     conn, membership = verification_connection
     now = timezone.now()
     claim = claim_verification(user.id, conn.id, {tenant.id}, now=now)
@@ -146,6 +149,10 @@ def test_archived_membership_cannot_consume_fresh_proof(user, tenant, verificati
     )
     membership.refresh_from_db()
     assert membership.archived_at is not None
+    if legacy_restores:
+        # A pre-omission legacy discovery can finish later with the same token.
+        membership.archived_at = None
+        membership.save(update_fields=["archived_at"])
 
     retry = claim_verification(user.id, conn.id, {tenant.id}, now=now + timedelta(minutes=2))
 
