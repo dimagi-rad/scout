@@ -133,7 +133,7 @@ def test_midrun_denial_uses_rotated_credential(denial_context, final_status):
     _conn, token, memberships, schema, pipeline = denial_context
     credential = {"type": "oauth", "value": token.token}
 
-    def refresh(*args):
+    def refresh(*args, **kwargs):
         SocialToken.objects.filter(pk=token.pk).update(token="rotated")
         return "rotated"
 
