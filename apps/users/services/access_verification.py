@@ -66,6 +66,19 @@ class VerificationDeadlineExceeded(TimeoutError):
 
 @dataclass(frozen=True)
 class VerificationAttemptReceipt:
+    """A finished attempt's connection-level outcome.
+
+    Carries no tenant scope. The lease is per connection, so two concurrent requests
+    for *different* tenant sets share one lease and observe the same observation hash;
+    a waiter therefore matches a receipt from an attempt that never covered its
+    tenants. Treat the outcome as a statement about the credential, never about a
+    specific tenant: a COMPLETE receipt can accompany a publication that archived the
+    waiter's tenant as omitted, and TENANT_DENIED does not say which tenant was denied.
+
+    Per-tenant answers must come from UpstreamAccessProof or PublicationReceipt
+    .accepted_tenant_ids, which are tenant-scoped.
+    """
+
     lease_token: uuid.UUID
     outcome: VerificationOutcome
     error_code: str
@@ -210,6 +223,12 @@ def _completed_attempt(control) -> VerificationAttemptReceipt | None:
 
 
 def attempt_receipt_matches(receipt, lease_token, observation) -> bool:
+    """Whether a receipt describes this lease and credential observation.
+
+    Proves only that the finished attempt used the same lease and the same credential
+    — not that it covered any particular tenant. See VerificationAttemptReceipt: a
+    caller must not turn a True here into a per-tenant success or denial.
+    """
     return bool(
         receipt
         and lease_token
@@ -585,6 +604,7 @@ def _publish_verification_receipt(
             # alias tenant stays claimable while never being published or archived.
             # Canonicalize in Python: a provider__startswith filter would sweep
             # commcare_connect into commcare.
+            _configure_transaction_deadline(deadline, clock)
             canonical_tenant_ids = [
                 tenant_id
                 for tenant_id, tenant_provider in TenantMembership.all_objects.filter(
@@ -615,30 +635,40 @@ def _publish_verification_receipt(
                         **(membership.provider_metadata or {}),
                         "team_slug": current.scope_key,
                     }
+                    # Per-tenant write: recompute so N tenants cannot each wait the
+                    # full remaining budget.
+                    _configure_transaction_deadline(deadline, clock)
                     membership.save(update_fields=["archived_at", "provider_metadata"])
                 omission_scope = owned_history.filter(
                     provider_metadata__team_slug=current.scope_key
                 )
             else:
+                _configure_transaction_deadline(deadline, clock)
                 returned_memberships.update(archived_at=None)
                 returned = list(returned_memberships)
                 omission_scope = owned_history
+            _configure_transaction_deadline(deadline, clock)
             omitted_ids = list(
                 omission_scope.exclude(tenant_id__in=result.tenant_ids).values_list(
                     "tenant_id", flat=True
                 )
             )
+            _configure_transaction_deadline(deadline, clock)
             omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
                 archived_at=decision_now
             )
             # Legacy discovery can restore a tombstone without our lease; it must
             # not revive an older positive proof after authoritative omission.
+            _configure_transaction_deadline(deadline, clock)
             UpstreamAccessProof.objects.filter(
                 connection=current, tenant_id__in=omitted_ids
             ).update(verified_at=None)
             live_ids = {membership.tenant_id for membership in returned}
             accepted_tenant_ids = frozenset(live_ids)
             for tenant_id in live_ids:
+                # Per-tenant write: recompute so N tenants cannot each wait the full
+                # remaining budget.
+                _configure_transaction_deadline(deadline, clock)
                 UpstreamAccessProof.objects.update_or_create(
                     connection=current,
                     tenant_id=tenant_id,
