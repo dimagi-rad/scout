@@ -58,6 +58,30 @@ async def test_headless_materialization_tool_reports_failure(workspace, user, mo
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_headless_materialization_tool_preserves_post_wait_authorization_denial(
+    workspace, user, monkeypatch
+):
+    denied = {
+        "status": "denied",
+        "message": "Read-write or manage role required for this operation.",
+        "error": {
+            "code": "FORBIDDEN",
+            "message": "Read-write or manage role required for this operation.",
+        },
+    }
+
+    async def _denied_after_wait(*_args):
+        return denied
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _denied_after_wait)
+
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+
+    assert result == denied
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, user, monkeypatch):
     """#364: this tool is the consumer of ``all_succeeded``. A workspace tenant
     the run did not cover must reach the agent by name, with the run's own
