@@ -18,6 +18,7 @@ from apps.users.models import (
     UpstreamAccessProof,
     VerificationControl,
 )
+from apps.users.services import access_verification
 from apps.users.services.access_verification import (
     LEASE_DURATION,
     ClaimStatus,
@@ -287,16 +288,21 @@ def test_release_is_bounded_when_control_row_is_locked(user, tenant, verificatio
     release = threading.Event()
     locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
     locker.start()
-    assert acquired.wait(timeout=2)
+    # Release in a finally: a failed assertion here would otherwise leave the locker
+    # holding its row lock for its full 10s, stalling this transactional test's
+    # teardown truncate and cascading into neighbouring tests.
+    try:
+        assert acquired.wait(timeout=2)
 
-    started = time.monotonic()
-    released = release_verification(claim)
-    elapsed = time.monotonic() - started
+        started = time.monotonic()
+        released = release_verification(claim)
+        elapsed = time.monotonic() - started
 
-    assert released is False
-    assert elapsed < 0.2
-    release.set()
-    locker.join(timeout=2)
+        assert released is False
+        assert elapsed < 0.2
+    finally:
+        release.set()
+        locker.join(timeout=2)
     assert VerificationControl.objects.get(connection=conn).lease_token == claim.lease_token
     assert release_verification(claim) is True
 
@@ -316,38 +322,65 @@ def test_release_never_clears_replacement_lease(user, tenant, verification_conne
 def test_claim_recomputes_remaining_deadline_before_control_lock(
     user, tenant, verification_connection, monkeypatch
 ):
-    from apps.users.services import access_verification
-
     conn, _membership = verification_connection
     VerificationControl.objects.create(connection=conn)
+    # A stale proof keeps the claim past the freshness check and gives us a hook that
+    # runs after the proofs query's recompute but before the control lock, so the
+    # budget this test spends lands in exactly the window the recompute must cover.
+    UpstreamAccessProof.objects.create(
+        connection=conn,
+        tenant=tenant,
+        verified_at=timezone.now() - timedelta(minutes=6),
+        credential_fingerprint=snapshot_credential(conn).observation.credential_fingerprint,
+    )
     acquired = threading.Event()
     release = threading.Event()
     locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
     locker.start()
-    assert acquired.wait(timeout=2)
     timer = threading.Timer(0.5, release.set)
     timer.start()
-    original = access_verification._locked_snapshot
+    try:
+        assert acquired.wait(timeout=2)
 
-    def delayed_snapshot(*args, **kwargs):
-        time.sleep(0.08)
-        return original(*args, **kwargs)
+        events = []
+        original_configure = access_verification._configure_transaction_deadline
+        original_fresh = access_verification.proof_is_fresh
 
-    monkeypatch.setattr(access_verification, "_locked_snapshot", delayed_snapshot)
-    started = time.monotonic()
-    claim = claim_verification(
-        user.id,
-        conn.id,
-        {tenant.id},
-        deadline=started + 0.15,
-    )
-    elapsed = time.monotonic() - started
-    release.set()
-    locker.join(timeout=2)
-    timer.cancel()
+        def recording_configure(*args, **kwargs):
+            events.append("configure")
+            return original_configure(*args, **kwargs)
+
+        def delayed_fresh(*args, **kwargs):
+            time.sleep(0.08)
+            events.append("budget-spent")
+            return original_fresh(*args, **kwargs)
+
+        monkeypatch.setattr(
+            access_verification, "_configure_transaction_deadline", recording_configure
+        )
+        monkeypatch.setattr(access_verification, "proof_is_fresh", delayed_fresh)
+        started = time.monotonic()
+        claim = claim_verification(
+            user.id,
+            conn.id,
+            {tenant.id},
+            deadline=started + 0.15,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        locker.join(timeout=2)
+        timer.cancel()
 
     assert claim.status == ClaimStatus.DEADLINE
-    assert elapsed < 0.25
+    # The guard: the deadline must be recomputed after the budget was spent and before
+    # the control lock. Without that recompute the lock would inherit the stale, larger
+    # timeout computed back at the proofs query. Asserting on ordering rather than wall
+    # clock keeps this deterministic on a loaded runner.
+    assert "budget-spent" in events
+    assert "configure" in events[events.index("budget-spent") :]
+    # Loose bound: it only has to prove we did not block for the locker's full hold.
+    assert elapsed < 0.45
     assert VerificationControl.objects.get(connection=conn).lease_token is None
 
 
