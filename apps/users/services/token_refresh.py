@@ -185,24 +185,26 @@ class _ValidatedRefresh:
 #: is an enum, not a secret, so it is safe to log even though the body is not -- and it
 #: is the only thing separating our own misconfiguration (invalid_client) from a routine
 #: dead grant (invalid_grant). Anything unrecognised is withheld rather than echoed.
-_OAUTH_ERROR_CODES = (
-    "invalid_request",
-    "invalid_client",
-    "invalid_grant",
-    "unauthorized_client",
-    "unsupported_grant_type",
-    "invalid_scope",
-)
+#: Keyed by the code a provider may report, valued by the label we are willing to log.
+#: The response body also carries the client secret and the refresh token, so the
+#: provider's own string is used only as a lookup key and never returned: what reaches
+#: the logger is always one of these values. Anything unlisted becomes "unrecognised".
+_OAUTH_ERROR_LABELS = {
+    "invalid_request": "invalid_request",
+    "invalid_client": "invalid_client",
+    "invalid_grant": "invalid_grant",
+    "unauthorized_client": "unauthorized_client",
+    "unsupported_grant_type": "unsupported_grant_type",
+    "invalid_scope": "invalid_scope",
+}
 
 
 def _oauth_error_code(response) -> str:
-    """The provider's OAuth error code, or a fixed placeholder if it is not a known one.
+    """A loggable label for the provider's OAuth error, never the provider's own text.
 
-    Returns one of our own literals rather than the parsed value, so the string handed
-    to a logger provably cannot carry provider text -- the response body also holds the
-    client secret and refresh token. A membership test would read the same but would
-    still return the parsed object, leaving the guarantee to the check rather than to
-    construction.
+    OAuth 2 names token-endpoint failures in a fixed set (RFC 6749 5.2), and that code
+    is the only thing separating our own misconfiguration (invalid_client) from a
+    routine dead grant (invalid_grant).
     """
     if response is None:
         return "none"
@@ -213,10 +215,9 @@ def _oauth_error_code(response) -> str:
     if not isinstance(data, dict):
         return "unparseable"
     reported = data.get("error")
-    for known in _OAUTH_ERROR_CODES:
-        if reported == known:
-            return known
-    return "unrecognised"
+    if not isinstance(reported, str):
+        return "unrecognised"
+    return _OAUTH_ERROR_LABELS.get(reported, "unrecognised")
 
 
 def _is_invalid_grant(response) -> bool:
