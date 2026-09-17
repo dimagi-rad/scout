@@ -32,6 +32,7 @@ from django.db import connection as django_connection
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.common.db_deadline import preserve_transaction_timeouts
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import TokenRefreshError, UpstreamRefreshFailed, UpstreamTokenExpired
 from apps.users.models import TenantConnection, User
@@ -101,6 +102,10 @@ class PersistedTokenSnapshot:
 class TokenRefreshResult:
     status: TokenRefreshStatus
     snapshot: PersistedTokenSnapshot
+    #: On SUPERSEDED, whether the stored credential moved on from what preflight saw.
+    #: False means a concurrent writer changed the fences but not the token, so the
+    #: snapshot still holds the credential this refresh just rotated away upstream.
+    credential_advanced: bool = True
 
 
 @dataclass(frozen=True)
@@ -206,7 +211,7 @@ def _ensure_before_deadline(deadline, clock) -> None:
 
 
 def _preflight_token(token, *, deadline=None, clock=time.monotonic) -> _TokenPreflight:
-    with transaction.atomic():
+    with transaction.atomic(), preserve_transaction_timeouts():
         _configure_transaction_deadline(deadline, clock)
         account = SocialAccount.objects.get(pk=token.account_id)
         _configure_transaction_deadline(deadline, clock)
@@ -236,7 +241,7 @@ def _preflight_token(token, *, deadline=None, clock=time.monotonic) -> _TokenPre
             )
         )
         _ensure_before_deadline(deadline, clock)
-    return _TokenPreflight(
+    preflight = _TokenPreflight(
         token_id=token.pk,
         account_id=token.account_id,
         app_id=token.app_id,
@@ -248,6 +253,16 @@ def _preflight_token(token, *, deadline=None, clock=time.monotonic) -> _TokenPre
         account_scope=account_scope(account),
         connection_fences=connection_fences,
     )
+    if not all(
+        fence.user_id == preflight.user_id
+        and canonical_provider(fence.provider) == preflight.account_provider
+        and fence.scope_key == preflight.account_scope
+        for fence in connection_fences
+    ):
+        raise TokenRefreshError(
+            "OAuth connection identity is inconsistent; reconnect this account."
+        )
+    return preflight
 
 
 def _connection_fence(connection) -> _ConnectionFence:
@@ -275,7 +290,10 @@ def _lock_refresh_context(preflight: _TokenPreflight, *, deadline=None, clock=ti
     _configure_transaction_deadline(deadline, clock)
     connections = list(
         TenantConnection.objects.select_for_update()
-        .filter(Q(social_account_id=preflight.account_id) | Q(pk__in=observed_ids))
+        .filter(
+            Q(social_account_id=preflight.account_id, credential_type=TenantConnection.OAUTH)
+            | Q(pk__in=observed_ids)
+        )
         .order_by("pk")
     )
     return current, connections
@@ -296,16 +314,7 @@ def _refresh_context_matches(
     ):
         return False
     current_fences = tuple(_connection_fence(connection) for connection in connections)
-    if current_fences != preflight.connection_fences:
-        return False
-    return all(
-        fence.user_id == preflight.user_id
-        and fence.credential_type == TenantConnection.OAUTH
-        and fence.social_account_id == preflight.account_id
-        and canonical_provider(fence.provider) == preflight.account_provider
-        and fence.scope_key == preflight.account_scope
-        for fence in current_fences
-    )
+    return current_fences == preflight.connection_fences
 
 
 def _validate_refresh_response(response, preflight: _TokenPreflight) -> _ValidatedRefresh:
@@ -318,7 +327,7 @@ def _validate_refresh_response(response, preflight: _TokenPreflight) -> _Validat
     access_token = data.get("access_token")
     if not isinstance(access_token, str) or not access_token:
         raise TokenRefreshError("OAuth refresh returned an invalid access token.")
-    refresh_token = data.get("refresh_token", preflight.refresh_token)
+    refresh_token = data.get("refresh_token") or preflight.refresh_token
     if not isinstance(refresh_token, str) or not refresh_token:
         raise TokenRefreshError("OAuth refresh returned an invalid refresh token.")
     expires_in = data.get("expires_in")
@@ -360,11 +369,16 @@ def _persist_refresh_response(
     deadline=None,
     clock=time.monotonic,
 ) -> TokenRefreshResult:
-    with transaction.atomic():
+    with transaction.atomic(), preserve_transaction_timeouts():
         current, connections = _lock_refresh_context(preflight, deadline=deadline, clock=clock)
         _ensure_before_deadline(deadline, clock)
         if not _refresh_context_matches(preflight, current, connections):
-            return TokenRefreshResult(TokenRefreshStatus.SUPERSEDED, _persisted_snapshot(current))
+            snapshot = _persisted_snapshot(current)
+            return TokenRefreshResult(
+                TokenRefreshStatus.SUPERSEDED,
+                snapshot,
+                credential_advanced=snapshot.access_token != preflight.access_token,
+            )
         current.token = refreshed.access_token
         current.token_secret = refreshed.refresh_token
         current.expires_at = refreshed.expires_at
@@ -375,7 +389,6 @@ def _persist_refresh_response(
             pk__in=[fence.connection_id for fence in preflight.connection_fences],
             oauth_refresh_failure_fingerprint=fingerprint,
         ).update(oauth_refresh_failure_fingerprint="")
-        _ensure_before_deadline(deadline, clock)
         return TokenRefreshResult(TokenRefreshStatus.APPLIED, _persisted_snapshot(current))
 
 
@@ -403,7 +416,7 @@ def _persist_refresh_failure(
     deadline=None,
     clock=time.monotonic,
 ) -> bool:
-    with transaction.atomic():
+    with transaction.atomic(), preserve_transaction_timeouts():
         try:
             current, connections = _lock_refresh_context(preflight, deadline=deadline, clock=clock)
         except (User.DoesNotExist, SocialToken.DoesNotExist):
@@ -415,7 +428,6 @@ def _persist_refresh_failure(
         TenantConnection.objects.filter(
             pk__in=[fence.connection_id for fence in preflight.connection_fences]
         ).update(oauth_refresh_failure_fingerprint=fingerprint)
-        _ensure_before_deadline(deadline, clock)
         return True
 
 
@@ -504,8 +516,13 @@ async def refresh_oauth_token_result(
             )
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        await _arecord_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
-        if _is_invalid_grant(e.response):
+        rejected = _is_invalid_grant(e.response)
+        try:
+            await _arecord_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+        except TokenRefreshUnavailable:
+            if not rejected:
+                raise
+        if rejected:
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
         if e.response.status_code in (408, 429) or e.response.status_code >= 500:
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
@@ -526,14 +543,28 @@ async def refresh_oauth_token_result(
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
-    logger.info("Successfully refreshed OAuth token for app %s", social_token.app.client_id)
+    if result.status is TokenRefreshStatus.SUPERSEDED:
+        logger.warning(
+            "Lost OAuth refresh race for app %s; stored credential %s",
+            social_token.app.client_id,
+            "was refreshed concurrently" if result.credential_advanced else "did not advance",
+        )
+    else:
+        logger.info("Successfully refreshed OAuth token for app %s", social_token.app.client_id)
     return result
+
+
+def _ensure_usable_credential(result: TokenRefreshResult) -> None:
+    """Refuse to hand back a credential this refresh already rotated away upstream."""
+    if result.status is TokenRefreshStatus.SUPERSEDED and not result.credential_advanced:
+        raise TokenRefreshUnavailable("OAuth refresh was superseded before it could be applied.")
 
 
 async def refresh_oauth_token(social_token, token_url: str, *, request_timeout: float = 30) -> str:
     result = await refresh_oauth_token_result(
         social_token, token_url, request_timeout=request_timeout
     )
+    _ensure_usable_credential(result)
     return result.snapshot.access_token
 
 
@@ -584,8 +615,13 @@ def refresh_oauth_token_result_sync(
             )
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        _record_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
-        if _is_invalid_grant(e.response):
+        rejected = _is_invalid_grant(e.response)
+        try:
+            _record_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+        except TokenRefreshUnavailable:
+            if not rejected:
+                raise
+        if rejected:
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
         if status is not None and (status in (408, 429) or status >= 500):
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
@@ -606,10 +642,20 @@ def refresh_oauth_token_result_sync(
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
-    logger.info("Successfully refreshed OAuth token (sync) for app %s", social_token.app.client_id)
+    if result.status is TokenRefreshStatus.SUPERSEDED:
+        logger.warning(
+            "Lost OAuth refresh race (sync) for app %s; stored credential %s",
+            social_token.app.client_id,
+            "was refreshed concurrently" if result.credential_advanced else "did not advance",
+        )
+    else:
+        logger.info(
+            "Successfully refreshed OAuth token (sync) for app %s", social_token.app.client_id
+        )
     return result
 
 
 def refresh_oauth_token_sync(social_token, token_url: str, *, timeout: float = 30) -> str:
     result = refresh_oauth_token_result_sync(social_token, token_url, timeout=timeout)
+    _ensure_usable_credential(result)
     return result.snapshot.access_token

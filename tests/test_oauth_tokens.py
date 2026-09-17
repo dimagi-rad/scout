@@ -209,7 +209,7 @@ class TestTokenRefresh:
             url=token_url,
             method="POST",
             status_code=400,
-            json={"error": "invalid_grant"},
+            json={"error": "invalid_grant", "description": "leaked-body-marker"},
         )
 
         social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
@@ -227,7 +227,7 @@ class TestTokenRefresh:
         assert not any(r.levelno >= logging.ERROR for r in records)
         assert not any(r.exc_info for r in records)
         assert "dead_refresh_token" not in caplog.text
-        assert '{"error": "invalid_grant"}' not in caplog.text
+        assert "leaked-body-marker" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_refresh_500_logs_exception(self, httpx_mock, caplog):
