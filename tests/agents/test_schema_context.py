@@ -21,6 +21,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from mcp_server.context import load_tenant_context
 
 
 @pytest.fixture
@@ -111,6 +112,25 @@ async def test_refresh_keeps_previous_data_queryable_only_when_ready(
     else:
         assert "previously loaded data" not in result.lower()
         assert "Data is loaded and ready" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_claimed_refresh_keeps_query_context_on_previous_active_schema(settings, tenant):
+    settings.MANAGED_DATABASE_URL = "postgresql://scout@localhost/scout"
+    previous = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="previous_active", state=SchemaState.ACTIVE
+    )
+    await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="claimed_refresh",
+        state=SchemaState.PROVISIONING,
+        refresh_claimed_at=timezone.now(),
+    )
+
+    context = await load_tenant_context(tenant.external_id, tenant.provider)
+
+    assert context.schema_name == previous.schema_name
 
 
 @pytest.mark.asyncio
