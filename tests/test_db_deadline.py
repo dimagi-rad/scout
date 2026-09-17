@@ -67,10 +67,18 @@ def test_restores_through_several_nesting_levels():
 
 @pytest.mark.django_db(transaction=True)
 def test_restores_unset_defaults():
-    before = _timeouts()
-    with transaction.atomic(), preserve_transaction_timeouts():
-        _tighten("250ms")
-    assert _timeouts() == before
+    """An unset timeout is a value to put back too; "0" is not a special case.
+
+    The assertion has to sit inside an enclosing transaction. Without one the inner
+    atomic() is the outermost transaction, and PostgreSQL discards every
+    set_config(..., is_local=true) at transaction end regardless -- so the timeouts
+    would revert whether or not the helper did anything.
+    """
+    with transaction.atomic():
+        before = _timeouts()
+        with transaction.atomic(), preserve_transaction_timeouts():
+            _tighten("250ms")
+        assert _timeouts() == before
 
 
 @pytest.mark.django_db(transaction=True)

@@ -372,15 +372,9 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
     oauth_identity, mode, httpx_mock, requests_mock
 ):
     token, connection = oauth_identity
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_user_lock, args=(connection.user_id, acquired, release))
-    locker.start()
-    assert await asyncio.to_thread(acquired.wait, 2)
-    # Holder outlasts the budget so only the persist phase can exhaust it; 1s leaves
-    # preflight room for a fresh executor thread and a new PostgreSQL connection.
-    timer = threading.Timer(4.0, release.set)
-    timer.start()
+    # 1s leaves preflight room for a fresh executor thread and a new PostgreSQL
+    # connection, so only the persist phase can exhaust the budget; the holder outlasts
+    # it so the lock cannot free early and let the write through.
     deadline = time.monotonic() + 1.0
     payload = {"access_token": "late-access", "refresh_token": "late-refresh"}
     if mode == "async":
@@ -390,14 +384,12 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
         requests_mock.post(URL, json=payload)
         operation = sync_to_async(refresh_oauth_token_result_sync)(token, URL, deadline=deadline)
 
-    started = time.monotonic()
-    # The provider already rotated the grant, so the stored token is dead: reconnect.
-    with pytest.raises(TokenRefreshRejected):
-        await operation
-    elapsed = time.monotonic() - started
-    release.set()
-    await asyncio.to_thread(locker.join, 5)
-    timer.cancel()
+    with _user_row_locked(connection.user_id, hold_seconds=4.0):
+        started = time.monotonic()
+        # The provider already rotated the grant, so the stored token is dead: reconnect.
+        with pytest.raises(TokenRefreshRejected):
+            await operation
+        elapsed = time.monotonic() - started
 
     # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
     # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
@@ -414,16 +406,9 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
     oauth_identity, mode, httpx_mock, requests_mock
 ):
     token, connection = oauth_identity
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_user_lock, args=(connection.user_id, acquired, release))
-    locker.start()
-    assert await asyncio.to_thread(acquired.wait, 2)
     # The holder must outlast the budget, or the lock frees before it can expire and
     # the marker gets written after all. 1s gives preflight -- a fresh executor thread
     # and a new PostgreSQL connection -- room to finish inside its own re-armed slice.
-    timer = threading.Timer(4.0, release.set)
-    timer.start()
     if mode == "async":
         httpx_mock.add_response(url=URL, status_code=503)
         operation = refresh_oauth_token_result(token, URL, db_timeout=1.0)
@@ -431,13 +416,11 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
         requests_mock.post(URL, status_code=503)
         operation = sync_to_async(refresh_oauth_token_result_sync)(token, URL, db_timeout=1.0)
 
-    started = time.monotonic()
-    with pytest.raises(TokenRefreshUnavailable):
-        await operation
-    elapsed = time.monotonic() - started
-    release.set()
-    await asyncio.to_thread(locker.join, 5)
-    timer.cancel()
+    with _user_row_locked(connection.user_id, hold_seconds=4.0):
+        started = time.monotonic()
+        with pytest.raises(TokenRefreshUnavailable):
+            await operation
+        elapsed = time.monotonic() - started
 
     # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
     # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
