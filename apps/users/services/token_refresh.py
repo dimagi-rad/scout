@@ -785,11 +785,16 @@ async def refresh_oauth_token_result(
     return result
 
 
-def _ensure_usable_credential(result: TokenRefreshResult) -> None:
+def ensure_usable_credential(result: TokenRefreshResult) -> None:
     """Refuse to hand back a credential this refresh already rotated away upstream.
 
     Reconnect rather than retry: the stored refresh token is dead at the provider, so
     no amount of retrying will revive it.
+
+    Public because every consumer of :func:`refresh_oauth_token_result` must apply
+    this check before using ``result.snapshot``. The wrappers below do it for you;
+    a caller that uses the raw result has to call this itself, or it will verify
+    with a credential that is already dead at the provider.
     """
     if result.status is TokenRefreshStatus.SUPERSEDED and not result.credential_advanced:
         raise TokenRefreshRejected(
@@ -807,7 +812,7 @@ async def refresh_oauth_token(
     result = await refresh_oauth_token_result(
         social_token, token_url, request_timeout=request_timeout, db_timeout=db_timeout
     )
-    _ensure_usable_credential(result)
+    ensure_usable_credential(result)
     return result.snapshot.access_token
 
 
@@ -943,5 +948,5 @@ def refresh_oauth_token_sync(
     result = refresh_oauth_token_result_sync(
         social_token, token_url, timeout=timeout, db_timeout=db_timeout
     )
-    _ensure_usable_credential(result)
+    ensure_usable_credential(result)
     return result.snapshot.access_token
