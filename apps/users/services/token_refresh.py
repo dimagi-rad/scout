@@ -185,45 +185,48 @@ class _ValidatedRefresh:
 #: is an enum, not a secret, so it is safe to log even though the body is not -- and it
 #: is the only thing separating our own misconfiguration (invalid_client) from a routine
 #: dead grant (invalid_grant). Anything unrecognised is withheld rather than echoed.
-#: Keyed by the code a provider may report, valued by the label we are willing to log.
-#: The response body also carries the client secret and the refresh token, so the
-#: provider's own string is used only as a lookup key and never returned: what reaches
-#: the logger is always one of these values. Anything unlisted becomes "unrecognised".
-_OAUTH_ERROR_LABELS = {
-    "invalid_request": "invalid_request",
-    "invalid_client": "invalid_client",
-    "invalid_grant": "invalid_grant",
-    "unauthorized_client": "unauthorized_client",
-    "unsupported_grant_type": "unsupported_grant_type",
-    "invalid_scope": "invalid_scope",
-}
-
-
-def _oauth_error_code(response) -> str:
-    """A loggable label for the provider's OAuth error, never the provider's own text.
-
-    OAuth 2 names token-endpoint failures in a fixed set (RFC 6749 5.2), and that code
-    is the only thing separating our own misconfiguration (invalid_client) from a
-    routine dead grant (invalid_grant).
-    """
+def _reports_oauth_error(response, code: str) -> bool:
+    """Does the provider's body name this specific OAuth error?"""
     if response is None:
-        return "none"
+        return False
     try:
         data = response.json()
     except ValueError:
-        return "unparseable"
-    if not isinstance(data, dict):
-        return "unparseable"
-    reported = data.get("error")
-    if not isinstance(reported, str):
-        return "unrecognised"
-    return _OAUTH_ERROR_LABELS.get(reported, "unrecognised")
+        return False
+    return isinstance(data, dict) and data.get("error") == code
 
 
 def _is_invalid_grant(response) -> bool:
     if response is None or response.status_code not in (400, 401, 403):
         return False
-    return _oauth_error_code(response) == "invalid_grant"
+    return _reports_oauth_error(response, "invalid_grant")
+
+
+def _oauth_error_label(response) -> str:
+    """A literal naming the provider's OAuth error, for the log line.
+
+    OAuth 2 names token-endpoint failures in a fixed set (RFC 6749 5.2), and that code
+    is the only thing separating our own misconfiguration (invalid_client) from a
+    routine dead grant (invalid_grant), which otherwise both read as a bare HTTP 400.
+
+    Written as literal returns behind boolean tests rather than as a lookup, so the
+    only thing crossing from the response is a bool and no provider-controlled string
+    can reach a logger by construction -- the body also carries the client secret and
+    the refresh token. Re-parsing per comparison is irrelevant on a failure path.
+    """
+    if _reports_oauth_error(response, "invalid_grant"):
+        return "invalid_grant"
+    if _reports_oauth_error(response, "invalid_client"):
+        return "invalid_client"
+    if _reports_oauth_error(response, "unauthorized_client"):
+        return "unauthorized_client"
+    if _reports_oauth_error(response, "invalid_request"):
+        return "invalid_request"
+    if _reports_oauth_error(response, "invalid_scope"):
+        return "invalid_scope"
+    if _reports_oauth_error(response, "unsupported_grant_type"):
+        return "unsupported_grant_type"
+    return "other"
 
 
 def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
@@ -726,7 +729,7 @@ async def refresh_oauth_token_result(
                 "Token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 e.response.status_code,
-                _oauth_error_code(e.response),
+                _oauth_error_label(e.response),
             )
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
@@ -873,7 +876,7 @@ def refresh_oauth_token_result_sync(
                 "Sync token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 status,
-                _oauth_error_code(e.response),
+                _oauth_error_label(e.response),
             )
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
