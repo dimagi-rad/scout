@@ -390,7 +390,13 @@ def claim_verification(
 
 
 def release_verification(claim) -> bool:
-    if claim.observation is None or claim.lease_token is None:
+    # A waiter observes the winner's lease token, so the token alone does not prove
+    # ownership; only the CLAIMED winner may clear the lease.
+    if (
+        claim.status != ClaimStatus.CLAIMED
+        or claim.observation is None
+        or claim.lease_token is None
+    ):
         return False
     try:
         with transaction.atomic():
