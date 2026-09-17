@@ -5,18 +5,20 @@ import contextlib
 import threading
 import time
 from datetime import timedelta
+from unittest import mock
 
 import httpx
 import pytest
 import requests
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-from asgiref.sync import async_to_sync, sync_to_async
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.sites.models import Site
 from django.db import DatabaseError, transaction
 from django.db import connection as django_connection
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantConnection
 from apps.users.services import credential_resolver, token_refresh
 from apps.users.services.credential_resolver import CredentialResolutionError
@@ -421,13 +423,12 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
     # the marker gets written after all.
     timer = threading.Timer(4.0, release.set)
     timer.start()
-    deadline = time.monotonic() + 0.1
     if mode == "async":
         httpx_mock.add_response(url=URL, status_code=503)
-        operation = refresh_oauth_token_result(token, URL, deadline=deadline)
+        operation = refresh_oauth_token_result(token, URL, db_timeout=0.1)
     else:
         requests_mock.post(URL, status_code=503)
-        operation = sync_to_async(refresh_oauth_token_result_sync)(token, URL, deadline=deadline)
+        operation = sync_to_async(refresh_oauth_token_result_sync)(token, URL, db_timeout=0.1)
 
     started = time.monotonic()
     with pytest.raises(TokenRefreshUnavailable):
@@ -805,6 +806,26 @@ async def test_failure_marker_write_error_does_not_erase_the_real_classification
 
 
 @contextlib.contextmanager
+def _stubbed_provider(payload=None):
+    """Stub the production CommCare token endpoint.
+
+    get_token_url("commcare") is a hard-coded production URL and nothing in this
+    suite blocks sockets, so an unstubbed test would POST to commcarehq.org.
+    Omitting refresh_token models a provider that does not rotate.
+    """
+    calls = []
+
+    async def fake_post(self, url, *args, **kwargs):
+        calls.append(url)
+        return httpx.Response(
+            200, json=payload or {"access_token": "new-access"}, request=httpx.Request("POST", url)
+        )
+
+    with mock.patch.object(httpx.AsyncClient, "post", fake_post):
+        yield calls
+
+
+@contextlib.contextmanager
 def _user_row_locked(user_id, hold_seconds=8.0):
     """Hold a competing lock on the User row the refresh must take."""
     acquired = threading.Event()
@@ -827,18 +848,19 @@ def test_providers_view_bounds_its_refresh_wait(oauth_identity, user, client, mo
     """The interactive path must not block a page render on a contended row.
 
     Fails if auth_views stops forwarding INTERACTIVE_DB_DEADLINE: the baked-in worker
-    default would then apply and this would sit on the lock for far longer.
+    default would then apply and this would sit on the lock far longer.
     """
     token, connection = oauth_identity
     token.app.sites.add(Site.objects.get(pk=settings.SITE_ID))
     monkeypatch.setattr(token_refresh, "INTERACTIVE_DB_DEADLINE", 0.3)
     client.force_login(user)
 
-    with _user_row_locked(connection.user_id):
+    with _stubbed_provider() as calls, _user_row_locked(connection.user_id):
         started = time.monotonic()
         response = client.get("/api/auth/providers/")
         elapsed = time.monotonic() - started
 
+    assert calls, "the provider must be stubbed, never actually called"
     assert response.status_code == 200
     assert elapsed < 4, f"providers_view waited {elapsed:.1f}s on a locked row"
     entries = {p["id"]: p for p in response.json()["providers"]}
@@ -848,48 +870,43 @@ def test_providers_view_bounds_its_refresh_wait(oauth_identity, user, client, mo
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_proactive_resolution_bounds_its_refresh_wait(oauth_identity, monkeypatch):
-    """Fails if credential_resolver stops forwarding WORKER_DB_DEADLINE."""
+    """Fails if credential_resolver stops forwarding WORKER_DB_DEADLINE.
+
+    The provider reuses our refresh token, so the stored credential is still good and
+    the outcome must be the retryable code, not a reconnect prompt.
+    """
     token, connection = oauth_identity
     monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", 0.3)
 
-    def locked_resolve():
-        with _user_row_locked(connection.user_id):
-            started = time.monotonic()
-            try:
-                async_to_sync(credential_resolver._aresolve_oauth_credential)(token, "commcare")
-            except CredentialResolutionError as exc:
-                return time.monotonic() - started, exc
-            return time.monotonic() - started, None
+    with _stubbed_provider() as calls, _user_row_locked(connection.user_id):
+        started = time.monotonic()
+        with pytest.raises(CredentialResolutionError) as caught:
+            await credential_resolver._aresolve_oauth_credential(token, "commcare")
+        elapsed = time.monotonic() - started
 
-    elapsed, error = await asyncio.to_thread(locked_resolve)
-
-    assert error is not None, "a contended row must fail closed, not resolve"
+    assert calls, "the provider must be stubbed, never actually called"
+    assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
     assert elapsed < 4, f"resolution waited {elapsed:.1f}s on a locked row"
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.asyncio
-async def test_midrun_refresher_bounds_its_refresh_wait(oauth_identity, monkeypatch):
+def test_midrun_refresher_bounds_its_refresh_wait(oauth_identity, monkeypatch, requests_mock):
     """The loader's mid-run 401 refresher runs on a worker thread and must stay bounded.
 
     Fails if credential_resolver stops forwarding WORKER_DB_DEADLINE.
     """
     token, connection = oauth_identity
     monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", 0.3)
+    stub = requests_mock.post(URL, json={"access_token": "new-access"})
     refresher = credential_resolver._make_token_refresher(token, URL)
 
-    def locked_refresh():
-        with _user_row_locked(connection.user_id):
-            started = time.monotonic()
-            try:
-                refresher()
-            except TokenRefreshError as exc:
-                return time.monotonic() - started, exc
-            return time.monotonic() - started, None
+    with _user_row_locked(connection.user_id):
+        started = time.monotonic()
+        with pytest.raises(TokenRefreshDeadlineExceeded):
+            refresher()
+        elapsed = time.monotonic() - started
 
-    elapsed, error = await asyncio.to_thread(locked_refresh)
-
-    assert error is not None, "a contended row must fail, not hang"
+    assert stub.called, "the provider must be stubbed, never actually called"
     assert elapsed < 4, f"mid-run refresh waited {elapsed:.1f}s on a locked row"
 
 
@@ -906,3 +923,86 @@ async def test_deadline_before_the_grant_is_spent_stays_retryable(oauth_identity
     else:
         with pytest.raises(TokenRefreshDeadlineExceeded):
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL, deadline=expired)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_a_slow_failing_provider_does_not_starve_the_failure_marker(
+    oauth_identity, mode, requests_mock
+):
+    """The marker is the only diagnostic left when a refresh fails; it gets its own budget.
+
+    A provider that took longer than db_timeout to return its error used to leave the
+    marker with an exhausted deadline, so the failure was recorded nowhere.
+    """
+    token, connection = oauth_identity
+
+    if mode == "async":
+
+        async def slow_error(self, url, *args, **kwargs):
+            await asyncio.sleep(0.4)
+            return httpx.Response(503, json={}, request=httpx.Request("POST", url))
+
+        with mock.patch.object(httpx.AsyncClient, "post", slow_error):
+            with pytest.raises(TokenRefreshUnavailable):
+                await refresh_oauth_token_result(token, URL, db_timeout=0.2)
+    else:
+        requests_mock.post(URL, status_code=503)
+        original = token_refresh.requests.post
+
+        def slow_error(*args, **kwargs):
+            time.sleep(0.4)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(token_refresh.requests, "post", slow_error):
+            with pytest.raises(TokenRefreshUnavailable):
+                await sync_to_async(refresh_oauth_token_result_sync)(token, URL, db_timeout=0.2)
+
+    await connection.arefresh_from_db()
+    assert connection.oauth_refresh_failure_fingerprint != ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_slow_provider_does_not_spend_the_budget_meant_for_the_write(
+    oauth_identity, mode, httpx_mock, requests_mock
+):
+    """The HTTP round trip sits between two database phases; it must not consume theirs.
+
+    With one deadline armed up front, a provider answering slower than db_timeout made
+    a healthy idle database look exhausted and the rotated credential was discarded.
+    """
+    token, _connection = oauth_identity
+    payload = {"access_token": "new-access", "refresh_token": "rotated-refresh"}
+
+    def slow_then_respond(*args, **kwargs):
+        time.sleep(0.4)
+        return payload
+
+    if mode == "async":
+
+        async def slow_post(self, url, *args, **kwargs):
+            await asyncio.sleep(0.4)
+            return httpx.Response(200, json=payload, request=httpx.Request("POST", url))
+
+        with mock.patch.object(httpx.AsyncClient, "post", slow_post):
+            result = await refresh_oauth_token_result(token, URL, db_timeout=0.2)
+    else:
+        requests_mock.post(URL, json=payload)
+        original = token_refresh.requests.post
+
+        def slow_sync_post(*args, **kwargs):
+            time.sleep(0.4)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(token_refresh.requests, "post", slow_sync_post):
+            result = await sync_to_async(refresh_oauth_token_result_sync)(
+                token, URL, db_timeout=0.2
+            )
+
+    assert result.status == TokenRefreshStatus.APPLIED
+    persisted = await SocialToken.objects.aget(pk=token.pk)
+    assert persisted.token == "new-access"
+    assert persisted.token_secret == "rotated-refresh"
