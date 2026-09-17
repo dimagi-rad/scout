@@ -43,6 +43,16 @@ logger = logging.getLogger(__name__)
 # Refresh tokens that expire within this window
 REFRESH_BUFFER = timedelta(minutes=5)
 
+#: Somebody is watching a page, and providers_view refreshes once per connected token,
+#: so this is a per-token slice of a page budget rather than a whole one.
+INTERACTIVE_DB_DEADLINE = 5.0
+
+#: Matches the 30s request_timeout the refresh wrappers already allow one provider call:
+#: the module's established unit of patience for a single refresh attempt. A worker is
+#: not waiting on a person, but blocking forever stalls thread-sensitive ORM work for
+#: everything else sharing the executor.
+WORKER_DB_DEADLINE = 30.0
+
 
 def _ocs_token_url() -> str:
     return f"{settings.OCS_URL.rstrip('/')}/o/token/"
@@ -69,6 +79,15 @@ def get_token_url(provider: str) -> str | None:
 
 class TokenRefreshUnavailable(TokenRefreshError, UpstreamRefreshFailed):
     """An HTTP or transport failure prevented credential refresh."""
+
+
+class TokenRefreshDeadlineExceeded(TokenRefreshUnavailable):
+    """The database wait for a refresh outran its budget before the grant was spent.
+
+    Retrying is the right move -- the lock holder will have moved on -- so this keeps
+    the retryable classification. It is a distinct class only so a contended database
+    is never read as an unexplained refresh failure.
+    """
 
 
 class TokenRefreshRejected(TokenRefreshError, UpstreamTokenExpired):
@@ -248,6 +267,27 @@ def _configure_transaction_deadline(deadline, clock) -> None:
             cursor.execute(
                 "SELECT set_config('statement_timeout', %s, true)", [f"{milliseconds}ms"]
             )
+
+
+#: PostgreSQL's codes for a statement cancelled by ``statement_timeout`` and a lock
+#: refused by ``lock_timeout``. Reading the SQLSTATE of a driver we do not own is the
+#: boundary-adapter case that ``apps/common/errors.py`` explicitly allows; the
+#: alternative is inferring a timeout from prose.
+_DEADLINE_SQLSTATES = frozenset({"57014", "55P03"})
+
+
+def _is_deadline_error(exc: BaseException) -> bool:
+    """True when this refresh's own budget fired, rather than the database faulting.
+
+    The explicit clock checks raise ``_RefreshDeadlineExceeded``, but the waits that
+    matter are enforced by PostgreSQL and arrive as a wrapped driver error.
+    """
+    if isinstance(exc, _RefreshDeadlineExceeded):
+        return True
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate is None:
+        sqlstate = getattr(exc.__cause__, "sqlstate", None)
+    return sqlstate in _DEADLINE_SQLSTATES
 
 
 def _ensure_before_deadline(deadline, clock) -> None:
@@ -596,6 +636,7 @@ async def refresh_oauth_token_result(
     token_url: str,
     *,
     request_timeout: float = 30,
+    db_timeout: float | None = WORKER_DB_DEADLINE,
     deadline=None,
     clock=time.monotonic,
 ) -> TokenRefreshResult:
@@ -612,11 +653,17 @@ async def refresh_oauth_token_result(
     Raises:
         TokenRefreshError: If the refresh request fails.
     """
+    if deadline is None and db_timeout is not None:
+        deadline = clock() + db_timeout
     try:
         preflight = await sync_to_async(_preflight_token)(
             social_token, deadline=deadline, clock=clock
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+        if _is_deadline_error(exc):
+            raise TokenRefreshDeadlineExceeded(
+                "Timed out waiting on the database before refreshing OAuth credentials."
+            ) from exc
         raise TokenRefreshUnavailable("Failed to read OAuth refresh state.") from exc
     fingerprint = credential_fingerprint(social_token)
     if social_token.app is None:
@@ -674,6 +721,11 @@ async def refresh_oauth_token_result(
             preflight, refreshed, fingerprint, deadline=deadline, clock=clock
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+        if _is_deadline_error(exc):
+            logger.warning("Timed out persisting a refreshed OAuth token", exc_info=True)
+            raise TokenRefreshRejected(
+                "The refreshed OAuth credential could not be stored in time; reconnect required."
+            ) from exc
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
@@ -700,9 +752,15 @@ def _ensure_usable_credential(result: TokenRefreshResult) -> None:
         )
 
 
-async def refresh_oauth_token(social_token, token_url: str, *, request_timeout: float = 30) -> str:
+async def refresh_oauth_token(
+    social_token,
+    token_url: str,
+    *,
+    request_timeout: float = 30,
+    db_timeout: float | None = WORKER_DB_DEADLINE,
+) -> str:
     result = await refresh_oauth_token_result(
-        social_token, token_url, request_timeout=request_timeout
+        social_token, token_url, request_timeout=request_timeout, db_timeout=db_timeout
     )
     _ensure_usable_credential(result)
     return result.snapshot.access_token
@@ -713,6 +771,7 @@ def refresh_oauth_token_result_sync(
     token_url: str,
     *,
     timeout: float = 30,
+    db_timeout: float | None = WORKER_DB_DEADLINE,
     deadline=None,
     clock=time.monotonic,
 ) -> TokenRefreshResult:
@@ -722,9 +781,15 @@ def refresh_oauth_token_result_sync(
     running under ``asyncio.to_thread`` can renew a token mid-run (arch #252,
     finding 14#3). The rotated token must persist before any caller may use it.
     """
+    if deadline is None and db_timeout is not None:
+        deadline = clock() + db_timeout
     try:
         preflight = _preflight_token(social_token, deadline=deadline, clock=clock)
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+        if _is_deadline_error(exc):
+            raise TokenRefreshDeadlineExceeded(
+                "Timed out waiting on the database before refreshing OAuth credentials."
+            ) from exc
         raise TokenRefreshUnavailable("Failed to read OAuth refresh state.") from exc
     fingerprint = credential_fingerprint(social_token)
     if social_token.app is None:
@@ -785,6 +850,11 @@ def refresh_oauth_token_result_sync(
             preflight, refreshed, fingerprint, deadline=deadline, clock=clock
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+        if _is_deadline_error(exc):
+            logger.warning("Timed out persisting a refreshed OAuth token", exc_info=True)
+            raise TokenRefreshRejected(
+                "The refreshed OAuth credential could not be stored in time; reconnect required."
+            ) from exc
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
@@ -801,7 +871,15 @@ def refresh_oauth_token_result_sync(
     return result
 
 
-def refresh_oauth_token_sync(social_token, token_url: str, *, timeout: float = 30) -> str:
-    result = refresh_oauth_token_result_sync(social_token, token_url, timeout=timeout)
+def refresh_oauth_token_sync(
+    social_token,
+    token_url: str,
+    *,
+    timeout: float = 30,
+    db_timeout: float | None = WORKER_DB_DEADLINE,
+) -> str:
+    result = refresh_oauth_token_result_sync(
+        social_token, token_url, timeout=timeout, db_timeout=db_timeout
+    )
     _ensure_usable_credential(result)
     return result.snapshot.access_token
