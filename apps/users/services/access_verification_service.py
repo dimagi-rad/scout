@@ -190,7 +190,15 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
             timeout=remaining,
         )
     except TokenRefreshRejected:
-        return claim, ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+        # A dead refresh grant requires reconnect but does not prove resource access
+        # loss, which is what TokenRefreshRejected.denial_handled records. Publishing
+        # CREDENTIAL_REJECTED here would call record_validated_upstream_denial with
+        # tenant_id=None and archive every live membership on the connection, so one
+        # failed refresh would revoke every tenant without any resource call denying
+        # access. A genuine provider 401 is the case that legitimately archives; see
+        # _status_result. AUTH_TOKEN_EXPIRED still travels to the caller as the
+        # reconnect signal, and publication leaves memberships and proofs untouched.
+        return claim, ProviderVerificationResult.unavailable(ErrorCode.AUTH_TOKEN_EXPIRED)
     except TokenRefreshUnavailable:
         return claim, ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)
     except TokenRefreshError:

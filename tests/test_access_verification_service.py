@@ -1180,7 +1180,7 @@ async def test_alias_provider_tenant_confirmed_upstream_is_not_denied_or_archive
     reaches ``result.tenant_ids``, publication reads it as omitted, archives the
     membership and nulls the proof -- revoking access upstream had just granted.
     """
-    connection = await sync_to_async(TenantConnection.objects.create)(
+    connection = await TenantConnection.objects.acreate(
         user=user,
         provider="commcare",
         credential_type=TenantConnection.API_KEY,
@@ -1219,7 +1219,7 @@ async def test_connect_tenant_is_not_swept_into_a_commcare_connection_mapping(us
     a second line of defence, but the behaviour it locks is currently guaranteed by
     publication -- what this test actively guards is that the alias IS mapped.
     """
-    connection = await sync_to_async(TenantConnection.objects.create)(
+    connection = await TenantConnection.objects.acreate(
         user=user,
         provider="commcare",
         credential_type=TenantConnection.API_KEY,
@@ -1263,7 +1263,7 @@ async def test_alias_provider_tenant_denial_is_attributed_not_lost(user):
     closed: an unmatched denial degrades to INDETERMINATE, so the caller learns
     nothing instead of learning the tenant was denied.
     """
-    connection = await sync_to_async(TenantConnection.objects.create)(
+    connection = await TenantConnection.objects.acreate(
         user=user,
         provider="commcare",
         credential_type=TenantConnection.API_KEY,
@@ -1288,3 +1288,99 @@ async def test_alias_provider_tenant_denial_is_attributed_not_lost(user):
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.last_attempt_outcome == VerificationOutcome.TENANT_DENIED.value
     assert str(alias.id) in control.last_attempt_tenant_ids
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_dead_refresh_grant_requires_reconnect_without_archiving_memberships(
+    user, tenant, httpx_mock
+):
+    """A rejected refresh grant must not publish an archiving credential denial.
+
+    ``TokenRefreshRejected.denial_handled`` records that a dead grant needs a
+    reconnect but does not prove resource access loss. Mapping it to
+    CREDENTIAL_REJECTED reaches ``record_validated_upstream_denial`` with
+    ``tenant_id=None``, which archives *every* live membership on the connection --
+    so one failed token refresh would revoke every tenant without any resource call
+    having denied access.
+    """
+    app = await SocialApp.objects.acreate(
+        provider="commcare", name="CommCare", client_id="client", secret="secret"
+    )
+    account = await SocialAccount.objects.acreate(user=user, provider="commcare", uid="identity")
+    await SocialToken.objects.acreate(
+        account=account,
+        app=app,
+        token="old-access",
+        token_secret="dead-refresh",
+        expires_at=timezone.now() - timedelta(minutes=1),
+    )
+    connection = await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.OAUTH,
+        social_account=account,
+    )
+    first = await TenantMembership.objects.acreate(user=user, tenant=tenant, connection=connection)
+    second_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="second", canonical_name="Second"
+    )
+    second = await TenantMembership.objects.acreate(
+        user=user, tenant=second_tenant, connection=connection
+    )
+    httpx_mock.add_response(
+        url="https://www.commcarehq.org/oauth/token/",
+        method="POST",
+        status_code=400,
+        json={"error": "invalid_grant"},
+    )
+    called = False
+
+    async def provider(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProviderVerificationResult.complete({tenant.external_id})
+
+    result = await verify_connection_access(
+        user.id,
+        connection.id,
+        {tenant.id, second_tenant.id},
+        provider_verifier=provider,
+    )
+
+    # The caller still learns a reconnect is required.
+    assert result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert result.status != AccessVerificationStatus.DENIED
+    assert not called
+    # No membership history destroyed, and no denial stamped on the connection.
+    for membership in (first, second):
+        refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+        assert refreshed.archived_at is None
+    refreshed_connection = await TenantConnection.objects.aget(pk=connection.pk)
+    assert refreshed_connection.upstream_denied_at is None
+    assert not refreshed_connection.upstream_denial_code
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_provider_401_still_archives_as_a_credential_denial(user, tenant, api_connection):
+    """A genuine resource 401 is the case that legitimately archives.
+
+    Guards the fix above from over-reaching: suppressing archival for a dead refresh
+    grant must not stop a real provider denial from being recorded.
+    """
+    connection, membership = api_connection
+
+    async def provider(*args, **kwargs):
+        return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    assert result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is not None
+    refreshed_connection = await TenantConnection.objects.aget(pk=connection.pk)
+    assert refreshed_connection.upstream_denied_at is not None
