@@ -893,3 +893,22 @@ def test_invalid_snapshot_publication_preserves_successor_lease(
     assert control.lease_token == successor
     assert control.lease_expires_at == expires
     assert not UpstreamAccessProof.objects.exists()
+
+
+@pytest.mark.django_db
+def test_waiter_cannot_release_winners_lease(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    winner = claim_verification(user.id, conn.id, {tenant.id})
+    waiter = claim_verification(user.id, conn.id, {tenant.id})
+    assert winner.status == ClaimStatus.CLAIMED
+    assert waiter.status == ClaimStatus.IN_PROGRESS
+    assert waiter.lease_token == winner.lease_token
+
+    assert release_verification(waiter) is False
+
+    control = VerificationControl.objects.get(connection=conn)
+    assert control.lease_token == winner.lease_token
+    assert (
+        publish_verification(winner, VerificationResult.complete({tenant.id}))
+        == PublicationStatus.PUBLISHED
+    )
