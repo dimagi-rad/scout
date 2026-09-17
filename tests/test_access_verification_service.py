@@ -799,15 +799,22 @@ async def test_cancellation_during_initial_claim_drains_and_releases_lease(
     release = threading.Event()
     locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
     locker.start()
-    assert await asyncio.to_thread(acquired.wait, 2)
+    # Release in a finally: an assertion failing before release.set() would otherwise
+    # leave _hold_user_lock holding SELECT FOR UPDATE on the user row for its full 10s
+    # timeout, and under transaction=True the teardown TRUNCATE blocks behind it --
+    # turning one failure into a cascade across neighbouring tests.
+    try:
+        assert await asyncio.to_thread(acquired.wait, 2)
 
-    task = asyncio.create_task(verify_connection_access(user.id, connection.id, {tenant.id}))
-    await asyncio.sleep(0.05)
-    task.cancel()
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await asyncio.to_thread(locker.join, 2)
+        task = asyncio.create_task(verify_connection_access(user.id, connection.id, {tenant.id}))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        await asyncio.to_thread(locker.join, 2)
     await asyncio.sleep(0.05)
 
     control = await VerificationControl.objects.filter(connection=connection).afirst()
