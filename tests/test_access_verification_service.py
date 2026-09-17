@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -22,8 +23,15 @@ from apps.users.models import (
     UpstreamAccessProof,
     VerificationControl,
 )
-from apps.users.services.access_verification import claim_verification, publish_verification
-from apps.users.services.access_verification_service import verify_connection_access
+from apps.users.services.access_verification import (
+    VerificationAttemptReceipt,
+    claim_verification,
+    publish_verification,
+)
+from apps.users.services.access_verification_service import (
+    _durable_result,
+    verify_connection_access,
+)
 from apps.users.services.access_verification_types import (
     AccessVerificationStatus,
     ProviderVerificationResult,
@@ -350,7 +358,9 @@ async def test_oauth_refresh_rebases_claim_to_persisted_token_before_provider(
 @pytest.mark.parametrize(
     ("provider_outcome", "rotate_before_waiter", "expected_calls"),
     [
-        ("complete", False, 1),
+        # A COMPLETE receipt excludes the tenant it omitted, so this waiter
+        # re-verifies; a rejected credential is connection-wide and is reused.
+        ("complete", False, 2),
         ("credential_rejected", False, 1),
         ("complete", True, 2),
     ],
@@ -650,9 +660,15 @@ async def test_disjoint_waiter_observes_connection_attempt_failure(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_disjoint_waiter_observes_complete_omission_without_second_discovery(
+async def test_omitted_waiter_reverifies_rather_than_reading_a_receipt_that_skipped_it(
     user, tenant, api_connection
 ):
+    """A COMPLETE receipt is authoritative only for the tenants it confirmed live.
+
+    The waiter's tenant was omitted from that publication, so the receipt carries no
+    verdict for it and the waiter must ask upstream itself. It still ends denied --
+    but on its own evidence, not by inference from an attempt that never covered it.
+    """
     connection, _membership = api_connection
     omitted = await Tenant.objects.acreate(
         provider="commcare", external_id="omitted-waiter", canonical_name="Omitted"
@@ -683,7 +699,8 @@ async def test_disjoint_waiter_observes_complete_omission_without_second_discove
     assert winner_result.status == AccessVerificationStatus.VERIFIED
     assert waiter_result.status == AccessVerificationStatus.DENIED
     assert waiter_result.error_code == "upstream_access_lost"
-    assert calls == 1
+    # Two discoveries: the omitted waiter cannot reuse a scope it falls outside.
+    assert calls == 2
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1048,3 +1065,105 @@ def test_publication_uses_provider_completion_time_for_freshness(user, tenant, a
 
     proof = UpstreamAccessProof.objects.get(connection=connection, tenant=tenant)
     assert proof.verified_at == completion
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_covered_waiter_reads_a_complete_receipt_as_verified(user, tenant, api_connection):
+    """A waiter inside the receipt's confirmed scope was verified, not denied.
+
+    Before the receipt carried a tenant scope, a matching COMPLETE could only mean
+    "the winner finished and I was not in it", so the waiter was denied. Now the
+    scope names the tenants the attempt confirmed live, and this waiter is one of
+    them -- denying it would revoke access the same attempt had just proven.
+    """
+    connection, _membership = api_connection
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def provider(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return ProviderVerificationResult.complete({tenant.external_id})
+
+    winner = asyncio.create_task(
+        verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    waiter = asyncio.create_task(
+        verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+    )
+    await asyncio.sleep(0.05)
+    release.set()
+    winner_result, waiter_result = await asyncio.gather(winner, waiter)
+
+    assert winner_result.status == AccessVerificationStatus.VERIFIED
+    assert waiter_result.status == AccessVerificationStatus.VERIFIED
+    # Reused the winner's proof instead of asking upstream a second time.
+    assert calls == 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_denied_waiter_reads_a_tenant_denied_receipt_as_denied(user, tenant, api_connection):
+    """TENANT_DENIED records the denied tenants, so a covered waiter is denied.
+
+    This is the one outcome that can hand a waiter a definitive denial, and the
+    durable path previously ignored it and fell through to a second discovery.
+    """
+    connection, _membership = api_connection
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def provider(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return ProviderVerificationResult.tenant_denied(
+            tenant.external_id, ErrorCode.AUTH_ACCESS_DENIED
+        )
+
+    winner = asyncio.create_task(
+        verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    waiter = asyncio.create_task(
+        verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+    )
+    await asyncio.sleep(0.05)
+    release.set()
+    winner_result, waiter_result = await asyncio.gather(winner, waiter)
+
+    assert winner_result.status == AccessVerificationStatus.DENIED
+    assert waiter_result.status == AccessVerificationStatus.DENIED
+    assert waiter_result.error_code == ErrorCode.AUTH_ACCESS_DENIED
+    assert calls == 1
+
+
+def test_durable_result_fails_closed_when_the_receipt_skipped_the_caller():
+    """The grant branch re-checks coverage, so a caller that skipped the match is denied.
+
+    attempt_receipt_matches already enforces this subset, so the normal path cannot
+    reach here -- but this is the only branch that grants access, and a future caller
+    that forgets the match must fail closed rather than inherit someone else's proof.
+    """
+    covered = uuid.uuid4()
+    uncovered = uuid.uuid4()
+    receipt = VerificationAttemptReceipt(
+        lease_token=uuid.uuid4(),
+        outcome=VerificationOutcome.COMPLETE,
+        error_code="",
+        observation_hash="hash",
+        tenant_ids=frozenset({str(covered)}),
+    )
+
+    assert _durable_result(receipt, {covered}).status == AccessVerificationStatus.VERIFIED
+
+    denied = _durable_result(receipt, {covered, uncovered})
+    assert denied.status == AccessVerificationStatus.DENIED
+    assert denied.error_code == "upstream_access_lost"

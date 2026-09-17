@@ -17,6 +17,7 @@ from apps.users.services.access_verification import (
     PublicationStatus,
     VerificationClaim,
     VerificationDeadlineExceeded,
+    _tenant_scope,
     aclaim_verification,
     apublish_verification_receipt,
     arebase_verification_claim,
@@ -304,8 +305,9 @@ async def _wait_for_claim(
             original_lease_token,
             original_observation,
             claim.observation,
+            tenant_ids,
         ):
-            durable_result = _durable_result(claim.completed_attempt)
+            durable_result = _durable_result(claim.completed_attempt, tenant_ids)
             if durable_result is not None:
                 await _release_claim(claim)
                 return durable_result
@@ -313,13 +315,35 @@ async def _wait_for_claim(
     return None
 
 
-def _durable_result(receipt):
+def _durable_result(receipt, requested_tenant_ids):
+    """Read a matched receipt the way _service_result reads a fresh provider result.
+
+    A COMPLETE receipt's scope is the set the attempt confirmed live, so a waiter
+    inside that scope was verified, not denied.
+
+    The COMPLETE branch is not reachable from the current waiter path -- a covered
+    waiter finds its proof refreshed and returns on a FRESH claim before getting
+    here, and an uncovered one fails :func:`attempt_receipt_matches`' subset test.
+    It is kept so this function agrees with ``_service_result`` on identical input
+    instead of contradicting it, and because it is the only branch that GRANTS
+    access: the coverage check makes a caller that skipped the match fail closed,
+    where a redundant DENIED only costs a re-verification.
+    """
     if receipt.outcome == VerificationOutcome.COMPLETE:
+        if _tenant_scope(requested_tenant_ids) <= receipt.tenant_ids:
+            return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
         return AccessVerificationResult(AccessVerificationStatus.DENIED, _UPSTREAM_ACCESS_LOST)
     if receipt.outcome == VerificationOutcome.CREDENTIAL_REJECTED:
         return AccessVerificationResult(
             AccessVerificationStatus.DENIED,
             receipt.error_code or ErrorCode.AUTH_TOKEN_EXPIRED,
+        )
+    if receipt.outcome == VerificationOutcome.TENANT_DENIED:
+        # The scope records the denied tenants, so a match means every tenant the
+        # waiter asked for was denied upstream.
+        return AccessVerificationResult(
+            AccessVerificationStatus.DENIED,
+            receipt.error_code or _UPSTREAM_ACCESS_LOST,
         )
     if receipt.outcome == VerificationOutcome.UNAVAILABLE:
         return AccessVerificationResult(
@@ -334,7 +358,16 @@ def _durable_result(receipt):
     return None
 
 
-def _attempt_matches_waiter_lineage(receipt, lease_token, original, current) -> bool:
+# Outcomes whose verdict belongs to specific tenants rather than to the whole
+# connection. Only these may be gated on the receipt's recorded tenant scope.
+_TENANT_SCOPED_OUTCOMES = frozenset(
+    {VerificationOutcome.COMPLETE, VerificationOutcome.TENANT_DENIED}
+)
+
+
+def _attempt_matches_waiter_lineage(
+    receipt, lease_token, original, current, requested_tenant_ids
+) -> bool:
     observations = [original, current]
     if (
         receipt is not None
@@ -343,8 +376,20 @@ def _attempt_matches_waiter_lineage(receipt, lease_token, original, current) -> 
         and current is not None
     ):
         observations.append(replace(current, upstream_denied_at=original.upstream_denied_at))
+    # A rejected credential, an unreachable provider or an indeterminate answer
+    # applies to every tenant on the connection, so a waiter asking about other
+    # tenants may still reuse it and skip a second upstream discovery. Passing the
+    # receipt's own scope satisfies attempt_receipt_matches' subset test without
+    # weakening its lease and observation checks, which are the real gates here.
+    # A legacy receipt carries an empty scope and still matches nothing.
+    scope = (
+        requested_tenant_ids
+        if receipt is not None and receipt.outcome in _TENANT_SCOPED_OUTCOMES
+        else getattr(receipt, "tenant_ids", frozenset())
+    )
     return any(
-        attempt_receipt_matches(receipt, lease_token, observation) for observation in observations
+        attempt_receipt_matches(receipt, lease_token, observation, scope)
+        for observation in observations
     )
 
 
