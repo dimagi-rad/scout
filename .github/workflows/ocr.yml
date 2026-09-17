@@ -213,6 +213,8 @@ jobs:
             End the review comment with <!-- scout-claude-artifact:v1 RECEIPT_JSON -->
             on its own line, substituting the exact JSON from that file for RECEIPT_JSON.
             Do not quote or repeat artifact markers elsewhere in the review.
+            Pass the comment body inline to gh pr comment; do not stage it in a file.
+            Search with Grep and Glob rather than shelling out.
             Return structured reviewed_head, complete, and blocking_findings (high/critical count).
             Only report complete=true after examining the requested range and earlier unresolved
             findings and successfully posting the review. Report blocking_findings=0 only when
@@ -221,7 +223,7 @@ jobs:
             --model claude-opus-5
             --max-budget-usd 10
             --json-schema '{"type":"object","properties":{"reviewed_head":{"type":"string"},"complete":{"type":"boolean"},"blocking_findings":{"type":"integer","minimum":0}},"required":["reviewed_head","complete","blocking_findings"],"additionalProperties":false}'
-            --allowedTools "Bash(git diff*),Bash(git log*),Bash(git show*),Bash(gh pr view:*),Bash(gh pr comment:*),Read"
+            --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr comment:*),Read,Grep,Glob"
 
       - name: Verify Claude receipt and record completed checkpoint
         id: claude_verify
