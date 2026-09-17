@@ -148,8 +148,8 @@ async def test_refresh_loser_returns_explicit_superseded_persisted_snapshot(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("changed_field", ["scope_key", "upstream_denied_at", "social_account"])
-async def test_refresh_cas_rejects_changed_connection_identity_or_denial_fence(
+@pytest.mark.parametrize("changed_field", ["scope_key", "social_account"])
+async def test_refresh_cas_rejects_changed_connection_identity(
     oauth_identity,
     user,
     mode,
@@ -166,7 +166,6 @@ async def test_refresh_cas_rejects_changed_connection_identity_or_denial_fence(
     async def mutate_async():
         value = {
             "scope_key": "replacement-scope",
-            "upstream_denied_at": timezone.now(),
             "social_account": replacement_account,
         }[changed_field]
         await TenantConnection.objects.filter(pk=connection.pk).aupdate(**{changed_field: value})
@@ -174,7 +173,6 @@ async def test_refresh_cas_rejects_changed_connection_identity_or_denial_fence(
     def mutate_sync():
         value = {
             "scope_key": "replacement-scope",
-            "upstream_denied_at": timezone.now(),
             "social_account": replacement_account,
         }[changed_field]
         TenantConnection.objects.filter(pk=connection.pk).update(**{changed_field: value})
@@ -335,13 +333,13 @@ async def test_persistence_failure_is_typed_unavailable_and_does_not_expose_netw
     if mode == "async":
 
         async def fail(*args, **kwargs):
-            raise RuntimeError("database unavailable")
+            raise DatabaseError("database unavailable")
 
         monkeypatch.setattr("apps.users.services.token_refresh._apersist_refresh_response", fail)
     else:
 
         def fail(*args, **kwargs):
-            raise RuntimeError("database unavailable")
+            raise DatabaseError("database unavailable")
 
         monkeypatch.setattr("apps.users.services.token_refresh._persist_refresh_response", fail)
 
@@ -558,7 +556,7 @@ async def test_lost_race_that_did_not_advance_credential_is_not_reported_as_refr
 
     def fence_moves_under_us(preflight, **kwargs):
         current, connections = original(preflight, **kwargs)
-        TenantConnection.objects.filter(pk=connection.pk).update(upstream_denied_at=timezone.now())
+        TenantConnection.objects.filter(pk=connection.pk).update(scope_key="replacement-scope")
         return current, list(TenantConnection.objects.filter(pk__in=[c.pk for c in connections]))
 
     monkeypatch.setattr(token_refresh, "_lock_refresh_context", fence_moves_under_us)
@@ -568,6 +566,11 @@ async def test_lost_race_that_did_not_advance_credential_is_not_reported_as_refr
     assert result.status == TokenRefreshStatus.SUPERSEDED
     assert result.credential_advanced is False
     assert result.snapshot.access_token == "old-access"
+
+    # Stranded, so it must be surfaced as needing reconnect rather than left looking
+    # connected while every future refresh fails.
+    await connection.arefresh_from_db()
+    assert connection.oauth_refresh_failure_fingerprint != ""
 
 
 @pytest.mark.django_db(transaction=True)
@@ -587,4 +590,117 @@ async def test_stable_fence_violation_is_terminal_rather_than_permanently_supers
         if mode == "async":
             await refresh_oauth_token_result(token, URL)
         else:
+            await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_denial_landing_mid_refresh_does_not_discard_the_rotated_credential(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    """A routine single-tenant 403 must not cost us a token pair the provider issued.
+
+    The endpoints here rotate refresh tokens, so discarding the new pair leaves the
+    stored refresh token dead upstream and the connection unable to ever refresh.
+    """
+    token, connection = oauth_identity
+    original = token_refresh._lock_refresh_context
+
+    def deny_under_us(preflight, **kwargs):
+        current, connections = original(preflight, **kwargs)
+        TenantConnection.objects.filter(pk=connection.pk).update(upstream_denied_at=timezone.now())
+        return current, list(TenantConnection.objects.filter(pk__in=[c.pk for c in connections]))
+
+    monkeypatch.setattr(token_refresh, "_lock_refresh_context", deny_under_us)
+
+    result = await _refresh(
+        mode,
+        token,
+        httpx_mock,
+        requests_mock,
+        {"access_token": "new-access", "refresh_token": "new-refresh"},
+    )
+
+    assert result.status == TokenRefreshStatus.APPLIED
+    persisted = await SocialToken.objects.aget(pk=token.pk)
+    assert persisted.token == "new-access"
+    assert persisted.token_secret == "new-refresh"
+    # The denial itself must survive the write.
+    await connection.arefresh_from_db()
+    assert connection.upstream_denied_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_defect_in_persistence_is_not_downgraded_into_a_dropped_expected_state(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    """config.sentry.before_send drops ExpectedStateError, so a bug must not become one."""
+    token, _connection = oauth_identity
+    if mode == "async":
+
+        async def boom(*args, **kwargs):
+            raise TypeError("refactor left a bad call")
+
+        monkeypatch.setattr("apps.users.services.token_refresh._apersist_refresh_response", boom)
+    else:
+
+        def boom(*args, **kwargs):
+            raise TypeError("refactor left a bad call")
+
+        monkeypatch.setattr("apps.users.services.token_refresh._persist_refresh_response", boom)
+
+    with pytest.raises(TypeError, match="refactor left a bad call"):
+        await _refresh(mode, token, httpx_mock, requests_mock, {"access_token": "new-access"})
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_disconnect_between_preflight_and_persist_is_superseded_not_unavailable(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    """The account vanishing mid-refresh is the race the CAS exists for, not an outage."""
+    token, _connection = oauth_identity
+    original = token_refresh._lock_refresh_context
+
+    def disconnect_under_us(preflight, **kwargs):
+        raise SocialToken.DoesNotExist
+
+    monkeypatch.setattr(token_refresh, "_lock_refresh_context", disconnect_under_us)
+    assert original is not token_refresh._lock_refresh_context
+
+    result = await _refresh(mode, token, httpx_mock, requests_mock, {"access_token": "new-access"})
+
+    assert result.status == TokenRefreshStatus.SUPERSEDED
+    assert result.credential_advanced is False
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_failure_marker_write_error_does_not_erase_the_real_classification(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    """A lost marker must not turn a reportable defect into a dropped expected state."""
+    token, _connection = oauth_identity
+    if mode == "async":
+
+        async def unavailable(*args, **kwargs):
+            raise DatabaseError("marker write failed")
+
+        monkeypatch.setattr(token_refresh, "_apersist_refresh_failure", unavailable)
+        httpx_mock.add_exception(httpx.ConnectError("offline"), url=URL)
+        with pytest.raises(TokenRefreshUnavailable):
+            await refresh_oauth_token_result(token, URL)
+    else:
+
+        def unavailable(*args, **kwargs):
+            raise DatabaseError("marker write failed")
+
+        monkeypatch.setattr(token_refresh, "_persist_refresh_failure", unavailable)
+        requests_mock.post(URL, exc=requests.ConnectionError("offline"))
+        with pytest.raises(TokenRefreshUnavailable):
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)

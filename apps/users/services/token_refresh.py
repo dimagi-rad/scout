@@ -124,6 +124,16 @@ class _TokenPreflight:
 
 @dataclass(frozen=True)
 class _ConnectionFence:
+    """The tenant binding a refresh was authorised against.
+
+    Only fields whose change would make the new credential land on a different
+    principal belong here. Volatile operational state -- notably
+    ``upstream_denied_at``, which ``record_validated_upstream_denial`` sets on any
+    single-tenant 403 -- must stay out: a denial arriving during the HTTP round
+    trip is routine, and vetoing on it discards a token pair the provider has
+    already issued and rotated away.
+    """
+
     connection_id: object
     user_id: int
     provider: str
@@ -131,6 +141,18 @@ class _ConnectionFence:
     social_account_id: int | None
     scope_key: str
     upstream_denied_at: timezone.datetime | None
+
+    @property
+    def identity(self) -> tuple:
+        """The binding itself, without the operational state layered on top of it."""
+        return (
+            self.connection_id,
+            self.user_id,
+            self.provider,
+            self.credential_type,
+            self.social_account_id,
+            self.scope_key,
+        )
 
 
 @dataclass(frozen=True)
@@ -300,8 +322,21 @@ def _lock_refresh_context(preflight: _TokenPreflight, *, deadline=None, clock=ti
 
 
 def _refresh_context_matches(
-    preflight: _TokenPreflight, current: SocialToken, connections: list[TenantConnection]
+    preflight: _TokenPreflight,
+    current: SocialToken,
+    connections: list[TenantConnection],
+    *,
+    fence_denial: bool,
 ) -> bool:
+    """Has anything changed that should stop this write?
+
+    ``fence_denial`` splits the two callers. Writing a *failure marker* must not
+    clobber a denial that landed while we were away, so that path fences on it.
+    Writing a *refreshed credential* must not be vetoed by one: the provider has
+    already rotated the grant, so discarding the new pair strands the connection on
+    a refresh token that is dead upstream (a routine single-tenant 403 is enough to
+    trigger it). Identity changes veto either way.
+    """
     if (
         current.account_id != preflight.account_id
         or current.app_id != preflight.app_id
@@ -313,8 +348,18 @@ def _refresh_context_matches(
         or account_scope(current.account) != preflight.account_scope
     ):
         return False
-    current_fences = tuple(_connection_fence(connection) for connection in connections)
-    return current_fences == preflight.connection_fences
+    current_fences = {connection.id: _connection_fence(connection) for connection in connections}
+    for fence in preflight.connection_fences:
+        # A connection that appeared or was removed mid-flight is not this refresh's
+        # business; one that was re-pointed at a different principal is.
+        observed = current_fences.get(fence.connection_id)
+        if observed is None:
+            continue
+        if observed.identity != fence.identity:
+            return False
+        if fence_denial and observed.upstream_denied_at != fence.upstream_denied_at:
+            return False
+    return True
 
 
 def _validate_refresh_response(response, preflight: _TokenPreflight) -> _ValidatedRefresh:
@@ -340,6 +385,17 @@ def _validate_refresh_response(response, preflight: _TokenPreflight) -> _Validat
     else:
         expires_at = timezone.now() + timedelta(seconds=expires_in)
     return _ValidatedRefresh(access_token, refresh_token, expires_at)
+
+
+def _preflight_snapshot(preflight: _TokenPreflight) -> PersistedTokenSnapshot:
+    return PersistedTokenSnapshot(
+        token_id=preflight.token_id,
+        account_id=preflight.account_id,
+        app_id=preflight.app_id,
+        access_token=preflight.access_token,
+        refresh_token=preflight.refresh_token,
+        expires_at=preflight.expires_at,
+    )
 
 
 def _persisted_snapshot(token) -> PersistedTokenSnapshot:
@@ -370,14 +426,31 @@ def _persist_refresh_response(
     clock=time.monotonic,
 ) -> TokenRefreshResult:
     with transaction.atomic(), preserve_transaction_timeouts():
-        current, connections = _lock_refresh_context(preflight, deadline=deadline, clock=clock)
-        _ensure_before_deadline(deadline, clock)
-        if not _refresh_context_matches(preflight, current, connections):
-            snapshot = _persisted_snapshot(current)
+        try:
+            current, connections = _lock_refresh_context(preflight, deadline=deadline, clock=clock)
+        except (User.DoesNotExist, SocialToken.DoesNotExist):
+            # Disconnected between preflight and persist: the very race the CAS is for.
+            # There is no row left to mark, so report it rather than let the lookup
+            # escape as an unclassified persistence failure.
             return TokenRefreshResult(
                 TokenRefreshStatus.SUPERSEDED,
-                snapshot,
-                credential_advanced=snapshot.access_token != preflight.access_token,
+                _preflight_snapshot(preflight),
+                credential_advanced=False,
+            )
+        _ensure_before_deadline(deadline, clock)
+        if not _refresh_context_matches(preflight, current, connections, fence_denial=False):
+            snapshot = _persisted_snapshot(current)
+            advanced = snapshot.access_token != preflight.access_token
+            if not advanced:
+                # Nobody else refreshed, so the credential we just rotated away is
+                # what stays on the row. Mark it so token_health surfaces a reconnect
+                # instead of reporting a connection that can never refresh again.
+                _configure_transaction_deadline(deadline, clock)
+                TenantConnection.objects.filter(
+                    pk__in=[fence.connection_id for fence in preflight.connection_fences]
+                ).update(oauth_refresh_failure_fingerprint=fingerprint)
+            return TokenRefreshResult(
+                TokenRefreshStatus.SUPERSEDED, snapshot, credential_advanced=advanced
             )
         current.token = refreshed.access_token
         current.token_secret = refreshed.refresh_token
@@ -422,7 +495,7 @@ def _persist_refresh_failure(
         except (User.DoesNotExist, SocialToken.DoesNotExist):
             return False
         _ensure_before_deadline(deadline, clock)
-        if not _refresh_context_matches(preflight, current, connections):
+        if not _refresh_context_matches(preflight, current, connections, fence_denial=True):
             return False
         _configure_transaction_deadline(deadline, clock)
         TenantConnection.objects.filter(
@@ -529,7 +602,11 @@ async def refresh_oauth_token_result(
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        await _arecord_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+        try:
+            await _arecord_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+        except TokenRefreshUnavailable:
+            # Losing the marker must not erase the real cause; it is already logged.
+            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         if isinstance(e, (httpx.RequestError, requests.RequestException)):
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
@@ -539,7 +616,7 @@ async def refresh_oauth_token_result(
         result = await _apersist_refresh_response(
             preflight, refreshed, fingerprint, deadline=deadline, clock=clock
         )
-    except Exception as exc:
+    except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
@@ -555,9 +632,15 @@ async def refresh_oauth_token_result(
 
 
 def _ensure_usable_credential(result: TokenRefreshResult) -> None:
-    """Refuse to hand back a credential this refresh already rotated away upstream."""
+    """Refuse to hand back a credential this refresh already rotated away upstream.
+
+    Reconnect rather than retry: the stored refresh token is dead at the provider, so
+    no amount of retrying will revive it.
+    """
     if result.status is TokenRefreshStatus.SUPERSEDED and not result.credential_advanced:
-        raise TokenRefreshUnavailable("OAuth refresh was superseded before it could be applied.")
+        raise TokenRefreshRejected(
+            "OAuth refresh was superseded; the stored credential can no longer be refreshed."
+        )
 
 
 async def refresh_oauth_token(social_token, token_url: str, *, request_timeout: float = 30) -> str:
@@ -628,7 +711,11 @@ def refresh_oauth_token_result_sync(
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        _record_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+        try:
+            _record_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+        except TokenRefreshUnavailable:
+            # Losing the marker must not erase the real cause; it is already logged.
+            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         if isinstance(e, (httpx.RequestError, requests.RequestException)):
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
@@ -638,7 +725,7 @@ def refresh_oauth_token_result_sync(
         result = _persist_refresh_response(
             preflight, refreshed, fingerprint, deadline=deadline, clock=clock
         )
-    except Exception as exc:
+    except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
