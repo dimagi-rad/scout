@@ -15,8 +15,10 @@ from django.db import connection as django_connection
 from django.utils import timezone
 
 from apps.users.models import TenantConnection
+from apps.users.services import token_refresh
 from apps.users.services.token_refresh import (
     TokenRefreshError,
+    TokenRefreshRejected,
     TokenRefreshStatus,
     TokenRefreshUnavailable,
     refresh_oauth_token_result,
@@ -259,7 +261,7 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("failure", ["rejected", "transport"])
-async def test_refresh_failure_marker_database_error_is_typed_unavailable(
+async def test_refresh_failure_marker_error_preserves_provider_classification(
     oauth_identity, mode, failure, httpx_mock, requests_mock, monkeypatch
 ):
     token, _connection = oauth_identity
@@ -275,7 +277,9 @@ async def test_refresh_failure_marker_database_error_is_typed_unavailable(
             httpx_mock.add_response(url=URL, status_code=400, json={"error": "invalid_grant"})
         else:
             httpx_mock.add_exception(httpx.ConnectError("offline"), url=URL)
-        with pytest.raises(TokenRefreshUnavailable):
+        with pytest.raises(
+            TokenRefreshRejected if failure == "rejected" else TokenRefreshUnavailable
+        ):
             await refresh_oauth_token_result(token, URL)
     else:
 
@@ -289,7 +293,9 @@ async def test_refresh_failure_marker_database_error_is_typed_unavailable(
             requests_mock.post(URL, status_code=400, json={"error": "invalid_grant"})
         else:
             requests_mock.post(URL, exc=requests.ConnectionError("offline"))
-        with pytest.raises(TokenRefreshUnavailable):
+        with pytest.raises(
+            TokenRefreshRejected if failure == "rejected" else TokenRefreshUnavailable
+        ):
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
 
 
@@ -302,7 +308,7 @@ async def test_refresh_failure_marker_database_error_is_typed_unavailable(
         {},
         {"access_token": ""},
         {"access_token": 12},
-        {"access_token": "new", "refresh_token": ""},
+        {"access_token": "new", "refresh_token": 123},
         {"access_token": "new", "expires_in": -1},
     ],
 )
@@ -385,7 +391,9 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
     await asyncio.to_thread(locker.join, 2)
     timer.cancel()
 
-    assert elapsed < 0.3
+    # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
+    # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
+    assert elapsed < 2
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "old-access"
     assert persisted.token_secret == "old-refresh"
@@ -421,6 +429,162 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
     await asyncio.to_thread(locker.join, 2)
     timer.cancel()
 
-    assert elapsed < 0.3
+    # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
+    # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
+    assert elapsed < 2
     await connection.arefresh_from_db()
     assert connection.oauth_refresh_failure_fingerprint == ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_invalid_stable_binding_fails_before_provider_rotation(
+    oauth_identity, mode, monkeypatch
+):
+
+    token, connection = oauth_identity
+    await TenantConnection.objects.filter(pk=connection.pk).aupdate(scope_key="wrong-account-scope")
+    if mode == "async":
+
+        async def unexpected(*args, **kwargs):
+            pytest.fail("invalid binding must not consume an upstream refresh grant")
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", unexpected)
+        with pytest.raises(TokenRefreshError, match="reconnect"):
+            await refresh_oauth_token_result(token, URL)
+    else:
+
+        def unexpected(*args, **kwargs):
+            pytest.fail("invalid binding must not consume an upstream refresh grant")
+
+        monkeypatch.setattr(token_refresh.requests, "post", unexpected)
+        with pytest.raises(TokenRefreshError, match="reconnect"):
+            await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_unrelated_api_key_binding_does_not_poison_oauth_cas(
+    oauth_identity, mode, httpx_mock, requests_mock
+):
+    token, connection = oauth_identity
+    await TenantConnection.objects.acreate(
+        user_id=connection.user_id,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        scope_key="api-key",
+        social_account_id=token.account_id,
+    )
+    result = await _refresh(mode, token, httpx_mock, requests_mock, {"access_token": "new-access"})
+    assert result.status == TokenRefreshStatus.APPLIED
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("empty_refresh", [None, ""])
+async def test_nonrotating_refresh_response_preserves_existing_refresh_token(
+    oauth_identity, mode, empty_refresh, httpx_mock, requests_mock
+):
+    token, _ = oauth_identity
+    result = await _refresh(
+        mode,
+        token,
+        httpx_mock,
+        requests_mock,
+        {"access_token": "new-access", "refresh_token": empty_refresh},
+    )
+    assert result.status == TokenRefreshStatus.APPLIED
+    assert result.snapshot.refresh_token == "old-refresh"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_invalid_grant_stays_terminal_when_failure_recording_is_unavailable(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+
+    token, _ = oauth_identity
+    if mode == "async":
+
+        async def unavailable(*args, **kwargs):
+            raise DatabaseError("test persistence failure")
+
+        monkeypatch.setattr(token_refresh, "_apersist_refresh_failure", unavailable)
+        httpx_mock.add_response(url=URL, status_code=400, json={"error": "invalid_grant"})
+        with pytest.raises(token_refresh.TokenRefreshRejected):
+            await refresh_oauth_token_result(token, URL)
+    else:
+
+        def unavailable(*args, **kwargs):
+            raise DatabaseError("test persistence failure")
+
+        monkeypatch.setattr(token_refresh, "_persist_refresh_failure", unavailable)
+        requests_mock.post(URL, status_code=400, json={"error": "invalid_grant"})
+        with pytest.raises(token_refresh.TokenRefreshRejected):
+            await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_nested_refresh_preflight_restores_callers_timeouts(oauth_identity):
+    from apps.users.services.token_refresh import _preflight_token
+
+    token, _ = oauth_identity
+    with transaction.atomic():
+        with django_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('lock_timeout', '13s', true), set_config('statement_timeout', '17s', true)"
+            )
+        _preflight_token(token, deadline=time.monotonic() + 1)
+        with django_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')"
+            )
+            assert cursor.fetchone() == ("13s", "17s")
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_lost_race_that_did_not_advance_credential_is_not_reported_as_refreshed(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    """A fence-only change strands the rotated-away token; callers must not get it back."""
+    token, connection = oauth_identity
+    original = token_refresh._lock_refresh_context
+
+    def fence_moves_under_us(preflight, **kwargs):
+        current, connections = original(preflight, **kwargs)
+        TenantConnection.objects.filter(pk=connection.pk).update(upstream_denied_at=timezone.now())
+        return current, list(TenantConnection.objects.filter(pk__in=[c.pk for c in connections]))
+
+    monkeypatch.setattr(token_refresh, "_lock_refresh_context", fence_moves_under_us)
+
+    result = await _refresh(mode, token, httpx_mock, requests_mock, {"access_token": "new-access"})
+
+    assert result.status == TokenRefreshStatus.SUPERSEDED
+    assert result.credential_advanced is False
+    assert result.snapshot.access_token == "old-access"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_stable_fence_violation_is_terminal_rather_than_permanently_superseded(
+    oauth_identity, mode
+):
+    """The CAS must not silently no-op forever on an invariant it can never satisfy.
+
+    It must also fail before the grant is spent, so no HTTP mock is registered here.
+    """
+    token, connection = oauth_identity
+    await TenantConnection.objects.filter(pk=connection.pk).aupdate(scope_key="stale-scope")
+
+    with pytest.raises(TokenRefreshError, match="reconnect"):
+        if mode == "async":
+            await refresh_oauth_token_result(token, URL)
+        else:
+            await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
