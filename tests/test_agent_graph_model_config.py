@@ -19,7 +19,7 @@ async def test_llm_model_comes_from_settings():
     """ChatAnthropic is built with settings.DEFAULT_LLM_MODEL, not a hardcoded id."""
     workspace = MagicMock()
     workspace.id = "ws-1"
-    user = MagicMock()
+    user = MagicMock(is_authenticated=False)
 
     with (
         override_settings(DEFAULT_LLM_MODEL="sentinel-model-id"),

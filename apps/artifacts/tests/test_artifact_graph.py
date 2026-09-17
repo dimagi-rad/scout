@@ -2,6 +2,7 @@ from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
@@ -1014,3 +1015,95 @@ async def test_check_graph_artifact_loads_workspace_in_async_context(workspace, 
 
     assert result["summary"] == "1/1 queries ok"
     assert query.await_args.args[0].id == workspace.id
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_read_dependency_inspection_does_not_rewrite_artifact(
+    workspace, member_user, invalid
+):
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=member_user).aupdate(
+        role=WorkspaceRole.READ
+    )
+    thread = await Thread.objects.acreate(workspace=workspace, user=member_user, title="Inspect")
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": graph_doc()},
+    )
+    await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    original_queries = deepcopy(artifact.semantic_queries)
+    original_manifest = deepcopy(artifact.semantic_query_manifest)
+    original_rows = [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ]
+    if invalid:
+        doc = graph_doc()
+        del doc["blocks"][1]["config"]["queries"]["visits_by_day"]["time_dimension"]
+        await Artifact.objects.filter(pk=artifact.pk).aupdate(data={"story_doc": doc})
+    tools = {t.name: t for t in create_artifact_graph_tools(workspace, member_user, str(thread.id))}
+
+    result = await tools["get_artifact_semantic_queries"].ainvoke(
+        {"artifact_id": str(artifact.id), "limit": 1}
+    )
+
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_queries == original_queries
+    assert artifact.semantic_query_manifest == original_manifest
+    assert [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ] == original_rows
+    assert result["pagination"] == {"limit": 1, "offset": 0, "total_count": 1, "has_more": False}
+    record = result["semantic_queries"][0]
+    assert record["query_key"] == "q.visits_by_day"
+    assert record["validation_status"] == ("invalid" if invalid else "valid")
+    assert record["id"] == (None if invalid else str(original_rows[0]["id"]))
+    assert record["created_at"] == (None if invalid else original_rows[0]["created_at"].isoformat())
+    assert await ThreadArtifact.objects.filter(
+        thread=thread, artifact=artifact, source="mentioned"
+    ).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_read_dependency_inspection_paginates_without_creating_cache(workspace, member_user):
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=member_user).aupdate(
+        role=WorkspaceRole.READ
+    )
+    doc = graph_doc()
+    queries = doc["blocks"][1]["config"]["queries"]
+    queries["aaa"] = deepcopy(queries["visits_by_day"])
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Uncached",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    tool = next(
+        t
+        for t in create_artifact_graph_tools(workspace, member_user)
+        if t.name == "get_artifact_semantic_queries"
+    )
+    first = await tool.ainvoke({"artifact_id": str(artifact.id), "limit": 1})
+    second = await tool.ainvoke({"artifact_id": str(artifact.id), "limit": 1, "offset": 1})
+    empty = await tool.ainvoke({"artifact_id": str(artifact.id), "offset": 2})
+    assert first["semantic_queries"][0]["query_key"] == "q.aaa"
+    assert first["pagination"]["has_more"] is True
+    assert second["semantic_queries"][0]["query_key"] == "q.visits_by_day"
+    assert second["pagination"]["has_more"] is False
+    assert empty["semantic_queries"] == []
+    for result in (first, second):
+        record = result["semantic_queries"][0]
+        assert (
+            record["id"] is None and record["created_at"] is None and record["updated_at"] is None
+        )
+        assert record["query_payload"]["measures"] == ["visits.count"]
+        assert result["pagination"]["total_count"] == 2
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_query_manifest == {}
+    assert artifact.semantic_queries == []
+    assert not await ArtifactSemanticQuery.objects.filter(artifact=artifact).aexists()
