@@ -952,3 +952,54 @@ def test_canonical_provider_history_can_be_published_or_omitted(
     else:
         assert membership.archived_at is not None
         assert proof.verified_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["claim", "publish", "release", "rebase", "denied_claim"])
+def test_verification_restores_timeouts_inside_outer_transaction(user, operation):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id="timeouts", canonical_name="Timeouts"
+    )
+    conn, _membership = _ocs_connection(user, tenant)
+    claim = claim_verification(user.id, conn.id, {tenant.id}) if operation != "claim" else None
+    token = SocialToken.objects.get(account_id=conn.social_account_id)
+    persisted = PersistedTokenSnapshot(
+        token_id=token.id,
+        account_id=token.account_id,
+        app_id=token.app_id,
+        access_token=token.token,
+        refresh_token=token.token_secret,
+        expires_at=token.expires_at,
+    )
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('lock_timeout', '3s', true), set_config('statement_timeout', '4s', true)"
+            )
+        deadline = time.monotonic() + 0.5
+        if operation == "claim":
+            assert (
+                claim_verification(user.id, conn.id, {tenant.id}, deadline=deadline).status
+                == ClaimStatus.CLAIMED
+            )
+        elif operation == "publish":
+            assert (
+                publish_verification(
+                    claim, VerificationResult.complete({tenant.id}), deadline=deadline
+                )
+                == PublicationStatus.PUBLISHED
+            )
+        elif operation == "release":
+            assert release_verification(claim)
+        elif operation == "rebase":
+            assert rebase_verification_claim(claim, persisted, deadline=deadline) is not None
+        else:
+            assert (
+                claim_verification(user.id, uuid4(), {tenant.id}, deadline=deadline).status
+                == ClaimStatus.DENIED
+            )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')"
+            )
+            assert cursor.fetchone() == ("3s", "4s")

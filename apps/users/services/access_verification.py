@@ -17,6 +17,7 @@ from django.db import connection as django_connection
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.common.db_deadline import preserve_transaction_timeouts
 from apps.common.error_codes import ErrorCode
 from apps.users.adapters import decrypt_credential
 from apps.users.models import (
@@ -258,7 +259,7 @@ def _claim_verification(
     requested = frozenset(tenant_ids)
     if not requested:
         return VerificationClaim(ClaimStatus.DENIED, requested)
-    with transaction.atomic():
+    with transaction.atomic(), preserve_transaction_timeouts():
         try:
             current, request = _locked_snapshot(
                 actor_user_id,
@@ -399,7 +400,7 @@ def release_verification(claim) -> bool:
     ):
         return False
     try:
-        with transaction.atomic():
+        with transaction.atomic(), preserve_transaction_timeouts():
             if django_connection.vendor == "postgresql":
                 milliseconds = max(1, int(CLEANUP_TIMEOUT_SECONDS * 1000))
                 with django_connection.cursor() as cursor:
@@ -446,7 +447,7 @@ def _rebase_verification_claim(
         or claim.request.token_snapshot is None
     ):
         return None
-    with transaction.atomic():
+    with transaction.atomic(), preserve_transaction_timeouts():
         try:
             current, request = _locked_snapshot(
                 claim.observation.user_id,
@@ -519,7 +520,7 @@ def _publish_verification_receipt(
 ):
     if claim.status != ClaimStatus.CLAIMED or claim.observation is None:
         return PublicationReceipt(PublicationStatus.REJECTED)
-    with transaction.atomic():
+    with transaction.atomic(), preserve_transaction_timeouts():
         try:
             current, request = _locked_snapshot(
                 claim.observation.user_id,
