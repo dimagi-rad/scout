@@ -41,6 +41,7 @@ from apps.users.services.token_refresh import (
     TokenRefreshError,
     TokenRefreshRejected,
     TokenRefreshUnavailable,
+    ensure_usable_credential,
     get_token_url,
     refresh_oauth_token_result,
     token_needs_refresh,
@@ -189,15 +190,24 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
             ),
             timeout=remaining,
         )
+        # Both wrappers around refresh_oauth_token_result apply this before handing
+        # back a snapshot, and so must we. A CAS loss that did not advance the
+        # credential returns SUPERSEDED with the STORED token -- the one this refresh
+        # just rotated away upstream. Rebasing would succeed, because the row really
+        # is unchanged, and we would then verify with a credential already dead at
+        # the provider, earning a 401 that archives every membership.
+        ensure_usable_credential(refreshed)
     except TokenRefreshRejected:
-        # A dead refresh grant requires reconnect but does not prove resource access
-        # loss, which is what TokenRefreshRejected.denial_handled records. Publishing
-        # CREDENTIAL_REJECTED here would call record_validated_upstream_denial with
-        # tenant_id=None and archive every live membership on the connection, so one
-        # failed refresh would revoke every tenant without any resource call denying
-        # access. A genuine provider 401 is the case that legitimately archives; see
-        # _status_result. AUTH_TOKEN_EXPIRED still travels to the caller as the
-        # reconnect signal, and publication leaves memberships and proofs untouched.
+        # Reached two ways: an outright invalid_grant from the token endpoint, and the
+        # unusable-credential check above. Either way a dead refresh grant requires
+        # reconnect but does not prove resource access loss, which is what
+        # TokenRefreshRejected.denial_handled records. Publishing CREDENTIAL_REJECTED
+        # here would call record_validated_upstream_denial with tenant_id=None and
+        # archive every live membership on the connection, so one failed refresh would
+        # revoke every tenant without any resource call denying access. A genuine
+        # provider 401 is the case that legitimately archives; see _status_result.
+        # AUTH_TOKEN_EXPIRED still travels to the caller as the reconnect signal, and
+        # publication leaves memberships and proofs untouched.
         return claim, ProviderVerificationResult.unavailable(ErrorCode.AUTH_TOKEN_EXPIRED)
     except TokenRefreshUnavailable:
         return claim, ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)

@@ -23,6 +23,7 @@ from apps.users.models import (
     UpstreamAccessProof,
     VerificationControl,
 )
+from apps.users.services import access_verification_service
 from apps.users.services.access_verification import (
     VerificationAttemptReceipt,
     claim_verification,
@@ -38,7 +39,12 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
-from apps.users.services.token_refresh import credential_fingerprint
+from apps.users.services.token_refresh import (
+    PersistedTokenSnapshot,
+    TokenRefreshResult,
+    TokenRefreshStatus,
+    credential_fingerprint,
+)
 
 
 @pytest.fixture
@@ -1384,3 +1390,78 @@ async def test_provider_401_still_archives_as_a_credential_denial(user, tenant, 
     assert refreshed.archived_at is not None
     refreshed_connection = await TenantConnection.objects.aget(pk=connection.pk)
     assert refreshed_connection.upstream_denied_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_superseded_refresh_that_kept_the_dead_credential_does_not_archive(
+    user, tenant, monkeypatch
+):
+    """A CAS loss that did not advance the credential must not reach the provider.
+
+    ``credential_advanced=False`` means the snapshot still holds the access token
+    this refresh already rotated away upstream. Rebasing the claim succeeds -- the
+    row genuinely is unchanged -- so verification would proceed with a credential
+    that is dead at the provider, collect a 401, and archive every live membership
+    through ``record_validated_upstream_denial(..., tenant_id=None)``. Same data
+    destruction as an outright invalid_grant, reached through the front door.
+    """
+    app = await SocialApp.objects.acreate(
+        provider="commcare", name="CommCare", client_id="client", secret="secret"
+    )
+    account = await SocialAccount.objects.acreate(user=user, provider="commcare", uid="identity")
+    token = await SocialToken.objects.acreate(
+        account=account,
+        app=app,
+        token="rotated-away",
+        token_secret="old-refresh",
+        expires_at=timezone.now() - timedelta(minutes=1),
+    )
+    connection = await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.OAUTH,
+        social_account=account,
+    )
+    membership = await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=connection
+    )
+    called = False
+
+    async def superseded_refresh(*args, **kwargs):
+        # The stored token is returned unchanged: nobody else rotated it, so the
+        # credential this refresh spent upstream is still what sits on the row.
+        return TokenRefreshResult(
+            TokenRefreshStatus.SUPERSEDED,
+            PersistedTokenSnapshot(
+                token_id=token.pk,
+                account_id=account.pk,
+                app_id=app.pk,
+                access_token="rotated-away",
+                refresh_token="old-refresh",
+                expires_at=token.expires_at,
+            ),
+            credential_advanced=False,
+        )
+
+    monkeypatch.setattr(
+        access_verification_service, "refresh_oauth_token_result", superseded_refresh
+    )
+
+    async def provider(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProviderVerificationResult.complete({tenant.external_id})
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider
+    )
+
+    assert not called
+    assert result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert result.status != AccessVerificationStatus.DENIED
+    refreshed_membership = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed_membership.archived_at is None
+    refreshed_connection = await TenantConnection.objects.aget(pk=connection.pk)
+    assert refreshed_connection.upstream_denied_at is None
+    assert not refreshed_connection.upstream_denial_code
