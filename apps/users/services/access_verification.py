@@ -579,14 +579,26 @@ def _publish_verification_receipt(
             if current.upstream_denial_code:
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
+            connection_provider = canonical_provider(current.provider)
+            # Claims match on the canonical provider, so publication must too or an
+            # alias tenant stays claimable while never being published or archived.
+            # Canonicalize in Python: a provider__startswith filter would sweep
+            # commcare_connect into commcare.
+            canonical_tenant_ids = [
+                tenant_id
+                for tenant_id, tenant_provider in TenantMembership.all_objects.filter(
+                    user_id=current.user_id,
+                    connection=current,
+                ).values_list("tenant_id", "tenant__provider")
+                if canonical_provider(tenant_provider) == connection_provider
+            ]
             owned_history = TenantMembership.all_objects.filter(
                 user_id=current.user_id,
                 connection=current,
-                tenant__provider=current.provider,
+                tenant_id__in=canonical_tenant_ids,
             )
             scoped_ocs_oauth = (
-                canonical_provider(current.provider) == "ocs"
-                and current.credential_type == TenantConnection.OAUTH
+                connection_provider == "ocs" and current.credential_type == TenantConnection.OAUTH
             )
             returned_memberships = owned_history.filter(tenant_id__in=result.tenant_ids)
             if scoped_ocs_oauth:
