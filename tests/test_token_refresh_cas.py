@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from datetime import timedelta
@@ -9,14 +10,18 @@ import httpx
 import pytest
 import requests
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
+from django.conf import settings
+from django.contrib.sites.models import Site
 from django.db import DatabaseError, transaction
 from django.db import connection as django_connection
 from django.utils import timezone
 
 from apps.users.models import TenantConnection
-from apps.users.services import token_refresh
+from apps.users.services import credential_resolver, token_refresh
+from apps.users.services.credential_resolver import CredentialResolutionError
 from apps.users.services.token_refresh import (
+    TokenRefreshDeadlineExceeded,
     TokenRefreshError,
     TokenRefreshRejected,
     TokenRefreshStatus,
@@ -382,7 +387,8 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
         operation = sync_to_async(refresh_oauth_token_result_sync)(token, URL, deadline=deadline)
 
     started = time.monotonic()
-    with pytest.raises(TokenRefreshUnavailable):
+    # The provider already rotated the grant, so the stored token is dead: reconnect.
+    with pytest.raises(TokenRefreshRejected):
         await operation
     elapsed = time.monotonic() - started
     release.set()
@@ -704,3 +710,107 @@ async def test_failure_marker_write_error_does_not_erase_the_real_classification
         requests_mock.post(URL, exc=requests.ConnectionError("offline"))
         with pytest.raises(TokenRefreshUnavailable):
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+
+
+@contextlib.contextmanager
+def _user_row_locked(user_id, hold_seconds=8.0):
+    """Hold a competing lock on the User row the refresh must take."""
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_user_lock, args=(user_id, acquired, release))
+    locker.start()
+    timer = threading.Timer(hold_seconds, release.set)
+    timer.start()
+    try:
+        assert acquired.wait(5), "lock holder never acquired the row"
+        yield
+    finally:
+        release.set()
+        timer.cancel()
+        locker.join(5)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_providers_view_bounds_its_refresh_wait(oauth_identity, user, client, monkeypatch):
+    """The interactive path must not block a page render on a contended row.
+
+    Fails if auth_views stops forwarding INTERACTIVE_DB_DEADLINE: the baked-in worker
+    default would then apply and this would sit on the lock for far longer.
+    """
+    token, connection = oauth_identity
+    token.app.sites.add(Site.objects.get(pk=settings.SITE_ID))
+    monkeypatch.setattr(token_refresh, "INTERACTIVE_DB_DEADLINE", 0.3)
+    client.force_login(user)
+
+    with _user_row_locked(connection.user_id):
+        started = time.monotonic()
+        response = client.get("/api/auth/providers/")
+        elapsed = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert elapsed < 4, f"providers_view waited {elapsed:.1f}s on a locked row"
+    entries = {p["id"]: p for p in response.json()["providers"]}
+    assert entries["commcare"]["status"] != "connected"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_proactive_resolution_bounds_its_refresh_wait(oauth_identity, monkeypatch):
+    """Fails if credential_resolver stops forwarding WORKER_DB_DEADLINE."""
+    token, connection = oauth_identity
+    monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", 0.3)
+
+    def locked_resolve():
+        with _user_row_locked(connection.user_id):
+            started = time.monotonic()
+            try:
+                async_to_sync(credential_resolver._aresolve_oauth_credential)(token, "commcare")
+            except CredentialResolutionError as exc:
+                return time.monotonic() - started, exc
+            return time.monotonic() - started, None
+
+    elapsed, error = await asyncio.to_thread(locked_resolve)
+
+    assert error is not None, "a contended row must fail closed, not resolve"
+    assert elapsed < 4, f"resolution waited {elapsed:.1f}s on a locked row"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_midrun_refresher_bounds_its_refresh_wait(oauth_identity, monkeypatch):
+    """The loader's mid-run 401 refresher runs on a worker thread and must stay bounded.
+
+    Fails if credential_resolver stops forwarding WORKER_DB_DEADLINE.
+    """
+    token, connection = oauth_identity
+    monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", 0.3)
+    refresher = credential_resolver._make_token_refresher(token, URL)
+
+    def locked_refresh():
+        with _user_row_locked(connection.user_id):
+            started = time.monotonic()
+            try:
+                refresher()
+            except TokenRefreshError as exc:
+                return time.monotonic() - started, exc
+            return time.monotonic() - started, None
+
+    elapsed, error = await asyncio.to_thread(locked_refresh)
+
+    assert error is not None, "a contended row must fail, not hang"
+    assert elapsed < 4, f"mid-run refresh waited {elapsed:.1f}s on a locked row"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_deadline_before_the_grant_is_spent_stays_retryable(oauth_identity, mode):
+    """Nothing was consumed upstream, so the caller should retry rather than reconnect."""
+    token, _connection = oauth_identity
+    expired = time.monotonic() - 1
+    if mode == "async":
+        with pytest.raises(TokenRefreshDeadlineExceeded):
+            await refresh_oauth_token_result(token, URL, deadline=expired)
+    else:
+        with pytest.raises(TokenRefreshDeadlineExceeded):
+            await sync_to_async(refresh_oauth_token_result_sync)(token, URL, deadline=expired)

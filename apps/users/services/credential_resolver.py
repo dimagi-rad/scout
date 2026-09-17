@@ -15,6 +15,7 @@ from apps.users.services.oauth_scope import (
     provider_accounts,
 )
 from apps.users.services.token_refresh import (
+    WORKER_DB_DEADLINE,
     TokenRefreshError,
     credential_fingerprint,
     get_token_url,
@@ -203,7 +204,7 @@ def _make_token_refresher(
     """
 
     def _refresh() -> str:
-        value = refresh_oauth_token_sync(token_obj, token_url)
+        value = refresh_oauth_token_sync(token_obj, token_url, db_timeout=WORKER_DB_DEADLINE)
         if credential is not None:
             credential["value"] = value
         return value
@@ -235,7 +236,9 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
         if not can_refresh:
             raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider))
         try:
-            token_value = await refresh_oauth_token(token_obj, token_url)
+            token_value = await refresh_oauth_token(
+                token_obj, token_url, db_timeout=WORKER_DB_DEADLINE
+            )
         except TokenRefreshError as e:
             logger.warning("Token refresh failed for provider %s; failing closed", provider)
             message = (
