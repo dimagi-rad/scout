@@ -912,3 +912,43 @@ def test_waiter_cannot_release_winners_lease(user, tenant, verification_connecti
         publish_verification(winner, VerificationResult.complete({tenant.id}))
         == PublicationStatus.PUBLISHED
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("returned", [False, True])
+def test_canonical_provider_history_can_be_published_or_omitted(
+    user, verification_connection, returned
+):
+    conn, _membership = verification_connection
+    alias = Tenant.objects.create(
+        provider="commcare-custom", external_id="alias", canonical_name="Alias"
+    )
+    foreign = Tenant.objects.create(
+        provider="commcare_connect", external_id="foreign", canonical_name="Foreign"
+    )
+    membership = TenantMembership.objects.create(user=user, tenant=alias, connection=conn)
+    foreign_membership = TenantMembership.objects.create(user=user, tenant=foreign, connection=conn)
+    proof = UpstreamAccessProof.objects.create(
+        connection=conn,
+        tenant=alias,
+        verified_at=timezone.now() - timedelta(minutes=6),
+        credential_fingerprint=snapshot_credential(conn).observation.credential_fingerprint,
+    )
+    claim = claim_verification(user.id, conn.id, {alias.id})
+    assert claim.status == ClaimStatus.CLAIMED
+    result = VerificationResult.complete({alias.id, foreign.id} if returned else set())
+
+    assert publish_verification(claim, result) == PublicationStatus.PUBLISHED
+
+    membership.refresh_from_db()
+    foreign_membership.refresh_from_db()
+    proof.refresh_from_db()
+    assert foreign_membership.archived_at is None
+    assert not UpstreamAccessProof.objects.filter(connection=conn, tenant=foreign).exists()
+    if returned:
+        assert membership.archived_at is None
+        assert proof_is_fresh(proof, claim.observation)
+        assert claim_verification(user.id, conn.id, {alias.id}).status == ClaimStatus.FRESH
+    else:
+        assert membership.archived_at is not None
+        assert proof.verified_at is None
