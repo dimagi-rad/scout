@@ -162,14 +162,37 @@ class _ValidatedRefresh:
     expires_at: timezone.datetime | None
 
 
-def _is_invalid_grant(response) -> bool:
-    if response is None or response.status_code not in (400, 401, 403):
+#: OAuth 2 names its token-endpoint failures in a fixed set (RFC 6749 5.2). The code
+#: is an enum, not a secret, so it is safe to log even though the body is not -- and it
+#: is the only thing separating our own misconfiguration (invalid_client) from a routine
+#: dead grant (invalid_grant). Anything unrecognised is withheld rather than echoed.
+#:
+#: These are predicates rather than a function returning the code, so that nothing
+#: derived from the response body is ever passed to a logger. CodeQL's taint analysis
+#: follows data, not control flow: a call reading response.json() is safe in a
+#: condition, but flagged as clear-text logging the moment its result is an argument.
+def _reports_oauth_error(response, code: str) -> bool:
+    """Does the provider's body name this specific OAuth error?"""
+    if response is None:
         return False
     try:
         data = response.json()
     except ValueError:
         return False
-    return isinstance(data, dict) and data.get("error") == "invalid_grant"
+    return isinstance(data, dict) and data.get("error") == code
+
+
+def _is_invalid_grant(response) -> bool:
+    if response is None or response.status_code not in (400, 401, 403):
+        return False
+    return _reports_oauth_error(response, "invalid_grant")
+
+
+def _is_invalid_client(response) -> bool:
+    """Our own client credentials were rejected -- a deployment fault, not a user's."""
+    if response is None or response.status_code not in (400, 401, 403):
+        return False
+    return _reports_oauth_error(response, "invalid_client")
 
 
 def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
@@ -321,6 +344,33 @@ def _lock_refresh_context(preflight: _TokenPreflight, *, deadline=None, clock=ti
     return current, connections
 
 
+def _identity_matches(
+    preflight: _TokenPreflight, current: SocialToken, connections: list[TenantConnection]
+) -> bool:
+    """Does this row still describe the binding the caller validated at preflight?
+
+    Single-sourced because two callers need the same verdict: the CAS, which must not
+    write, and the read-back on a CAS miss, which must not *serve* a credential from a
+    principal the caller never saw.
+    """
+    if (
+        current.account_id != preflight.account_id
+        or current.app_id != preflight.app_id
+        or current.account.user_id != preflight.user_id
+        or canonical_provider(current.account.provider) != preflight.account_provider
+        or account_scope(current.account) != preflight.account_scope
+    ):
+        return False
+    current_fences = {connection.id: _connection_fence(connection) for connection in connections}
+    for fence in preflight.connection_fences:
+        # A connection that appeared or was removed mid-flight is not this refresh's
+        # business; one that was re-pointed at a different principal is.
+        observed = current_fences.get(fence.connection_id)
+        if observed is not None and observed.identity != fence.identity:
+            return False
+    return True
+
+
 def _refresh_context_matches(
     preflight: _TokenPreflight,
     current: SocialToken,
@@ -337,29 +387,22 @@ def _refresh_context_matches(
     a refresh token that is dead upstream (a routine single-tenant 403 is enough to
     trigger it). Identity changes veto either way.
     """
+    if not _identity_matches(preflight, current, connections):
+        return False
     if (
-        current.account_id != preflight.account_id
-        or current.app_id != preflight.app_id
-        or current.token != preflight.access_token
+        current.token != preflight.access_token
         or current.token_secret != preflight.refresh_token
         or current.expires_at != preflight.expires_at
-        or current.account.user_id != preflight.user_id
-        or canonical_provider(current.account.provider) != preflight.account_provider
-        or account_scope(current.account) != preflight.account_scope
     ):
         return False
+    if not fence_denial:
+        return True
     current_fences = {connection.id: _connection_fence(connection) for connection in connections}
-    for fence in preflight.connection_fences:
-        # A connection that appeared or was removed mid-flight is not this refresh's
-        # business; one that was re-pointed at a different principal is.
-        observed = current_fences.get(fence.connection_id)
-        if observed is None:
-            continue
-        if observed.identity != fence.identity:
-            return False
-        if fence_denial and observed.upstream_denied_at != fence.upstream_denied_at:
-            return False
-    return True
+    return all(
+        current_fences[fence.connection_id].upstream_denied_at == fence.upstream_denied_at
+        for fence in preflight.connection_fences
+        if fence.connection_id in current_fences
+    )
 
 
 def _validate_refresh_response(response, preflight: _TokenPreflight) -> _ValidatedRefresh:
@@ -439,6 +482,18 @@ def _persist_refresh_response(
             )
         _ensure_before_deadline(deadline, clock)
         if not _refresh_context_matches(preflight, current, connections, fence_denial=False):
+            if not _identity_matches(preflight, current, connections):
+                # The row no longer describes the binding the caller validated, so the
+                # credential on it is not ours to hand back -- returning it would serve a
+                # token from a principal the caller never saw, which is the exposure the
+                # identity fences exist to stop. Report what preflight held so nothing
+                # foreign crosses the boundary, and mark nothing: those connection rows
+                # may belong to someone else now.
+                return TokenRefreshResult(
+                    TokenRefreshStatus.SUPERSEDED,
+                    _preflight_snapshot(preflight),
+                    credential_advanced=False,
+                )
             snapshot = _persisted_snapshot(current)
             advanced = snapshot.access_token != preflight.access_token
             if not advanced:
@@ -581,15 +636,17 @@ async def refresh_oauth_token_result(
     except httpx.HTTPStatusError as e:
         # A 4xx (typically 400 invalid_grant on a dead refresh token) is an
         # expected outcome, not a bug. Keep provider response bodies out of logs.
+        rejected = _is_invalid_grant(e.response)
+        misconfigured = _is_invalid_client(e.response)
         if 400 <= e.response.status_code < 500:
             logger.warning(
-                "Token refresh rejected for app %s: HTTP %s",
+                "Token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 e.response.status_code,
+                "invalid_grant" if rejected else "invalid_client" if misconfigured else "other",
             )
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        rejected = _is_invalid_grant(e.response)
         try:
             await _arecord_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
         except TokenRefreshUnavailable:
@@ -690,15 +747,17 @@ def refresh_oauth_token_result_sync(
         # response bodies out of logs. The sync path never got this treatment,
         # so every routine dead-token refresh raised a Sentry event (#373).
         status = e.response.status_code if e.response is not None else None
+        rejected = _is_invalid_grant(e.response)
+        misconfigured = _is_invalid_client(e.response)
         if status is not None and 400 <= status < 500:
             logger.warning(
-                "Sync token refresh rejected for app %s: HTTP %s",
+                "Sync token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 status,
+                "invalid_grant" if rejected else "invalid_client" if misconfigured else "other",
             )
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        rejected = _is_invalid_grant(e.response)
         try:
             _record_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
         except TokenRefreshUnavailable:
