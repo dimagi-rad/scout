@@ -1093,13 +1093,11 @@ def test_publish_recomputes_deadline_per_tenant_write(user, monkeypatch):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_attempt_receipt_is_connection_scoped_not_tenant_scoped(user, tenant):
-    """Pins the documented limitation: a receipt says nothing about a tenant.
+def test_attempt_receipt_is_scoped_to_the_tenants_it_covered(user, tenant):
+    """A waiter must not reuse a receipt from an attempt that skipped its tenant.
 
-    A waiter for a different tenant matches the winner's receipt, so a consumer that
-    reads COMPLETE as per-tenant success would report success for a tenant the same
-    publication archived. If a future change makes the receipt tenant-scoped, this
-    test should be replaced by one asserting the waiter does NOT match.
+    Replaces the earlier test that pinned this as a documented limitation: the receipt
+    now records its tenant scope, so the mismatch is refused rather than described.
     """
     conn = TenantConnection.objects.create(
         user=user,
@@ -1126,11 +1124,140 @@ def test_attempt_receipt_is_connection_scoped_not_tenant_scoped(user, tenant):
     receipt = access_verification._completed_attempt(control)
     assert receipt is not None
     assert receipt.outcome == VerificationOutcome.COMPLETE
-    # The receipt matches even though the attempt archived `other` rather than
-    # verifying it, which is exactly why it must not be read per tenant.
+    assert receipt.tenant_ids == frozenset({str(tenant.id)})
+
+    # The tenant the attempt actually confirmed still matches.
     assert access_verification.attempt_receipt_matches(
-        receipt, control.last_attempt_lease_token, winner.observation
+        receipt, control.last_attempt_lease_token, winner.observation, {tenant.id}
     )
-    assert not UpstreamAccessProof.objects.filter(
-        connection=conn, tenant=other, verified_at__isnull=False
-    ).exists()
+    # The tenant it archived as omitted does not, nor does a set spanning both.
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation, {other.id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation, {tenant.id, other.id}
+    )
+    # An empty request proves nothing and must not match.
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation, set()
+    )
+
+
+@pytest.mark.django_db
+def test_credential_level_receipt_covers_every_requested_tenant(user, verification_connection):
+    conn, membership = verification_connection
+    second = Tenant.objects.create(
+        provider=conn.provider, external_id="cred-level", canonical_name="Second"
+    )
+    TenantMembership.objects.create(user=user, tenant=second, connection=conn)
+    requested = {membership.tenant_id, second.id}
+    claim = claim_verification(user.id, conn.id, requested)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    assert (
+        publish_verification(
+            claim,
+            VerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED),
+        )
+        == PublicationStatus.PUBLISHED
+    )
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt.tenant_ids == frozenset(str(tenant_id) for tenant_id in requested)
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, requested
+    )
+
+
+@pytest.mark.django_db
+def test_receipt_without_recorded_scope_matches_nothing(user, verification_connection):
+    """Rows written before the scope existed carry [] and must fail closed."""
+    conn, membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {membership.tenant_id})
+    assert claim.status == ClaimStatus.CLAIMED
+    publish_verification(claim, VerificationResult.complete({membership.tenant_id}))
+    VerificationControl.objects.filter(connection=conn).update(last_attempt_tenant_ids=[])
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+
+    assert receipt.tenant_ids == frozenset()
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {membership.tenant_id}
+    )
+
+
+@pytest.mark.django_db
+def test_complete_receipt_excludes_a_tenant_it_omitted(user, verification_connection):
+    """A COMPLETE attempt that archived a requested tenant must not vouch for it.
+
+    The claim asks about two tenants and upstream returns only one, so the other is
+    archived as omitted. Recording the requested set rather than the accepted set here
+    would let a consumer read this COMPLETE as success for the revoked tenant.
+    """
+    conn, membership = verification_connection
+    omitted = Tenant.objects.create(
+        provider=conn.provider, external_id="omitted-one", canonical_name="Omitted"
+    )
+    omitted_membership = TenantMembership.objects.create(user=user, tenant=omitted, connection=conn)
+    requested = {membership.tenant_id, omitted.id}
+    claim = claim_verification(user.id, conn.id, requested)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    assert (
+        publish_verification(claim, VerificationResult.complete({membership.tenant_id}))
+        == PublicationStatus.PUBLISHED
+    )
+
+    omitted_membership.refresh_from_db()
+    assert omitted_membership.archived_at is not None
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt.tenant_ids == frozenset({str(membership.tenant_id)})
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {membership.tenant_id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {omitted.id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, requested
+    )
+
+
+@pytest.mark.django_db
+def test_tenant_denied_receipt_covers_only_the_denied_tenant(user, verification_connection):
+    """A denial is about one tenant and must not be reused for the others.
+
+    Recording the requested set here would let a consumer treat a sibling tenant as
+    denied on the strength of a denial that never named it.
+    """
+    conn, membership = verification_connection
+    sibling = Tenant.objects.create(
+        provider=conn.provider, external_id="denied-sibling", canonical_name="Sibling"
+    )
+    TenantMembership.objects.create(user=user, tenant=sibling, connection=conn)
+    requested = {membership.tenant_id, sibling.id}
+    claim = claim_verification(user.id, conn.id, requested)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    assert (
+        publish_verification(
+            claim,
+            VerificationResult.tenant_denied(membership.tenant_id, ErrorCode.AUTH_ACCESS_DENIED),
+        )
+        == PublicationStatus.PUBLISHED
+    )
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt.outcome == VerificationOutcome.TENANT_DENIED
+    assert receipt.tenant_ids == frozenset({str(membership.tenant_id)})
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {membership.tenant_id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {sibling.id}
+    )

@@ -66,23 +66,23 @@ class VerificationDeadlineExceeded(TimeoutError):
 
 @dataclass(frozen=True)
 class VerificationAttemptReceipt:
-    """A finished attempt's connection-level outcome.
+    """A finished attempt, scoped to the tenants its outcome is authoritative for.
 
-    Carries no tenant scope. The lease is per connection, so two concurrent requests
-    for *different* tenant sets share one lease and observe the same observation hash;
-    a waiter therefore matches a receipt from an attempt that never covered its
-    tenants. Treat the outcome as a statement about the credential, never about a
-    specific tenant: a COMPLETE receipt can accompany a publication that archived the
-    waiter's tenant as omitted, and TENANT_DENIED does not say which tenant was denied.
+    The lease is per connection, so two concurrent requests for *different* tenant
+    sets share one lease and observe the same observation hash. ``tenant_ids`` is what
+    keeps the two apart: a COMPLETE publication records the tenants it confirmed live
+    (so a tenant it archived as omitted is excluded), TENANT_DENIED records the denied
+    tenant, and credential-level outcomes record the tenants the attempt requested.
 
-    Per-tenant answers must come from UpstreamAccessProof or PublicationReceipt
-    .accepted_tenant_ids, which are tenant-scoped.
+    Match with :func:`attempt_receipt_matches`, which requires the caller's tenants to
+    fall inside this scope; do not read the outcome without that check.
     """
 
     lease_token: uuid.UUID
     outcome: VerificationOutcome
     error_code: str
     observation_hash: str
+    tenant_ids: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -207,6 +207,11 @@ def _observation_hash(observation: CredentialObservation) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _tenant_scope(tenant_ids) -> frozenset:
+    """Normalise tenant ids to strings so stored JSON and in-memory UUIDs compare."""
+    return frozenset(str(tenant_id) for tenant_id in tenant_ids or ())
+
+
 def _completed_attempt(control) -> VerificationAttemptReceipt | None:
     if not control.last_attempt_lease_token or not control.last_attempt_outcome:
         return None
@@ -219,22 +224,31 @@ def _completed_attempt(control) -> VerificationAttemptReceipt | None:
         outcome=outcome,
         error_code=control.last_attempt_error_code,
         observation_hash=control.last_attempt_observation_hash,
+        tenant_ids=_tenant_scope(control.last_attempt_tenant_ids),
     )
 
 
-def attempt_receipt_matches(receipt, lease_token, observation) -> bool:
-    """Whether a receipt describes this lease and credential observation.
+def attempt_receipt_matches(receipt, lease_token, observation, requested_tenant_ids) -> bool:
+    """Whether a receipt's outcome may be reused for exactly these tenants.
 
-    Proves only that the finished attempt used the same lease and the same credential
-    — not that it covered any particular tenant. See VerificationAttemptReceipt: a
-    caller must not turn a True here into a per-tenant success or denial.
+    Requires the same lease and credential observation *and* that every requested
+    tenant falls inside the attempt's recorded scope. Without the scope check a waiter
+    holding the winner's lease would match a receipt from an attempt that never
+    covered its tenants — and a COMPLETE outcome would then read as success for a
+    tenant that same publication archived as omitted.
+
+    Receipts written before the scope was recorded carry an empty scope and so match
+    nothing, which fails closed.
     """
+    requested = _tenant_scope(requested_tenant_ids)
     return bool(
         receipt
         and lease_token
         and observation
+        and requested
         and receipt.lease_token == lease_token
         and receipt.observation_hash == _observation_hash(observation)
+        and requested <= receipt.tenant_ids
     )
 
 
@@ -737,10 +751,21 @@ def _publish_verification_receipt(
                 last_error_code=result.error_code,
             )
         _ensure_before_deadline(deadline, clock)
+        if result.outcome == VerificationOutcome.COMPLETE:
+            # Only the tenants confirmed live: one archived as omitted must not be
+            # reusable as a success.
+            receipt_tenant_ids = accepted_tenant_ids
+        elif result.outcome == VerificationOutcome.TENANT_DENIED:
+            receipt_tenant_ids = frozenset({result.denied_tenant_id})
+        else:
+            # Credential-level outcome: authoritative for everything this attempt asked
+            # about, and for nothing it did not.
+            receipt_tenant_ids = claim.requested_tenant_ids
         control.last_attempt_lease_token = claim.lease_token
         control.last_attempt_outcome = result.outcome.value
         control.last_attempt_error_code = result.error_code
         control.last_attempt_observation_hash = _observation_hash(claim.observation)
+        control.last_attempt_tenant_ids = sorted(_tenant_scope(receipt_tenant_ids))
         control.lease_token = None
         control.lease_expires_at = None
         control.save(
@@ -749,6 +774,7 @@ def _publish_verification_receipt(
                 "last_attempt_outcome",
                 "last_attempt_error_code",
                 "last_attempt_observation_hash",
+                "last_attempt_tenant_ids",
                 "lease_token",
                 "lease_expires_at",
             ]
