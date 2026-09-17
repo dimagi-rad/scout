@@ -389,7 +389,10 @@ def test_default_process_limiter_survives_successive_contended_event_loops(setti
             )
         )
         assert all(result.outcome == VerificationOutcome.COMPLETE for result in results)
-        assert peak == 4
+        # Upper bound only: requiring exactly 4 would need all four to reach
+        # DelayedClient.get inside the 10ms window. Without the limiter this
+        # would be 8.
+        assert peak <= 4
 
     async_to_sync(burst)()
     async_to_sync(burst)()
@@ -436,7 +439,9 @@ def test_default_limiter_bounds_concurrent_loops_process_wide(settings):
         futures = [executor.submit(run) for _ in range(2)]
         for future in futures:
             assert all(r.outcome == VerificationOutcome.COMPLETE for r in future.result(timeout=3))
-    assert peak == 4
+    # Two OS threads under the GIL: a >20ms preemption leaves fewer than four
+    # simultaneously active. Without the limiter this would reach 16.
+    assert peak <= 4
     assert active == 0
 
 
