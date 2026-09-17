@@ -1,6 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import timedelta
 from uuid import uuid4
 
@@ -18,15 +19,41 @@ from apps.users.models import (
     UpstreamAccessProof,
     VerificationControl,
 )
+from apps.users.services import access_verification
 from apps.users.services.access_verification import (
     LEASE_DURATION,
     ClaimStatus,
     PublicationStatus,
+    VerificationDeadlineExceeded,
     claim_verification,
     proof_is_fresh,
     publish_verification,
+    rebase_verification_claim,
+    release_verification,
+    snapshot_credential,
 )
-from apps.users.services.access_verification_types import VerificationResult
+from apps.users.services.access_verification_types import (
+    VerificationOutcome,
+    VerificationResult,
+)
+
+
+@dataclass(frozen=True)
+class _PersistedToken:
+    """The credential fields rebase_verification_claim reads off a persisted snapshot.
+
+    Mirrors PersistedTokenSnapshot, which lives in token_refresh and lands with the
+    OAuth refresh-fencing work. Declared here so this module does not depend on that
+    PR: rebase_verification_claim takes the snapshot untyped and reads only these
+    fields, so the contract this exercises is entirely owned by access_verification.
+    """
+
+    token_id: int
+    account_id: int
+    app_id: int
+    access_token: str
+    refresh_token: str
+    expires_at: object = None
 
 
 @pytest.fixture
@@ -76,6 +103,108 @@ def _hold_user_lock(user_id, acquired, release):
         connection.close()
 
 
+def _hold_control_lock(connection_id, acquired, release):
+    try:
+        with transaction.atomic():
+            VerificationControl.objects.select_for_update().get(connection_id=connection_id)
+            acquired.set()
+            assert release.wait(timeout=10)
+    finally:
+        connection.close()
+
+
+@pytest.mark.django_db
+def test_snapshot_credential_builds_observation_from_loaded_connection(
+    user, verification_connection
+):
+    conn, _membership = verification_connection
+
+    snapshot = snapshot_credential(conn)
+
+    assert snapshot.observation.connection_id == conn.id
+    assert snapshot.observation.user_id == user.id
+    assert snapshot.credential == "secret-one"
+    assert "secret-one" not in repr(snapshot)
+
+
+@pytest.mark.django_db
+def test_direct_empty_claim_is_denied_without_electing_lease(user, verification_connection):
+    conn, _membership = verification_connection
+
+    claim = claim_verification(user.id, conn.id, set())
+
+    assert claim.status == ClaimStatus.DENIED
+    assert not VerificationControl.objects.filter(connection=conn).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("tenant_provider", "expected"),
+    [("ocs", ClaimStatus.DENIED), ("commcare-custom", ClaimStatus.CLAIMED)],
+)
+def test_claim_requires_same_canonical_provider(
+    user, verification_connection, tenant_provider, expected
+):
+    conn, _membership = verification_connection
+    mismatched = Tenant.objects.create(
+        provider=tenant_provider,
+        external_id=f"provider-{tenant_provider}",
+        canonical_name="Provider scope",
+    )
+    TenantMembership.objects.create(user=user, tenant=mismatched, connection=conn)
+
+    claim = claim_verification(user.id, conn.id, {mismatched.id})
+
+    assert claim.status == expected
+    assert VerificationControl.objects.filter(connection=conn).exists() is (
+        expected == ClaimStatus.CLAIMED
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({}, ClaimStatus.CLAIMED),
+        ({"team_slug": ""}, ClaimStatus.CLAIMED),
+        ({"team_slug": "acme"}, ClaimStatus.CLAIMED),
+        ({"team_slug": "other-team"}, ClaimStatus.DENIED),
+    ],
+)
+def test_ocs_claim_allows_legacy_team_history_but_denies_explicit_other_team(
+    user, metadata, expected
+):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id=f"scope-{metadata!s}", canonical_name="Scoped"
+    )
+    conn, membership = _ocs_connection(user, tenant, scope="acme")
+    membership.provider_metadata = metadata
+    membership.save(update_fields=["provider_metadata"])
+
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+
+    assert claim.status == expected
+    assert VerificationControl.objects.filter(connection=conn).exists() is (
+        expected == ClaimStatus.CLAIMED
+    )
+
+
+@pytest.mark.django_db
+def test_oauth_claim_without_social_account_is_denied(user, tenant):
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.OAUTH,
+        social_account=None,
+    )
+    TenantMembership.objects.create(user=user, tenant=tenant, connection=conn)
+
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+
+    assert claim.status == ClaimStatus.DENIED
+    assert not VerificationControl.objects.filter(connection=conn).exists()
+
+
 @pytest.mark.django_db(transaction=True)
 def test_disjoint_requests_elect_one_connection_winner(user, tenant, verification_connection):
     conn, _membership = verification_connection
@@ -103,6 +232,177 @@ def test_disjoint_requests_elect_one_connection_winner(user, tenant, verificatio
 
     assert statuses == {ClaimStatus.CLAIMED, ClaimStatus.IN_PROGRESS}
     assert VerificationControl.objects.get(connection=conn).lease_token is not None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_user_lock_wait_stops_at_deadline(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
+    locker.start()
+    assert acquired.wait(timeout=2)
+    timer = threading.Timer(0.4, release.set)
+    timer.start()
+
+    started = time.monotonic()
+    claim = claim_verification(
+        user.id,
+        conn.id,
+        {tenant.id},
+        deadline=started + 0.1,
+    )
+    elapsed = time.monotonic() - started
+    locker.join(timeout=2)
+    timer.cancel()
+
+    assert claim.status == ClaimStatus.DEADLINE
+    assert elapsed < 0.3
+    assert not VerificationControl.objects.filter(connection=conn).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_rebase_user_lock_wait_stops_at_deadline(user):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id="deadline", canonical_name="Deadline"
+    )
+    conn, _membership = _ocs_connection(user, tenant)
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    token = SocialToken.objects.get(account_id=conn.social_account_id)
+    persisted = _PersistedToken(
+        token_id=token.id,
+        account_id=token.account_id,
+        app_id=token.app_id,
+        access_token=token.token,
+        refresh_token=token.token_secret,
+        expires_at=token.expires_at,
+    )
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
+    locker.start()
+    assert acquired.wait(timeout=2)
+    timer = threading.Timer(0.4, release.set)
+    timer.start()
+
+    started = time.monotonic()
+    with pytest.raises(VerificationDeadlineExceeded):
+        rebase_verification_claim(
+            claim,
+            persisted,
+            deadline=started + 0.1,
+        )
+    elapsed = time.monotonic() - started
+    locker.join(timeout=2)
+    timer.cancel()
+    release_verification(claim)
+
+    assert elapsed < 0.3
+    assert VerificationControl.objects.get(connection=conn).lease_token is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_release_is_bounded_when_control_row_is_locked(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
+    locker.start()
+    # Release in a finally: a failed assertion here would otherwise leave the locker
+    # holding its row lock for its full 10s, stalling this transactional test's
+    # teardown truncate and cascading into neighbouring tests.
+    try:
+        assert acquired.wait(timeout=2)
+
+        started = time.monotonic()
+        released = release_verification(claim)
+        elapsed = time.monotonic() - started
+
+        assert released is False
+        assert elapsed < 0.2
+    finally:
+        release.set()
+        locker.join(timeout=2)
+    assert VerificationControl.objects.get(connection=conn).lease_token == claim.lease_token
+    assert release_verification(claim) is True
+
+
+@pytest.mark.django_db
+def test_release_never_clears_replacement_lease(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+    successor = uuid4()
+    VerificationControl.objects.filter(connection=conn).update(lease_token=successor)
+
+    assert release_verification(claim) is False
+    assert VerificationControl.objects.get(connection=conn).lease_token == successor
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_recomputes_remaining_deadline_before_control_lock(
+    user, tenant, verification_connection, monkeypatch
+):
+    conn, _membership = verification_connection
+    VerificationControl.objects.create(connection=conn)
+    # A stale proof keeps the claim past the freshness check and gives us a hook that
+    # runs after the proofs query's recompute but before the control lock, so the
+    # budget this test spends lands in exactly the window the recompute must cover.
+    UpstreamAccessProof.objects.create(
+        connection=conn,
+        tenant=tenant,
+        verified_at=timezone.now() - timedelta(minutes=6),
+        credential_fingerprint=snapshot_credential(conn).observation.credential_fingerprint,
+    )
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
+    locker.start()
+    timer = threading.Timer(0.5, release.set)
+    timer.start()
+    try:
+        assert acquired.wait(timeout=2)
+
+        events = []
+        original_configure = access_verification._configure_transaction_deadline
+        original_fresh = access_verification.proof_is_fresh
+
+        def recording_configure(*args, **kwargs):
+            events.append("configure")
+            return original_configure(*args, **kwargs)
+
+        def delayed_fresh(*args, **kwargs):
+            time.sleep(0.08)
+            events.append("budget-spent")
+            return original_fresh(*args, **kwargs)
+
+        monkeypatch.setattr(
+            access_verification, "_configure_transaction_deadline", recording_configure
+        )
+        monkeypatch.setattr(access_verification, "proof_is_fresh", delayed_fresh)
+        started = time.monotonic()
+        claim = claim_verification(
+            user.id,
+            conn.id,
+            {tenant.id},
+            deadline=started + 0.15,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        locker.join(timeout=2)
+        timer.cancel()
+
+    assert claim.status == ClaimStatus.DEADLINE
+    # The guard: the deadline must be recomputed after the budget was spent and before
+    # the control lock. Without that recompute the lock would inherit the stale, larger
+    # timeout computed back at the proofs query. Asserting on ordering rather than wall
+    # clock keeps this deterministic on a loaded runner.
+    assert "budget-spent" in events
+    assert "configure" in events[events.index("budget-spent") :]
+    # Loose bound: it only has to prove we did not block for the locker's full hold.
+    assert elapsed < 0.45
+    assert VerificationControl.objects.get(connection=conn).lease_token is None
 
 
 @pytest.mark.django_db
@@ -647,3 +947,335 @@ def test_invalid_snapshot_publication_preserves_successor_lease(
     assert control.lease_token == successor
     assert control.lease_expires_at == expires
     assert not UpstreamAccessProof.objects.exists()
+
+
+@pytest.mark.django_db
+def test_waiter_cannot_release_winners_lease(user, tenant, verification_connection):
+    conn, _membership = verification_connection
+    winner = claim_verification(user.id, conn.id, {tenant.id})
+    waiter = claim_verification(user.id, conn.id, {tenant.id})
+    assert winner.status == ClaimStatus.CLAIMED
+    assert waiter.status == ClaimStatus.IN_PROGRESS
+    assert waiter.lease_token == winner.lease_token
+
+    assert release_verification(waiter) is False
+
+    control = VerificationControl.objects.get(connection=conn)
+    assert control.lease_token == winner.lease_token
+    assert (
+        publish_verification(winner, VerificationResult.complete({tenant.id}))
+        == PublicationStatus.PUBLISHED
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("returned", [False, True])
+def test_canonical_provider_history_can_be_published_or_omitted(
+    user, verification_connection, returned
+):
+    conn, _membership = verification_connection
+    alias = Tenant.objects.create(
+        provider="commcare-custom", external_id="alias", canonical_name="Alias"
+    )
+    foreign = Tenant.objects.create(
+        provider="commcare_connect", external_id="foreign", canonical_name="Foreign"
+    )
+    membership = TenantMembership.objects.create(user=user, tenant=alias, connection=conn)
+    foreign_membership = TenantMembership.objects.create(user=user, tenant=foreign, connection=conn)
+    proof = UpstreamAccessProof.objects.create(
+        connection=conn,
+        tenant=alias,
+        verified_at=timezone.now() - timedelta(minutes=6),
+        credential_fingerprint=snapshot_credential(conn).observation.credential_fingerprint,
+    )
+    claim = claim_verification(user.id, conn.id, {alias.id})
+    assert claim.status == ClaimStatus.CLAIMED
+    result = VerificationResult.complete({alias.id, foreign.id} if returned else set())
+
+    assert publish_verification(claim, result) == PublicationStatus.PUBLISHED
+
+    membership.refresh_from_db()
+    foreign_membership.refresh_from_db()
+    proof.refresh_from_db()
+    assert foreign_membership.archived_at is None
+    assert not UpstreamAccessProof.objects.filter(connection=conn, tenant=foreign).exists()
+    if returned:
+        assert membership.archived_at is None
+        assert proof_is_fresh(proof, claim.observation)
+        assert claim_verification(user.id, conn.id, {alias.id}).status == ClaimStatus.FRESH
+    else:
+        assert membership.archived_at is not None
+        assert proof.verified_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["claim", "publish", "release", "rebase", "denied_claim"])
+def test_verification_restores_timeouts_inside_outer_transaction(user, operation):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id="timeouts", canonical_name="Timeouts"
+    )
+    conn, _membership = _ocs_connection(user, tenant)
+    claim = claim_verification(user.id, conn.id, {tenant.id}) if operation != "claim" else None
+    token = SocialToken.objects.get(account_id=conn.social_account_id)
+    persisted = _PersistedToken(
+        token_id=token.id,
+        account_id=token.account_id,
+        app_id=token.app_id,
+        access_token=token.token,
+        refresh_token=token.token_secret,
+        expires_at=token.expires_at,
+    )
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('lock_timeout', '3s', true), set_config('statement_timeout', '4s', true)"
+            )
+        deadline = time.monotonic() + 0.5
+        if operation == "claim":
+            assert (
+                claim_verification(user.id, conn.id, {tenant.id}, deadline=deadline).status
+                == ClaimStatus.CLAIMED
+            )
+        elif operation == "publish":
+            assert (
+                publish_verification(
+                    claim, VerificationResult.complete({tenant.id}), deadline=deadline
+                )
+                == PublicationStatus.PUBLISHED
+            )
+        elif operation == "release":
+            assert release_verification(claim)
+        elif operation == "rebase":
+            assert rebase_verification_claim(claim, persisted, deadline=deadline) is not None
+        else:
+            assert (
+                claim_verification(user.id, uuid4(), {tenant.id}, deadline=deadline).status
+                == ClaimStatus.DENIED
+            )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')"
+            )
+            assert cursor.fetchone() == ("3s", "4s")
+
+
+def _publish_and_count_recomputes(user, tenant_count, monkeypatch, label):
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential(f"secret-{label}"),
+    )
+    tenant_ids = set()
+    for index in range(tenant_count):
+        extra = Tenant.objects.create(
+            provider="commcare",
+            external_id=f"{label}-{index}",
+            canonical_name=f"{label} {index}",
+        )
+        TenantMembership.objects.create(user=user, tenant=extra, connection=conn)
+        tenant_ids.add(extra.id)
+    claim = claim_verification(user.id, conn.id, tenant_ids)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    original = access_verification._configure_transaction_deadline
+    recomputes = []
+
+    def counting_configure(deadline, clock, cancelled=None):
+        recomputes.append(1)
+        return original(deadline, clock, cancelled)
+
+    monkeypatch.setattr(access_verification, "_configure_transaction_deadline", counting_configure)
+    try:
+        status = publish_verification(
+            claim, VerificationResult.complete(tenant_ids), deadline=time.monotonic() + 30
+        )
+    finally:
+        monkeypatch.setattr(access_verification, "_configure_transaction_deadline", original)
+    assert status == PublicationStatus.PUBLISHED
+    assert UpstreamAccessProof.objects.filter(connection=conn).count() == tenant_count
+    return len(recomputes)
+
+
+@pytest.mark.django_db
+def test_publish_recomputes_deadline_per_tenant_write(user, monkeypatch):
+    one = _publish_and_count_recomputes(user, 1, monkeypatch, "single")
+    many = _publish_and_count_recomputes(user, 7, monkeypatch, "bulk")
+
+    # lock_timeout/statement_timeout are per statement, so a budget set once cannot
+    # bound a loop over N tenants: each write may wait the full remaining budget and
+    # total wall time grows with N while the wrapper still advertises a bounded wait.
+    # Comparing two sizes isolates per-tenant scaling from the constant overhead, so
+    # this fails if the per-write recomputes are dropped.
+    assert many - one >= 6
+
+
+@pytest.mark.django_db(transaction=True)
+def test_attempt_receipt_is_scoped_to_the_tenants_it_covered(user, tenant):
+    """A waiter must not reuse a receipt from an attempt that skipped its tenant.
+
+    Replaces the earlier test that pinned this as a documented limitation: the receipt
+    now records its tenant scope, so the mismatch is refused rather than described.
+    """
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider=tenant.provider,
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("secret-scope"),
+    )
+    TenantMembership.objects.create(user=user, tenant=tenant, connection=conn)
+    other = Tenant.objects.create(
+        provider=tenant.provider, external_id="receipt-other", canonical_name="Other"
+    )
+    other_membership = TenantMembership.objects.create(user=user, tenant=other, connection=conn)
+
+    winner = claim_verification(user.id, conn.id, {tenant.id})
+    assert winner.status == ClaimStatus.CLAIMED
+    assert publish_verification(winner, VerificationResult.complete({tenant.id})) == (
+        PublicationStatus.PUBLISHED
+    )
+
+    other_membership.refresh_from_db()
+    assert other_membership.archived_at is not None
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt is not None
+    assert receipt.outcome == VerificationOutcome.COMPLETE
+    assert receipt.tenant_ids == frozenset({str(tenant.id)})
+
+    # The tenant the attempt actually confirmed still matches.
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation, {tenant.id}
+    )
+    # The tenant it archived as omitted does not, nor does a set spanning both.
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation, {other.id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation, {tenant.id, other.id}
+    )
+    # An empty request proves nothing and must not match.
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation, set()
+    )
+
+
+@pytest.mark.django_db
+def test_credential_level_receipt_covers_every_requested_tenant(user, verification_connection):
+    conn, membership = verification_connection
+    second = Tenant.objects.create(
+        provider=conn.provider, external_id="cred-level", canonical_name="Second"
+    )
+    TenantMembership.objects.create(user=user, tenant=second, connection=conn)
+    requested = {membership.tenant_id, second.id}
+    claim = claim_verification(user.id, conn.id, requested)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    assert (
+        publish_verification(
+            claim,
+            VerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED),
+        )
+        == PublicationStatus.PUBLISHED
+    )
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt.tenant_ids == frozenset(str(tenant_id) for tenant_id in requested)
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, requested
+    )
+
+
+@pytest.mark.django_db
+def test_receipt_without_recorded_scope_matches_nothing(user, verification_connection):
+    """Rows written before the scope existed carry [] and must fail closed."""
+    conn, membership = verification_connection
+    claim = claim_verification(user.id, conn.id, {membership.tenant_id})
+    assert claim.status == ClaimStatus.CLAIMED
+    publish_verification(claim, VerificationResult.complete({membership.tenant_id}))
+    VerificationControl.objects.filter(connection=conn).update(last_attempt_tenant_ids=[])
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+
+    assert receipt.tenant_ids == frozenset()
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {membership.tenant_id}
+    )
+
+
+@pytest.mark.django_db
+def test_complete_receipt_excludes_a_tenant_it_omitted(user, verification_connection):
+    """A COMPLETE attempt that archived a requested tenant must not vouch for it.
+
+    The claim asks about two tenants and upstream returns only one, so the other is
+    archived as omitted. Recording the requested set rather than the accepted set here
+    would let a consumer read this COMPLETE as success for the revoked tenant.
+    """
+    conn, membership = verification_connection
+    omitted = Tenant.objects.create(
+        provider=conn.provider, external_id="omitted-one", canonical_name="Omitted"
+    )
+    omitted_membership = TenantMembership.objects.create(user=user, tenant=omitted, connection=conn)
+    requested = {membership.tenant_id, omitted.id}
+    claim = claim_verification(user.id, conn.id, requested)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    assert (
+        publish_verification(claim, VerificationResult.complete({membership.tenant_id}))
+        == PublicationStatus.PUBLISHED
+    )
+
+    omitted_membership.refresh_from_db()
+    assert omitted_membership.archived_at is not None
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt.tenant_ids == frozenset({str(membership.tenant_id)})
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {membership.tenant_id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {omitted.id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, requested
+    )
+
+
+@pytest.mark.django_db
+def test_tenant_denied_receipt_covers_only_the_denied_tenant(user, verification_connection):
+    """A denial is about one tenant and must not be reused for the others.
+
+    Recording the requested set here would let a consumer treat a sibling tenant as
+    denied on the strength of a denial that never named it.
+    """
+    conn, membership = verification_connection
+    sibling = Tenant.objects.create(
+        provider=conn.provider, external_id="denied-sibling", canonical_name="Sibling"
+    )
+    TenantMembership.objects.create(user=user, tenant=sibling, connection=conn)
+    requested = {membership.tenant_id, sibling.id}
+    claim = claim_verification(user.id, conn.id, requested)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    assert (
+        publish_verification(
+            claim,
+            VerificationResult.tenant_denied(membership.tenant_id, ErrorCode.AUTH_ACCESS_DENIED),
+        )
+        == PublicationStatus.PUBLISHED
+    )
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt.outcome == VerificationOutcome.TENANT_DENIED
+    assert receipt.tenant_ids == frozenset({str(membership.tenant_id)})
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {membership.tenant_id}
+    )
+    assert not access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, claim.observation, {sibling.id}
+    )

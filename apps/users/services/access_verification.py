@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -9,10 +12,12 @@ from enum import StrEnum
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from cryptography.fernet import InvalidToken
-from django.db import transaction
+from django.db import OperationalError, transaction
+from django.db import connection as django_connection
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.common.db_deadline import preserve_transaction_timeouts
 from apps.common.error_codes import ErrorCode
 from apps.users.adapters import decrypt_credential
 from apps.users.models import (
@@ -34,6 +39,7 @@ from apps.users.services.upstream_denial import record_validated_upstream_denial
 
 PROOF_MAX_AGE = timedelta(minutes=5)
 LEASE_DURATION = timedelta(seconds=30)
+CLEANUP_TIMEOUT_SECONDS = 0.05
 
 
 class ClaimStatus(StrEnum):
@@ -41,15 +47,48 @@ class ClaimStatus(StrEnum):
     CLAIMED = "claimed"
     IN_PROGRESS = "in_progress"
     DENIED = "denied"
+    DEADLINE = "deadline"
 
 
 class PublicationStatus(StrEnum):
     PUBLISHED = "published"
     REJECTED = "rejected"
+    TIMED_OUT = "timed_out"
 
 
 class CredentialSnapshotError(ValueError):
     pass
+
+
+class VerificationDeadlineExceeded(TimeoutError):
+    pass
+
+
+@dataclass(frozen=True)
+class VerificationAttemptReceipt:
+    """A finished attempt, scoped to the tenants its outcome is authoritative for.
+
+    The lease is per connection, so two concurrent requests for *different* tenant
+    sets share one lease and observe the same observation hash. ``tenant_ids`` is what
+    keeps the two apart: a COMPLETE publication records the tenants it confirmed live
+    (so a tenant it archived as omitted is excluded), TENANT_DENIED records the denied
+    tenant, and credential-level outcomes record the tenants the attempt requested.
+
+    Match with :func:`attempt_receipt_matches`, which requires the caller's tenants to
+    fall inside this scope; do not read the outcome without that check.
+    """
+
+    lease_token: uuid.UUID
+    outcome: VerificationOutcome
+    error_code: str
+    observation_hash: str
+    tenant_ids: frozenset = frozenset()
+
+
+@dataclass(frozen=True)
+class PublicationReceipt:
+    status: PublicationStatus
+    accepted_tenant_ids: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -60,9 +99,10 @@ class VerificationClaim:
     request: CredentialRequestSnapshot | None = None
     lease_token: uuid.UUID | None = None
     lease_expires_at: timezone.datetime | None = None
+    completed_attempt: VerificationAttemptReceipt | None = None
 
 
-def _snapshot(connection, token=None) -> CredentialRequestSnapshot:
+def snapshot_credential(connection, token=None) -> CredentialRequestSnapshot:
     if connection.credential_type == TenantConnection.API_KEY:
         try:
             secret = decrypt_credential(connection.encrypted_credential)
@@ -95,11 +135,21 @@ def _snapshot(connection, token=None) -> CredentialRequestSnapshot:
     return CredentialRequestSnapshot(observation, secret, token_snapshot)
 
 
-def _locked_snapshot(actor_user_id, connection_id):
+def _locked_snapshot(
+    actor_user_id,
+    connection_id,
+    *,
+    deadline=None,
+    clock=time.monotonic,
+    cancelled: threading.Event | None = None,
+):
+    _configure_transaction_deadline(deadline, clock, cancelled)
     User.objects.select_for_update().get(pk=actor_user_id)
+    _configure_transaction_deadline(deadline, clock, cancelled)
     initial = TenantConnection.objects.get(pk=connection_id, user_id=actor_user_id)
     token = None
     if initial.credential_type == TenantConnection.OAUTH:
+        _configure_transaction_deadline(deadline, clock, cancelled)
         token = (
             SocialToken.objects.select_for_update(of=("self",))
             .select_related("account")
@@ -111,6 +161,7 @@ def _locked_snapshot(actor_user_id, connection_id):
         )
         if token is None:
             raise ValueError("OAuth connection has no current token")
+    _configure_transaction_deadline(deadline, clock, cancelled)
     current = TenantConnection.objects.select_for_update().get(
         pk=connection_id, user_id=actor_user_id
     )
@@ -124,7 +175,7 @@ def _locked_snapshot(actor_user_id, connection_id):
             or (canonical_provider(current.provider) == "ocs" and not observed_scope)
         ):
             raise ValueError("OAuth identity changed")
-    return current, _snapshot(current, token)
+    return current, snapshot_credential(current, token)
 
 
 def proof_is_fresh(proof, observation, *, now=None) -> bool:
@@ -139,11 +190,117 @@ def proof_is_fresh(proof, observation, *, now=None) -> bool:
     )
 
 
-def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
+def _observation_hash(observation: CredentialObservation) -> str:
+    value = json.dumps(
+        [
+            str(observation.connection_id),
+            observation.user_id,
+            observation.provider,
+            observation.credential_type,
+            observation.credential_fingerprint,
+            observation.account_identity,
+            observation.scope_key,
+            observation.upstream_denied_at.isoformat() if observation.upstream_denied_at else None,
+        ],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _tenant_scope(tenant_ids) -> frozenset:
+    """Normalise tenant ids to strings so stored JSON and in-memory UUIDs compare."""
+    return frozenset(str(tenant_id) for tenant_id in tenant_ids or ())
+
+
+def _completed_attempt(control) -> VerificationAttemptReceipt | None:
+    if not control.last_attempt_lease_token or not control.last_attempt_outcome:
+        return None
+    try:
+        outcome = VerificationOutcome(control.last_attempt_outcome)
+    except ValueError:
+        return None
+    return VerificationAttemptReceipt(
+        lease_token=control.last_attempt_lease_token,
+        outcome=outcome,
+        error_code=control.last_attempt_error_code,
+        observation_hash=control.last_attempt_observation_hash,
+        tenant_ids=_tenant_scope(control.last_attempt_tenant_ids),
+    )
+
+
+def attempt_receipt_matches(receipt, lease_token, observation, requested_tenant_ids) -> bool:
+    """Whether a receipt's outcome may be reused for exactly these tenants.
+
+    Requires the same lease and credential observation *and* that every requested
+    tenant falls inside the attempt's recorded scope. Without the scope check a waiter
+    holding the winner's lease would match a receipt from an attempt that never
+    covered its tenants — and a COMPLETE outcome would then read as success for a
+    tenant that same publication archived as omitted.
+
+    Receipts written before the scope was recorded carry an empty scope and so match
+    nothing, which fails closed.
+    """
+    requested = _tenant_scope(requested_tenant_ids)
+    return bool(
+        receipt
+        and lease_token
+        and observation
+        and requested
+        and receipt.lease_token == lease_token
+        and receipt.observation_hash == _observation_hash(observation)
+        and requested <= receipt.tenant_ids
+    )
+
+
+def _deadline_expired(deadline, clock) -> bool:
+    return deadline is not None and clock() >= deadline
+
+
+def _ensure_before_deadline(deadline, clock, cancelled=None) -> None:
+    if (cancelled is not None and cancelled.is_set()) or _deadline_expired(deadline, clock):
+        raise VerificationDeadlineExceeded
+
+
+def _configure_transaction_deadline(deadline, clock, cancelled=None) -> None:
+    _ensure_before_deadline(deadline, clock, cancelled)
+    if deadline is None:
+        return
+    remaining = deadline - clock()
+    if django_connection.vendor == "postgresql":
+        milliseconds = max(1, int(remaining * 1000))
+        with django_connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('lock_timeout', %s, true)", [f"{milliseconds}ms"])
+            cursor.execute(
+                "SELECT set_config('statement_timeout', %s, true)", [f"{milliseconds}ms"]
+            )
+
+
+def _is_lock_timeout(error: OperationalError) -> bool:
+    return getattr(error.__cause__, "sqlstate", None) in {"55P03", "57014"}
+
+
+def _claim_verification(
+    actor_user_id,
+    connection_id,
+    tenant_ids,
+    *,
+    now=None,
+    deadline=None,
+    clock=time.monotonic,
+    cancelled=None,
+):
     requested = frozenset(tenant_ids)
-    with transaction.atomic():
+    if not requested:
+        return VerificationClaim(ClaimStatus.DENIED, requested)
+    with transaction.atomic(), preserve_transaction_timeouts():
         try:
-            current, request = _locked_snapshot(actor_user_id, connection_id)
+            current, request = _locked_snapshot(
+                actor_user_id,
+                connection_id,
+                deadline=deadline,
+                clock=clock,
+                cancelled=cancelled,
+            )
         except (
             User.DoesNotExist,
             TenantConnection.DoesNotExist,
@@ -151,15 +308,35 @@ def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
             ValueError,
         ):
             return VerificationClaim(ClaimStatus.DENIED, requested)
-        history = list(
+        _configure_transaction_deadline(deadline, clock, cancelled)
+        history_rows = list(
             TenantMembership.all_objects.filter(
                 user_id=actor_user_id, connection=current, tenant_id__in=requested
-            ).values_list("tenant_id", "archived_at")
+            ).values_list(
+                "tenant_id",
+                "archived_at",
+                "tenant__provider",
+                "provider_metadata",
+            )
         )
+        connection_provider = canonical_provider(current.provider)
+        scoped_ocs_oauth = (
+            connection_provider == "ocs" and current.credential_type == TenantConnection.OAUTH
+        )
+        history = [
+            (tenant_id, archived_at)
+            for tenant_id, archived_at, tenant_provider, metadata in history_rows
+            if canonical_provider(tenant_provider) == connection_provider
+            and (
+                not scoped_ocs_oauth
+                or (metadata or {}).get("team_slug") in (None, "", current.scope_key)
+            )
+        ]
         owned = {tenant_id for tenant_id, _archived_at in history}
         if owned != requested:
             return VerificationClaim(ClaimStatus.DENIED, requested)
         all_memberships_live = all(archived_at is None for _tenant_id, archived_at in history)
+        _configure_transaction_deadline(deadline, clock, cancelled)
         proofs = {
             proof.tenant_id: proof
             for proof in UpstreamAccessProof.objects.filter(
@@ -176,24 +353,36 @@ def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
                 for tenant_id in requested
             )
         ):
+            _ensure_before_deadline(deadline, clock, cancelled)
             return VerificationClaim(
                 ClaimStatus.FRESH, requested, observation=request.observation, request=request
             )
+        _configure_transaction_deadline(deadline, clock, cancelled)
         control, _ = VerificationControl.objects.select_for_update().get_or_create(
             connection=current
         )
+        _ensure_before_deadline(deadline, clock, cancelled)
         lease_now = now or timezone.now()
         if (
             control.lease_token
             and control.lease_expires_at
             and lease_now < control.lease_expires_at
         ):
-            return VerificationClaim(ClaimStatus.IN_PROGRESS, requested)
+            return VerificationClaim(
+                ClaimStatus.IN_PROGRESS,
+                requested,
+                observation=request.observation,
+                lease_token=control.lease_token,
+                lease_expires_at=control.lease_expires_at,
+                completed_attempt=_completed_attempt(control),
+            )
         lease_token = uuid.uuid4()
         expires_at = lease_now + LEASE_DURATION
         control.lease_token = lease_token
         control.lease_expires_at = expires_at
+        _configure_transaction_deadline(deadline, clock, cancelled)
         control.save(update_fields=["lease_token", "lease_expires_at"])
+        _ensure_before_deadline(deadline, clock, cancelled)
         return VerificationClaim(
             ClaimStatus.CLAIMED,
             requested,
@@ -201,17 +390,178 @@ def claim_verification(actor_user_id, connection_id, tenant_ids, *, now=None):
             request=request,
             lease_token=lease_token,
             lease_expires_at=expires_at,
+            completed_attempt=_completed_attempt(control),
         )
 
 
-def publish_verification(claim, result: VerificationResult, *, now=None):
-    if claim.status != ClaimStatus.CLAIMED or claim.observation is None:
-        return PublicationStatus.REJECTED
-    with transaction.atomic():
+def claim_verification(
+    actor_user_id,
+    connection_id,
+    tenant_ids,
+    *,
+    now=None,
+    deadline=None,
+    clock=time.monotonic,
+    cancelled=None,
+):
+    requested = frozenset(tenant_ids)
+    try:
+        return _claim_verification(
+            actor_user_id,
+            connection_id,
+            requested,
+            now=now,
+            deadline=deadline,
+            clock=clock,
+            cancelled=cancelled,
+        )
+    except VerificationDeadlineExceeded:
+        return VerificationClaim(ClaimStatus.DEADLINE, requested)
+    except OperationalError as exc:
+        if deadline is not None and _is_lock_timeout(exc):
+            return VerificationClaim(ClaimStatus.DEADLINE, requested)
+        raise
+
+
+def release_verification(claim) -> bool:
+    # A waiter observes the winner's lease token, so the token alone does not prove
+    # ownership; only the CLAIMED winner may clear the lease.
+    if (
+        claim.status != ClaimStatus.CLAIMED
+        or claim.observation is None
+        or claim.lease_token is None
+    ):
+        return False
+    try:
+        with transaction.atomic(), preserve_transaction_timeouts():
+            if django_connection.vendor == "postgresql":
+                milliseconds = max(1, int(CLEANUP_TIMEOUT_SECONDS * 1000))
+                with django_connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, true)", [f"{milliseconds}ms"]
+                    )
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        [f"{milliseconds}ms"],
+                    )
+            return bool(
+                VerificationControl.objects.filter(
+                    connection_id=claim.observation.connection_id,
+                    lease_token=claim.lease_token,
+                ).update(lease_token=None, lease_expires_at=None)
+            )
+    except OperationalError as exc:
+        if _is_lock_timeout(exc):
+            return False
+        raise
+
+
+def _same_identity_except_credential(before, after) -> bool:
+    return (
+        before.connection_id == after.connection_id
+        and before.user_id == after.user_id
+        and before.provider == after.provider
+        and before.credential_type == after.credential_type
+        and before.account_identity == after.account_identity
+        and before.scope_key == after.scope_key
+        and before.upstream_denied_at == after.upstream_denied_at
+    )
+
+
+def _rebase_verification_claim(
+    claim, persisted_token, *, now=None, deadline=None, clock=time.monotonic
+):
+    """Move one live OAuth lease onto the exact token persisted after refresh."""
+    if (
+        claim.status != ClaimStatus.CLAIMED
+        or claim.observation is None
+        or claim.request is None
+        or claim.lease_token is None
+        or claim.request.token_snapshot is None
+    ):
+        return None
+    with transaction.atomic(), preserve_transaction_timeouts():
         try:
             current, request = _locked_snapshot(
-                claim.observation.user_id, claim.observation.connection_id
+                claim.observation.user_id,
+                claim.observation.connection_id,
+                deadline=deadline,
+                clock=clock,
             )
+            _configure_transaction_deadline(deadline, clock)
+            control = VerificationControl.objects.select_for_update().get(connection=current)
+        except (
+            User.DoesNotExist,
+            TenantConnection.DoesNotExist,
+            SocialToken.DoesNotExist,
+            VerificationControl.DoesNotExist,
+            ValueError,
+        ):
+            return None
+        _ensure_before_deadline(deadline, clock)
+        decision_now = now or timezone.now()
+        expected_token_snapshot = (
+            persisted_token.token_id,
+            persisted_token.refresh_token,
+            persisted_token.app_id,
+        )
+        if (
+            control.lease_token != claim.lease_token
+            or not control.lease_expires_at
+            or decision_now >= control.lease_expires_at
+            or not _same_identity_except_credential(claim.observation, request.observation)
+            or request.credential != persisted_token.access_token
+            or request.token_snapshot != expected_token_snapshot
+            or request.observation.account_identity != str(persisted_token.account_id)
+        ):
+            return None
+        return VerificationClaim(
+            ClaimStatus.CLAIMED,
+            claim.requested_tenant_ids,
+            observation=request.observation,
+            request=request,
+            lease_token=claim.lease_token,
+            lease_expires_at=control.lease_expires_at,
+        )
+
+
+def rebase_verification_claim(
+    claim, persisted_token, *, now=None, deadline=None, clock=time.monotonic
+):
+    try:
+        return _rebase_verification_claim(
+            claim,
+            persisted_token,
+            now=now,
+            deadline=deadline,
+            clock=clock,
+        )
+    except OperationalError as exc:
+        if deadline is not None and _is_lock_timeout(exc):
+            raise VerificationDeadlineExceeded from exc
+        raise
+
+
+def _publish_verification_receipt(
+    claim,
+    result: VerificationResult,
+    *,
+    now=None,
+    verified_at=None,
+    deadline=None,
+    clock=time.monotonic,
+):
+    if claim.status != ClaimStatus.CLAIMED or claim.observation is None:
+        return PublicationReceipt(PublicationStatus.REJECTED)
+    with transaction.atomic(), preserve_transaction_timeouts():
+        try:
+            current, request = _locked_snapshot(
+                claim.observation.user_id,
+                claim.observation.connection_id,
+                deadline=deadline,
+                clock=clock,
+            )
+            _configure_transaction_deadline(deadline, clock)
             control = VerificationControl.objects.select_for_update().get(connection=current)
         except (
             User.DoesNotExist,
@@ -226,10 +576,12 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                 connection_id=claim.observation.connection_id,
                 lease_token=claim.lease_token,
             ).update(lease_token=None, lease_expires_at=None)
-            return PublicationStatus.REJECTED
+            return PublicationReceipt(PublicationStatus.REJECTED)
+        _ensure_before_deadline(deadline, clock)
         if control.lease_token != claim.lease_token:
-            return PublicationStatus.REJECTED
+            return PublicationReceipt(PublicationStatus.REJECTED)
         decision_now = now or timezone.now()
+        proof_verified_at = min(verified_at or decision_now, decision_now)
         if (
             not control.lease_expires_at
             or decision_now >= control.lease_expires_at
@@ -238,7 +590,7 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
             control.lease_token = None
             control.lease_expires_at = None
             control.save(update_fields=["lease_token", "lease_expires_at"])
-            return PublicationStatus.REJECTED
+            return PublicationReceipt(PublicationStatus.REJECTED)
         if (
             result.outcome == VerificationOutcome.TENANT_DENIED
             and result.denied_tenant_id not in claim.requested_tenant_ids
@@ -246,7 +598,7 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
             control.lease_token = None
             control.lease_expires_at = None
             control.save(update_fields=["lease_token", "lease_expires_at"])
-            return PublicationStatus.REJECTED
+            return PublicationReceipt(PublicationStatus.REJECTED)
         expected_denial_code = {
             VerificationOutcome.TENANT_DENIED: ErrorCode.AUTH_ACCESS_DENIED,
             VerificationOutcome.CREDENTIAL_REJECTED: ErrorCode.AUTH_TOKEN_EXPIRED,
@@ -255,19 +607,33 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
             control.lease_token = None
             control.lease_expires_at = None
             control.save(update_fields=["lease_token", "lease_expires_at"])
-            return PublicationStatus.REJECTED
+            return PublicationReceipt(PublicationStatus.REJECTED)
+        accepted_tenant_ids = frozenset()
         if result.outcome == VerificationOutcome.COMPLETE:
             if current.upstream_denial_code:
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
+            connection_provider = canonical_provider(current.provider)
+            # Claims match on the canonical provider, so publication must too or an
+            # alias tenant stays claimable while never being published or archived.
+            # Canonicalize in Python: a provider__startswith filter would sweep
+            # commcare_connect into commcare.
+            _configure_transaction_deadline(deadline, clock)
+            canonical_tenant_ids = [
+                tenant_id
+                for tenant_id, tenant_provider in TenantMembership.all_objects.filter(
+                    user_id=current.user_id,
+                    connection=current,
+                ).values_list("tenant_id", "tenant__provider")
+                if canonical_provider(tenant_provider) == connection_provider
+            ]
             owned_history = TenantMembership.all_objects.filter(
                 user_id=current.user_id,
                 connection=current,
-                tenant__provider=current.provider,
+                tenant_id__in=canonical_tenant_ids,
             )
             scoped_ocs_oauth = (
-                canonical_provider(current.provider) == "ocs"
-                and current.credential_type == TenantConnection.OAUTH
+                connection_provider == "ocs" and current.credential_type == TenantConnection.OAUTH
             )
             returned_memberships = owned_history.filter(tenant_id__in=result.tenant_ids)
             if scoped_ocs_oauth:
@@ -283,29 +649,40 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                         **(membership.provider_metadata or {}),
                         "team_slug": current.scope_key,
                     }
+                    # Per-tenant write: recompute so N tenants cannot each wait the
+                    # full remaining budget.
+                    _configure_transaction_deadline(deadline, clock)
                     membership.save(update_fields=["archived_at", "provider_metadata"])
                 omission_scope = owned_history.filter(
                     provider_metadata__team_slug=current.scope_key
                 )
             else:
+                _configure_transaction_deadline(deadline, clock)
                 returned_memberships.update(archived_at=None)
                 returned = list(returned_memberships)
                 omission_scope = owned_history
+            _configure_transaction_deadline(deadline, clock)
             omitted_ids = list(
                 omission_scope.exclude(tenant_id__in=result.tenant_ids).values_list(
                     "tenant_id", flat=True
                 )
             )
+            _configure_transaction_deadline(deadline, clock)
             omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
                 archived_at=decision_now
             )
             # Legacy discovery can restore a tombstone without our lease; it must
             # not revive an older positive proof after authoritative omission.
+            _configure_transaction_deadline(deadline, clock)
             UpstreamAccessProof.objects.filter(
                 connection=current, tenant_id__in=omitted_ids
             ).update(verified_at=None)
             live_ids = {membership.tenant_id for membership in returned}
+            accepted_tenant_ids = frozenset(live_ids)
             for tenant_id in live_ids:
+                # Per-tenant write: recompute so N tenants cannot each wait the full
+                # remaining budget.
+                _configure_transaction_deadline(deadline, clock)
                 UpstreamAccessProof.objects.update_or_create(
                     connection=current,
                     tenant_id=tenant_id,
@@ -314,7 +691,7 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                         "account_identity": request.observation.account_identity,
                         "scope_key": request.observation.scope_key,
                         "observed_denied_at": request.observation.upstream_denied_at,
-                        "verified_at": decision_now,
+                        "verified_at": proof_verified_at,
                         "last_attempt_result": result.outcome.value,
                         "last_error_code": result.error_code,
                     },
@@ -353,7 +730,7 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                 control.lease_token = None
                 control.lease_expires_at = None
                 control.save(update_fields=["lease_token", "lease_expires_at"])
-                return PublicationStatus.REJECTED
+                return PublicationReceipt(PublicationStatus.REJECTED)
             UpstreamAccessProof.objects.filter(
                 connection=current, tenant_id=result.denied_tenant_id
             ).update(
@@ -368,16 +745,90 @@ def publish_verification(claim, result: VerificationResult, *, now=None):
                 control.lease_token = None
                 control.lease_expires_at = None
                 control.save(update_fields=["lease_token", "lease_expires_at"])
-                return PublicationStatus.REJECTED
+                return PublicationReceipt(PublicationStatus.REJECTED)
             UpstreamAccessProof.objects.filter(connection=current).update(
                 last_attempt_result=result.outcome.value,
                 last_error_code=result.error_code,
             )
+        _ensure_before_deadline(deadline, clock)
+        if result.outcome == VerificationOutcome.COMPLETE:
+            # Only the tenants confirmed live: one archived as omitted must not be
+            # reusable as a success.
+            receipt_tenant_ids = accepted_tenant_ids
+        elif result.outcome == VerificationOutcome.TENANT_DENIED:
+            receipt_tenant_ids = frozenset({result.denied_tenant_id})
+        else:
+            # Credential-level outcome: authoritative for everything this attempt asked
+            # about, and for nothing it did not.
+            receipt_tenant_ids = claim.requested_tenant_ids
+        control.last_attempt_lease_token = claim.lease_token
+        control.last_attempt_outcome = result.outcome.value
+        control.last_attempt_error_code = result.error_code
+        control.last_attempt_observation_hash = _observation_hash(claim.observation)
+        control.last_attempt_tenant_ids = sorted(_tenant_scope(receipt_tenant_ids))
         control.lease_token = None
         control.lease_expires_at = None
-        control.save(update_fields=["lease_token", "lease_expires_at"])
-        return PublicationStatus.PUBLISHED
+        control.save(
+            update_fields=[
+                "last_attempt_lease_token",
+                "last_attempt_outcome",
+                "last_attempt_error_code",
+                "last_attempt_observation_hash",
+                "last_attempt_tenant_ids",
+                "lease_token",
+                "lease_expires_at",
+            ]
+        )
+        return PublicationReceipt(PublicationStatus.PUBLISHED, accepted_tenant_ids)
+
+
+def publish_verification_receipt(
+    claim,
+    result: VerificationResult,
+    *,
+    now=None,
+    verified_at=None,
+    deadline=None,
+    clock=time.monotonic,
+):
+    try:
+        return _publish_verification_receipt(
+            claim,
+            result,
+            now=now,
+            verified_at=verified_at,
+            deadline=deadline,
+            clock=clock,
+        )
+    except VerificationDeadlineExceeded:
+        return PublicationReceipt(PublicationStatus.TIMED_OUT)
+    except OperationalError as exc:
+        if deadline is not None and _is_lock_timeout(exc):
+            return PublicationReceipt(PublicationStatus.TIMED_OUT)
+        raise
+
+
+def publish_verification(
+    claim,
+    result: VerificationResult,
+    *,
+    now=None,
+    verified_at=None,
+    deadline=None,
+    clock=time.monotonic,
+):
+    return publish_verification_receipt(
+        claim,
+        result,
+        now=now,
+        verified_at=verified_at,
+        deadline=deadline,
+        clock=clock,
+    ).status
 
 
 aclaim_verification = sync_to_async(claim_verification)
 apublish_verification = sync_to_async(publish_verification)
+apublish_verification_receipt = sync_to_async(publish_verification_receipt)
+arebase_verification_claim = sync_to_async(rebase_verification_claim)
+arelease_verification = sync_to_async(release_verification)

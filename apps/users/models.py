@@ -249,6 +249,21 @@ class VerificationControl(models.Model):
     )
     lease_token = models.UUIDField(null=True, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_lease_token = models.UUIDField(null=True, blank=True)
+    last_attempt_outcome = models.CharField(max_length=40, blank=True, default="", db_default="")
+    last_attempt_error_code = models.CharField(max_length=80, blank=True, default="", db_default="")
+    last_attempt_observation_hash = models.CharField(
+        max_length=64, blank=True, default="", db_default=""
+    )
+    last_attempt_tenant_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Tenant ids the last attempt's outcome is authoritative for, as strings. "
+            "The lease is per connection, so this is what stops a waiter reusing a "
+            "receipt from an attempt that never covered its tenants."
+        ),
+    )
 
     def __str__(self):
         return f"VerificationControl({self.connection_id})"
