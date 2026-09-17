@@ -185,20 +185,25 @@ class _ValidatedRefresh:
 #: is an enum, not a secret, so it is safe to log even though the body is not -- and it
 #: is the only thing separating our own misconfiguration (invalid_client) from a routine
 #: dead grant (invalid_grant). Anything unrecognised is withheld rather than echoed.
-_OAUTH_ERROR_CODES = frozenset(
-    {
-        "invalid_request",
-        "invalid_client",
-        "invalid_grant",
-        "unauthorized_client",
-        "unsupported_grant_type",
-        "invalid_scope",
-    }
+_OAUTH_ERROR_CODES = (
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
 )
 
 
 def _oauth_error_code(response) -> str:
-    """The provider's OAuth error code, or "unrecognised" if it is not a known one."""
+    """The provider's OAuth error code, or a fixed placeholder if it is not a known one.
+
+    Returns one of our own literals rather than the parsed value, so the string handed
+    to a logger provably cannot carry provider text -- the response body also holds the
+    client secret and refresh token. A membership test would read the same but would
+    still return the parsed object, leaving the guarantee to the check rather than to
+    construction.
+    """
     if response is None:
         return "none"
     try:
@@ -207,8 +212,11 @@ def _oauth_error_code(response) -> str:
         return "unparseable"
     if not isinstance(data, dict):
         return "unparseable"
-    code = data.get("error")
-    return code if code in _OAUTH_ERROR_CODES else "unrecognised"
+    reported = data.get("error")
+    for known in _OAUTH_ERROR_CODES:
+        if reported == known:
+            return known
+    return "unrecognised"
 
 
 def _is_invalid_grant(response) -> bool:
