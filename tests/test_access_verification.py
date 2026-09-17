@@ -31,7 +31,10 @@ from apps.users.services.access_verification import (
     release_verification,
     snapshot_credential,
 )
-from apps.users.services.access_verification_types import VerificationResult
+from apps.users.services.access_verification_types import (
+    VerificationOutcome,
+    VerificationResult,
+)
 from apps.users.services.token_refresh import PersistedTokenSnapshot
 
 
@@ -1036,3 +1039,98 @@ def test_verification_restores_timeouts_inside_outer_transaction(user, operation
                 "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')"
             )
             assert cursor.fetchone() == ("3s", "4s")
+
+
+def _publish_and_count_recomputes(user, tenant_count, monkeypatch, label):
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential(f"secret-{label}"),
+    )
+    tenant_ids = set()
+    for index in range(tenant_count):
+        extra = Tenant.objects.create(
+            provider="commcare",
+            external_id=f"{label}-{index}",
+            canonical_name=f"{label} {index}",
+        )
+        TenantMembership.objects.create(user=user, tenant=extra, connection=conn)
+        tenant_ids.add(extra.id)
+    claim = claim_verification(user.id, conn.id, tenant_ids)
+    assert claim.status == ClaimStatus.CLAIMED
+
+    original = access_verification._configure_transaction_deadline
+    recomputes = []
+
+    def counting_configure(deadline, clock, cancelled=None):
+        recomputes.append(1)
+        return original(deadline, clock, cancelled)
+
+    monkeypatch.setattr(access_verification, "_configure_transaction_deadline", counting_configure)
+    try:
+        status = publish_verification(
+            claim, VerificationResult.complete(tenant_ids), deadline=time.monotonic() + 30
+        )
+    finally:
+        monkeypatch.setattr(access_verification, "_configure_transaction_deadline", original)
+    assert status == PublicationStatus.PUBLISHED
+    assert UpstreamAccessProof.objects.filter(connection=conn).count() == tenant_count
+    return len(recomputes)
+
+
+@pytest.mark.django_db
+def test_publish_recomputes_deadline_per_tenant_write(user, monkeypatch):
+    one = _publish_and_count_recomputes(user, 1, monkeypatch, "single")
+    many = _publish_and_count_recomputes(user, 7, monkeypatch, "bulk")
+
+    # lock_timeout/statement_timeout are per statement, so a budget set once cannot
+    # bound a loop over N tenants: each write may wait the full remaining budget and
+    # total wall time grows with N while the wrapper still advertises a bounded wait.
+    # Comparing two sizes isolates per-tenant scaling from the constant overhead, so
+    # this fails if the per-write recomputes are dropped.
+    assert many - one >= 6
+
+
+@pytest.mark.django_db(transaction=True)
+def test_attempt_receipt_is_connection_scoped_not_tenant_scoped(user, tenant):
+    """Pins the documented limitation: a receipt says nothing about a tenant.
+
+    A waiter for a different tenant matches the winner's receipt, so a consumer that
+    reads COMPLETE as per-tenant success would report success for a tenant the same
+    publication archived. If a future change makes the receipt tenant-scoped, this
+    test should be replaced by one asserting the waiter does NOT match.
+    """
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider=tenant.provider,
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("secret-scope"),
+    )
+    TenantMembership.objects.create(user=user, tenant=tenant, connection=conn)
+    other = Tenant.objects.create(
+        provider=tenant.provider, external_id="receipt-other", canonical_name="Other"
+    )
+    other_membership = TenantMembership.objects.create(user=user, tenant=other, connection=conn)
+
+    winner = claim_verification(user.id, conn.id, {tenant.id})
+    assert winner.status == ClaimStatus.CLAIMED
+    assert publish_verification(winner, VerificationResult.complete({tenant.id})) == (
+        PublicationStatus.PUBLISHED
+    )
+
+    other_membership.refresh_from_db()
+    assert other_membership.archived_at is not None
+
+    control = VerificationControl.objects.get(connection=conn)
+    receipt = access_verification._completed_attempt(control)
+    assert receipt is not None
+    assert receipt.outcome == VerificationOutcome.COMPLETE
+    # The receipt matches even though the attempt archived `other` rather than
+    # verifying it, which is exactly why it must not be read per tenant.
+    assert access_verification.attempt_receipt_matches(
+        receipt, control.last_attempt_lease_token, winner.observation
+    )
+    assert not UpstreamAccessProof.objects.filter(
+        connection=conn, tenant=other, verified_at__isnull=False
+    ).exists()
