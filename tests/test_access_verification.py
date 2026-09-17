@@ -1,6 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import timedelta
 from uuid import uuid4
 
@@ -35,7 +36,24 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
-from apps.users.services.token_refresh import PersistedTokenSnapshot
+
+
+@dataclass(frozen=True)
+class _PersistedToken:
+    """The credential fields rebase_verification_claim reads off a persisted snapshot.
+
+    Mirrors PersistedTokenSnapshot, which lives in token_refresh and lands with the
+    OAuth refresh-fencing work. Declared here so this module does not depend on that
+    PR: rebase_verification_claim takes the snapshot untyped and reads only these
+    fields, so the contract this exercises is entirely owned by access_verification.
+    """
+
+    token_id: int
+    account_id: int
+    app_id: int
+    access_token: str
+    refresh_token: str
+    expires_at: object = None
 
 
 @pytest.fixture
@@ -251,7 +269,7 @@ def test_rebase_user_lock_wait_stops_at_deadline(user):
     conn, _membership = _ocs_connection(user, tenant)
     claim = claim_verification(user.id, conn.id, {tenant.id})
     token = SocialToken.objects.get(account_id=conn.social_account_id)
-    persisted = PersistedTokenSnapshot(
+    persisted = _PersistedToken(
         token_id=token.id,
         account_id=token.account_id,
         app_id=token.app_id,
@@ -999,7 +1017,7 @@ def test_verification_restores_timeouts_inside_outer_transaction(user, operation
     conn, _membership = _ocs_connection(user, tenant)
     claim = claim_verification(user.id, conn.id, {tenant.id}) if operation != "claim" else None
     token = SocialToken.objects.get(account_id=conn.social_account_id)
-    persisted = PersistedTokenSnapshot(
+    persisted = _PersistedToken(
         token_id=token.id,
         account_id=token.account_id,
         app_id=token.app_id,
