@@ -9,6 +9,7 @@ not pay another TLS handshake.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,6 +22,11 @@ def _clear_pools():
     pool_mod._pools.clear()
     yield
     pool_mod._pools.clear()
+
+
+def _fake_pool():
+    """A mock that looks live: the cache now drops pools that report themselves closed."""
+    return MagicMock(open=AsyncMock(), close=AsyncMock(), closed=False)
 
 
 def _base_params(schema):
@@ -40,8 +46,7 @@ def _base_params(schema):
 async def test_get_pool_reuses_pool_for_same_base_db():
     """Two contexts on different schemas of the same managed DB share one pool —
     proving connections are reused, not reopened per schema."""
-    fake_pool = MagicMock()
-    fake_pool.open = AsyncMock()
+    fake_pool = _fake_pool()
 
     with patch.object(pool_mod, "AsyncConnectionPool", return_value=fake_pool) as PoolCls:
         p1 = await pool_mod.get_pool(_base_params("t_alpha"))
@@ -56,8 +61,8 @@ async def test_get_pool_reuses_pool_for_same_base_db():
 @pytest.mark.asyncio
 async def test_get_pool_separate_pools_for_different_dbs():
     """Different managed databases get distinct pools."""
-    fake_a = MagicMock(open=AsyncMock())
-    fake_b = MagicMock(open=AsyncMock())
+    fake_a = _fake_pool()
+    fake_b = _fake_pool()
 
     with patch.object(pool_mod, "AsyncConnectionPool", side_effect=[fake_a, fake_b]) as PoolCls:
         a = _base_params("t_a")
@@ -74,7 +79,7 @@ async def test_get_pool_separate_pools_for_different_dbs():
 async def test_base_conninfo_excludes_per_schema_options():
     """The conninfo passed to the pool carries the base DB identity but not the
     per-schema search_path options."""
-    fake_pool = MagicMock(open=AsyncMock())
+    fake_pool = _fake_pool()
     with patch.object(pool_mod, "AsyncConnectionPool", return_value=fake_pool) as PoolCls:
         await pool_mod.get_pool(_base_params("t_x"))
 
@@ -82,3 +87,69 @@ async def test_base_conninfo_excludes_per_schema_options():
     assert "dbname='scout'" in conninfo
     assert "host='db.example.com'" in conninfo
     assert "search_path" not in conninfo
+
+
+@pytest.mark.asyncio
+async def test_failed_close_does_not_strand_the_pool_in_the_cache():
+    """A close that raises must still evict the pool.
+
+    psycopg sets ``_closed`` before it awaits its workers, so a pool whose close
+    raised is already unusable. Leaving it cached made every later ``get_pool``
+    return a dead pool and raise ``PoolClosed`` for the life of the process.
+    """
+    dying = _fake_pool()
+    dying.close = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=dying):
+        await pool_mod.get_pool(_base_params("t_alpha"))
+
+    with pytest.raises(asyncio.CancelledError):
+        await pool_mod.close_all_pools()
+
+    assert pool_mod._pools == {}
+
+    revived = _fake_pool()
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=revived) as PoolCls:
+        assert await pool_mod.get_pool(_base_params("t_alpha")) is revived
+    assert PoolCls.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_pool_replaces_a_pool_that_reports_itself_closed():
+    """A cached-but-closed pool is rebuilt rather than handed out."""
+    stale = _fake_pool()
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=stale):
+        await pool_mod.get_pool(_base_params("t_alpha"))
+
+    stale.closed = True
+
+    fresh = _fake_pool()
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=fresh) as PoolCls:
+        assert await pool_mod.get_pool(_base_params("t_alpha")) is fresh
+    assert PoolCls.call_count == 1
+    stale.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_all_pools_closes_every_pool_even_when_one_raises():
+    """One failing close must not strand the pools queued behind it.
+
+    They are already evicted, so a close that aborts early leaves them
+    unreachable and leaks their connections and worker tasks for the process.
+    """
+    bad = _fake_pool()
+    bad.close = AsyncMock(side_effect=RuntimeError("boom"))
+    good = _fake_pool()
+
+    with patch.object(pool_mod, "AsyncConnectionPool", side_effect=[bad, good]):
+        first = _base_params("t_a")
+        second = _base_params("t_b")
+        second["dbname"] = "other_db"
+        await pool_mod.get_pool(first)
+        await pool_mod.get_pool(second)
+
+    await pool_mod.close_all_pools()
+
+    bad.close.assert_awaited_once()
+    good.close.assert_awaited_once()
+    assert pool_mod._pools == {}
