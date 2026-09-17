@@ -202,31 +202,11 @@ def _is_invalid_grant(response) -> bool:
     return _reports_oauth_error(response, "invalid_grant")
 
 
-def _oauth_error_label(response) -> str:
-    """A literal naming the provider's OAuth error, for the log line.
-
-    OAuth 2 names token-endpoint failures in a fixed set (RFC 6749 5.2), and that code
-    is the only thing separating our own misconfiguration (invalid_client) from a
-    routine dead grant (invalid_grant), which otherwise both read as a bare HTTP 400.
-
-    Written as literal returns behind boolean tests rather than as a lookup, so the
-    only thing crossing from the response is a bool and no provider-controlled string
-    can reach a logger by construction -- the body also carries the client secret and
-    the refresh token. Re-parsing per comparison is irrelevant on a failure path.
-    """
-    if _reports_oauth_error(response, "invalid_grant"):
-        return "invalid_grant"
-    if _reports_oauth_error(response, "invalid_client"):
-        return "invalid_client"
-    if _reports_oauth_error(response, "unauthorized_client"):
-        return "unauthorized_client"
-    if _reports_oauth_error(response, "invalid_request"):
-        return "invalid_request"
-    if _reports_oauth_error(response, "invalid_scope"):
-        return "invalid_scope"
-    if _reports_oauth_error(response, "unsupported_grant_type"):
-        return "unsupported_grant_type"
-    return "other"
+def _is_invalid_client(response) -> bool:
+    """Our own client credentials were rejected -- a deployment fault, not a user's."""
+    if response is None or response.status_code not in (400, 401, 403):
+        return False
+    return _reports_oauth_error(response, "invalid_client")
 
 
 def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
@@ -724,16 +704,17 @@ async def refresh_oauth_token_result(
     except httpx.HTTPStatusError as e:
         # A 4xx (typically 400 invalid_grant on a dead refresh token) is an
         # expected outcome, not a bug. Keep provider response bodies out of logs.
+        rejected = _is_invalid_grant(e.response)
+        misconfigured = _is_invalid_client(e.response)
         if 400 <= e.response.status_code < 500:
             logger.warning(
                 "Token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 e.response.status_code,
-                _oauth_error_label(e.response),
+                "invalid_grant" if rejected else "invalid_client" if misconfigured else "other",
             )
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        rejected = _is_invalid_grant(e.response)
         try:
             # Deliberately not the caller's deadline: it may already be exhausted, and
             # starving the marker is how a diagnosable failure becomes a silent one.
@@ -871,16 +852,17 @@ def refresh_oauth_token_result_sync(
         # response bodies out of logs. The sync path never got this treatment,
         # so every routine dead-token refresh raised a Sentry event (#373).
         status = e.response.status_code if e.response is not None else None
+        rejected = _is_invalid_grant(e.response)
+        misconfigured = _is_invalid_client(e.response)
         if status is not None and 400 <= status < 500:
             logger.warning(
                 "Sync token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 status,
-                _oauth_error_label(e.response),
+                "invalid_grant" if rejected else "invalid_client" if misconfigured else "other",
             )
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        rejected = _is_invalid_grant(e.response)
         try:
             _record_refresh_failure(
                 preflight,
