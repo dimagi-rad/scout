@@ -110,7 +110,7 @@ class TestSyncRefreshLogLevels:
         assert body_marker not in caplog.text
 
     def test_an_unrecognised_error_code_is_withheld_rather_than_echoed(self, caplog):
-        """Only the known OAuth enum is echoed; anything else could carry provider text."""
+        """Only the known OAuth enum is named; anything else could carry provider text."""
         caplog.set_level(logging.DEBUG)
         with patch(
             "apps.users.services.token_refresh.requests.post",
@@ -121,7 +121,7 @@ class TestSyncRefreshLogLevels:
 
         assert "surprise-leaky-value" not in caplog.text
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert "unrecognised" in warnings[0].getMessage()
+        assert "other" in warnings[0].getMessage()
 
     @pytest.mark.parametrize("status", [400, 401, 403, 429])
     def test_all_4xx_are_warnings(self, caplog, status):
