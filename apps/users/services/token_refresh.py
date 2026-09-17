@@ -253,6 +253,34 @@ def _configure_transaction_deadline(deadline, clock) -> None:
 _DEADLINE_SQLSTATES = frozenset({"57014", "55P03"})
 
 
+def _phase_deadline(deadline, db_timeout, clock):
+    """The budget for one database phase.
+
+    ``db_timeout`` bounds a single database phase and is re-armed for each, because
+    the provider round trip sits between them: carrying one deadline across it let a
+    slow-but-successful provider spend the budget meant for the write, so a healthy
+    idle database "timed out" and a freshly rotated credential was discarded.
+
+    An explicit ``deadline`` is an end-to-end contract from the caller and is honoured
+    exactly as given.
+    """
+    if deadline is not None:
+        return deadline
+    if db_timeout is None:
+        return None
+    return clock() + db_timeout
+
+
+def _grant_was_spent(preflight: _TokenPreflight, refreshed: _ValidatedRefresh) -> bool:
+    """Did the provider rotate the refresh token, invalidating what we hold?
+
+    ``_validate_refresh_response`` falls back to the stored refresh token when the
+    response omits one, so an unchanged value means the provider did not rotate and
+    the stored credential is still refreshable.
+    """
+    return refreshed.refresh_token != preflight.refresh_token
+
+
 def _is_deadline_error(exc: BaseException) -> bool:
     """True when this refresh's own budget fired, rather than the database faulting.
 
@@ -598,11 +626,9 @@ async def refresh_oauth_token_result(
     Raises:
         TokenRefreshError: If the refresh request fails.
     """
-    if deadline is None and db_timeout is not None:
-        deadline = clock() + db_timeout
     try:
         preflight = await sync_to_async(_preflight_token)(
-            social_token, deadline=deadline, clock=clock
+            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         if _is_deadline_error(exc):
@@ -638,10 +664,16 @@ async def refresh_oauth_token_result(
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         rejected = _is_invalid_grant(e.response)
         try:
-            await _arecord_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+            # Deliberately not the caller's deadline: it may already be exhausted, and
+            # starving the marker is how a diagnosable failure becomes a silent one.
+            await _arecord_refresh_failure(
+                preflight,
+                fingerprint,
+                deadline=_phase_deadline(None, db_timeout, clock),
+                clock=clock,
+            )
         except TokenRefreshUnavailable:
-            if not rejected:
-                raise
+            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         if rejected:
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
         if e.response.status_code in (408, 429) or e.response.status_code >= 500:
@@ -650,7 +682,12 @@ async def refresh_oauth_token_result(
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         try:
-            await _arecord_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+            await _arecord_refresh_failure(
+                preflight,
+                fingerprint,
+                deadline=_phase_deadline(None, db_timeout, clock),
+                clock=clock,
+            )
         except TokenRefreshUnavailable:
             # Losing the marker must not erase the real cause; it is already logged.
             logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
@@ -661,15 +698,23 @@ async def refresh_oauth_token_result(
     refreshed = _validate_refresh_response(response, preflight)
     try:
         result = await _apersist_refresh_response(
-            preflight, refreshed, fingerprint, deadline=deadline, clock=clock
+            preflight,
+            refreshed,
+            fingerprint,
+            deadline=_phase_deadline(deadline, db_timeout, clock),
+            clock=clock,
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
-        if _is_deadline_error(exc):
-            logger.warning("Timed out persisting a refreshed OAuth token", exc_info=True)
+        if _is_deadline_error(exc) and _grant_was_spent(preflight, refreshed):
+            logger.warning("Timed out persisting a rotated OAuth token", exc_info=True)
             raise TokenRefreshRejected(
                 "The refreshed OAuth credential could not be stored in time; reconnect required."
             ) from exc
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
+        if _is_deadline_error(exc):
+            raise TokenRefreshDeadlineExceeded(
+                "Timed out storing refreshed OAuth credentials."
+            ) from exc
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
     if result.status is TokenRefreshStatus.SUPERSEDED:
@@ -724,10 +769,10 @@ def refresh_oauth_token_result_sync(
     running under ``asyncio.to_thread`` can renew a token mid-run (arch #252,
     finding 14#3). The rotated token must persist before any caller may use it.
     """
-    if deadline is None and db_timeout is not None:
-        deadline = clock() + db_timeout
     try:
-        preflight = _preflight_token(social_token, deadline=deadline, clock=clock)
+        preflight = _preflight_token(
+            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+        )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         if _is_deadline_error(exc):
             raise TokenRefreshDeadlineExceeded(
@@ -765,10 +810,14 @@ def refresh_oauth_token_result_sync(
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         rejected = _is_invalid_grant(e.response)
         try:
-            _record_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+            _record_refresh_failure(
+                preflight,
+                fingerprint,
+                deadline=_phase_deadline(None, db_timeout, clock),
+                clock=clock,
+            )
         except TokenRefreshUnavailable:
-            if not rejected:
-                raise
+            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         if rejected:
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
         if status is not None and (status in (408, 429) or status >= 500):
@@ -777,7 +826,12 @@ def refresh_oauth_token_result_sync(
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         try:
-            _record_refresh_failure(preflight, fingerprint, deadline=deadline, clock=clock)
+            _record_refresh_failure(
+                preflight,
+                fingerprint,
+                deadline=_phase_deadline(None, db_timeout, clock),
+                clock=clock,
+            )
         except TokenRefreshUnavailable:
             # Losing the marker must not erase the real cause; it is already logged.
             logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
@@ -788,15 +842,23 @@ def refresh_oauth_token_result_sync(
     refreshed = _validate_refresh_response(response, preflight)
     try:
         result = _persist_refresh_response(
-            preflight, refreshed, fingerprint, deadline=deadline, clock=clock
+            preflight,
+            refreshed,
+            fingerprint,
+            deadline=_phase_deadline(deadline, db_timeout, clock),
+            clock=clock,
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
-        if _is_deadline_error(exc):
-            logger.warning("Timed out persisting a refreshed OAuth token", exc_info=True)
+        if _is_deadline_error(exc) and _grant_was_spent(preflight, refreshed):
+            logger.warning("Timed out persisting a rotated OAuth token", exc_info=True)
             raise TokenRefreshRejected(
                 "The refreshed OAuth credential could not be stored in time; reconnect required."
             ) from exc
         logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
+        if _is_deadline_error(exc):
+            raise TokenRefreshDeadlineExceeded(
+                "Timed out storing refreshed OAuth credentials."
+            ) from exc
         raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
     if result.status is TokenRefreshStatus.SUPERSEDED:
