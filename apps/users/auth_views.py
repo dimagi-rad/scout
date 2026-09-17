@@ -297,6 +297,7 @@ def _record_status(seen: dict[str, set[str]], provider: str, status: str) -> Non
 def providers_view(request):
     """Return OAuth providers configured for this site, with connection status if authenticated."""
     from apps.users.services.token_refresh import (
+        INTERACTIVE_DB_DEADLINE,
         TokenRefreshError,
         refresh_oauth_token,
         token_needs_refresh,
@@ -335,7 +336,9 @@ def providers_view(request):
             refresh_failed = False
             if can_refresh and token_needs_refresh(social_token.expires_at):
                 try:
-                    async_to_sync(refresh_oauth_token)(social_token, token_url)
+                    async_to_sync(refresh_oauth_token)(
+                        social_token, token_url, db_timeout=INTERACTIVE_DB_DEADLINE
+                    )
                 except TokenRefreshError:
                     refresh_failed = True
             refresh_failed = (
