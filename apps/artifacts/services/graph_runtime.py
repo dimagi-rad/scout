@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from apps.semantic.services.date_context import DateContextError
 from apps.semantic.services.query import run_semantic_query
 from apps.workspaces.models import Workspace
 
 from .graph_doc import expected_result_keys, member_to_key, normalize_doc, validate_doc
 from .graph_manifest import build_semantic_query_manifest
+from .query_context import resolve_artifact_queries
 
 CHECK_ROW_LIMIT = 50
 MAX_CHECK_QUERIES = 25
@@ -20,12 +22,22 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     )
     diagnostics = validate_doc(doc)
     manifest = build_semantic_query_manifest(doc)
-    entries = manifest.get("entries", [])[:MAX_CHECK_QUERIES]
+    try:
+        resolved, context = resolve_artifact_queries(doc)
+    except DateContextError as exc:
+        return {
+            "success": False,
+            "diagnostics": [{"severity": "error", "code": "date_context", "message": str(exc)}],
+            "queries": [],
+            "key_warnings": [],
+            "summary": "Date context could not be resolved",
+        }
+    entries = resolved[:MAX_CHECK_QUERIES]
     query_results = []
     actual_keys: dict[str, list[str]] = {}
     workspace = await Workspace.objects.aget(pk=artifact.workspace_id)
     for entry in entries:
-        query = dict(entry.get("query") or {})
+        query = {key: value for key, value in entry.items() if key != "name"}
         query.setdefault("limit", CHECK_ROW_LIMIT)
         result = await run_semantic_query(workspace, query, user_id=user_id)
         if not result.get("success", True) or result.get("error"):
@@ -33,7 +45,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             message = error.get("message") if isinstance(error, dict) else str(error)
             query_results.append(
                 {
-                    "query_key": entry["key"],
+                    "query_key": entry["name"],
                     "status": "error",
                     "error": message or "Semantic query failed",
                     "semantic_query": query,
@@ -41,10 +53,10 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             )
             continue
         row_keys = _row_keys(result.get("columns", []), result.get("rows", []), query)
-        actual_keys[entry["key"]] = sorted(row_keys)
+        actual_keys[entry["name"]] = sorted(row_keys)
         query_results.append(
             {
-                "query_key": entry["key"],
+                "query_key": entry["name"],
                 "status": "ok",
                 "row_count": result.get("row_count", 0),
                 "result_keys": sorted(row_keys),
@@ -56,6 +68,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     ok_count = sum(1 for item in query_results if item["status"] == "ok")
     return {
         "success": not diagnostics and not key_warnings and ok_count == len(query_results),
+        "query_context": context,
         "diagnostics": diagnostics,
         "manifest": {
             "schema_version": manifest.get("schema_version"),

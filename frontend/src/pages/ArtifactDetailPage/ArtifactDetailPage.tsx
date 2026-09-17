@@ -49,6 +49,7 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const adoptedWorkspaceRef = useRef(false)
   const [dataOpen, setDataOpen] = useState(false)
+  const [dateSources, setDateSources] = useState<Record<string, { start: string; end: string }>>({})
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
   const {
@@ -57,7 +58,9 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
     error: dataError,
     refetch: refetchData,
     setQueryData,
-  } = useArtifactQueryData(artifactId, workspaceId)
+  } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
+    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
+  } : undefined)
 
   useEffect(() => {
     if (adoptedWorkspaceRef.current) {
@@ -118,6 +121,7 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
           isLoading={isLoading}
           error={error}
           onQueryData={setQueryData}
+          onDateSourcesChange={setDateSources}
         />
       </div>
 
