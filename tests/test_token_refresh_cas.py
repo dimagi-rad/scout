@@ -370,9 +370,11 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
     locker = threading.Thread(target=_hold_user_lock, args=(connection.user_id, acquired, release))
     locker.start()
     assert await asyncio.to_thread(acquired.wait, 2)
-    timer = threading.Timer(0.5, release.set)
+    # Holder outlasts the budget so only the persist phase can exhaust it; 1s leaves
+    # preflight room for a fresh executor thread and a new PostgreSQL connection.
+    timer = threading.Timer(4.0, release.set)
     timer.start()
-    deadline = time.monotonic() + 0.1
+    deadline = time.monotonic() + 1.0
     payload = {"access_token": "late-access", "refresh_token": "late-refresh"}
     if mode == "async":
         httpx_mock.add_response(url=URL, json=payload)
@@ -386,12 +388,12 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
         await operation
     elapsed = time.monotonic() - started
     release.set()
-    await asyncio.to_thread(locker.join, 2)
+    await asyncio.to_thread(locker.join, 5)
     timer.cancel()
 
     # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
     # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
-    assert elapsed < 2
+    assert elapsed < 4
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "old-access"
     assert persisted.token_secret == "old-refresh"
@@ -409,7 +411,9 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
     locker = threading.Thread(target=_hold_user_lock, args=(connection.user_id, acquired, release))
     locker.start()
     assert await asyncio.to_thread(acquired.wait, 2)
-    timer = threading.Timer(0.5, release.set)
+    # The holder must outlast the budget, or the lock frees before it can expire and
+    # the marker gets written after all.
+    timer = threading.Timer(4.0, release.set)
     timer.start()
     deadline = time.monotonic() + 0.1
     if mode == "async":
@@ -424,12 +428,12 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
         await operation
     elapsed = time.monotonic() - started
     release.set()
-    await asyncio.to_thread(locker.join, 2)
+    await asyncio.to_thread(locker.join, 5)
     timer.cancel()
 
     # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
     # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
-    assert elapsed < 2
+    assert elapsed < 4
     await connection.arefresh_from_db()
     assert connection.oauth_refresh_failure_fingerprint == ""
 
@@ -550,16 +554,19 @@ def test_nested_refresh_preflight_restores_callers_timeouts(oauth_identity):
 async def test_lost_race_that_did_not_advance_credential_is_not_reported_as_refreshed(
     oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
 ):
-    """A fence-only change strands the rotated-away token; callers must not get it back."""
+    """A non-identity CAS miss strands the rotated-away token; mark it for reconnect."""
     token, connection = oauth_identity
     original = token_refresh._lock_refresh_context
 
-    def fence_moves_under_us(preflight, **kwargs):
+    def expiry_moves_under_us(preflight, **kwargs):
         current, connections = original(preflight, **kwargs)
-        TenantConnection.objects.filter(pk=connection.pk).update(scope_key="replacement-scope")
-        return current, list(TenantConnection.objects.filter(pk__in=[c.pk for c in connections]))
+        SocialToken.objects.filter(pk=token.pk).update(
+            expires_at=timezone.now() + timedelta(hours=9)
+        )
+        current.refresh_from_db()
+        return current, connections
 
-    monkeypatch.setattr(token_refresh, "_lock_refresh_context", fence_moves_under_us)
+    monkeypatch.setattr(token_refresh, "_lock_refresh_context", expiry_moves_under_us)
 
     result = await _refresh(mode, token, httpx_mock, requests_mock, {"access_token": "new-access"})
 
@@ -571,6 +578,91 @@ async def test_lost_race_that_did_not_advance_credential_is_not_reported_as_refr
     # connected while every future refresh fails.
     await connection.arefresh_from_db()
     assert connection.oauth_refresh_failure_fingerprint != ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("drift", ["account", "scope_key"])
+async def test_identity_drift_is_refused_rather_than_served(
+    oauth_identity, user, other_user, mode, drift, httpx_mock, requests_mock, monkeypatch
+):
+    """A credential from a binding the caller never validated must not be handed back.
+
+    If the row is re-pointed while a concurrent refresh rotates it, the stored token
+    changed *and* the principal changed. Reporting that as a normal advance would serve
+    one user's credential to another -- the exposure the identity fences exist to stop.
+    """
+    token, connection = oauth_identity
+    foreign_account = await SocialAccount.objects.acreate(
+        user=other_user, provider="commcare", uid=f"foreign-{mode}-{drift}"
+    )
+    original = token_refresh._lock_refresh_context
+
+    def identity_moves_under_us(preflight, **kwargs):
+        current, connections = original(preflight, **kwargs)
+        if drift == "account":
+            SocialToken.objects.filter(pk=token.pk).update(
+                account=foreign_account, token="foreign-access", token_secret="foreign-refresh"
+            )
+        else:
+            TenantConnection.objects.filter(pk=connection.pk).update(scope_key="replacement-scope")
+            SocialToken.objects.filter(pk=token.pk).update(
+                token="foreign-access", token_secret="foreign-refresh"
+            )
+        current.refresh_from_db()
+        return current, list(TenantConnection.objects.filter(pk__in=[c.pk for c in connections]))
+
+    monkeypatch.setattr(token_refresh, "_lock_refresh_context", identity_moves_under_us)
+
+    result = await _refresh(mode, token, httpx_mock, requests_mock, {"access_token": "new-access"})
+
+    assert result.status == TokenRefreshStatus.SUPERSEDED
+    assert result.credential_advanced is False, "identity drift must never read as an advance"
+    assert result.snapshot.access_token == "old-access"
+    assert result.snapshot.refresh_token == "old-refresh"
+    assert "foreign-access" not in repr(result)
+    # The caller's own object must not be polluted either: the typed API applies the
+    # snapshot before any wrapper gets a chance to raise.
+    assert token.token != "foreign-access"
+    assert token.token_secret != "foreign-refresh"
+
+    # Those rows may belong to someone else now, so nothing is marked on them.
+    await connection.arefresh_from_db()
+    assert connection.oauth_refresh_failure_fingerprint == ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_identity_drift_makes_the_string_wrappers_refuse(
+    oauth_identity, other_user, mode, httpx_mock, requests_mock, monkeypatch
+):
+    """The convenience wrappers promise a usable token, so drift must be terminal."""
+    token, _connection = oauth_identity
+    foreign_account = await SocialAccount.objects.acreate(
+        user=other_user, provider="commcare", uid=f"foreign-wrap-{mode}"
+    )
+    original = token_refresh._lock_refresh_context
+
+    def identity_moves_under_us(preflight, **kwargs):
+        current, connections = original(preflight, **kwargs)
+        SocialToken.objects.filter(pk=token.pk).update(
+            account=foreign_account, token="foreign-access"
+        )
+        current.refresh_from_db()
+        return current, connections
+
+    monkeypatch.setattr(token_refresh, "_lock_refresh_context", identity_moves_under_us)
+
+    if mode == "async":
+        httpx_mock.add_response(url=URL, json={"access_token": "new-access"})
+        with pytest.raises(TokenRefreshRejected):
+            await token_refresh.refresh_oauth_token(token, URL)
+    else:
+        requests_mock.post(URL, json={"access_token": "new-access"})
+        with pytest.raises(TokenRefreshRejected):
+            await sync_to_async(token_refresh.refresh_oauth_token_sync)(token, URL)
 
 
 @pytest.mark.django_db(transaction=True)
