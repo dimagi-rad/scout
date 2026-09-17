@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier, Lock
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import httpx
@@ -501,6 +501,46 @@ async def test_limiter_cancellation_preserves_capacity(settings, waiting):
     else:
         assert network_stopped.is_set()
     assert await asyncio.wait_for(limiter.acquire(), timeout=0.1)
+    limiter.release()
+    with pytest.raises(ValueError):
+        limiter.release()
+
+
+@pytest.mark.asyncio
+async def test_permit_is_released_when_the_wait_is_cut_short_after_acquiring(settings):
+    """A permit taken just as the wait is cut short must not be lost.
+
+    stdlib wait_for rescues this today -- 3.11 returns the inner future's result
+    when the outer wait is cancelled, 3.12+ runs the coroutine inline so there is
+    no window -- but the rescue is a version-specific implementation detail. This
+    drives the unsafe interleaving directly: the waiter completes and takes the
+    permit, then the wait reports cancellation anyway. Without the guard in
+    verify_provider the permit is never released and the process-wide limiter
+    loses capacity permanently.
+    """
+    settings.OCS_URL = "https://ocs.example"
+    limiter = ProcessNetworkLimiter(1)
+    factory = Mock()
+    real_wait_for = asyncio.wait_for
+
+    # Drop-in for asyncio.wait_for, so it must mirror that signature.
+    async def cut_short_after_success(fut, timeout=None):  # noqa: ASYNC109
+        await real_wait_for(fut, timeout=timeout)
+        raise asyncio.CancelledError
+
+    with patch.object(asyncio, "wait_for", cut_short_after_success):
+        with pytest.raises(asyncio.CancelledError):
+            await verify_provider(
+                _request("ocs"),
+                settings=settings,
+                limiter=limiter,
+                client_factory=factory,
+            )
+
+    factory.assert_not_called()
+    # Capacity fully restored, and restored exactly once: a leaked permit makes
+    # the acquire below starve, while a double release raises ValueError.
+    assert await real_wait_for(limiter.acquire(), timeout=0.1)
     limiter.release()
     with pytest.raises(ValueError):
         limiter.release()
