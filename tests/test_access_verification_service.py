@@ -1167,3 +1167,124 @@ def test_durable_result_fails_closed_when_the_receipt_skipped_the_caller():
     denied = _durable_result(receipt, {covered, uncovered})
     assert denied.status == AccessVerificationStatus.DENIED
     assert denied.error_code == "upstream_access_lost"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_alias_provider_tenant_confirmed_upstream_is_not_denied_or_archived(user):
+    """An alias-provider tenant the provider just confirmed must survive publication.
+
+    Claims and publication both match memberships on ``canonical_provider``, so a
+    ``commcare-custom`` tenant on a ``commcare`` connection is claimable. If the
+    result mapping in between compares the provider exactly, the tenant never
+    reaches ``result.tenant_ids``, publication reads it as omitted, archives the
+    membership and nulls the proof -- revoking access upstream had just granted.
+    """
+    connection = await sync_to_async(TenantConnection.objects.create)(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("username:key"),
+    )
+    alias = await Tenant.objects.acreate(
+        provider="commcare-custom", external_id="alias", canonical_name="Alias"
+    )
+    membership = await TenantMembership.objects.acreate(
+        user=user, tenant=alias, connection=connection
+    )
+
+    async def provider(*args, **kwargs):
+        return ProviderVerificationResult.complete({"alias"})
+
+    result = await verify_connection_access(
+        user.id, connection.id, {alias.id}, provider_verifier=provider
+    )
+
+    assert result.status == AccessVerificationStatus.VERIFIED
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is None
+    assert await UpstreamAccessProof.objects.filter(connection=connection, tenant=alias).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_connect_tenant_is_not_swept_into_a_commcare_connection_mapping(user):
+    """An alias tenant is mapped while a connect tenant on the same connection is not.
+
+    canonical_provider resolves commcare_connect before commcare, so a SQL
+    ``provider__startswith='commcare'`` filter here would sweep the connect tenant
+    into the mapping. Note that substituting startswith does NOT fail this test:
+    publication canonicalizes independently and filters it out again, so the
+    mapping's error is not observable downstream. The connect assertion is kept as
+    a second line of defence, but the behaviour it locks is currently guaranteed by
+    publication -- what this test actively guards is that the alias IS mapped.
+    """
+    connection = await sync_to_async(TenantConnection.objects.create)(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("username:key"),
+    )
+    alias = await Tenant.objects.acreate(
+        provider="commcare-custom", external_id="alias", canonical_name="Alias"
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=alias, connection=connection)
+    connect_tenant = await Tenant.objects.acreate(
+        provider="commcare_connect", external_id="connect-id", canonical_name="Connect"
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=connect_tenant, connection=connection)
+
+    # The provider names both ids; only the alias belongs to this connection.
+    async def provider(*args, **kwargs):
+        return ProviderVerificationResult.complete({"alias", "connect-id"})
+
+    # The connect tenant is not canonically owned here, so it falls outside the
+    # claim's ownership set and requesting the alias alone is a covering request.
+    result = await verify_connection_access(
+        user.id, connection.id, {alias.id}, provider_verifier=provider
+    )
+
+    assert result.status == AccessVerificationStatus.VERIFIED
+    control = await VerificationControl.objects.aget(connection=connection)
+    assert str(alias.id) in control.last_attempt_tenant_ids
+    # A provider__startswith filter would sweep the connect tenant in here.
+    assert str(connect_tenant.id) not in control.last_attempt_tenant_ids
+    assert not await UpstreamAccessProof.objects.filter(
+        connection=connection, tenant=connect_tenant
+    ).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_alias_provider_tenant_denial_is_attributed_not_lost(user):
+    """A denial naming an alias tenant must resolve to that tenant, not go blank.
+
+    The same canonical-vs-exact mismatch as the COMPLETE branch, but this one fails
+    closed: an unmatched denial degrades to INDETERMINATE, so the caller learns
+    nothing instead of learning the tenant was denied.
+    """
+    connection = await sync_to_async(TenantConnection.objects.create)(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("username:key"),
+    )
+    alias = await Tenant.objects.acreate(
+        provider="commcare-custom", external_id="alias", canonical_name="Alias"
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=alias, connection=connection)
+
+    async def provider(*args, **kwargs):
+        return ProviderVerificationResult.tenant_denied("alias", ErrorCode.AUTH_ACCESS_DENIED)
+
+    result = await verify_connection_access(
+        user.id, connection.id, {alias.id}, provider_verifier=provider
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    assert result.error_code == ErrorCode.AUTH_ACCESS_DENIED
+    # The returned status comes from the raw provider result, so only the receipt
+    # shows whether the mapping actually attributed the denial to this tenant.
+    control = await VerificationControl.objects.aget(connection=connection)
+    assert control.last_attempt_outcome == VerificationOutcome.TENANT_DENIED.value
+    assert str(alias.id) in control.last_attempt_tenant_ids

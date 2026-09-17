@@ -36,6 +36,7 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
+from apps.users.services.oauth_scope import canonical_provider
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     TokenRefreshRejected,
@@ -219,31 +220,39 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
 
 
 async def _map_provider_result(claim, result):
+    # Claims and publication both match memberships on the canonical provider, so
+    # the mapping sandwiched between them must too. An exact comparison misses an
+    # alias tenant (commcare-custom on a commcare connection), which then never
+    # reaches result.tenant_ids, and publication -- whose omission scope IS
+    # canonical -- archives the membership and denies a tenant the provider just
+    # confirmed. Canonicalize in Python: a provider__startswith filter would sweep
+    # commcare_connect into commcare, because canonical_provider resolves
+    # commcare_connect first.
+    connection_provider = canonical_provider(claim.observation.provider)
     if result.outcome == VerificationOutcome.COMPLETE:
         tenant_ids = {
             tenant_id
-            async for tenant_id in TenantMembership.all_objects.filter(
+            async for tenant_id, tenant_provider in TenantMembership.all_objects.filter(
                 user_id=claim.observation.user_id,
                 connection_id=claim.observation.connection_id,
-                tenant__provider=claim.observation.provider,
                 tenant__external_id__in=result.external_ids,
-            ).values_list("tenant_id", flat=True)
+            ).values_list("tenant_id", "tenant__provider")
+            if canonical_provider(tenant_provider) == connection_provider
         }
         return VerificationResult.complete(tenant_ids)
     if result.outcome == VerificationOutcome.CREDENTIAL_REJECTED:
         return VerificationResult.credential_rejected(result.error_code)
     if result.outcome == VerificationOutcome.TENANT_DENIED:
-        tenant_id = (
-            await TenantMembership.all_objects.filter(
-                user_id=claim.observation.user_id,
-                connection_id=claim.observation.connection_id,
-                tenant__provider=claim.observation.provider,
-                tenant__external_id=result.denied_external_id,
-                tenant_id__in=claim.requested_tenant_ids,
-            )
-            .values_list("tenant_id", flat=True)
-            .afirst()
-        )
+        tenant_id = None
+        async for candidate_id, tenant_provider in TenantMembership.all_objects.filter(
+            user_id=claim.observation.user_id,
+            connection_id=claim.observation.connection_id,
+            tenant__external_id=result.denied_external_id,
+            tenant_id__in=claim.requested_tenant_ids,
+        ).values_list("tenant_id", "tenant__provider"):
+            if canonical_provider(tenant_provider) == connection_provider:
+                tenant_id = candidate_id
+                break
         if tenant_id is None:
             return VerificationResult.indeterminate(_VERIFICATION_INDETERMINATE)
         return VerificationResult.tenant_denied(tenant_id, result.error_code)
