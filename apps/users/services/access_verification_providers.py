@@ -195,7 +195,19 @@ async def verify_provider(
         return ProviderVerificationResult.unavailable(_UNAVAILABLE)
     acquired = False
     try:
-        await asyncio.wait_for(limiter.acquire(), timeout=remaining)
+        # Take the permit through an explicit handle so the ownership transfer is
+        # observable. stdlib wait_for does rescue a permit taken just as the wait
+        # is cut short -- 3.11 returns the inner future's result, 3.12+ runs the
+        # coroutine inline with no window -- but that is a version-specific
+        # implementation detail, and a permit lost here would starve this
+        # process-wide limiter for the life of the process.
+        waiter = asyncio.ensure_future(limiter.acquire())
+        try:
+            await asyncio.wait_for(waiter, timeout=remaining)
+        except BaseException:
+            if waiter.done() and not waiter.cancelled() and waiter.exception() is None:
+                limiter.release()
+            raise
         acquired = True
         seen_urls: set[str] = set()
         seen_rows: dict[str, str] = {}
