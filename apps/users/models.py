@@ -255,6 +255,15 @@ class VerificationControl(models.Model):
     last_attempt_observation_hash = models.CharField(
         max_length=64, blank=True, default="", db_default=""
     )
+    last_attempt_tenant_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Tenant ids the last attempt's outcome is authoritative for, as strings. "
+            "The lease is per connection, so this is what stops a waiter reusing a "
+            "receipt from an attempt that never covered its tenants."
+        ),
+    )
 
     def __str__(self):
         return f"VerificationControl({self.connection_id})"
