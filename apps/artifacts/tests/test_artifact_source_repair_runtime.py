@@ -55,6 +55,12 @@ async def _partial_publication(setup):
 
 
 async def _fail_view_build(setup):
+    # A failed rebuild of an ACTIVE row keeps its last-good views serving (D2), so
+    # reach FAILED the way production does: a membership change marks the row
+    # PROVISIONING before the rebuild, and that rebuild fails.
+    await WorkspaceViewSchema.objects.filter(pk=setup.view.pk).aupdate(
+        state=SchemaState.PROVISIONING
+    )
     with patch.object(
         SchemaManager, "_create_readonly_role", side_effect=RuntimeError("Synthetic DDL failure")
     ):

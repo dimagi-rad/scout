@@ -586,7 +586,16 @@ class TestBuildViewSchemaTenantCoverage:
         ):
             SchemaManager().build_view_schema(workspace)
 
-        mock_connection.assert_not_called()
+        # The only physical statement on this path drops the now-unserveable views:
+        # their sources are gone, so leaving them would block a dependency-guarded
+        # retirement of the tenant schemas they read.
+        statements = [
+            str(call.args[0])
+            for call in mock_connection.return_value.cursor.return_value.execute.call_args_list
+        ]
+        assert len(statements) == 1
+        assert "DROP SCHEMA IF EXISTS" in statements[0]
+        assert not any("CREATE" in statement for statement in statements)
         view_schema = WorkspaceViewSchema.objects.get(workspace=workspace)
         assert view_schema.state == SchemaState.FAILED
         assert "no active schema" in view_schema.last_error
