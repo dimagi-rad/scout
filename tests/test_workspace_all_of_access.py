@@ -390,6 +390,16 @@ class TestRemediationWithoutCoverage:
 
         assert resp.status_code == 204
 
+    def test_cannot_remove_other_members(self, client, manager, partial_member, other_user):
+        _join(partial_member, other_user)
+        theirs = WorkspaceMembership.objects.get(workspace=partial_member, user=other_user)
+        client.force_login(manager)
+
+        resp = client.delete(f"/api/workspaces/{partial_member.id}/members/{theirs.id}/")
+
+        assert resp.status_code == 403
+        assert WorkspaceMembership.objects.filter(pk=theirs.pk).exists()
+
     def test_can_delete_the_workspace(self, client, manager, partial_member, two_sources):
         # Deletion separately refuses to drop a user's last workspace for a source.
         spare = _workspace(manager, *two_sources, name="Spare")

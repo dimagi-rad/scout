@@ -197,9 +197,9 @@ def missing_tenants_by_workspace(user, workspaces) -> dict:
     live = set()
     if not all_of_access_enforced():
         live = set(
-            TenantMembership.objects.filter(user=user, tenant_id__in=all_tenants).values_list(
-                "tenant_id", flat=True
-            )
+            TenantMembership.objects.filter(
+                user=user, tenant_id__in=all_tenants.keys()
+            ).values_list("tenant_id", flat=True)
         )
     # Any-of already grants these, so readiness is only worth computing for the rest.
     granted = {ws_id for ws_id, tenants in tenants_by_ws.items() if live & {t.pk for t in tenants}}

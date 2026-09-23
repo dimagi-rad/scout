@@ -674,6 +674,11 @@ class WorkspaceMemberDetailView(APIView):
 
         # Allow self-removal; managers can remove others
         is_self = target.user_id == request.user.id
+        if not is_self:
+            # Only leaving is exempt from coverage; acting on others still needs it.
+            _workspace, membership, err = resolve_workspace(request, workspace_id)
+            if err:
+                return err
         if not is_self and membership.role != WorkspaceRole.MANAGE:
             return Response(
                 {"error": "Only managers can remove other members."},
