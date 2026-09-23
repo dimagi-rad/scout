@@ -197,3 +197,27 @@ jobs:
             'See DEPLOYMENT.md: Migration-safe backend handoff. No automatic worker restart was attempted.' \
             >> "$GITHUB_STEP_SUMMARY"
 
+  report:
+    # A failed deploy on main notifies nobody by default; one went unnoticed for
+    # six days. Keep a single `deploy-failure` issue open until a deploy succeeds.
+    needs: [test, deploy]
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Open, update or close the deploy-failure issue
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        with:
+          script: |
+            const { reportDeploy } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/deploy-failure-issue.cjs`);
+            await reportDeploy({ github, context, core, env: process.env });

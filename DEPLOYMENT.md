@@ -664,6 +664,7 @@ nothing reached production for six days before anyone noticed.
   `Host disk nearly full`.
 - SSM Run Command reports failure with empty output.
 - Session Manager refuses to connect with `Plugin with name Standard_Stream not found`.
+- An open GitHub issue labelled `deploy-failure`.
 
 **Recovery.** SSM needs free disk to work, so use SSH as the deploy user:
 
@@ -686,6 +687,10 @@ pending drain receipt (see [Migration-safe backend handoff](#migration-safe-back
    role keeps `retain_containers: 3`. Prune failures are warnings.
 2. `Check host disk space` — fails the deploy with a clear error when Docker's
    filesystem has less than `HOST_MIN_FREE_GB` (8 GB) free, and warns below twice that.
+
+A failed production deploy on `main` opens (or comments on) a single GitHub issue
+labelled `deploy-failure` and mentions whoever pushed; the next successful deploy
+closes it.
 
 ## Infrastructure Changes
 

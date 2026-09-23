@@ -213,3 +213,17 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
 def test_every_role_retains_three_stopped_containers(config_name, destination):
     assert load_config(config_name, destination=destination)["retain_containers"] == 3
     assert "WORKER_RETAIN=3\n" in SCRIPT.read_text()
+
+
+def test_failed_production_deploys_open_a_tracking_issue():
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "deploy.yml").read_text())
+    report = workflow["jobs"]["report"]
+    assert report["needs"] == ["test", "deploy"]
+    assert "always()" in report["if"]
+    assert report["permissions"] == {"contents": "read", "issues": "write"}
+    script = report["steps"][-1]
+    assert script["env"] == {
+        "TEST_RESULT": "${{ needs.test.result }}",
+        "DEPLOY_RESULT": "${{ needs.deploy.result }}",
+    }
+    assert "deploy-failure-issue.cjs" in script["with"]["script"]
