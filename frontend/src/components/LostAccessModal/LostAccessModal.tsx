@@ -1,10 +1,11 @@
 import { useMemo } from "react"
-import { useNavigate } from "react-router-dom"
+import { useLocation, useNavigate } from "react-router-dom"
 import { AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
+import { Button } from "@/components/ui/button"
 
 /** Distinct provider labels for a workspace, e.g. "CommCare" or "CommCare, Open Chat Studio". */
 function providerLabels(tenants: { provider: string }[]): string {
@@ -21,6 +22,7 @@ function providerLabels(tenants: { provider: string }[]): string {
  */
 export function LostAccessModal() {
   const navigate = useNavigate()
+  const location = useLocation()
   const domains = useAppStore((s) => s.domains)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -33,6 +35,8 @@ export function LostAccessModal() {
   // Only gate once the list has actually loaded and resolved to an orphan —
   // never during the initial load, or we'd flash the modal before we know.
   if (domainsStatus !== "loaded" || !active || workspaceHasAccess(active)) return null
+  // Connection management is user-scoped and must remain reachable for recovery.
+  if (location.pathname.replace(/\/$/, "") === "/settings/connections") return null
 
   const source = providerLabels(active.tenants ?? [])
 
@@ -64,16 +68,24 @@ export function LostAccessModal() {
           {source ? (
             <>
               This is a <span className="font-medium text-foreground">{source}</span> workspace.
-              Your access appears to have been removed upstream. Check your access on {source}, or
-              if you think this is a mistake, reach out to the workspace owner or an admin.
+              Scout no longer has an active connection to its data. Check your connection
+              and your access on {source}.
             </>
           ) : (
             <>
-              Your access to this workspace appears to have been removed upstream. If you think
-              this is a mistake, reach out to the workspace owner or an admin.
+              Scout no longer has an active connection to this workspace’s data.
             </>
           )}
         </p>
+
+        <p className="mt-3 text-sm text-muted-foreground">
+          If you disconnected your account, reconnect it in Connections. If your provider
+          removed or restricted your access, ask a provider admin to restore it;
+          reconnecting alone won’t restore those permissions.
+        </p>
+        <Button className="mt-4" onClick={() => navigate("/settings/connections")} data-testid="lost-access-connections">
+          Manage connections
+        </Button>
 
         {accessible.length > 0 ? (
           <div className="mt-5">
@@ -97,8 +109,7 @@ export function LostAccessModal() {
           </div>
         ) : (
           <p className="mt-5 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
-            You don’t have access to any workspaces right now. Reconnect your account or ask an
-            admin to restore access.
+            You don’t have access to any workspaces right now. You can still manage your connections.
           </p>
         )}
       </div>
