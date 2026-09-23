@@ -523,9 +523,8 @@ async def materialize_workspace_core(
     qs = TenantMembership.objects.select_related("user", "tenant", "connection").filter(
         archived_at__isnull=True,
         tenant_id__in=list(workspace_tenants),
+        user_id=user_id,
     )
-    if user_id:
-        qs = qs.filter(user_id=user_id)
 
     memberships = [tm async for tm in qs]
 
@@ -557,8 +556,6 @@ async def materialize_workspace_core(
 
     for tm in memberships:
         attempted_tenant_ids.add(str(tm.tenant_id))
-        # A later attempt can invalidate the snapshot produced by an earlier success.
-        successful_attempted_tenant_ids.discard(str(tm.tenant_id))
         tenant_id = tm.tenant.external_id
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
         if pipeline_name is None:

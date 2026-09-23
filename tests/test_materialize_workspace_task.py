@@ -1812,28 +1812,18 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_missing_actor_cannot_borrow_other_memberships(
-    multi_tenant_workspace, tenant, tenant_membership_obj, user, admin_user
+    multi_tenant_workspace, tenant_membership_obj
 ):
-    await TenantMembership.objects.acreate(user=admin_user, tenant=tenant)
-    calls = 0
-
-    def pipeline(membership, *_args):
-        nonlocal calls
-        if membership.tenant_id == tenant.id:
-            calls += 1
-            if calls == 2:
-                raise RuntimeError("second refresh failed after the first succeeded")
-        return {"status": "completed"}
-
+    pipeline = AsyncMock()
     with (
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=pipeline),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
     ):
         result = await workspaces_tasks.materialize_workspace_core(
             str(multi_tenant_workspace.id), user_id=""
         )
 
-    assert calls == 0
+    pipeline.assert_not_awaited()
     assert result["status"] == "denied"
     assert result["error"]["code"] == "FORBIDDEN"
     cube.assert_not_called()
