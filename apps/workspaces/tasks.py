@@ -37,8 +37,9 @@ from apps.users.services.credential_resolver import (
     aresolve_credential,
 )
 from apps.workspaces.access import (
+    TENANT_ACCESS_LOST,
+    WorkspaceAccess,
     aresolve_workspace_access_ex,
-    aworkspace_write_allowed,
     tool_write_denied,
 )
 from apps.workspaces.models import (
@@ -420,6 +421,26 @@ def _preflight_failure(tenant, error: str, code: str = "") -> dict:
     }
 
 
+def _unreachable_tenant_results(tenants: Iterable) -> list[dict]:
+    results = [
+        _preflight_failure(
+            tenant, _unreachable_tenant_error(tenant), ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        )
+        for tenant in tenants
+    ]
+    _set_tenant_display_names(results)
+    return results
+
+
+def _no_reachable_tenants_result(unreachable_results: list[dict]) -> dict:
+    return {
+        "error": "No tenant memberships found",
+        "tenants": unreachable_results,
+        "all_succeeded": False,
+        "guidance": _credential_guidance(_summary_failures(unreachable_results)),
+    }
+
+
 async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict | None:
     if not user_id:
         return tool_write_denied()
@@ -427,9 +448,24 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         user = await User.objects.filter(id=user_id).afirst()
     except (TypeError, ValueError, ValidationError):
         user = None
-    if user is None or not await aworkspace_write_allowed(user, workspace_id):
+    if user is None:
         return tool_write_denied()
-    return None
+    access = await aresolve_workspace_access_ex(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    )
+    if access.granted:
+        return None
+    if access.denied_reason == TENANT_ACCESS_LOST:
+        # Even a MANAGE member cannot fix this by changing roles; report the
+        # per-tenant reconnect guidance this path gave before the role gate.
+        tenants = [
+            wt.tenant
+            async for wt in WorkspaceTenant.objects.filter(
+                workspace_id=workspace_id
+            ).select_related("tenant")
+        ]
+        return _no_reachable_tenants_result(_unreachable_tenant_results(tenants))
+    return tool_write_denied()
 
 
 def serialized_workspace_materialization(function):
@@ -501,14 +537,9 @@ async def materialize_workspace_core(
     # that transitional state without borrowing a teammate's credentials; the
     # ALL-of authorization rollout decided in #380 is outside this reporting fix.
     reachable = {tm.tenant_id for tm in memberships}
-    unreachable_results = [
-        _preflight_failure(
-            tenant, _unreachable_tenant_error(tenant), ErrorCode.WORKSPACE_TENANT_UNREACHABLE
-        )
-        for tenant_id, tenant in workspace_tenants.items()
-        if tenant_id not in reachable
-    ]
-    _set_tenant_display_names(unreachable_results)
+    unreachable_results = _unreachable_tenant_results(
+        tenant for tenant_id, tenant in workspace_tenants.items() if tenant_id not in reachable
+    )
     for entry in unreachable_results:
         logger.warning(
             "materialize_workspace: workspace %s includes tenant %s, which the "
@@ -519,12 +550,7 @@ async def materialize_workspace_core(
 
     if not memberships:
         logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
-        return {
-            "error": "No tenant memberships found",
-            "tenants": unreachable_results,
-            "all_succeeded": False,
-            "guidance": _credential_guidance(_summary_failures(unreachable_results)),
-        }
+        return _no_reachable_tenants_result(unreachable_results)
 
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
@@ -1309,20 +1335,17 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             await _await_in_progress_materializations(str(recovery.workspace_id))
 
             requester = await User.objects.filter(id=recovery.requested_by_id).afirst()
-            if (
-                requester is None
-                or not (
-                    await aresolve_workspace_access_ex(
-                        requester,
-                        recovery.workspace_id,
-                        minimum_role=WorkspaceRole.READ_WRITE,
-                    )
-                ).granted
-            ):
-                raise ValueError(
-                    "The requesting user no longer has a read-write or manage workspace role. "
-                    "Ask a workspace member with write access to retry."
+            access = (
+                await aresolve_workspace_access_ex(
+                    requester,
+                    recovery.workspace_id,
+                    minimum_role=WorkspaceRole.READ_WRITE,
                 )
+                if requester is not None
+                else None
+            )
+            if access is None or not access.granted:
+                raise ValueError(_recovery_requester_denied_message(access))
 
             surface = await recovery_query_surface(recovery)
             action = surface.get("recovery_action")
@@ -1378,6 +1401,19 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             completed_at=timezone.now(),
         )
         return {"status": "failed", "error": error, "result": result}
+
+
+def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
+    if access is not None and access.denied_reason == TENANT_ACCESS_LOST:
+        projects = ", ".join(access.lost_tenant_names) or "this workspace's data sources"
+        return (
+            f"The requesting user no longer has upstream access to: {projects}. "
+            "Access may have been removed upstream — reconnect or ask an admin."
+        )
+    return (
+        "The requesting user no longer has a read-write or manage workspace role. "
+        "Ask a workspace member with write access to retry."
+    )
 
 
 def _workspace_recovery_error(result: dict, surface: dict) -> str:

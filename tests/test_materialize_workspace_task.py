@@ -1448,14 +1448,60 @@ async def test_fully_reachable_workspace_still_reports_success(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_no_tenant_membership_denies_before_loading(workspace, tenant, user):
-    """A stale workspace row cannot authorize loading after tenant access is removed."""
+    """A stale workspace row cannot authorize loading after tenant access is removed,
+    and the denial names the tenant with reconnect guidance rather than a role error."""
     await TenantMembership.objects.filter(user=user, tenant=tenant).adelete()
+    pipeline = AsyncMock()
 
-    result, mock_cube = await _materialize_as(user, workspace)
+    with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
+        result, mock_cube = await _materialize_as(user, workspace)
 
-    assert result["status"] == "denied"
-    assert result["error"]["code"] == "FORBIDDEN"
+    assert result["all_succeeded"] is False
+    assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
+    assert result["tenants"][0]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert result["guidance"]
+    pipeline.assert_not_awaited()
     mock_cube.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
+    workspace, tenant, user, context_with_job_id
+):
+    assert (
+        await WorkspaceMembership.objects.aget(workspace=workspace, user=user)
+    ).role == WorkspaceRole.MANAGE
+    await TenantMembership.objects.filter(user=user, tenant=tenant).adelete()
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    thread_job = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=context_with_job_id.job.id,
+        tool_call_id="manager-lost-tenant",
+    )
+
+    with patch(
+        "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
+        new=AsyncMock(),
+    ):
+        result = await materialize_workspace(context_with_job_id, str(workspace.id), str(user.id))
+
+    assert "status" not in result
+    await thread_job.arefresh_from_db()
+    assert [f["error_code"] for f in thread_job.materialization_preflight_failures] == [
+        ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    ]
+
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        await workspaces_tasks.resume_thread_after_materialization.func(None, str(thread_job.id))
+
+    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    await thread_job.arefresh_from_db()
+    assert "Settings → Connections" in body
+    assert "read-write or manage" not in body.lower()
+    assert "read-write or manage" not in thread_job.error_summary.lower()
 
 
 @pytest.mark.asyncio
