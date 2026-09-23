@@ -12,6 +12,45 @@ def canonical_provider(provider: str) -> str:
     return provider
 
 
+def same_provider(left: str, right: str) -> bool:
+    return canonical_provider(left) == canonical_provider(right)
+
+
+def _provider_rows(provider, fields):
+    """Return the ``values_list`` fields and a row filter for ``provider``'s tenants.
+
+    Canonicalizes in Python on purpose: canonical_provider resolves
+    ``commcare_connect`` before ``commcare``, so a ``provider__startswith`` filter
+    would sweep Connect tenants into a CommCare connection.
+    """
+    if not fields:
+        raise ValueError("memberships_on_provider needs at least one field")
+
+    def keep(row):
+        return same_provider(row[-1], provider)
+
+    def project(row):
+        return row[0] if len(fields) == 1 else row[:-1]
+
+    return (*fields, "tenant__provider"), keep, project
+
+
+def memberships_on_provider(memberships, provider, *fields):
+    """Project ``memberships`` whose tenant is on ``provider``'s canonical provider.
+
+    One field yields flat values; several yield tuples. This is the only place
+    membership rows should be matched to a connection's provider -- an exact
+    comparison drops alias tenants (``commcare-custom`` on ``commcare``).
+    """
+    columns, keep, project = _provider_rows(provider, fields)
+    return [project(row) for row in memberships.values_list(*columns) if keep(row)]
+
+
+async def amemberships_on_provider(memberships, provider, *fields):
+    columns, keep, project = _provider_rows(provider, fields)
+    return [project(row) async for row in memberships.values_list(*columns) if keep(row)]
+
+
 def provider_accounts(user_id, provider):
     provider = canonical_provider(provider)
     accounts = SocialAccount.objects.filter(user_id=user_id)
