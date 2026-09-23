@@ -44,7 +44,8 @@ class _Holder:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         "SELECT set_config('lock_timeout', %s, true)",
-                        [f"{int(self.acquire_timeout * 1000)}ms"],
+                        # lock_timeout=0 means no timeout, so never round down to it.
+                        [f"{max(1, int(self.acquire_timeout * 1000))}ms"],
                     )
                 self.lock()
                 self.acquired.set()
@@ -55,7 +56,12 @@ class _Holder:
             connection.close()
 
     def wait_acquired(self):
-        return self.acquired.wait(timeout=self.acquire_timeout)
+        # Margin over the holder's lock_timeout, whose clock only starts after connection
+        # setup: waking first would discard the error the holder is about to record.
+        if self.acquired.wait(timeout=self.acquire_timeout + 1):
+            return True
+        self.thread.join(timeout=JOIN_TIMEOUT_SECONDS)
+        return self.acquired.is_set()
 
     def on_acquire_result(self, acquired):
         if not acquired:
