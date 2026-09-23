@@ -18,10 +18,13 @@ from django.test import RequestFactory
 from django.urls import NoReverseMatch
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.services.credential_resolver import _social_token_qs
 from apps.users.services.token_refresh import (
     TokenRefreshError,
+    TokenRefreshRejected,
+    TokenRefreshUnavailable,
     refresh_oauth_token,
     token_needs_refresh,
 )
@@ -198,8 +201,10 @@ class TestTokenRefresh:
         social_token.app.client_id = "client_123"
         social_token.app.secret = "secret_456"
 
-        with pytest.raises(TokenRefreshError):
+        with pytest.raises(TokenRefreshError) as caught:
             await refresh_oauth_token(social_token, token_url)
+        assert caught.type is TokenRefreshError
+        assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
 
     @pytest.mark.asyncio
     async def test_refresh_400_logs_warning_not_error(self, httpx_mock, caplog):
@@ -218,8 +223,10 @@ class TestTokenRefresh:
         social_token.app.secret = "secret_456"
 
         with caplog.at_level(logging.DEBUG, logger="apps.users.services.token_refresh"):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 await refresh_oauth_token(social_token, token_url)
+            assert caught.type is TokenRefreshRejected
+            assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
 
         records = [r for r in caplog.records if r.name == "apps.users.services.token_refresh"]
         assert records, "expected a log record"
@@ -241,8 +248,10 @@ class TestTokenRefresh:
         social_token.app.secret = "secret_456"
 
         with caplog.at_level(logging.DEBUG, logger="apps.users.services.token_refresh"):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 await refresh_oauth_token(social_token, token_url)
+            assert caught.type is TokenRefreshUnavailable
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
 
         error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert error_records, "expected an ERROR/exception-level log record"
@@ -260,8 +269,10 @@ class TestTokenRefresh:
         social_token.app.secret = "secret_456"
 
         with caplog.at_level(logging.DEBUG, logger="apps.users.services.token_refresh"):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 await refresh_oauth_token(social_token, token_url)
+            assert caught.type is TokenRefreshUnavailable
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
 
         error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert error_records, "expected an ERROR/exception-level log record"

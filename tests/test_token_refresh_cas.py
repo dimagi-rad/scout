@@ -322,8 +322,10 @@ async def test_malformed_refresh_response_never_mutates_token(
 ):
     token, _connection = oauth_identity
 
-    with pytest.raises(TokenRefreshError):
+    with pytest.raises(TokenRefreshError) as caught:
         await _refresh(mode, token, httpx_mock, requests_mock, payload)
+    assert caught.type is TokenRefreshError
+    assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
 
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "old-access"
