@@ -17,6 +17,7 @@ from sqlglot.errors import SqlglotError
 from apps.common.identifiers import fit_identifier
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.staging_identity import RepeatModelMigrationRequired
+from mcp_server.event_time import event_time_sql
 
 _REF = re.compile(r"\{\{\s*ref\('([a-z][a-z0-9_]*)'\)\s*\}\}")
 _NAME = re.compile(r"[a-z][a-z0-9_]*")
@@ -207,6 +208,12 @@ def _parent_source(sql: str, *, provider: str) -> str | None:
         )
         core_count, json_column = 7, "form_json"
     templates = [expected]
+    if provider == "commcare":
+        typed_time = expected.copy()
+        typed_time.expressions[2].set(
+            "this", sqlglot.parse_one(event_time_sql("received_on"), read="postgres")
+        )
+        templates.append(typed_time)
     if provider == "commcare_connect":
         # Before 03771cc the generator emitted user_id instead of username.
         # That known projection bug does not change raw_visits source identity;
@@ -239,8 +246,14 @@ def _canonical_case(sql: str) -> bool:
         f"WHERE case_type = {_literal(case_type.this)}",
         read="postgres",
     )
-    return _canonical_query(
-        tree, expected, core_count=7, scalar_column="properties", allow_cast=False
+    typed_times = expected.copy()
+    for index, column in [(4, "date_opened"), (5, "last_modified")]:
+        typed_times.expressions[index].set(
+            "this", sqlglot.parse_one(event_time_sql(column), read="postgres")
+        )
+    return any(
+        _canonical_query(tree, template, core_count=7, scalar_column="properties", allow_cast=False)
+        for template in [expected, typed_times]
     )
 
 
