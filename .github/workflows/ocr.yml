@@ -215,6 +215,10 @@ jobs:
             Do not quote or repeat artifact markers elsewhere in the review.
             Pass the comment body inline to gh pr comment; do not stage it in a file.
             Search with Grep and Glob rather than shelling out.
+            Any denied tool call fails this review, so stay within the allowed tools. Run exactly
+            one command per Bash call, with no pipes, redirects, &&, ;, subshells or cd. Bash may
+            only run git diff, log, show, rev-parse, merge-base, ls-tree, cat-file or blame, and
+            gh pr view or comment. Use Read, not cat, for runner temp files.
             Return structured reviewed_head, complete, and blocking_findings (high/critical count).
             Only report complete=true after examining the requested range and earlier unresolved
             findings and successfully posting the review. Report blocking_findings=0 only when
@@ -223,7 +227,7 @@ jobs:
             --model claude-opus-5
             --max-budget-usd 10
             --json-schema '{"type":"object","properties":{"reviewed_head":{"type":"string"},"complete":{"type":"boolean"},"blocking_findings":{"type":"integer","minimum":0}},"required":["reviewed_head","complete","blocking_findings"],"additionalProperties":false}'
-            --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr comment:*),Read,Grep,Glob"
+            --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(git ls-tree:*),Bash(git cat-file:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr comment:*),Read,Grep,Glob"
 
       - name: Verify Claude receipt and record completed checkpoint
         id: claude_verify
