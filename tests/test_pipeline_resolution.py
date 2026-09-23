@@ -25,15 +25,19 @@ from apps.workspaces.services.pipeline_resolver import (
 )
 from mcp_server import server as mcp_server_module
 from mcp_server.context import QueryContext
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 UNKNOWN_PROVIDER = "mystery_provider"
 
 
 @pytest.fixture
-def unresolvable_tenant_schema(db, tenant):
+def unresolvable_tenant_schema(db, user, tenant):
     """A tenant whose provider has no pipeline YAML, with a live schema."""
     tenant.provider = UNKNOWN_PROVIDER
     tenant.save(update_fields=["provider"])
+    # The user's existing credential is for the old provider, so it no longer
+    # proves access to this tenant; re-provision one for the new provider.
+    grant_fresh_upstream_access(user, tenant)
     return TenantSchema.objects.create(
         tenant=tenant,
         schema_name="t_mystery",

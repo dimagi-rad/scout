@@ -27,6 +27,7 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
+from tests.upstream_proofs import agrant_fresh_upstream_access, grant_fresh_upstream_access
 
 
 @pytest.mark.asyncio
@@ -328,7 +329,7 @@ def multi_tenant_workspace(db, workspace, user):
         provider="commcare", external_id="test-domain-2", canonical_name="Test Domain 2"
     )
     WorkspaceTenant.objects.create(workspace=workspace, tenant=second_tenant)
-    TenantMembership.objects.create(user=user, tenant=second_tenant)
+    grant_fresh_upstream_access(user, second_tenant)
     return workspace
 
 
@@ -998,7 +999,7 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
         user=other_user,
         role=WorkspaceRole.READ_WRITE,
     )
-    await TenantMembership.objects.acreate(user=other_user, tenant=tenant)  # peer's live access
+    await agrant_fresh_upstream_access(other_user, tenant)
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="test_xuser_cancel",
@@ -1076,7 +1077,7 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
         user=other_user,
         role=WorkspaceRole.READ_WRITE,
     )
-    await TenantMembership.objects.acreate(user=other_user, tenant=tenant)  # peer's live access
+    await agrant_fresh_upstream_access(other_user, tenant)
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="test_orphan_skip_other",
@@ -1404,7 +1405,7 @@ async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
     """
     mate = await django_user_model.objects.acreate_user(email="mate@example.com", password="pass")
     other = await _add_second_tenant(workspace, external_id="mates-bot")
-    await TenantMembership.objects.acreate(user=mate, tenant=other)
+    await agrant_fresh_upstream_access(mate, other)
 
     result, _ = await _materialize_as(user, workspace)
 
@@ -1717,7 +1718,7 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
     workspace, tenant, tenant_membership_obj, user, context_with_job_id, reason, all_missing
 ):
     other = await _add_second_tenant(workspace, provider="ocs", external_id=tenant.external_id)
-    await TenantMembership.objects.acreate(user=user, tenant=other)
+    await agrant_fresh_upstream_access(user, other)
     thread = await Thread.objects.acreate(workspace=workspace, user=user)
     job_id = context_with_job_id.job.id
     tj = await ThreadJob.objects.acreate(

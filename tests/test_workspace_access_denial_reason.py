@@ -6,7 +6,7 @@ import uuid
 import pytest
 from django.contrib.auth import get_user_model
 
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant
 from apps.workspaces.access import (
     NOT_MEMBER,
     TENANT_ACCESS_LOST,
@@ -15,6 +15,7 @@ from apps.workspaces.access import (
     resolve_workspace_access_ex,
 )
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 User = get_user_model()
 
@@ -130,7 +131,7 @@ def test_member_with_live_tenant_is_granted():
     ws = Workspace.objects.create(name="Live WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
-    TenantMembership.objects.create(user=user, tenant=tenant)
+    grant_fresh_upstream_access(user, tenant)
 
     result = resolve_workspace_access_ex(user, ws.id)
 

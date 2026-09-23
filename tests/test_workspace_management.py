@@ -12,6 +12,7 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
 )
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 User = get_user_model()
 
@@ -471,7 +472,7 @@ class TestMemberAdd:
 
     def test_non_manager_cannot_add_members(self, client, workspace, tenant, db):
         writer = User.objects.create_user(email="wr@example.com", password="pass")
-        TenantMembership.objects.create(user=writer, tenant=tenant)
+        grant_fresh_upstream_access(writer, tenant)
         WorkspaceMembership.objects.create(
             workspace=workspace, user=writer, role=WorkspaceRole.READ_WRITE
         )

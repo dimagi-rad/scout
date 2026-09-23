@@ -23,7 +23,7 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.chat.models import Thread
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -38,6 +38,7 @@ from mcp_server.server import (
     get_materialization_status,
     run_materialization,
 )
+from tests.upstream_proofs import agrant_fresh_upstream_access
 
 User = get_user_model()
 
@@ -50,7 +51,7 @@ async def _make_workspace_with_run(*, email, ext_id, schema_name, run_state):
         external_id=ext_id, provider="commcare", canonical_name=f"T-{ext_id}"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await agrant_fresh_upstream_access(user, tenant)
     await WorkspaceMembership.objects.aupdate_or_create(
         workspace=ws, user=user, defaults={"role": WorkspaceRole.MANAGE}
     )
@@ -80,7 +81,7 @@ async def test_run_materialization_denies_empty_user_id():
         external_id="te", provider="commcare", canonical_name="Empty Tenant"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await agrant_fresh_upstream_access(user, tenant)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     result = await run_materialization(

@@ -7,6 +7,9 @@ All content APIs are nested under /api/workspaces/<workspace_id>/.
 import pytest
 from django.contrib.auth import get_user_model
 
+from apps.users.models import TenantMembership
+from tests.upstream_proofs import grant_fresh_upstream_access
+
 User = get_user_model()
 
 
@@ -48,17 +51,15 @@ def tenant_b(db):
 @pytest.fixture
 def membership_a(db, user_a, tenant_a):
     """Creates TenantMembership and auto-creates Workspace via signal."""
-    from apps.users.models import TenantMembership
-
-    return TenantMembership.objects.create(user=user_a, tenant=tenant_a)
+    TenantMembership.objects.create(user=user_a, tenant=tenant_a)
+    return grant_fresh_upstream_access(user_a, tenant_a)
 
 
 @pytest.fixture
 def membership_b(db, user_a, tenant_b):
     """Creates TenantMembership and auto-creates Workspace via signal."""
-    from apps.users.models import TenantMembership
-
-    return TenantMembership.objects.create(user=user_a, tenant=tenant_b)
+    TenantMembership.objects.create(user=user_a, tenant=tenant_b)
+    return grant_fresh_upstream_access(user_a, tenant_b)
 
 
 @pytest.fixture

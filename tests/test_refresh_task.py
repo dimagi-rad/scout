@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
 from apps.users.adapters import encrypt_credential
-from apps.users.models import Tenant, TenantConnection, User
+from apps.users.models import Tenant, TenantConnection, TenantMembership, User
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -31,6 +31,7 @@ from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import refresh_tenant_schema
 from mcp_server.context import load_tenant_context
 from mcp_server.pipeline_registry import PipelineConfig
+from tests.upstream_proofs import arecord_fresh_proof, grant_fresh_upstream_access
 
 
 @pytest.fixture
@@ -74,10 +75,9 @@ def old_active_schema(db, tenant):
 
 @pytest.fixture
 def tenant_membership_obj(db, user, tenant):
-    from apps.users.models import TenantMembership
-
-    tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
-    return tm
+    # get_or_create fires the auto-workspace signal the refresh auth context needs.
+    TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+    return grant_fresh_upstream_access(user, tenant)
 
 
 def _mock_conn():
@@ -542,6 +542,7 @@ async def test_refresh_task_resolves_credential_in_async_context(
     )
     tenant_membership_obj.connection = conn
     await tenant_membership_obj.asave(update_fields=["connection"])
+    await arecord_fresh_proof(conn, tenant_membership_obj.tenant)
 
     with (
         patch(

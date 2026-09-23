@@ -12,13 +12,14 @@ from django.test import AsyncClient
 
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.views import _upsert_thread
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.upstream_proofs import agrant_fresh_upstream_access
 
 User = get_user_model()
 
@@ -95,7 +96,7 @@ async def test_chat_rejects_turn_while_resume_running_on_same_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)
+    await agrant_fresh_upstream_access(user, tenant)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
         thread=thread,
@@ -147,9 +148,9 @@ async def test_chat_does_not_authorize_foreign_thread_on_transient_lookup_error(
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=attacker, role=WorkspaceRole.READ_WRITE
     )
-    # The attacker needs a TenantMembership to pass the single-tenant access gate
+    # The attacker needs fresh live access to pass the single-tenant access gate
     # and actually reach the thread-ownership check (the path under test).
-    await TenantMembership.objects.acreate(user=attacker, tenant=tenant)
+    await agrant_fresh_upstream_access(attacker, tenant)
     owners_thread = await Thread.objects.acreate(workspace=ws, user=owner)
 
     # Plain client: @csrf_protect is bypassed when the client does not enforce
@@ -307,9 +308,9 @@ async def test_chat_rejection_logs_warning(caplog):
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=attacker, role=WorkspaceRole.READ_WRITE
     )
-    # The attacker needs a TenantMembership to pass the single-tenant access gate
+    # The attacker needs fresh live access to pass the single-tenant access gate
     # and actually reach the thread-ownership check (the bug under test).
-    await TenantMembership.objects.acreate(user=attacker, tenant=tenant)
+    await agrant_fresh_upstream_access(attacker, tenant)
     owners_thread = await Thread.objects.acreate(workspace=ws, user=owner)
 
     client = AsyncClient(enforce_csrf_checks=True)
@@ -363,7 +364,7 @@ async def test_messages_view_404_for_foreign_owned_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=other, role=WorkspaceRole.READ_WRITE
     )
-    await TenantMembership.objects.acreate(user=other, tenant=tenant)  # pass the live-tenant gate
+    await agrant_fresh_upstream_access(other, tenant)
     owners_thread = await Thread.objects.acreate(workspace=ws, user=owner)
 
     client = AsyncClient()
@@ -388,7 +389,7 @@ async def test_messages_view_empty_for_nonexistent_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # pass the live-tenant gate
+    await agrant_fresh_upstream_access(user, tenant)
 
     # A random UUID that has no Thread row yet.
     fresh_thread_id = "22222222-2222-2222-2222-222222222222"

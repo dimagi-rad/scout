@@ -40,6 +40,7 @@ from apps.workspaces.services.data_operation import workspace_data_lock
 from apps.workspaces.services.data_recovery import artifact_data_state
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import reconcile_workspace_data_recovery, recover_workspace_data
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 pytestmark = [pytest.mark.django_db(transaction=True)]
 
@@ -57,7 +58,7 @@ def required_setup():
     ]
     for tenant in tenants:
         WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-        TenantMembership.objects.create(user=user, tenant=tenant)
+        grant_fresh_upstream_access(user, tenant)
     schema_a = TenantSchema.objects.create(
         tenant=tenants[0], schema_name="required_source_a", state=SchemaState.ACTIVE
     )

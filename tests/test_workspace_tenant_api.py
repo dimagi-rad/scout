@@ -1,12 +1,13 @@
 import pytest
 from rest_framework.test import APIClient
 
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant
 from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def tenant2(db):
 @pytest.fixture
 def tenant_membership(db, user, tenant2):
     """Grant the test user access to tenant2 (used for add/remove tenant tests)."""
-    return TenantMembership.objects.create(user=user, tenant=tenant2)
+    return grant_fresh_upstream_access(user, tenant2)
 
 
 def test_add_tenant_to_workspace(api_client, user, workspace, tenant2, tenant_membership):

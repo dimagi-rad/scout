@@ -4,7 +4,7 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.chat.models import Thread, ThreadJob
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant
 from apps.workspaces.models import (
     Workspace,
     WorkspaceDataRecovery,
@@ -13,6 +13,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from mcp_server.server import run_materialization
+from tests.upstream_proofs import agrant_fresh_upstream_access
 
 User = get_user_model()
 
@@ -55,7 +56,7 @@ async def test_run_materialization_rejects_non_uuid_thread_id():
         external_id="tnu", provider="commcare", canonical_name="NonUUID Tenant"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await agrant_fresh_upstream_access(user, tenant)
 
     result = await run_materialization(
         workspace_id=str(ws.id),
@@ -80,7 +81,7 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
         external_id="t1", provider="commcare", canonical_name="Test Tenant"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await agrant_fresh_upstream_access(user, tenant)
     await _grant_manage(ws, user)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
@@ -115,7 +116,7 @@ async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fai
         external_id="t2", provider="commcare", canonical_name="Test Tenant 2"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await agrant_fresh_upstream_access(user, tenant)
     await _grant_manage(ws, user)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
@@ -160,8 +161,8 @@ async def test_run_materialization_rejects_thread_owned_by_other_user():
         canonical_name="X Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user_a)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user_b)
+    await agrant_fresh_upstream_access(user_a, tenant)
+    await agrant_fresh_upstream_access(user_b, tenant)
     await _grant_manage(ws, user_b)
     foreign_thread = await Thread.objects.acreate(
         workspace=ws,
@@ -194,7 +195,7 @@ async def test_run_materialization_returns_already_in_progress_if_active_in_same
         canonical_name="Dup Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await agrant_fresh_upstream_access(user, tenant)
     await _grant_manage(ws, user)
 
     # Same thread holds the in-progress job and is also the caller.
@@ -235,7 +236,7 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
         canonical_name="Parallel Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await agrant_fresh_upstream_access(user, tenant)
     await _grant_manage(ws, user)
 
     # Thread 1 has an in-progress job.

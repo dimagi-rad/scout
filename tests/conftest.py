@@ -6,6 +6,7 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant, TenantMembership
+from tests.upstream_proofs import ProviderStub, grant_fresh_upstream_access
 
 
 @pytest.fixture
@@ -48,8 +49,8 @@ def tenant_membership(db, user, tenant):
     Idempotent so it can coexist with the ``workspace`` fixture, which also gives the
     user a live TenantMembership for the same tenant.
     """
-    tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
-    return tm
+    TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+    return grant_fresh_upstream_access(user, tenant)
 
 
 @pytest.fixture
@@ -65,7 +66,8 @@ def connect_tenant_membership(db):
     connect_tenant = Tenant.objects.create(
         provider="commcare_connect", external_id="1237", canonical_name="Connect Opp 1237"
     )
-    return TenantMembership.objects.create(user=connect_user, tenant=connect_tenant)
+    TenantMembership.objects.create(user=connect_user, tenant=connect_tenant)
+    return grant_fresh_upstream_access(connect_user, connect_tenant)
 
 
 @pytest.fixture
@@ -96,9 +98,7 @@ def workspace(db, user, tenant):
     ws = Workspace.objects.create(name=tenant.canonical_name, created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
-    TenantMembership.objects.bulk_create(
-        [TenantMembership(user=user, tenant=tenant)], ignore_conflicts=True
-    )
+    grant_fresh_upstream_access(user, tenant)
     return ws
 
 
@@ -109,9 +109,7 @@ def read_user(db, workspace, tenant):
 
     u = User.objects.create_user(email="reader@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ)
-    TenantMembership.objects.bulk_create(
-        [TenantMembership(user=u, tenant=tenant)], ignore_conflicts=True
-    )
+    grant_fresh_upstream_access(u, tenant)
     return u
 
 
@@ -122,7 +120,11 @@ def write_user(db, workspace, tenant):
 
     u = User.objects.create_user(email="writer@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ_WRITE)
-    TenantMembership.objects.bulk_create(
-        [TenantMembership(user=u, tenant=tenant)], ignore_conflicts=True
-    )
+    grant_fresh_upstream_access(u, tenant)
     return u
+
+
+@pytest.fixture
+def upstream_provider(monkeypatch):
+    """Stubbed upstream provider for tests that drive a real access recheck."""
+    return ProviderStub().install(monkeypatch)

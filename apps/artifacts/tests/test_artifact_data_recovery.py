@@ -11,7 +11,7 @@ from django.test import AsyncClient
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import CubeSchema, SemanticDataset, SemanticField, SemanticModel
-from apps.users.models import Tenant, TenantMembership, User
+from apps.users.models import Tenant, User
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -26,6 +26,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.tasks import rebuild_workspace_semantic_model_core, recover_workspace_data
 from mcp_server.server import get_schema_status
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 
 @pytest.fixture
@@ -38,7 +39,7 @@ def recovery_setup(db):
     workspace = Workspace.objects.create(name="Recovery Domain")
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
     user = User.objects.create_user(email="recovery@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant=tenant)
+    grant_fresh_upstream_access(user, tenant)
     WorkspaceMembership.objects.create(
         workspace=workspace,
         user=user,

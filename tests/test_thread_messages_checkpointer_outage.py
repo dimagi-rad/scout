@@ -17,13 +17,14 @@ from django.test import AsyncClient
 from apps.chat.helpers import CheckpointerUnavailable
 from apps.chat.models import Thread
 from apps.chat.thread_views import _load_thread_messages
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.upstream_proofs import agrant_fresh_upstream_access
 
 User = get_user_model()
 
@@ -35,7 +36,7 @@ async def _make_owned_thread():
         external_id="t-ckpt", provider="commcare", canonical_name="Ckpt Tenant"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    tm = await TenantMembership.objects.acreate(user=user, tenant=tenant)  # noqa: F841
+    await agrant_fresh_upstream_access(user, tenant)
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )

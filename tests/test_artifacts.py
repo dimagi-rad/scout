@@ -21,6 +21,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.upstream_proofs import agrant_fresh_upstream_access
 
 User = get_user_model()
 
@@ -467,7 +468,7 @@ class TestArtifactDataView:
 
     def test_artifact_data_requires_workspace_membership(self, db, user, client):
         """Test that artifact access requires workspace membership (no membership -> 403)."""
-        from apps.users.models import Tenant, TenantMembership
+        from apps.users.models import Tenant
         from apps.workspaces.models import (
             Workspace,
             WorkspaceMembership,
@@ -744,8 +745,8 @@ class TestArtifactQueryDataRouting:
                 provider="commcare", external_id=ext, canonical_name=ext
             )
             await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
-        # user needs a live TenantMembership for one tenant to pass the access gate
-        await TenantMembership.objects.acreate(user=user, tenant=t)
+        # user needs fresh live access to one tenant to pass the access gate
+        await agrant_fresh_upstream_access(user, t)
         art = await Artifact.objects.acreate(
             workspace=ws,
             created_by=user,

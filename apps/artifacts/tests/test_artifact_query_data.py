@@ -10,8 +10,9 @@ from django.core.cache import cache
 from django.test import AsyncClient
 
 from apps.artifacts.models import Artifact, ArtifactType
-from apps.users.models import TenantMembership, User
+from apps.users.models import User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +46,7 @@ def workspace(db):
 @pytest.fixture
 def member_user(db, workspace):
     user = User.objects.create_user(email="member@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant=workspace.tenant)
+    grant_fresh_upstream_access(user, workspace.tenant)
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user
 
@@ -76,7 +77,7 @@ def other_workspace(db):
 @pytest.fixture
 def other_membership(db, other_workspace, other_user):
     """Returns the other workspace (used as the URL parameter)."""
-    TenantMembership.objects.create(user=other_user, tenant=other_workspace.tenant)
+    grant_fresh_upstream_access(other_user, other_workspace.tenant)
     WorkspaceMembership.objects.create(
         workspace=other_workspace, user=other_user, role=WorkspaceRole.MANAGE
     )

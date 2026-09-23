@@ -17,8 +17,9 @@ from apps.artifacts.services.graph_manifest import (
 )
 from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.chat.models import Thread, ThreadArtifact
-from apps.users.models import Tenant, TenantMembership, User
+from apps.users.models import Tenant, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.upstream_proofs import grant_fresh_upstream_access
 
 
 @pytest.fixture
@@ -36,7 +37,7 @@ def workspace(db):
 @pytest.fixture
 def member_user(db, workspace):
     user = User.objects.create_user(email="graph@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant=workspace.tenant)
+    grant_fresh_upstream_access(user, workspace.tenant)
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user
 
