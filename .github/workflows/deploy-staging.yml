@@ -51,6 +51,8 @@ jobs:
       # The Cube runtime uses the existing scout/mcp ECR repository; the MCP
       # process itself shares the API image, so that repository is otherwise idle.
       CUBE_TAG: cube-${{ github.sha }}
+      # A deploy pulls several ~1 GB images; below this the pull itself can fail.
+      HOST_MIN_FREE_GB: 8
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -116,6 +118,31 @@ jobs:
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # Both destinations share one host. A full disk once failed every deploy
+      # for six days: the first pull died, so Kamal's end-of-deploy prune never
+      # ran. Prune before pulling, and stop here with a clear error if that
+      # still leaves too little room. See DEPLOYMENT.md: Host disk full.
+      - name: Free host disk space
+        timeout-minutes: 10
+        run: |
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "scout@$SCOUT_EC2_IP" bash -s -- prune-workers < scripts/host-disk-guard.sh \
+            || echo "::warning title=Worker prune failed::Continuing to the disk check."
+          # Same service-wide prune `kamal deploy` runs after a successful deploy.
+          # Workers are excluded: the host script above guards their receipts.
+          for config in config/deploy.yml config/deploy-mcp.yml config/deploy-cube.yml config/deploy-frontend.yml; do
+            kamal prune all -c "$config" -d staging \
+              || echo "::warning title=Prune failed::kamal prune all -c $config failed; continuing to the disk check."
+          done
+          kamal prune images -c config/deploy-worker.yml -d staging \
+            || echo "::warning title=Prune failed::Worker image prune failed; continuing to the disk check."
+
+      - name: Check host disk space
+        timeout-minutes: 2
+        run: |
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "scout@$SCOUT_EC2_IP" bash -s -- check "$HOST_MIN_FREE_GB" < scripts/host-disk-guard.sh
 
       # Role-specific Kamal builds retain the correct service labels without
       # making a build/push failure pause the existing worker queue.
