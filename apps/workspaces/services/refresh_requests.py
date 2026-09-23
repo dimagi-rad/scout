@@ -182,7 +182,9 @@ def fail_claimed_refresh_candidate(schema_id: uuid.UUID, job_id: int) -> TenantS
     return schema
 
 
-def activate_claimed_refresh_candidate(schema_id, job_id: int, accessed_at) -> bool:
+def activate_claimed_refresh_candidate(
+    schema_id: uuid.UUID, job_id: int, accessed_at: datetime
+) -> bool:
     """Publish only the candidate claimed by this exact queue job."""
     return bool(
         TenantSchema.objects.filter(
@@ -215,36 +217,56 @@ def _unbound_candidates(tenant):
     ).exclude(schema_name=tenant_schema_name(tenant.provider, tenant.external_id))
 
 
-def find_legacy_refresh_jobs(tenant) -> dict[uuid.UUID, tuple[int, ...]]:
+@dataclass(frozen=True)
+class LegacyRefreshJobs:
+    """Queue jobs of unbound candidates, found before the tenant lock."""
+
+    scanned_at: datetime
+    job_ids: dict[uuid.UUID, tuple[int, ...]]
+
+
+def find_legacy_refresh_jobs(tenant) -> LegacyRefreshJobs:
     """Find the queue jobs of unbound (pre-binding) candidates, before any lock.
 
-    procrastinate_jobs.args has no index for a schema_id lookup, so this scan must
-    not run under the tenant lock. Candidates created since binding shipped always
-    carry refresh_job_id, so the unbound set and their job ids cannot grow between
-    this scan and the locked reconciliation. At most two ids are kept per
+    procrastinate_jobs.args has no index for a schema_id lookup, so this single
+    scan must not run under the tenant lock. At most two ids are kept per
     candidate, which is enough to tell "exactly one" from "ambiguous".
     """
-    return {
-        candidate_id: tuple(
+    scanned_at = timezone.now()
+    candidate_ids = [str(cid) for cid in _unbound_candidates(tenant).values_list("id", flat=True)]
+    job_ids: dict[uuid.UUID, tuple[int, ...]] = {uuid.UUID(cid): () for cid in candidate_ids}
+    if candidate_ids:
+        for job_id, schema_id in (
             ProcrastinateJob.objects.filter(
-                task_name=REFRESH_TASK_NAME, args__schema_id=str(candidate_id)
-            ).values_list("id", flat=True)[:2]
-        )
-        for candidate_id in _unbound_candidates(tenant).values_list("id", flat=True)
-    }
+                task_name=REFRESH_TASK_NAME, args__schema_id__in=candidate_ids
+            )
+            .order_by("id")
+            .values_list("id", "args__schema_id")
+        ):
+            key = _parsed_uuid(schema_id)
+            if key in job_ids and len(job_ids[key]) < 2:
+                job_ids[key] = (*job_ids[key], job_id)
+    return LegacyRefreshJobs(scanned_at=scanned_at, job_ids=job_ids)
 
 
 def reconcile_legacy_refresh_candidates(
-    tenant, legacy_jobs: dict[uuid.UUID, tuple[int, ...]], *, pruned_before: datetime
+    tenant,
+    legacy_jobs: LegacyRefreshJobs,
+    *,
+    pruned_before: datetime,
+    stalled_before: datetime,
 ) -> LegacyRefreshReconciliation:
-    """Settle only provably terminal refresh candidates so a retry can proceed.
+    """Settle only provably finished refresh candidates so a retry can proceed.
 
     ``legacy_jobs`` comes from ``find_legacy_refresh_jobs`` called before the lock;
-    here each job is re-read by primary key under the lock. The caller may already
-    hold the tenant lock; taking it again is harmless and keeps the required
-    Tenant -> candidate -> queue-job order for direct callers. Active jobs remain
-    ordinary in-progress work. Ambiguous, malformed, or cross-tenant evidence
-    remains untouched and is flagged for operator recovery.
+    here each job is re-read by primary key under the lock. ``pruned_before`` is
+    the queue's retention cutoff and ``stalled_before`` the worker-heartbeat
+    cutoff: a job still marked running whose worker has not heartbeated since
+    then died with the job and is settled like a finished one. The caller may
+    already hold the tenant lock; taking it again is harmless and keeps the
+    required Tenant -> candidate -> queue-job order for direct callers.
+    Ambiguous, malformed, or cross-tenant evidence remains untouched and is
+    flagged for operator recovery.
     """
     settled: list[uuid.UUID] = []
     recovery_needed = False
@@ -258,17 +280,32 @@ def reconcile_legacy_refresh_candidates(
         )
         for candidate in candidates:
             if candidate.refresh_job_id is not None:
-                outcome = _bound_candidate_outcome(candidate, pruned_before)
+                outcome, reason = _bound_candidate_outcome(candidate, pruned_before, stalled_before)
             else:
-                outcome = _legacy_candidate_outcome(
-                    candidate, legacy_jobs.get(candidate.id), pruned_before
+                outcome, reason = _legacy_candidate_outcome(
+                    candidate, legacy_jobs, pruned_before, stalled_before
                 )
             if outcome == _SETTLE:
                 candidate.state = SchemaState.FAILED
                 candidate.save(update_fields=["state"])
                 settled.append(candidate.id)
+                log = logger.error if reason == _STALLED else logger.info
+                log(
+                    "Settled refresh candidate %s (%s) for tenant %s as FAILED: %s",
+                    candidate.id,
+                    candidate.schema_name,
+                    tenant.id,
+                    reason,
+                )
             elif outcome == _RECOVER:
                 recovery_needed = True
+                logger.warning(
+                    "Refresh candidate %s (%s) for tenant %s needs operator recovery: %s",
+                    candidate.id,
+                    candidate.schema_name,
+                    tenant.id,
+                    reason,
+                )
     return LegacyRefreshReconciliation(
         recovery_needed=recovery_needed,
         settled_schema_ids=tuple(settled),
@@ -278,56 +315,82 @@ def reconcile_legacy_refresh_candidates(
 _KEEP = "keep"
 _SETTLE = "settle"
 _RECOVER = "recover"
+_STALLED = "queue job's worker stopped heartbeating (worker died mid-refresh)"
+_IN_FLIGHT_STATUSES = frozenset({"todo", "doing", "aborting"})
 
 
-def _job_status_outcome(status: str) -> str:
-    if status in {"todo", "doing", "aborting"}:
-        return _KEEP
-    if status in _TERMINAL_JOB_STATUSES:
-        return _SETTLE
-    return _RECOVER
+def _job_outcome(job: ProcrastinateJob, stalled_before: datetime) -> tuple[str, str]:
+    if job.status in _IN_FLIGHT_STATUSES:
+        # Mirrors Procrastinate's own stalled-job rule: a started job whose worker
+        # row is gone or whose heartbeat is older than the cutoff will never finish.
+        if job.status != "todo" and (
+            job.worker is None or job.worker.last_heartbeat < stalled_before
+        ):
+            return _SETTLE, _STALLED
+        return _KEEP, f"queue job {job.id} is {job.status}"
+    if job.status in _TERMINAL_JOB_STATUSES:
+        return _SETTLE, f"queue job {job.id} ended {job.status}"
+    return _RECOVER, f"queue job {job.id} has unknown status {job.status!r}"
 
 
-def _bound_candidate_outcome(candidate: TenantSchema, pruned_before: datetime) -> str:
+def _bound_candidate_outcome(
+    candidate: TenantSchema, pruned_before: datetime, stalled_before: datetime
+) -> tuple[str, str]:
     try:
-        job = ProcrastinateJob.objects.select_for_update().get(id=candidate.refresh_job_id)
+        job = (
+            ProcrastinateJob.objects.select_for_update(of=("self",))
+            .select_related("worker")
+            .get(id=candidate.refresh_job_id)
+        )
     except ProcrastinateJob.DoesNotExist:
-        return _SETTLE if _job_was_pruned(candidate, pruned_before) else _RECOVER
+        if _job_was_pruned(candidate, pruned_before):
+            return _SETTLE, "queue job was pruned after finishing"
+        return _RECOVER, f"queue job {candidate.refresh_job_id} is missing"
     expected_args = refresh_task_args(candidate)
     if expected_args is None or job.task_name != REFRESH_TASK_NAME or job.args != expected_args:
-        return _RECOVER
-    return _job_status_outcome(job.status)
+        return _RECOVER, f"queue job {job.id} does not match the recorded request"
+    return _job_outcome(job, stalled_before)
 
 
 def _legacy_candidate_outcome(
-    candidate: TenantSchema, job_ids: tuple[int, ...] | None, pruned_before: datetime
-) -> str:
+    candidate: TenantSchema,
+    legacy_jobs: LegacyRefreshJobs,
+    pruned_before: datetime,
+    stalled_before: datetime,
+) -> tuple[str, str]:
+    job_ids = legacy_jobs.job_ids.get(candidate.id)
     if job_ids is None:
-        return _RECOVER
+        if candidate.created_at >= legacy_jobs.scanned_at:
+            # Committed after the pre-lock scan, so its queue evidence was simply
+            # not looked for yet; the next reconciliation will see it.
+            return _KEEP, "created after the queue scan"
+        return _RECOVER, "was not visible to the queue scan"
     jobs = list(
-        ProcrastinateJob.objects.select_for_update()
+        ProcrastinateJob.objects.select_for_update(of=("self",))
+        .select_related("worker")
         .filter(id__in=job_ids, task_name=REFRESH_TASK_NAME)
         .order_by("id")
     )
     if not jobs and _job_was_pruned(candidate, pruned_before):
-        return _SETTLE
+        return _SETTLE, "queue job was pruned after finishing"
     if len(jobs) != 1:
-        return _RECOVER
+        return _RECOVER, f"found {len(jobs)} queue jobs, expected exactly one"
     job = jobs[0]
     args = job.args if isinstance(job.args, dict) else {}
     keys = frozenset(args)
+    malformed = f"queue job {job.id} has malformed or foreign arguments"
     if keys not in {_LEGACY_ARG_KEYS, _CONTEXT_ARG_KEYS}:
-        return _RECOVER
+        return _RECOVER, malformed
     if _parsed_uuid(args.get("schema_id")) != candidate.id:
-        return _RECOVER
+        return _RECOVER, malformed
     membership_id = _parsed_uuid(args.get("membership_id"))
     if membership_id is None:
-        return _RECOVER
+        return _RECOVER, malformed
     membership = TenantMembership.all_objects.filter(
         id=membership_id, tenant_id=candidate.tenant_id
     ).first()
     if membership is None:
-        return _RECOVER
+        return _RECOVER, malformed
     if keys == _CONTEXT_ARG_KEYS:
         workspace_id = _parsed_uuid(args.get("workspace_id"))
         actor_user_id = _parsed_user_id(args.get("actor_user_id"))
@@ -338,5 +401,5 @@ def _legacy_candidate_outcome(
                 workspace_id=workspace_id, tenant_id=candidate.tenant_id
             ).exists()
         ):
-            return _RECOVER
-    return _job_status_outcome(job.status)
+            return _RECOVER, malformed
+    return _job_outcome(job, stalled_before)
