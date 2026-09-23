@@ -244,6 +244,8 @@ def _system_prompt_cache_key(
     materialization guidance differs between interactive (fire-and-resume) and
     headless (blocking) runs. Includes ``canvas_write`` because write-capable
     chats get different dataset-editing instructions from read-only chats.
+    Includes ``write_capable`` because it selects the artifact prompt and the
+    read-only or write-capable materialization guidance.
     """
     prompt_hash = hashlib.md5(
         (workspace.system_prompt or "").encode(), usedforsecurity=False
