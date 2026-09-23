@@ -216,16 +216,13 @@ def _render(**values: str) -> str:
     return prompt
 
 
-_WRITE_QUERY_FAILURE_FIX = "propose a corrected semantic member or ask to rebuild the data"
-_WRITE_UNAVAILABLE_COUNT_GUIDANCE = (
-    "tell the user the data is unavailable and offer to re-run materialization."
-)
-
 # Read-only members have no materialization tools (#517), so every place the
 # prompt would offer a rebuild has to point them at a write-capable member instead.
 BASE_SYSTEM_PROMPT = _render(
-    query_failure_fix=_WRITE_QUERY_FAILURE_FIX,
-    unavailable_count_guidance=_WRITE_UNAVAILABLE_COUNT_GUIDANCE,
+    query_failure_fix="propose a corrected semantic member or ask to rebuild the data",
+    unavailable_count_guidance=(
+        "tell the user the data is unavailable and offer to re-run materialization."
+    ),
     schema_drift_guidance="""Do exactly one of:
 
 1. If the user has already asked you to refresh or rebuild the data, call
@@ -235,10 +232,15 @@ BASE_SYSTEM_PROMPT = _render(
 )
 
 # Headless (recipe) runs have no user to answer an ask-first question and no
-# resume path, so the drift rule rebuilds directly with the blocking tool.
+# resume path, so every rebuild offer becomes a direct call to the blocking tool.
 HEADLESS_BASE_SYSTEM_PROMPT = _render(
-    query_failure_fix=_WRITE_QUERY_FAILURE_FIX,
-    unavailable_count_guidance=_WRITE_UNAVAILABLE_COUNT_GUIDANCE,
+    query_failure_fix=(
+        "propose a corrected semantic member, or call `run_materialization` to "
+        "rebuild the data and continue in the same run"
+    ),
+    unavailable_count_guidance=(
+        "call `run_materialization` to rebuild the data, then re-run the count in the same run."
+    ),
     schema_drift_guidance="""Call `run_materialization` to rebuild the
 data. It blocks until loading finishes; then continue in the same run.""",
 )

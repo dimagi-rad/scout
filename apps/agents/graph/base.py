@@ -195,6 +195,13 @@ ESCALATION_MESSAGE = (
     "Would you like me to run materialization?"
 )
 
+# A headless run has nobody to answer the interactive question.
+HEADLESS_ESCALATION_MESSAGE = (
+    "I've encountered repeated schema errors — the tables I expected to "
+    "find aren't queryable. The data may need to be re-materialized before "
+    "this run can complete."
+)
+
 READ_ONLY_ESCALATION_MESSAGE = (
     "I've encountered repeated schema errors — the tables I expected to "
     "find aren't queryable. The data may need to be refreshed, which a "
@@ -995,7 +1002,12 @@ async def build_agent_graph(
 
     def escalation_node(state: AgentState) -> dict[str, Any]:
         """Terminal node that emits a fixed escalation message and ends the turn."""
-        message = ESCALATION_MESSAGE if write_capable else READ_ONLY_ESCALATION_MESSAGE
+        if not write_capable:
+            message = READ_ONLY_ESCALATION_MESSAGE
+        elif not interactive:
+            message = HEADLESS_ESCALATION_MESSAGE
+        else:
+            message = ESCALATION_MESSAGE
         return {"messages": [AIMessage(content=message)]}
 
     graph = StateGraph(AgentState)
@@ -1271,6 +1283,7 @@ currency, explain that a read-write workspace role is required.
 __all__ = [
     "ESCALATION_MESSAGE",
     "ESCALATION_TRIGGER_COUNT",
+    "HEADLESS_ESCALATION_MESSAGE",
     "READ_ONLY_ESCALATION_MESSAGE",
     "_should_escalate",
     "build_agent_graph",

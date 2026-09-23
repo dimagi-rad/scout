@@ -7,6 +7,7 @@ from langchain_core.tools import StructuredTool
 
 from apps.agents.graph.base import (
     ESCALATION_MESSAGE,
+    HEADLESS_ESCALATION_MESSAGE,
     READ_ONLY_ESCALATION_MESSAGE,
     _build_system_prompt,
     _build_tools,
@@ -183,18 +184,27 @@ async def test_graph_resolves_live_role_for_bound_tools_and_prompt(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [False, True])
 @pytest.mark.parametrize("writer", [False, True])
-async def test_escalation_message_matches_role(workspace, read_user, write_user, writer):
+async def test_escalation_message_matches_role_and_mode(
+    workspace, read_user, write_user, writer, interactive
+):
     with patch("apps.agents.graph.base.ChatAnthropic"):
-        graph = await build_agent_graph(workspace, write_user if writer else read_user)
+        graph = await build_agent_graph(
+            workspace, write_user if writer else read_user, interactive=interactive
+        )
 
     escalate = graph.builder.nodes["escalate"].runnable
     message = escalate.invoke({"messages": []})["messages"][0].content
 
-    assert message == (ESCALATION_MESSAGE if writer else READ_ONLY_ESCALATION_MESSAGE)
-    assert ("run materialization" in message) is writer
     if not writer:
+        assert message == READ_ONLY_ESCALATION_MESSAGE
         assert "workspace member with write access" in message
+    elif interactive:
+        assert message == ESCALATION_MESSAGE
+    else:
+        assert message == HEADLESS_ESCALATION_MESSAGE
+    assert ("?" in message) is (writer and interactive)
 
 
 @pytest.mark.asyncio
@@ -229,6 +239,9 @@ async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, wri
     assert "Call `run_materialization` to rebuild" in drift
     assert "continue in the same run" in drift
     assert "ask whether" not in drift
+    assert "offer to re-run materialization" not in stable
+    assert "ask to rebuild the data" not in stable
+    assert "re-run the count in the same run" in stable
 
 
 @pytest.mark.parametrize(
@@ -249,7 +262,12 @@ def test_every_base_prompt_variant_keeps_the_shared_guardrails(prompt):
         "pg_tables",
     ):
         assert invariant in prompt
-    assert "{" not in prompt
+    for placeholder in (
+        "{query_failure_fix}",
+        "{unavailable_count_guidance}",
+        "{schema_drift_guidance}",
+    ):
+        assert placeholder not in prompt
 
 
 @pytest.mark.asyncio
