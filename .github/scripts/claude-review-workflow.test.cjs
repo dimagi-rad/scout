@@ -62,7 +62,7 @@ function harness() {
     setSecret: (value) => (h.secrets = (h.secrets || []).concat(value)),
     setOutput: (k, v) => (h.outputs[k] = v),
     info() {},
-    warning() {},
+    warning: (w) => (h.warnings = (h.warnings || []).concat(w)),
     setFailed: (r) => h.failures.push(r),
     summary: {
       addRaw(s) {
@@ -378,4 +378,56 @@ test("checkpoint write must be observed before claiming successful persistence",
   assert.notEqual(h.outputs.claude_verified, "true");
   assert.ok(h.failures.length);
   assert.doesNotMatch(h.summary, /Claude review: verified/);
+});
+
+test("denied tool calls are logged to the run but kept out of PR comments", async () => {
+  const h = await prepared();
+  reviewed(h);
+  h.files["/sdk.json"] = JSON.stringify([
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      permission_denials: [
+        { tool_name: "Bash", tool_input: { command: "git grep PRIVATE | head" } },
+      ],
+    },
+  ]);
+  await finishClaude(h);
+  assert.deepEqual(h.warnings, [
+    'Denied tool call 1: Bash command="git grep PRIVATE | head"',
+  ]);
+  assert.ok(h.failures.length);
+  assert.equal(readState(h.comments).claudeHead, null);
+  for (const c of h.comments) assert.doesNotMatch(c.body, /PRIVATE/);
+  assert.doesNotMatch(h.summary, /PRIVATE/);
+});
+
+test("Claude reviewer tools are an exact read-only allowlist", () => {
+  const workflow = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../workflows/ocr.yml"),
+    "utf8",
+  );
+  const lines = workflow.match(/--allowedTools "([^"]*)"/g);
+  assert.ok(lines, "ocr.yml must declare a double-quoted --allowedTools value");
+  assert.equal(lines.length, 1);
+  const tools = lines[0].slice('--allowedTools "'.length, -1).split(",");
+  // git grep is excluded because -O/--open-files-in-pager runs an arbitrary
+  // shell command; gh api can write with the job's PR/issue token.
+  assert.deepEqual(tools, [
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git rev-parse:*)",
+    "Bash(git merge-base:*)",
+    "Bash(git ls-tree:*)",
+    "Bash(git cat-file:*)",
+    "Bash(git blame:*)",
+    "Bash(gh pr view:*)",
+    "Bash(gh pr comment:*)",
+    "Read",
+    "Grep",
+    "Glob",
+  ]);
+  assert.match(workflow, /one command per Bash call, with no pipes, redirects/);
 });
