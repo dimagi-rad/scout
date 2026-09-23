@@ -45,6 +45,8 @@ if args[0] == "ps":
     print("\n".join(state["stopped"].get(destination, [])))
 elif args[0] == "rm" and f"rm {args[1]}" in state["fail"]:
     sys.exit(1)
+elif args[0] == "inspect" and args[-1] in state.get("missing", []):
+    sys.exit(1)
 elif args[0] == "info":
     print(state.get("root", "/"))
 """
@@ -85,9 +87,15 @@ def guard(tmp_path):
         "DOCKER_STATE": str(state_file),
     }
 
-    def run(*args, stopped=None, free_gb=50, fail=()):
+    def run(*args, stopped=None, free_gb=50, fail=(), missing=()):
         free_kb = None if free_gb is None else int(free_gb * 1024 * 1024)
-        state = {"commands": [], "stopped": stopped or {}, "free_kb": free_kb, "fail": [*fail]}
+        state = {
+            "commands": [],
+            "stopped": stopped or {},
+            "free_kb": free_kb,
+            "fail": [*fail],
+            "missing": [*missing],
+        }
         state_file.write_text(json.dumps(state))
         result = subprocess.run(  # noqa: S603 - repository script against owned doubles
             ["/bin/bash", str(SCRIPT), *args],
@@ -160,6 +168,20 @@ def test_malformed_account_record_keeps_every_stopped_worker(guard, record):
     assert commands == []
 
 
+@pytest.mark.parametrize("kind", ["root", "symlink", "file"])
+def test_unusable_home_keeps_every_stopped_worker(guard, tmp_path, kind):
+    home = {"root": "/", "symlink": tmp_path / "home-link", "file": tmp_path / "home-file"}[kind]
+    if kind == "symlink":
+        home.symlink_to(guard.home)
+    elif kind == "file":
+        home.write_text("")
+    guard.account.write_text(f"scout:x:1000:1000::{home}:/bin/bash")
+    result, commands = guard("prune-workers", stopped={"production": ["p1", "p2", "p3", "p4"]})
+    assert result.returncode == 0, result.stderr
+    assert "Worker prune skipped" in result.stdout
+    assert commands == []
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permission bits")
 @pytest.mark.parametrize("unreadable", ["home", "home/.kamal"])
 def test_unreadable_home_or_kamal_keeps_every_stopped_worker(guard, unreadable):
@@ -181,6 +203,10 @@ def test_listing_or_removal_failures_do_not_abort_the_rest_of_the_prune(guard):
     assert result.returncode == 0, result.stderr
     assert _removed(commands) == ["gone", "p5", "s4"]
     assert "1 stopped production worker(s) could not be removed" in result.stdout
+
+    result, commands = guard("prune-workers", stopped=stopped, fail={"rm gone"}, missing={"gone"})
+    assert result.returncode == 0, result.stderr
+    assert "could not be removed" not in result.stdout
     assert ["image", "prune", "--force"] in commands
 
     result, commands = guard("prune-workers", stopped=stopped, fail={"ps production"})
@@ -305,9 +331,11 @@ def test_prune_step_tolerates_some_failures_but_not_all(
         check=False,
     )
     assert result.returncode == expected, result.stdout + result.stderr
-    assert len(calls.read_text().splitlines()) == 6
+    commands = len(calls.read_text().splitlines())
     if failing:
-        assert "failed" in summary.read_text()
+        tools = failing.split()
+        failures = (commands - 1 if "kamal" in tools else 0) + ("ssh" in tools)
+        assert f"{failures} of {commands} commands failed" in summary.read_text()
     if expected:
         assert "::error title=Host prune failed::" in result.stdout
 
