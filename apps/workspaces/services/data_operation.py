@@ -8,7 +8,9 @@ workspace's ``W`` while holding it; sibling rebuilds are deferred tasks.
 A ``T`` region must not fan out into work that takes ``W``: child tasks inherit
 the held-tenant context, and ``W`` is refused whenever it shows tenant keys.
 Threads that may enter a lock region must be started with ``run_data_thread``,
-which is what lets them reuse their task's locks.
+which is what lets them reuse their task's locks. The guard against other thread
+starts is best-effort: it catches context-copying ones (``asyncio.to_thread``,
+``sync_to_async``) but cannot see a plain ``threading.Thread``.
 """
 
 import asyncio
@@ -139,9 +141,9 @@ def sync_workspace_data_lock(workspace_id):
     if key in held:
         yield
         return
-    tenant_owner, tenant_keys = _held_tenants.get()
-    _refuse_unbridged_thread(owner, tenant_owner, tenant_keys)
+    _tenant_owner, tenant_keys = _held_tenants.get()
     if tenant_keys:
+        # The order inversion is the root cause even for a bridged thread.
         raise LockOrderError(_WORKSPACE_AFTER_TENANT)
     # Nested W is single-workspace by construction: every caller locks the one
     # workspace it is working on, so no ordering rule is needed across W keys.

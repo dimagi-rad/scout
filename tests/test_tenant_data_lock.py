@@ -36,9 +36,8 @@ def _held_tenant_locks(conn, keys):
 
 @pytest.fixture
 def probe():
-    conn = psycopg.connect(**data_operation._connection_params(), autocommit=True)
-    yield conn
-    conn.close()
+    with psycopg.connect(**data_operation._connection_params(), autocommit=True) as conn:
+        yield conn
 
 
 async def test_keys_are_sorted_and_deduplicated_physical_keys():
@@ -145,7 +144,7 @@ async def test_cancelled_holder_releases_tenant_locks():
             await asyncio.Event().wait()
 
     task = asyncio.create_task(holder())
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 10)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -233,8 +232,9 @@ async def test_cancelled_drained_thread_keeps_parent_tenant_ownership_until_stop
         async with tenant_data_lock([tenant]):
             await data_operation.run_data_thread(work)
 
-    task = asyncio.create_task(owner())
-    await entered.wait()
+    with patch.object(data_operation, "_LOCK_TIMEOUT", "5s"):
+        task = asyncio.create_task(owner())
+        await asyncio.wait_for(entered.wait(), 10)
     try:
         task.cancel()
         await asyncio.sleep(0)
@@ -268,9 +268,11 @@ async def test_a_bare_thread_cannot_wait_on_its_own_tasks_tenant_lock():
         with data_operation.sync_tenant_data_lock([tenant]):
             pass
 
-    async with tenant_data_lock([tenant]):
-        with pytest.raises(LockOrderError, match="run_data_thread"):
-            await asyncio.wait_for(asyncio.to_thread(nested), 5)
+    # A regression must not leave the thread waiting out the production timeout.
+    with patch.object(data_operation, "_LOCK_TIMEOUT", "2s"):
+        async with tenant_data_lock([tenant]):
+            with pytest.raises(LockOrderError, match="run_data_thread"):
+                await asyncio.wait_for(asyncio.to_thread(nested), 5)
 
 
 async def test_child_task_of_a_tenant_holder_cannot_take_a_workspace_lock():
