@@ -13,6 +13,7 @@ from apps.workspaces.models import SchemaState, WorkspaceViewSchema
 from mcp_server.loaders.ocs_base import OCSExportError
 from mcp_server.loaders.ocs_messages import map_session_messages
 from mcp_server.services.materializer import _write_ocs_messages
+from mcp_server.services.metadata import workspace_table_identity
 from mcp_server.source_identity import source_identity
 
 HISTORY = [
@@ -154,3 +155,45 @@ async def test_namespaced_views_keep_their_declared_source_identity(workspace, t
         monkeypatch.setattr(catalog, attribute, AsyncMock(return_value=value))
     _, tables = await catalog._load_physical_tables_async(workspace)
     assert tables[0].identity["version"] == 2
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mapping", ["valid", "legacy", "unlisted", "other_tenant"])
+async def test_mcp_view_identity_uses_only_authorized_publication_provenance(
+    workspace, tenant, mapping
+):
+    await Tenant.objects.filter(pk=tenant.pk).aupdate(provider="ocs")
+    sources = {
+        "version": 1,
+        "views": {
+            "fitted_name": {"tenant_id": str(tenant.id), "source_table_name": "raw_messages"}
+        },
+    }
+    if mapping == "legacy":
+        sources = {}
+    elif mapping == "unlisted":
+        sources["views"] = {}
+    elif mapping == "other_tenant":
+        sources["views"]["fitted_name"]["tenant_id"] = "not-in-workspace"
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="identity_views",
+        state=SchemaState.ACTIVE,
+        view_sources=sources,
+    )
+    columns = [
+        {"name": name, "type": "text"}
+        for name in ["message_id", "session_id", "snapshot_revision", "message_version"]
+    ]
+    identity = await workspace_table_identity(
+        workspace.id, "identity_views", "fitted_name", columns
+    )
+    if mapping == "valid":
+        assert identity["kind"] == "snapshot_local"
+        assert identity["safe_for_reviewed_labels"] is True
+        assert identity["source_scope"] == "tenant"
+        assert set(identity["scope_columns"]) <= {column["name"] for column in columns}
+    else:
+        assert identity["kind"] == "unknown"
+        assert identity["safe_for_reviewed_labels"] is False

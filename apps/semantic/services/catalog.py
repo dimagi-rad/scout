@@ -303,7 +303,8 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 type=entry.get("type", "table"),
                 description=(detail or {}).get("description") or entry.get("description", ""),
                 columns=columns,
-                identity=source_identity(
+                identity=(detail or {}).get("identity")
+                or source_identity(
                     source_provider, source.source_table_name if source else table_name, columns
                 ),
                 materialized_row_count=entry.get("materialized_row_count"),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -130,15 +132,24 @@ def test_message_loader_flattens_messages_with_composite_pk():
     with patch.object(loader._session, "get", side_effect=[sessions_page, detail]):
         pages = list(loader.load_pages())
         rows = [r for pg, _ in pages for r in pg]
-        revision = rows[0]["snapshot_revision"]
-        assert len(revision) == 64
+
+        def digest(value):
+            return hashlib.sha256(
+                json.dumps(
+                    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode()
+            ).hexdigest()
+
+        original_messages = detail.json.return_value["messages"]
+        revision = digest(["sess-1", original_messages])
+        assert rows[0]["snapshot_revision"] == revision
         assert rows[1]["snapshot_revision"] == revision
         assert rows[0]["message_version"] != rows[1]["message_version"]
         assert rows == [
             {
                 "message_id": f"sess-1:v2:{revision}:0",
                 "snapshot_revision": revision,
-                "message_version": rows[0]["message_version"],
+                "message_version": digest(original_messages[0]),
                 "session_id": "sess-1",
                 "message_index": 0,
                 "role": "user",
@@ -150,7 +161,7 @@ def test_message_loader_flattens_messages_with_composite_pk():
             {
                 "message_id": f"sess-1:v2:{revision}:1",
                 "snapshot_revision": revision,
-                "message_version": rows[1]["message_version"],
+                "message_version": digest(original_messages[1]),
                 "session_id": "sess-1",
                 "message_index": 1,
                 "role": "assistant",

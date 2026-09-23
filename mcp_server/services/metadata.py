@@ -15,7 +15,8 @@ from django.db import models
 
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
-from apps.workspaces.models import MaterializationRun
+from apps.workspaces.models import MaterializationRun, SchemaState, WorkspaceViewSchema
+from apps.workspaces.services.view_sources import ViewSourcesError, parse_view_sources
 from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
@@ -280,6 +281,33 @@ async def pipeline_describe_table(
         "columns": columns,
         **({"identity": identity} if identity else {}),
     }
+
+
+async def workspace_table_identity(workspace_id, schema_name, table_name, columns) -> dict | None:
+    """Resolve a view's source from publication provenance, never its fitted name."""
+    unknown = {
+        "kind": "unknown",
+        "safe_for_reviewed_labels": False,
+        "label_policy": "Source identity is unverified. Resolve source provenance before saving reviewed labels.",
+    }
+    view_schema = (
+        await WorkspaceViewSchema.objects.filter(
+            workspace_id=workspace_id, schema_name=schema_name, state=SchemaState.ACTIVE
+        )
+        .select_related("workspace")
+        .afirst()
+    )
+    if view_schema is None:
+        return unknown
+    tenants = {str(tenant.id): tenant async for tenant in view_schema.workspace.tenants.all()}
+    try:
+        sources = parse_view_sources(view_schema.view_sources, set(tenants))
+    except ViewSourcesError:
+        return unknown
+    source = sources.get(table_name) if sources else None
+    if source is None:
+        return unknown
+    return source_identity(tenants[source.tenant_id].provider, source.source_table_name, columns)
 
 
 def _build_jsonb_annotations(

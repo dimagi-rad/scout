@@ -87,6 +87,7 @@ from mcp_server.services.metadata import (
     pipeline_get_metadata,
     pipeline_list_tables,
     workspace_list_tables,
+    workspace_table_identity,
 )
 from mcp_server.services.query import execute_query
 
@@ -260,6 +261,13 @@ async def describe_table(
                 NOT_FOUND, f"Table '{table_name}' not found in schema '{ctx.schema_name}'"
             )
             return tc["result"]
+
+        if pipeline_config is None:
+            identity = await workspace_table_identity(
+                workspace_id, ctx.schema_name, table_name, table["columns"]
+            )
+            if identity:
+                table["identity"] = identity
 
         tc["result"] = success_response(
             table,
