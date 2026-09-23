@@ -15,6 +15,7 @@ from django.db import close_old_connections
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
 from apps.semantic.services.cube_client import (
+    CubeAuthenticationError,
     CubeClient,
     CubeConfigurationError,
     CubeConnectionError,
@@ -25,7 +26,7 @@ from apps.semantic.services.cube_schema import (
     build_cube_security_context,
     get_active_cube_schema,
 )
-from apps.semantic.services.query_outcomes import query_error, query_readiness_error
+from apps.semantic.services.query_outcomes import QueryReadiness, query_error, query_readiness_error
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR
 
@@ -61,6 +62,7 @@ async def run_semantic_query(
     query_spec: dict[str, Any],
     *,
     user_id: str = "",
+    readiness: QueryReadiness | None = None,
 ) -> dict[str, Any]:
     """Execute a structured semantic query and return tabular results."""
     try:
@@ -70,17 +72,25 @@ async def run_semantic_query(
         )
     except SemanticCatalogUnavailable as exc:
         return await query_readiness_error(
-            workspace, query_spec, VALIDATION_ERROR, str(exc), category="data_unavailable"
+            workspace,
+            query_spec,
+            VALIDATION_ERROR,
+            str(exc),
+            category="data_unavailable",
+            readiness=readiness,
         )
     except SemanticMemberError as exc:
-        return await query_readiness_error(
-            workspace, query_spec, VALIDATION_ERROR, str(exc), category="missing_model_dependency"
-        )
+        return query_error(VALIDATION_ERROR, str(exc), category="missing_model_dependency")
     except SemanticQueryError as exc:
         return query_error(VALIDATION_ERROR, str(exc), category="invalid_query")
     except CubeSchemaBuildError as exc:
         return await query_readiness_error(
-            workspace, query_spec, VALIDATION_ERROR, str(exc), category="data_unavailable"
+            workspace,
+            query_spec,
+            VALIDATION_ERROR,
+            str(exc),
+            category="data_unavailable",
+            readiness=readiness,
         )
 
     try:
@@ -91,7 +101,12 @@ async def run_semantic_query(
         # structured error envelope so the agent can explain that the data
         # needs to be materialized again.
         return await query_readiness_error(
-            workspace, query_spec, VALIDATION_ERROR, str(exc), category="data_unavailable"
+            workspace,
+            query_spec,
+            VALIDATION_ERROR,
+            str(exc),
+            category="data_unavailable",
+            readiness=readiness,
         )
     security_context = build_cube_security_context(
         workspace,
@@ -105,7 +120,7 @@ async def run_semantic_query(
             compiled["cube_query"],
             security_context=security_context,
         )
-    except CubeConfigurationError as exc:
+    except (CubeConfigurationError, CubeAuthenticationError) as exc:
         return query_error(VALIDATION_ERROR, str(exc), category="configuration_required")
     except CubeConnectionError as exc:
         return query_error(
@@ -115,9 +130,7 @@ async def run_semantic_query(
             retryable=True,
         )
     except CubeQueryError as exc:
-        return await query_readiness_error(
-            workspace,
-            query_spec,
+        return query_error(
             VALIDATION_ERROR,
             f"Cube query execution failed: {exc}",
             category="invalid_query",

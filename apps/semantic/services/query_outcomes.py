@@ -1,5 +1,6 @@
 """Typed failures for chat and artifact queries; classification never performs repairs."""
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
@@ -15,15 +16,29 @@ def query_error(code, message, *, category, retryable=False, recovery_action=Non
     return result
 
 
-async def query_readiness_error(workspace, query, code, message, *, category):
+class QueryReadiness:
+    """One lazy inspection of a batch's required members, never a global cache."""
+
+    def __init__(self, workspace, queries):
+        self.subject = SimpleNamespace(workspace=workspace, semantic_queries=queries, id=None)
+        self._surface = None
+        self._lock = asyncio.Lock()
+
+    async def surface(self):
+        async with self._lock:
+            if self._surface is None:
+                self._surface = await artifact_query_surface(self.subject)
+            return self._surface
+
+
+async def query_readiness_error(workspace, query, code, message, *, category, readiness=None):
     """Reuse artifact-page dependency/readiness decisions for a query not yet saved.
 
     The subject has no persisted artifact or recovery history. The existing
     service only reads catalog/publication state; it never loads provider data.
     """
-    subject = SimpleNamespace(workspace=workspace, semantic_queries=[query], id=None)
     try:
-        surface = await artifact_query_surface(subject)
+        surface = await (readiness or QueryReadiness(workspace, [query])).surface()
     except Exception:
         logger.warning(
             "Unable to inspect query readiness for workspace %s", workspace.id, exc_info=True
