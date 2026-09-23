@@ -402,3 +402,31 @@ test("denied tool calls are logged to the run but kept out of PR comments", asyn
   for (const c of h.comments) assert.doesNotMatch(c.body, /PRIVATE/);
   assert.doesNotMatch(h.summary, /PRIVATE/);
 });
+
+test("Claude reviewer tools are an exact read-only allowlist", () => {
+  const workflow = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../workflows/ocr.yml"),
+    "utf8",
+  );
+  const lines = workflow.match(/--allowedTools "([^"]*)"/g);
+  assert.equal(lines.length, 1);
+  const tools = lines[0].slice('--allowedTools "'.length, -1).split(",");
+  // git grep is excluded because -O/--open-files-in-pager runs an arbitrary
+  // shell command; gh api can write with the job's PR/issue token.
+  assert.deepEqual(tools, [
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git rev-parse:*)",
+    "Bash(git merge-base:*)",
+    "Bash(git ls-tree:*)",
+    "Bash(git cat-file:*)",
+    "Bash(git blame:*)",
+    "Bash(gh pr view:*)",
+    "Bash(gh pr comment:*)",
+    "Read",
+    "Grep",
+    "Glob",
+  ]);
+  assert.match(workflow, /one command per Bash call, with no pipes, redirects/);
+});
