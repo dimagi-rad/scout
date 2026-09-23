@@ -38,8 +38,13 @@ if args[0] == "ps":
     statuses = {f.split("=", 1)[1] for f in filters if f.startswith("status=")}
     assert statuses == {"created", "exited", "dead"}, statuses
     assert "label=service=scout-worker" in filters
-    destination = next(f for f in filters if f.startswith("label=destination=")).split("=", 2)[2]
-    print("\n".join(state["stopped"].get(destination or "production", [])))
+    label = next(f for f in filters if f.startswith("label=destination=")).split("=", 2)[2]
+    destination = label or "production"
+    if f"ps {destination}" in state["fail"]:
+        sys.exit(1)
+    print("\n".join(state["stopped"].get(destination, [])))
+elif args[0] == "rm" and f"rm {args[1]}" in state["fail"]:
+    sys.exit(1)
 elif args[0] == "info":
     print(state.get("root", "/"))
 """
@@ -50,9 +55,11 @@ def guard(tmp_path):
     state_file = tmp_path / "docker-state.json"
     home = tmp_path / "home"
     home.mkdir()
+    account = tmp_path / "account"
+    account.write_text(f"scout:x:1000:1000::{home}:/bin/bash")
     doubles = {
         "docker": DOCKER_DOUBLE,
-        "getent": f"print('scout:x:1000:1000::{home}:/bin/bash')",
+        "getent": (f"from pathlib import Path\nprint(Path({str(account)!r}).read_text())\n"),
         "timeout": (
             "import os, sys\n"
             "assert sys.argv[1] == '--foreground'\n"
@@ -63,6 +70,8 @@ def guard(tmp_path):
             "import json, os\n"
             "from pathlib import Path\n"
             "kb = json.loads(Path(os.environ['DOCKER_STATE']).read_text())['free_kb']\n"
+            "if kb is None:\n"
+            "    raise SystemExit(1)\n"
             "print('Filesystem 1024-blocks Used Available Capacity Mounted on')\n"
             "print(f'/dev/root 100000000 1 {kb} 99% /')\n"
         ),
@@ -76,12 +85,10 @@ def guard(tmp_path):
         "DOCKER_STATE": str(state_file),
     }
 
-    def run(*args, stopped=None, free_gb=50):
-        state_file.write_text(
-            json.dumps(
-                {"commands": [], "stopped": stopped or {}, "free_kb": int(free_gb * 1024 * 1024)}
-            )
-        )
+    def run(*args, stopped=None, free_gb=50, fail=()):
+        free_kb = None if free_gb is None else int(free_gb * 1024 * 1024)
+        state = {"commands": [], "stopped": stopped or {}, "free_kb": free_kb, "fail": [*fail]}
+        state_file.write_text(json.dumps(state))
         result = subprocess.run(  # noqa: S603 - repository script against owned doubles
             ["/bin/bash", str(SCRIPT), *args],
             env=env,
@@ -94,6 +101,7 @@ def guard(tmp_path):
         return result, json.loads(state_file.read_text())["commands"]
 
     run.home = home
+    run.account = account
     return run
 
 
@@ -136,6 +144,48 @@ def test_any_pending_or_legacy_drain_receipt_keeps_every_stopped_worker(guard, b
     assert commands == []
 
 
+@pytest.mark.parametrize(
+    "record",
+    [
+        "scout:x:1000:1000::{home}:/bin/bash\nscout:x:1000:1000::/elsewhere:/bin/bash",
+        "scout:x:1000:1000:{home}",
+        "other:x:1000:1000::{home}:/bin/bash",
+    ],
+)
+def test_malformed_account_record_keeps_every_stopped_worker(guard, record):
+    guard.account.write_text(record.format(home=guard.home))
+    result, commands = guard("prune-workers", stopped={"production": ["p1", "p2", "p3", "p4"]})
+    assert result.returncode == 0, result.stderr
+    assert "Invalid scout account record" in result.stdout
+    assert commands == []
+
+
+def test_unreadable_kamal_directory_keeps_every_stopped_worker(guard):
+    kamal = guard.home / ".kamal"
+    kamal.mkdir()
+    kamal.chmod(0o000)
+    try:
+        result, commands = guard("prune-workers", stopped={"production": ["p1", "p2", "p3", "p4"]})
+    finally:
+        kamal.chmod(0o700)
+    assert result.returncode == 0, result.stderr
+    assert commands == []
+
+
+def test_listing_or_removal_failures_do_not_abort_the_rest_of_the_prune(guard):
+    stopped = {"production": ["p1", "p2", "p3", "gone", "p5"], "staging": ["s1", "s2", "s3", "s4"]}
+    result, commands = guard("prune-workers", stopped=stopped, fail={"rm gone"})
+    assert result.returncode == 0, result.stderr
+    assert _removed(commands) == ["gone", "p5", "s4"]
+    assert ["image", "prune", "--force"] in commands
+
+    result, commands = guard("prune-workers", stopped=stopped, fail={"ps production"})
+    assert result.returncode == 0, result.stderr
+    assert "Could not list stopped production workers" in result.stdout
+    assert _removed(commands) == ["s4"]
+    assert ["image", "prune", "--force"] in commands
+
+
 def test_unexpected_receipt_root_contents_fail_closed(guard):
     root = guard.home / ".scout-worker-drains-v1"
     root.mkdir()
@@ -154,6 +204,12 @@ def test_check_passes_with_room_and_warns_when_getting_full(guard):
     assert "::warning title=Host disk getting full::12 GB free" in result.stdout
 
 
+def test_unreadable_free_space_fails_with_an_annotation(guard):
+    result, _ = guard("check", "8", free_gb=None)
+    assert result.returncode == 1
+    assert "::error title=Host disk check failed::" in result.stdout
+
+
 def test_check_fails_loudly_when_disk_is_too_full(guard):
     result, _ = guard("check", "8", free_gb=3.5)
     assert result.returncode == 1
@@ -168,14 +224,14 @@ def test_rejects_bad_usage(guard, args):
     assert commands == []
 
 
-def _steps(name):
+def _deploy_job(name):
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
     return workflow["jobs"]["deploy"]
 
 
 @pytest.mark.parametrize(("name", "destination"), WORKFLOWS)
 def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
-    job = _steps(name)
+    job = _deploy_job(name)
     names = [step.get("name") for step in job["steps"]]
     free, check = names.index("Free host disk space"), names.index("Check host disk space")
     assert names.index("Setup SSH") < free < check < names.index("Deploy Cube")
@@ -213,6 +269,41 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
 def test_every_role_retains_three_stopped_containers(config_name, destination):
     assert load_config(config_name, destination=destination)["retain_containers"] == 3
     assert "WORKER_RETAIN=3\n" in SCRIPT.read_text()
+
+
+@pytest.mark.parametrize(("name", "destination"), WORKFLOWS)
+@pytest.mark.parametrize(("failing", "expected"), [("", 0), ("kamal", 0), ("kamal ssh", 1)])
+def test_prune_step_tolerates_some_failures_but_not_all(
+    tmp_path, name, destination, failing, expected
+):
+    job = _deploy_job(name)
+    step = next(s for s in job["steps"] if s.get("name") == "Free host disk space")
+    calls = tmp_path / "calls"
+    for tool in ("kamal", "ssh"):
+        executable = tmp_path / tool
+        code = 1 if tool in failing.split() else 0
+        executable.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{calls}"\nexit {code}\n')
+        executable.chmod(0o755)
+    summary = tmp_path / "summary"
+    result = subprocess.run(  # noqa: S603 - checked-in step with owned command doubles
+        ["/bin/bash", "-e", "-c", step["run"]],
+        cwd=ROOT,
+        env={
+            "PATH": os.pathsep.join((str(tmp_path), *filter(None, os.defpath.split(os.pathsep)))),
+            "SCOUT_EC2_IP": "example.invalid",
+            "GITHUB_STEP_SUMMARY": str(summary),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert len(calls.read_text().splitlines()) == 6
+    if failing:
+        assert "failed" in summary.read_text()
+    if expected:
+        assert "::error title=Host prune failed::" in result.stdout
 
 
 def test_failed_production_deploys_open_a_tracking_issue():

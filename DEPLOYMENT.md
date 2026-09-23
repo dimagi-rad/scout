@@ -61,10 +61,11 @@ it — see [Second environment (staging)](#second-environment-staging).
 
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`:
 
-1. Authenticates to AWS via OIDC (no access keys), then prunes the host and
-   stops if it still lacks disk space (see [Host disk full](#host-disk-full))
-2. Builds and pushes the frontend once, including its Sentry build inputs, then
-   all three role-qualified backend images before interrupting any worker
+1. Authenticates to AWS via OIDC (no access keys)
+2. Builds and pushes the frontend once, including its Sentry build inputs; then
+   prunes the host and stops if it still lacks disk space (see
+   [Host disk full](#host-disk-full)); then builds all three role-qualified
+   backend images before interrupting any worker
 3. Deploys Cube → graceful old-worker drain → API migration/health → MCP →
    worker → frontend; prebuilt images use `--skip-push`
 4. Uses worker-only `kamal redeploy` to preserve stopped-worker drain evidence
@@ -651,7 +652,7 @@ historical streams are preserved with their 30-day retention — no data is lost
 
 ### Host disk full
 
-Production and staging share one host, and every deploy pulls several ~1 GB images.
+Production and staging share one host (a 50 GB root volume, per `infra/scout-stack.yml`), and every deploy pulls several ~1 GB images.
 Stopped Kamal rollback containers pin their images, so the disk fills if pruning
 stops. In September 2026 it did: the first pull of every deploy failed with
 `no space left on device`, Kamal's end-of-deploy prune therefore never ran, and
@@ -679,12 +680,13 @@ stopped containers (`docker ps -a --filter status=exited`). Remove old API, MCP,
 Cube or frontend containers freely, but never a stopped worker named by a
 pending drain receipt (see [Migration-safe backend handoff](#migration-safe-backend-handoff)).
 
-**Prevention.** Both deploy workflows now run, before anything is built or pulled:
+**Prevention.** Both deploy workflows now run, after SSH setup and before any backend build or host pull:
 
 1. `Free host disk space` — `kamal prune all` for API, MCP, Cube and frontend
    (the same service-wide prune `kamal deploy` runs on success), a worker image
    prune, and the receipt-guarded worker container prune described above. Every
-   role keeps `retain_containers: 3`. Prune failures are warnings.
+   role keeps `retain_containers: 3`. A single prune failure is a warning; if all
+   of them fail (for example a stale Kamal lock), the step fails.
 2. `Check host disk space` — fails the deploy with a clear error when Docker's
    filesystem has less than `HOST_MIN_FREE_GB` (8 GB) free, and warns below twice that.
 

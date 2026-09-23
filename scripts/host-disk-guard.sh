@@ -24,10 +24,19 @@ prune_workers() {
     echo "::warning title=Worker prune skipped::Could not resolve the scout account."
     return 0
   }
+  # Same record and legacy-path checks as drain-workers.sh: a malformed record
+  # or unreadable .kamal would hide receipts and make this guard fail open.
+  if [[ "$account" == *$'\n'* || "$account" == *$'\r'* || \
+        ! "$account" =~ ^scout:[^:]*:[0-9]+:[0-9]+:[^:]*:[^:]+:[^:]*$ ]]; then
+    echo "::warning title=Worker prune skipped::Invalid scout account record."
+    return 0
+  fi
   home=$(cut -d: -f6 <<< "$account")
-  if [[ "$home" != /* || -e "$home/.kamal/scout-worker-drains-v1" || \
-        -L "$home/.kamal/scout-worker-drains-v1" ]]; then
-    echo "::warning title=Worker prune skipped::Legacy or unresolvable drain metadata; inspect it before pruning workers."
+  local kamal="$home/.kamal"
+  if [[ "$home" != /* || -L "$kamal" || \
+        ( -e "$kamal" && ( ! -d "$kamal" || ! -r "$kamal" || ! -x "$kamal" ) ) || \
+        -e "$kamal/scout-worker-drains-v1" || -L "$kamal/scout-worker-drains-v1" ]]; then
+    echo "::warning title=Worker prune skipped::Legacy or unreadable drain metadata; inspect it before pruning workers."
     return 0
   fi
   local root="$home/.scout-worker-drains-v1"
@@ -55,9 +64,13 @@ prune_workers() {
     # docker ps lists newest first, so everything after the first N is older.
     stopped=$(run_docker ps --all --no-trunc --quiet \
       --filter label=service=scout-worker --filter "label=destination=$label" \
-      --filter status=created --filter status=exited --filter status=dead)
+      --filter status=created --filter status=exited --filter status=dead) || {
+      echo "::warning title=Worker prune skipped::Could not list stopped $destination workers."
+      continue
+    }
     tail -n "+$((WORKER_RETAIN + 1))" <<< "$stopped" | while read -r container; do
-      if [[ -n "$container" ]]; then run_docker rm "$container" >/dev/null; fi
+      # Best effort: Kamal may already have removed it since the listing.
+      if [[ -n "$container" ]]; then run_docker rm "$container" >/dev/null || true; fi
     done
   done
   # Only images no container references; stopped rollback containers keep theirs.
@@ -70,8 +83,11 @@ check() {
   local root available_kb available_gb
   root=$(run_docker info --format '{{.DockerRootDir}}' 2>/dev/null) || root=/
   [[ -e "$root" ]] || root=/
-  available_kb=$(df -Pk -- "$root" | awk 'NR == 2 { print $4 }')
-  [[ "$available_kb" =~ ^[0-9]+$ ]] || { echo "Could not read free space for $root" >&2; exit 1; }
+  available_kb=$(df -Pk -- "$root" 2>/dev/null | awk 'NR == 2 { print $4 }') || available_kb=""
+  [[ "$available_kb" =~ ^[0-9]+$ ]] || {
+    echo "::error title=Host disk check failed::Could not read free space for $root. Follow DEPLOYMENT.md: Host disk full."
+    exit 1
+  }
   available_gb=$((available_kb / 1024 / 1024))
   df -Ph -- "$root"
   run_docker system df || true
