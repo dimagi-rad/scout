@@ -12,7 +12,7 @@ from apps.users.decorators import async_login_required
 from apps.workspaces import tasks as workspace_tasks
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
-from apps.workspaces.services.failure_guidance import REQUIRES_REMEDIATION
+from apps.workspaces.services.failure_guidance import REQUIRES_REMEDIATION, summary_failures
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
     Retry is offered only when no recorded failure requires user/admin action.
     Completed jobs still clear stale failure cards in the frontend.
     """
-    failures = workspace_tasks._summary_failures(
+    failures = summary_failures(
         [
             *job.materialization_preflight_failures,
             *run_results,

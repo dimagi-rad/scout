@@ -1,5 +1,8 @@
 """User remediation shared by access denials and materialization consumers."""
 
+from collections.abc import Iterable
+from typing import NamedTuple
+
 from apps.common.error_codes import ErrorCode
 
 # Loaders describe failures; only presentation consumers add this advice.
@@ -46,3 +49,36 @@ REQUIRES_REMEDIATION = frozenset(
         ErrorCode.PIPELINE_UNRESOLVED,
     }
 )
+
+
+class SourceFailure(NamedTuple):
+    """A source or tenant failure, with a name for attributed user guidance."""
+
+    name: str
+    error: str
+    code: str
+
+
+def summary_failures(tenant_summaries: Iterable[dict]) -> list[SourceFailure]:
+    """Collect tenant-level and per-source failures, including preflight refusals."""
+    failures: list[SourceFailure] = []
+    for tenant in tenant_summaries:
+        if tenant.get("error_code"):
+            failures.append(
+                SourceFailure(
+                    name=str(tenant.get("display_name") or tenant.get("tenant") or "unknown"),
+                    error=str(tenant.get("error") or ""),
+                    code=str(tenant["error_code"]),
+                )
+            )
+        for name, src in (tenant.get("sources") or {}).items():
+            if not isinstance(src, dict):
+                continue
+            failures.append(
+                SourceFailure(
+                    name=name,
+                    error=str(src.get("error") or ""),
+                    code=str(src.get("error_code") or ErrorCode.INTERNAL_ERROR),
+                )
+            )
+    return failures
