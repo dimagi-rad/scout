@@ -236,12 +236,17 @@ async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, wri
     )
 
     drift = stable.split("## When the Schema is Broken", 1)[1].split("Do NOT:", 1)[0]
-    assert "Call `run_materialization` to rebuild" in drift
+    assert "call `run_materialization` to rebuild" in drift
     assert "continue in the same run" in drift
     assert "ask whether" not in drift
+    # No user gate headless, so a mistyped member must not trigger a full reload.
+    assert "Rule out a mistyped member first" in drift
+    assert "at most once\nper run" in drift
+    count_rule = stable.split("## Metadata vs. Verified Counts", 1)[1].split("## When", 1)[0]
+    assert "confirm the member names with `describe_dataset`" in count_rule
+    assert "re-run the count in the same run" in count_rule
     assert "offer to re-run materialization" not in stable
     assert "ask to rebuild the data" not in stable
-    assert "re-run the count in the same run" in stable
 
 
 @pytest.mark.parametrize(

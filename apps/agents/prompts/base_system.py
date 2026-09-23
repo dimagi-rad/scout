@@ -239,10 +239,15 @@ HEADLESS_BASE_SYSTEM_PROMPT = _render(
         "rebuild the data and continue in the same run"
     ),
     unavailable_count_guidance=(
-        "call `run_materialization` to rebuild the data, then re-run the count in the same run."
+        "first confirm the member names with `describe_dataset`; most of these errors "
+        "are a mistyped member. Only if the dataset itself is unreachable, call "
+        "`run_materialization` to rebuild the data, then re-run the count in the same run."
     ),
-    schema_drift_guidance="""Call `run_materialization` to rebuild the
-data. It blocks until loading finishes; then continue in the same run.""",
+    schema_drift_guidance="""Rule out a mistyped member first: if
+`describe_dataset` succeeds, fix the member name instead. Only if `describe_dataset`
+itself fails for that dataset, call `run_materialization` to rebuild the data. It
+blocks until loading finishes; then continue in the same run. Call it at most once
+per run — if the data is still unreachable afterwards, report that and stop.""",
 )
 
 READ_ONLY_BASE_SYSTEM_PROMPT = _render(
