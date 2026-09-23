@@ -16,7 +16,7 @@ WORKER_RETAIN=3
 run_docker() { timeout --foreground 60s docker "$@"; }
 
 prune_workers() {
-  local account home destination label stopped not_removed
+  local account home destination label stopped not_removed error
   # Worker deploys skip Kamal's service-wide prune so a stopped worker named by
   # either destination's pending drain receipt survives (DEPLOYMENT.md). Only
   # prune when no receipt exists anywhere; otherwise leave cleanup to an operator.
@@ -75,6 +75,7 @@ prune_workers() {
       [[ -n "$container" ]] || continue
       if ! error=$(run_docker rm "$container" 2>&1 >/dev/null) && \
          [[ "$error" != *"No such container"* ]]; then
+        echo "docker rm $container: ${error:-no output (likely a timeout)}" >&2
         echo "$container"
       fi
     done)

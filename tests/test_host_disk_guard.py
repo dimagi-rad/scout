@@ -278,8 +278,9 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
         ["kamal", "prune", "images"],
     ]
     assert f'-c "$config"{" -d staging" if destination else ""}' in free_run
+    # Service-wide container pruning could delete receipt-referenced workers.
     configs = shlex.split(free_run.split("for config in", 1)[1].split(";", 1)[0])
-    assert configs == [f"config/{name}" for name in KAMAL_CONFIGS if name != "deploy-worker.yml"]
+    assert configs == [f"config/{c}" for c in KAMAL_CONFIGS if c != "deploy-worker.yml"]
     assert shlex.split(kamal_prunes[1].rstrip("\\")) == [
         "kamal",
         "prune",
@@ -288,8 +289,6 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
         "config/deploy-worker.yml",
         *suffix,
     ]
-    # Service-wide container pruning could delete receipt-referenced workers.
-    assert "deploy-worker.yml" not in free_run.split("for config in", 1)[1].split("\n")[0]
     assert "prune-workers < scripts/host-disk-guard.sh" in free_run
 
     check_step = job["steps"][check]
