@@ -118,8 +118,12 @@ Open http://localhost:5173 in your browser.
 docker compose up --build
 ```
 
-This starts backend API (port 8000), frontend (port 3000), internal MCP server,
-PostgreSQL, and Cube (ports 4000 and 4010).
+This starts backend API (port 8000), frontend (port 3000), MCP server,
+PostgreSQL, and Cube (ports 4000 and 4010). The automatically loaded local
+`docker-compose.override.yml` publishes MCP on port 8100; without that override,
+MCP is internal to the Compose network. This Compose stack does not start a
+background worker; see the [Docker setup guide](docs/docs/deployment/docker.md)
+for materialization jobs.
 
 ## Project Setup
 

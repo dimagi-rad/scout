@@ -1,5 +1,5 @@
 from django.apps import AppConfig
-from django.core.checks import Tags, register
+from django.core.checks import register
 
 from .checks import check_cube_configuration
 
@@ -10,4 +10,4 @@ class SemanticConfig(AppConfig):
     verbose_name = "Semantic Model"
 
     def ready(self):
-        register(Tags.compatibility)(check_cube_configuration)
+        register(check_cube_configuration)

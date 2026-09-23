@@ -10,6 +10,9 @@ Scout is configured via environment variables, typically set in a `.env` file in
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude. Starts with `sk-ant-`. |
 | `DB_CREDENTIAL_KEY` | Fernet key for encrypting project database credentials at rest. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `DATABASE_URL` | PostgreSQL connection URL for Scout's own database. Example: `postgresql://user:pass@localhost/scout` |
+| `CUBE_API_URL` | Cube semantic query API. Host development: `http://localhost:4000`; use the private service URL in production. |
+| `CUBE_VALIDATOR_URL` | Cube schema validator. Host development: `http://localhost:4010`; use the private service URL in production. |
+| `CUBEJS_API_SECRET` | Shared signing secret for Scout and Cube. Both must use the same value. |
 
 ## Optional variables
 
@@ -65,7 +68,7 @@ The default LLM model (`claude-sonnet-4-5-20250929`) can be overridden per-proje
 
 ### Error monitoring (Sentry)
 
-Sentry is off by default. Setting `SENTRY_DSN` activates it for the API, Celery worker, and MCP server (they all load Django settings). For the frontend, source maps can optionally be uploaded at build time so minified stack traces resolve back to TypeScript source.
+Sentry is off by default. Setting `SENTRY_DSN` activates it for the API, Procrastinate worker, and MCP server (they all load Django settings). For the frontend, source maps can optionally be uploaded at build time so minified stack traces resolve back to TypeScript source.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

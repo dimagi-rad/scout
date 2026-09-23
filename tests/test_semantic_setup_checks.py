@@ -1,7 +1,8 @@
+import shlex
 from unittest.mock import Mock
 
 import pytest
-from django.core.checks import Tags, run_checks
+from django.core.checks import run_checks
 
 from apps.semantic.checks import check_cube_configuration
 from tasks import deps
@@ -32,7 +33,7 @@ def test_configured_cube_does_not_warn():
 
 def test_check_is_registered(settings):
     settings.CUBE_API_URL = ""
-    assert any(w.id == "semantic.W001" for w in run_checks(tags=[Tags.compatibility]))
+    assert any(w.id == "semantic.W001" for w in run_checks())
 
 
 def test_local_setup_warning_is_not_applied_to_production(settings):
@@ -44,6 +45,8 @@ def test_local_setup_warning_is_not_applied_to_production(settings):
 def test_dependency_command_starts_cube_without_a_duplicate_mcp():
     context = Mock()
     deps.body(context)
-    context.run.assert_called_once_with(
-        "docker compose up -d --build --wait platform-db cube", pty=True
-    )
+    context.run.assert_called_once()
+    command = shlex.split(context.run.call_args.args[0])
+    assert command[:3] == ["docker", "compose", "up"]
+    assert {"-d", "--build", "--wait", "platform-db", "cube"} <= set(command)
+    assert "mcp-server" not in command
