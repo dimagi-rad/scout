@@ -354,7 +354,7 @@ async def test_recent_terminations_completed_state_has_no_retry():
         MaterializationRun.objects, "filter", wraps=MaterializationRun.objects.filter
     ) as runs:
         resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
-    assert all(not call.kwargs["procrastinate_job_id__in"] for call in runs.call_args_list)
+    assert all(not call.kwargs.get("procrastinate_job_id__in") for call in runs.call_args_list)
     body = resp.json()
     assert len(body["recent_terminations"]) == 1
     assert body["recent_terminations"][0]["retry_available"] is False

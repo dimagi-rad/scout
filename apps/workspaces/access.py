@@ -76,7 +76,7 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
         return {
             "error": (
                 f"You no longer have access to {projects}: "
-                + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
+                + CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE]
             ),
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),

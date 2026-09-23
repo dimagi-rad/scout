@@ -32,10 +32,11 @@ CREDENTIAL_GUIDANCE: dict[str, str] = {
         "data source from the workspace."
     ),
     ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
-        "in this workspace but not connected to your account, so this run did not "
-        "refresh it — connect that account "
-        "(Settings → Connections) if you should have access, or ask a workspace "
-        "admin to move it to its own workspace."
+        "not connected to your account — connect that account (Settings → Connections) "
+        "if you disconnected it or have not connected it yet. If access was removed "
+        "or restricted at the provider, ask a provider admin to restore it; "
+        "reconnecting alone cannot restore those permissions. A workspace admin "
+        "can help remove a source you no longer need."
     ),
 }
 
@@ -53,7 +54,7 @@ REQUIRES_REMEDIATION = frozenset(
 
 
 class SourceFailure(NamedTuple):
-    """A source or tenant failure, with a name for attributed user guidance."""
+    """A failure attributed to a source, or the tenant when preflight never ran sources."""
 
     name: str
     error: str
@@ -61,7 +62,7 @@ class SourceFailure(NamedTuple):
 
 
 def summary_failures(tenant_summaries: Iterable[dict]) -> list[SourceFailure]:
-    """Collect tenant-level and per-source failures, including preflight refusals."""
+    """Include preflight refusals: no MaterializationRun exists until run_pipeline starts."""
     failures: list[SourceFailure] = []
     for tenant in tenant_summaries:
         if not isinstance(tenant, dict):

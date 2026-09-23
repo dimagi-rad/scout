@@ -5,9 +5,10 @@ import uuid
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.workspaces.access import (
     NOT_MEMBER,
     TENANT_ACCESS_LOST,
@@ -104,7 +105,8 @@ def test_non_member_gets_generic_denial():
 
 
 @pytest.mark.django_db
-def test_member_without_live_tenant_gets_tenant_access_lost():
+@pytest.mark.parametrize("cause", ["not_connected", "disconnected", "upstream_denial"])
+def test_member_without_live_tenant_gets_tenant_access_lost(cause):
     user = User.objects.create_user(email="denial-lost@example.com", password="pass")
     tenant = Tenant.objects.create(
         provider="commcare", external_id="skelly", canonical_name="skelly"
@@ -112,7 +114,18 @@ def test_member_without_live_tenant_gets_tenant_access_lost():
     ws = Workspace.objects.create(name="Skelly WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.READ)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
-    # No live TenantMembership: upstream access was removed.
+    if cause != "not_connected":
+        connection = TenantConnection.objects.create(
+            user=user,
+            provider="commcare",
+            credential_type=TenantConnection.API_KEY,
+            upstream_denial_code=ErrorCode.AUTH_ACCESS_DENIED if cause == "upstream_denial" else "",
+        )
+        TenantMembership.all_objects.create(
+            user=user, tenant=tenant, connection=connection, archived_at=timezone.now()
+        )
+        if cause == "disconnected":
+            connection.delete()
 
     result = resolve_workspace_access_ex(user, ws.id, minimum_role=WorkspaceRole.MANAGE)
 
@@ -121,8 +134,11 @@ def test_member_without_live_tenant_gets_tenant_access_lost():
     assert result.lost_tenant_names == ("skelly",)
     body = access_denied_body(result)
     assert body["reason"] == TENANT_ACCESS_LOST
-    assert CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED] in body["error"]
-    assert "reconnect or" not in body["error"]
+    assert CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in body["error"]
+    assert "if you disconnected it" in body["error"]
+    assert "If access was removed or restricted at the provider" in body["error"]
+    assert "reconnecting alone cannot restore those permissions" in body["error"]
+    assert "A workspace admin can help remove" in body["error"]
     assert body["lost_tenants"] == ["skelly"]
     assert "skelly" in body["error"]
 
