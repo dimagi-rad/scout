@@ -42,11 +42,16 @@ def _recovery_url(artifact):
 
 
 async def _partial_publication(setup):
-    """Expire the required source and really publish only the other tenant."""
+    """Expire the required source and really publish only the other tenant.
+
+    The views move off the TEARDOWN source first (the rebuild excludes it) and
+    the physical drop follows: the only order that works once retirement stops
+    cascading over dependent views.
+    """
     await TenantSchema.objects.filter(pk=setup.schemas[0].pk).aupdate(state=SchemaState.TEARDOWN)
-    await teardown_schema.func(str(setup.schemas[0].id))
     result = await rebuild_workspace_view_schema.func(str(setup.workspace.id))
     assert result["cube_schema"]["ok"] is True
+    await teardown_schema.func(str(setup.schemas[0].id))
     await setup.view.arefresh_from_db()
     await setup.dataset.arefresh_from_db()
     assert setup.dataset.table_name not in setup.view.view_sources["views"]
@@ -311,11 +316,12 @@ async def test_older_ready_surface_cannot_hide_current_explicit_missing_view(
     full_surface = await workspace_query_surface(setup.workspace)
     assert full_surface["queryable"] is True
     await TenantSchema.objects.filter(pk=setup.schemas[0].pk).aupdate(state=SchemaState.TEARDOWN)
-    await teardown_schema.func(str(setup.schemas[0].id))
     # Physical publication precedes the catalog/Cube phase. The old model is
     # still readable while the source is restored before its new view is built.
+    # Drop the source only after these views stop reading it (see _partial_publication).
     partial_view = await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
     assert setup.dataset.table_name not in partial_view.view_sources["views"]
+    await teardown_schema.func(str(setup.schemas[0].id))
     if source_restored:
         restored = await sync_to_async(SchemaManager().provision)(setup.tenants[0])
         await sync_to_async(_create_table)(setup.dsn, restored.schema_name, count=3)
