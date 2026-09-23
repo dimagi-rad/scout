@@ -385,13 +385,6 @@ def _durable_result(receipt, requested_tenant_ids):
     return None
 
 
-# Outcomes whose verdict belongs to specific tenants rather than to the whole
-# connection. Only these may be gated on the receipt's recorded tenant scope.
-_TENANT_SCOPED_OUTCOMES = frozenset(
-    {VerificationOutcome.COMPLETE, VerificationOutcome.TENANT_DENIED}
-)
-
-
 def _attempt_matches_waiter_lineage(
     receipt, lease_token, original, current, requested_tenant_ids
 ) -> bool:
@@ -403,19 +396,8 @@ def _attempt_matches_waiter_lineage(
         and current is not None
     ):
         observations.append(replace(current, upstream_denied_at=original.upstream_denied_at))
-    # A rejected credential, an unreachable provider or an indeterminate answer
-    # applies to every tenant on the connection, so a waiter asking about other
-    # tenants may still reuse it and skip a second upstream discovery. Passing the
-    # receipt's own scope satisfies attempt_receipt_matches' subset test without
-    # weakening its lease and observation checks, which are the real gates here.
-    # A legacy receipt carries an empty scope and still matches nothing.
-    scope = (
-        requested_tenant_ids
-        if receipt is not None and receipt.outcome in _TENANT_SCOPED_OUTCOMES
-        else getattr(receipt, "tenant_ids", frozenset())
-    )
     return any(
-        attempt_receipt_matches(receipt, lease_token, observation, scope)
+        attempt_receipt_matches(receipt, lease_token, observation, requested_tenant_ids)
         for observation in observations
     )
 

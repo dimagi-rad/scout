@@ -1279,3 +1279,64 @@ def test_tenant_denied_receipt_covers_only_the_denied_tenant(user, verification_
     assert not access_verification.attempt_receipt_matches(
         receipt, control.last_attempt_lease_token, claim.observation, {sibling.id}
     )
+
+
+def _receipt(outcome, observation, tenant_ids, lease_token):
+    return access_verification.VerificationAttemptReceipt(
+        lease_token=lease_token,
+        outcome=outcome,
+        error_code="",
+        observation_hash=access_verification._observation_hash(observation),
+        tenant_ids=frozenset(str(tenant_id) for tenant_id in tenant_ids),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("outcome", "reusable_for_uncovered"),
+    [
+        (VerificationOutcome.COMPLETE, False),
+        (VerificationOutcome.TENANT_DENIED, False),
+        (VerificationOutcome.CREDENTIAL_REJECTED, True),
+        (VerificationOutcome.UNAVAILABLE, True),
+        (VerificationOutcome.INDETERMINATE, True),
+    ],
+)
+def test_receipt_scope_gate_applies_only_to_tenant_scoped_outcomes(
+    verification_connection, outcome, reusable_for_uncovered
+):
+    """The matcher owns the whole scope policy, in both directions.
+
+    A tenant-scoped verdict must not vouch for a tenant it never covered, while a
+    connection-level verdict must, or a waiter asking about other tenants on the same
+    failed connection would force a second upstream call.
+    """
+    conn, membership = verification_connection
+    observation = snapshot_credential(conn).observation
+    lease = uuid4()
+    uncovered = uuid4()
+    receipt = _receipt(outcome, observation, {membership.tenant_id}, lease)
+
+    matches = access_verification.attempt_receipt_matches
+    assert matches(receipt, lease, observation, {membership.tenant_id})
+    assert matches(receipt, lease, observation, {uncovered}) is reusable_for_uncovered
+    assert (
+        matches(receipt, lease, observation, {membership.tenant_id, uncovered})
+        is reusable_for_uncovered
+    )
+    # The scope exemption must not weaken the lease and observation gates.
+    assert not matches(receipt, uuid4(), observation, {uncovered})
+    assert not matches(receipt, lease, observation, set())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", list(VerificationOutcome))
+def test_unscoped_legacy_receipt_matches_nothing_for_any_outcome(verification_connection, outcome):
+    conn, membership = verification_connection
+    observation = snapshot_credential(conn).observation
+    lease = uuid4()
+    receipt = _receipt(outcome, observation, (), lease)
+
+    assert not access_verification.attempt_receipt_matches(
+        receipt, lease, observation, {membership.tenant_id}
+    )
