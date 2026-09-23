@@ -28,10 +28,7 @@ from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
 )
-from apps.agents.prompts.base_system import (
-    BASE_SYSTEM_PROMPT,
-    READ_ONLY_BASE_SYSTEM_PROMPT,
-)
+from apps.agents.prompts.base_system import select_base_system_prompt
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
@@ -1174,10 +1171,10 @@ async def _build_stable_system_prompt(
             return value
 
     # Stable sections (cacheable prefix)
-    if write_capable:
-        stable_sections = [BASE_SYSTEM_PROMPT, ARTIFACT_PROMPT_ADDITION]
-    else:
-        stable_sections = [READ_ONLY_BASE_SYSTEM_PROMPT, ARTIFACT_READ_ONLY_PROMPT_ADDITION]
+    stable_sections = [
+        select_base_system_prompt(write_capable=write_capable, interactive=interactive),
+        ARTIFACT_PROMPT_ADDITION if write_capable else ARTIFACT_READ_ONLY_PROMPT_ADDITION,
+    ]
 
     if workspace.system_prompt:
         stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")

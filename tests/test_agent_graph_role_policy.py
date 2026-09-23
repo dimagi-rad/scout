@@ -14,6 +14,11 @@ from apps.agents.graph.base import (
     _system_prompt_cache,
     build_agent_graph,
 )
+from apps.agents.prompts.base_system import (
+    BASE_SYSTEM_PROMPT,
+    HEADLESS_BASE_SYSTEM_PROMPT,
+    READ_ONLY_BASE_SYSTEM_PROMPT,
+)
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant, WorkspaceViewSchema
 
@@ -210,6 +215,41 @@ async def test_static_prompt_rebuild_offers_match_role(workspace, read_user, wri
     assert ("ask whether\n   to re-materialize" in stable) is writer
     assert ("run_materialization" in stable) is writer
     assert ("workspace member with write access" in stable) is not writer
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, write_user):
+    _system_prompt_cache.clear()
+    stable, _ = await _build_system_prompt(
+        workspace, write_user, interactive=False, canvas_write=False, write_capable=True
+    )
+
+    drift = stable.split("## When the Schema is Broken", 1)[1].split("Do NOT:", 1)[0]
+    assert "Call `run_materialization` to rebuild" in drift
+    assert "continue in the same run" in drift
+    assert "ask whether" not in drift
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [BASE_SYSTEM_PROMPT, HEADLESS_BASE_SYSTEM_PROMPT, READ_ONLY_BASE_SYSTEM_PROMPT],
+    ids=["interactive", "headless", "read_only"],
+)
+def test_every_base_prompt_variant_keeps_the_shared_guardrails(prompt):
+    for invariant in (
+        "## Metadata vs. Verified Counts",
+        "NEVER report",
+        "## When the Schema is Broken",
+        "STOP exploring",
+        "more than two",
+        "pg_namespace",
+        "pg_class",
+        "pg_views",
+        "pg_tables",
+    ):
+        assert invariant in prompt
+    assert "{" not in prompt
 
 
 @pytest.mark.asyncio

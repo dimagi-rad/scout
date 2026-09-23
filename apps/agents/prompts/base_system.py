@@ -204,13 +204,28 @@ Frame clarifying questions helpfully:
 "To make sure I give you the right answer: Did you mean [option A] or [option B]?"
 """
 
+
+def _render(**values: str) -> str:
+    # str.format would turn any literal brace added to the prompt into an import error.
+    prompt = _BASE_SYSTEM_PROMPT_TEMPLATE
+    for name, value in values.items():
+        placeholder = "{" + name + "}"
+        if placeholder not in prompt:
+            raise ValueError(f"base system prompt has no {placeholder} placeholder")
+        prompt = prompt.replace(placeholder, value)
+    return prompt
+
+
+_WRITE_QUERY_FAILURE_FIX = "propose a corrected semantic member or ask to rebuild the data"
+_WRITE_UNAVAILABLE_COUNT_GUIDANCE = (
+    "tell the user the data is unavailable and offer to re-run materialization."
+)
+
 # Read-only members have no materialization tools (#517), so every place the
 # prompt would offer a rebuild has to point them at a write-capable member instead.
-BASE_SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT_TEMPLATE.format(
-    query_failure_fix="propose a corrected semantic member or ask to rebuild the data",
-    unavailable_count_guidance=(
-        "tell the user the data is unavailable and offer to re-run materialization."
-    ),
+BASE_SYSTEM_PROMPT = _render(
+    query_failure_fix=_WRITE_QUERY_FAILURE_FIX,
+    unavailable_count_guidance=_WRITE_UNAVAILABLE_COUNT_GUIDANCE,
     schema_drift_guidance="""Do exactly one of:
 
 1. If the user has already asked you to refresh or rebuild the data, call
@@ -219,7 +234,16 @@ BASE_SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT_TEMPLATE.format(
    to re-materialize before calling `run_materialization`; it is long-running.""",
 )
 
-READ_ONLY_BASE_SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT_TEMPLATE.format(
+# Headless (recipe) runs have no user to answer an ask-first question and no
+# resume path, so the drift rule rebuilds directly with the blocking tool.
+HEADLESS_BASE_SYSTEM_PROMPT = _render(
+    query_failure_fix=_WRITE_QUERY_FAILURE_FIX,
+    unavailable_count_guidance=_WRITE_UNAVAILABLE_COUNT_GUIDANCE,
+    schema_drift_guidance="""Call `run_materialization` to rebuild the
+data. It blocks until loading finishes; then continue in the same run.""",
+)
+
+READ_ONLY_BASE_SYSTEM_PROMPT = _render(
     query_failure_fix=(
         "propose a corrected semantic member, or explain that a workspace member "
         "with write access can refresh the data"
@@ -232,3 +256,9 @@ READ_ONLY_BASE_SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT_TEMPLATE.format(
 queryable. Their workspace role is read-only, so a workspace member with write
 access needs to refresh it. Do not offer to rebuild or re-materialize it yourself.""",
 )
+
+
+def select_base_system_prompt(*, write_capable: bool, interactive: bool) -> str:
+    if not write_capable:
+        return READ_ONLY_BASE_SYSTEM_PROMPT
+    return BASE_SYSTEM_PROMPT if interactive else HEADLESS_BASE_SYSTEM_PROMPT
