@@ -65,6 +65,13 @@ cp -n .env.example .env  # Do not overwrite an existing .env
 # ANTHROPIC_API_KEY, DB_CREDENTIAL_KEY, and the three Cube settings below
 ```
 
+For local Compose, keep `DATABASE_URL` and `PLATFORM_DB_PASSWORD` consistent
+with each other; `.env.example` provides a matching pair. If you change the
+password or published PostgreSQL port, update the host URL too. Existing
+PostgreSQL volumes keep their original password; editing `.env` does not rotate
+it. Restore the matching configuration or explicitly rotate the database
+password—do not delete a volume containing data you need.
+
 Returning developers: compare your existing `.env` with `.env.example` and add
 `CUBE_API_URL=http://localhost:4000`, `CUBE_VALIDATOR_URL=http://localhost:4010`,
 and `CUBEJS_API_SECRET` if missing. Use the same signing secret for the host
@@ -86,6 +93,8 @@ inv deps   # docker compose up -d --build --wait platform-db cube
 These backing services stay in Docker; do not also launch the Compose MCP/API
 when using Honcho below. The host `DATABASE_URL` must point at the published
 PostgreSQL port and database. See [local setup details](CLAUDE.md#local-development-setup-including-returning-developers).
+After stopping Honcho, `docker compose stop platform-db cube` stops these
+dependencies without deleting their data. `inv deps` starts them again.
 
 ### 7. Run migrations
 

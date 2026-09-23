@@ -90,7 +90,7 @@ def check(c: Context) -> None:
 
 @task
 def docker_up(c: Context) -> None:
-    """Start all services via Docker Compose (api :8000, frontend :3000, mcp :8100)."""
+    """Start Compose API, frontend, MCP, PostgreSQL and Cube (no background worker)."""
     c.run("docker compose up", pty=True)
 
 

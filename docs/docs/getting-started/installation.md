@@ -45,7 +45,9 @@ CUBEJS_API_SECRET=your-local-cube-signing-secret
 Keep the matching `DATABASE_URL` and `PLATFORM_DB_PASSWORD` values copied from
 `.env.example`. If you change `PLATFORM_DB_PASSWORD` or `PLATFORM_DB_PORT`, update
 the host URL too. An existing PostgreSQL volume keeps its original password;
-editing `.env` does not rotate that database password. Cube and
+editing `.env` does not rotate that database password. Restore the matching
+configuration or explicitly rotate the database password; do not delete a
+volume containing data you need. Cube and
 the host processes read the same `CUBEJS_API_SECRET` from `.env`; their values
 must match. If you change `CUBE_PORT` or `CUBE_VALIDATOR_PORT`, update the
 corresponding host URLs.
@@ -109,6 +111,10 @@ This checks configuration only, not service reachability.
 An ERROR-level system check stops the web process and Honcho's other processes;
 resolve that error before restarting. Cube's missing-setting warnings do not
 stop startup.
+
+After stopping Honcho, run `docker compose stop platform-db cube` to stop the
+Docker dependencies without deleting their data. Use the dependency startup
+command above to restart them.
 
 ## Docker setup
 
