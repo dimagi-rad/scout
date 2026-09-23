@@ -60,7 +60,11 @@ from apps.semantic.models import (
     SemanticCanvasChange,
     SemanticDataset,
 )
-from apps.semantic.services.catalog import get_active_semantic_model, semantic_name
+from apps.semantic.services.catalog import (
+    SemanticCatalogUnavailable,
+    get_active_semantic_model,
+    semantic_name,
+)
 from apps.semantic.services.custom_datasets import (
     CustomDatasetError,
     compile_custom_dataset_sql,
@@ -845,6 +849,14 @@ def validate_custom_dataset_draft(
     result: dict[str, Any] = {"sql_hash": sql_hash, "error": "", "columns": [], "compiled_sql": ""}
     try:
         model = get_active_semantic_model(canvas.workspace)
+    except SemanticCatalogUnavailable as exc:
+        # A temporarily unavailable catalog does not invalidate the saved SQL probe.
+        return {
+            **result,
+            "error": f"Semantic catalog unavailable: {exc}",
+            "error_code": "CATALOG_UNAVAILABLE",
+        }
+    try:
         revision = custom_dataset_catalog_revision(model)
         cached_at = cached.get("checked_at")
         recent_failure = (

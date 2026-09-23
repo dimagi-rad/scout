@@ -324,7 +324,9 @@ def _custom_draft_diagnostics(
 
     validation = validate_custom_dataset_draft(canvas, change, retry_failed=retry_failed_sql)
     if validation.get("error"):
-        out.append(_diagnostic("INVALID_SQL", change, "definition_sql", validation["error"]))
+        code = validation.get("error_code", "INVALID_SQL")
+        path = "" if code == "CATALOG_UNAVAILABLE" else "definition_sql"
+        out.append(_diagnostic(code, change, path, validation["error"]))
         return out
     columns = validation.get("columns") or []
     if not columns:

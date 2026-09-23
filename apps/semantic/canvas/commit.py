@@ -149,26 +149,28 @@ def _commit_transaction(canvas, pending: list[SemanticCanvasChange], user) -> li
     committed: list[dict[str, Any]] = []
     now = timezone.now()
     with transaction.atomic():
-        # Catalog refresh takes this same lock; a probe from before that refresh
-        # must not be committed after it using stale inferred columns.
+        custom_drafts = [
+            change
+            for change in pending
+            if change.object_type == ObjectType.CUSTOM_DATASET
+            and change.change_type == ChangeType.CREATE
+        ]
+        models = SemanticModel.objects.all()
+        if custom_drafts:
+            # Only SQL probes need to exclude a concurrent physical catalog refresh.
+            models = models.select_for_update(nowait=True)
         try:
-            model = SemanticModel.objects.select_for_update(nowait=True).get(
-                pk=canvas.semantic_model_id
-            )
+            model = models.get(pk=canvas.semantic_model_id)
         except OperationalError as exc:
             if getattr(exc.__cause__, "sqlstate", None) == "55P03":
                 raise _CatalogChanged from exc
             raise
-        for change in pending:
-            if (
-                change.object_type == ObjectType.CUSTOM_DATASET
-                and change.change_type == ChangeType.CREATE
-            ):
-                validation = change.fields.get("_validation") or {}
-                if model.status != SemanticModel.Status.ACTIVE or validation.get(
-                    "catalog_revision"
-                ) != custom_dataset_catalog_revision(model):
-                    raise _CatalogChanged
+        for change in custom_drafts:
+            validation = change.fields.get("_validation") or {}
+            if model.status != SemanticModel.Status.ACTIVE or validation.get(
+                "catalog_revision"
+            ) != custom_dataset_catalog_revision(model):
+                raise _CatalogChanged
         canvas.semantic_model = model
         workspace = canvas.workspace
         for change in pending:
