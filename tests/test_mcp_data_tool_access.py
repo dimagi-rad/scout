@@ -50,7 +50,7 @@ async def test_non_member_is_refused_before_any_read(workspace):
 
     result, load, run = await _query(workspace, str(stranger.id))
 
-    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
     load.assert_not_awaited()
     run.assert_not_awaited()
 
@@ -62,7 +62,7 @@ async def test_member_who_lost_the_source_is_told_which_one(workspace, user, ten
 
     result, load, _run = await _query(workspace, str(user.id))
 
-    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
     assert tenant.canonical_name in result["error"]["message"]
     load.assert_not_awaited()
 
@@ -76,7 +76,7 @@ async def test_every_data_tool_rechecks(workspace, tool):
             workspace_id=str(workspace.id), user_id=str(stranger.id)
         )
 
-    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
     load.assert_not_awaited()
 
 
@@ -88,7 +88,7 @@ async def test_describe_table_rechecks(workspace):
             "cases", workspace_id=str(workspace.id), user_id=str(stranger.id)
         )
 
-    assert result["error"]["code"] == "AUTH_ACCESS_DENIED"
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
     load.assert_not_awaited()
 
 
@@ -97,3 +97,15 @@ async def test_calls_without_an_acting_user_are_unchanged(workspace):
 
     assert result.get("success", True) is not False
     load.assert_awaited_once()
+
+
+async def test_get_lineage_rechecks(workspace):
+    stranger = await User.objects.acreate_user(email="stranger@example.com", password="x")
+
+    with patch.object(server, "aget_lineage_chain", AsyncMock(return_value=[])) as lineage:
+        result = await server.get_lineage(
+            "cases", workspace_id=str(workspace.id), user_id=str(stranger.id)
+        )
+
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
+    lineage.assert_not_awaited()

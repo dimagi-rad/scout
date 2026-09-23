@@ -47,6 +47,8 @@ from apps.semantic.services.query import run_semantic_query
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import TenantMembership, User
 from apps.workspaces.access import (
+    NOT_MEMBER,
+    WorkspaceAccess,
     access_denied_body,
     aresolve_workspace_access,
     aresolve_workspace_access_ex,
@@ -81,6 +83,7 @@ from mcp_server.envelope import (
     PIPELINE_UNRESOLVED,
     SCHEMA_BUILD_FAILED,
     VALIDATION_ERROR,
+    WORKSPACE_ACCESS_DENIED,
     error_response,
     success_response,
     tool_context,
@@ -117,9 +120,11 @@ async def _authorize_read(workspace_id: str, user_id: str) -> None:
     if not user_id:
         return
     user = await User.objects.filter(id=user_id).afirst()
-    if user is None:
-        raise _WorkspaceAccessDenied("Workspace not found or access denied.")
-    access = await aresolve_workspace_access_ex(user, workspace_id)
+    access = (
+        await aresolve_workspace_access_ex(user, workspace_id)
+        if user is not None
+        else WorkspaceAccess(denied_reason=NOT_MEMBER)
+    )
     if not access.granted:
         raise _WorkspaceAccessDenied(access_denied_body(access)["error"])
 
@@ -174,7 +179,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
         try:
             ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
-            tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
+            tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
@@ -257,7 +262,7 @@ async def describe_table(
         try:
             ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
-            tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
+            tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
@@ -320,7 +325,7 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
         try:
             ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
-            tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
+            tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
@@ -391,6 +396,14 @@ async def get_lineage(
     ) as tc:
         if not workspace_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
+            return tc["result"]
+        try:
+            await _authorize_read(workspace_id, user_id)
+        except _WorkspaceAccessDenied as e:
+            tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
+            return tc["result"]
+        except (ValueError, _ValidationError) as e:
+            tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
         try:
@@ -771,7 +784,7 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
         try:
             ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
-            tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
+            tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
@@ -1459,8 +1472,9 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
     """Check whether data has been loaded for this workspace.
 
     Returns schema existence, state, last materialization timestamp, and table
-    list. Always succeeds — returns exists=False if no schema has been
-    provisioned yet. Safe to call before any data has been loaded.
+    list; exists=False if no schema has been provisioned yet. Safe to call
+    before any data has been loaded. Fails with WORKSPACE_ACCESS_DENIED when
+    the acting user can no longer read the workspace.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -1476,7 +1490,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         try:
             await _authorize_read(workspace_id, user_id)
         except _WorkspaceAccessDenied as e:
-            tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
+            tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
