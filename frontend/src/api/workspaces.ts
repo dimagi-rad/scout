@@ -13,8 +13,8 @@ export interface MissingTenant {
   tenant_name: string
   provider: string
   recovery: "connect_source" | "access_removed" | "reconnect" | "connect_team" | "legacy_team_unknown"
-  team_slug: string
-  team_name: string
+  team_slug?: string
+  team_name?: string
   remedy: string
 }
 

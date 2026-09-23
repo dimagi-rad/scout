@@ -91,6 +91,15 @@ describe("LostAccessModal", () => {
     expect(screen.queryByTestId("lost-access-picker")).toBeNull()
     expect(screen.getByText(/don’t have access to any workspaces/)).toBeInTheDocument()
   })
+
+  it("offers Connected Accounts even without a missing-source list", async () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-connections"))
+
+    expect(navigate).toHaveBeenCalledWith("/settings/connections")
+  })
 })
 
 describe("LostAccessModal with missing sources", () => {
@@ -131,13 +140,16 @@ describe("LostAccessModal with missing sources", () => {
     expect(navigate).toHaveBeenCalledWith("/settings/connections")
   })
 
-  it("does not cover Connected Accounts, where the user fixes it", () => {
-    render(
-      <MemoryRouter initialEntries={["/settings/connections"]}>
-        <LostAccessModal />
-      </MemoryRouter>,
-    )
+  it.each(["/settings/connections", "/settings/connections/", "/embed/settings/connections"])(
+    "does not cover Connected Accounts (%s), where the user fixes it",
+    (path) => {
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <LostAccessModal />
+        </MemoryRouter>,
+      )
 
-    expect(screen.queryByTestId("lost-access-modal")).toBeNull()
-  })
+      expect(screen.queryByTestId("lost-access-modal")).toBeNull()
+    },
+  )
 })

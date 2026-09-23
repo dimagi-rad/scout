@@ -18,6 +18,7 @@ import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -361,7 +362,7 @@ export function Sidebar() {
             title="Connected Accounts"
             data-testid="sidebar-connections"
           >
-            <Link to={`${pathPrefix}/settings/connections`} onClick={collapseSidebar}>
+            <Link to={`${pathPrefix}${CONNECTIONS_PATH}`} onClick={collapseSidebar}>
               <Link2 className="h-4 w-4 shrink-0" />
               <span className="scout-sidebar-label min-w-0 truncate">
                 Connected Accounts

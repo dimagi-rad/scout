@@ -5,8 +5,7 @@ import { useAppStore } from "@/store/store"
 import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
-
-const CONNECTIONS_PATH = "/settings/connections"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 
 /** Distinct provider labels for a workspace, e.g. "CommCare" or "CommCare, Open Chat Studio". */
 function providerLabels(tenants: { provider: string }[]): string {
@@ -16,10 +15,10 @@ function providerLabels(tenants: { provider: string }[]): string {
 
 /**
  * A hard, non-dismissible gate shown when the active workspace needs a source
- * the user cannot use — every member must cover every source (#380). The
- * backend already refuses its data (403), so the page behind is dead; this
- * names the missing sources, links to Connected Accounts to fix them, or lets
- * the user pick a workspace they can still access. Reachable only via a stale
+ * the user cannot use. The backend already refuses its data (403), so the page
+ * behind is dead; this links to Connected Accounts, where the user can connect
+ * or reconnect what is missing (naming each source when the server lists them,
+ * #380), or lets the user pick a workspace they can still access. Reachable only via a stale
  * default or a deep link — the switcher and default-pick avoid orphans.
  */
 export function LostAccessModal() {
@@ -36,7 +35,7 @@ export function LostAccessModal() {
 
   const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
   // Connected Accounts is where the user fixes this, so the gate must not cover it.
-  const onRecoveryPage = location.pathname.endsWith(CONNECTIONS_PATH)
+  const onRecoveryPage = location.pathname.replace(/\/+$/, "").endsWith(CONNECTIONS_PATH)
 
   // Only gate once the list has actually loaded and resolved to an orphan —
   // never during the initial load, or we'd flash the modal before we know.
@@ -84,13 +83,6 @@ export function LostAccessModal() {
               ))}
             </ul>
             <p className="mt-2">Access returns automatically once that is fixed.</p>
-            <button
-              data-testid="lost-access-connections"
-              onClick={() => navigate(`${pathPrefix}${CONNECTIONS_PATH}`)}
-              className="mt-3 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-            >
-              Open Connected Accounts
-            </button>
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">
@@ -108,6 +100,14 @@ export function LostAccessModal() {
             )}
           </p>
         )}
+
+        <button
+          data-testid="lost-access-connections"
+          onClick={() => navigate(`${pathPrefix}${CONNECTIONS_PATH}`)}
+          className="mt-3 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+        >
+          Open Connected Accounts
+        </button>
 
         {accessible.length > 0 ? (
           <div className="mt-5">
