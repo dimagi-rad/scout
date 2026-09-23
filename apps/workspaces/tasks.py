@@ -457,7 +457,7 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         return None
     if access.denied_reason == TENANT_ACCESS_LOST:
         # Even a MANAGE member cannot fix this by changing roles; report the
-        # per-tenant reconnect guidance this path gave before the role gate.
+        # per-tenant unreachable guidance this path gave before the role gate.
         tenants = [
             wt.tenant
             async for wt in WorkspaceTenant.objects.filter(
@@ -1405,7 +1405,7 @@ def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
         projects = ", ".join(access.lost_tenant_names) or "this workspace's data sources"
         return (
             f"The requesting user no longer has upstream access to: {projects}. "
-            "Access may have been removed upstream — reconnect or ask an admin."
+            f"Their {_CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]}"
         )
     return (
         "The requesting user no longer has a read-write or manage workspace role. "
