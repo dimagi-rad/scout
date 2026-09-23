@@ -27,7 +27,7 @@ from apps.workspaces.services.pipeline_resolver import (
 from apps.workspaces.services.refresh_requests import reconcile_legacy_refresh_candidates
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
-from apps.workspaces.tasks import refresh_tenant_schema
+from apps.workspaces.tasks import drop_failed_refresh_schema, refresh_tenant_schema
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -493,6 +493,8 @@ class RefreshSchemaView(APIView):
         with transaction.atomic():
             tenant = Tenant.objects.select_for_update().get(id=tenant.id)
             legacy = reconcile_legacy_refresh_candidates(tenant)
+            for settled_id in legacy.settled_schema_ids:
+                drop_failed_refresh_schema.defer(schema_id=str(settled_id))
             if legacy.recovery_needed:
                 return Response(
                     {

@@ -31,7 +31,7 @@ from apps.workspaces.services.refresh_requests import (
     reconcile_legacy_refresh_candidates,
     refresh_task_args,
 )
-from apps.workspaces.tasks import refresh_tenant_schema
+from apps.workspaces.tasks import drop_failed_refresh_schema, refresh_tenant_schema
 from config.procrastinate import JOB_RETENTION_HOURS
 
 
@@ -62,6 +62,14 @@ def refresh_job(db):
     if created:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM procrastinate_jobs WHERE id = ANY(%s)", [created])
+
+
+@pytest.fixture(autouse=True)
+def queued_schema_drops():
+    # Reconciliation queues real teardown jobs; procrastinate_jobs is unmanaged, so
+    # a real defer would outlive the test.
+    with patch("apps.workspaces.api.views.drop_failed_refresh_schema.defer") as drop:
+        yield drop
 
 
 def _bound_candidate(tenant, workspace, membership, refresh_job, *, state=SchemaState.PROVISIONING):
@@ -656,3 +664,78 @@ def test_bound_candidate_missing_its_job_within_retention_still_blocks_retry(
     assert response.data["code"] == "refresh_recovery_required"
     assert candidate.state == SchemaState.PROVISIONING
     defer.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reconciled_candidate_has_its_physical_schema_dropped(
+    manage_client, workspace, tenant, tenant_membership, refresh_job, queued_schema_drops
+):
+    # The worker may have died after CREATE SCHEMA or mid-load; nothing else ever
+    # sweeps FAILED rows, so settling one must also queue its physical drop.
+    candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE procrastinate_jobs SET status = %s::procrastinate_job_status WHERE id = %s",
+            ["failed", job_id],
+        )
+
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+        defer.return_value = MagicMock(id=987657)
+        response = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert response.status_code == 202
+    queued_schema_drops.assert_called_once_with(schema_id=str(candidate.id))
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("state", "dropped"),
+    [(SchemaState.FAILED, True), (SchemaState.ACTIVE, False), (SchemaState.PROVISIONING, False)],
+)
+def test_failed_refresh_drop_only_touches_failed_rows(tenant, state, dropped):
+    schema = TenantSchema.objects.create(tenant=tenant, schema_name="dropped_r1", state=state)
+
+    with patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown:
+        async_to_sync(drop_failed_refresh_schema.func)(schema_id=str(schema.id))
+
+    assert teardown.called is dropped
+    schema.refresh_from_db()
+    assert schema.state == state
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("taken_to", "dropped"), [(SchemaState.FAILED, True), (SchemaState.ACTIVE, False)]
+)
+def test_lost_activation_drops_the_loaded_schema_only_if_it_was_failed(
+    workspace, tenant, tenant_membership, refresh_job, taken_to, dropped
+):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    pipeline = MagicMock(provider=tenant.provider, name="refresh_pipeline")
+    registry = MagicMock()
+    registry.list.return_value = [pipeline]
+    registry.get.return_value = pipeline
+
+    def load_then_lose_ownership(*_args, **_kwargs):
+        TenantSchema.objects.filter(id=candidate.id).update(state=taken_to)
+
+    with (
+        patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            return_value={"type": "api_key", "value": "token"},
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=registry),
+        patch("apps.workspaces.tasks.run_pipeline", side_effect=load_then_lose_ownership),
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+    ):
+        result = async_to_sync(refresh_tenant_schema.func)(
+            context=SimpleNamespace(job=SimpleNamespace(id=job_id)), **args
+        )
+
+    candidate.refresh_from_db()
+    assert result == {"status": "ignored"}
+    assert candidate.state == taken_to
+    assert [call.args[0].id for call in teardown.call_args_list] == (
+        [candidate.id] if dropped else []
+    )

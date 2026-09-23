@@ -425,6 +425,12 @@ async def refresh_tenant_schema(
         timezone.now(),
     )
     if not activated:
+        # Whoever took the candidate may have settled it FAILED while this job was
+        # still loading, so any drop it queued could have run before our writes.
+        try:
+            await _drop_failed_refresh_schema(new_schema.id)
+        except Exception:
+            logger.exception("Failed to drop lost refresh schema '%s'", new_schema.schema_name)
         return {"status": "ignored"}
     new_schema.state = SchemaState.ACTIVE
 
@@ -1124,6 +1130,21 @@ async def _drop_claimed_refresh_schema_and_fail(schema, job_id: int) -> None:
         await asyncio.to_thread(manager.teardown, claimed)
     except Exception:
         logger.exception("Failed to drop schema '%s' during cleanup", claimed.schema_name)
+
+
+async def _drop_failed_refresh_schema(schema_id) -> None:
+    # FAILED is terminal for a refresh candidate: it is never served and nothing
+    # moves it back, so its physical schema can be dropped without a claim.
+    schema = await TenantSchema.objects.filter(id=schema_id, state=SchemaState.FAILED).afirst()
+    if schema is None:
+        return
+    await asyncio.to_thread(SchemaManager().teardown, schema)
+
+
+@task
+async def drop_failed_refresh_schema(schema_id: str) -> None:
+    """Drop the physical schema of a refresh candidate settled as FAILED."""
+    await _drop_failed_refresh_schema(schema_id)
 
 
 async def _drain_cancelled_refresh_cleanup(schema, job_id: int) -> None:

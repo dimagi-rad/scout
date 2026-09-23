@@ -41,8 +41,8 @@ class RefreshClaim:
 
 @dataclass(frozen=True)
 class LegacyRefreshReconciliation:
-    reconciled: int = 0
     recovery_needed: bool = False
+    settled_schema_ids: tuple[uuid.UUID, ...] = ()
 
 
 def refresh_task_args(schema: TenantSchema) -> dict[str, str] | None:
@@ -210,7 +210,7 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
     Active jobs remain ordinary in-progress work. Ambiguous, malformed, or
     cross-tenant evidence remains untouched and is flagged for operator recovery.
     """
-    reconciled = 0
+    settled: list[uuid.UUID] = []
     recovery_needed = False
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant.id)
@@ -235,7 +235,7 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
                     if _job_was_pruned(candidate):
                         candidate.state = SchemaState.FAILED
                         candidate.save(update_fields=["state"])
-                        reconciled += 1
+                        settled.append(candidate.id)
                     else:
                         recovery_needed = True
                     continue
@@ -252,7 +252,7 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
                 if job.status in _TERMINAL_JOB_STATUSES:
                     candidate.state = SchemaState.FAILED
                     candidate.save(update_fields=["state"])
-                    reconciled += 1
+                    settled.append(candidate.id)
                     continue
                 recovery_needed = True
                 continue
@@ -265,7 +265,7 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
             if not jobs and _job_was_pruned(candidate):
                 candidate.state = SchemaState.FAILED
                 candidate.save(update_fields=["state"])
-                reconciled += 1
+                settled.append(candidate.id)
                 continue
             if len(jobs) != 1:
                 recovery_needed = True
@@ -306,10 +306,10 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
             if job.status in _TERMINAL_JOB_STATUSES:
                 candidate.state = SchemaState.FAILED
                 candidate.save(update_fields=["state"])
-                reconciled += 1
+                settled.append(candidate.id)
                 continue
             recovery_needed = True
     return LegacyRefreshReconciliation(
-        reconciled=reconciled,
         recovery_needed=recovery_needed,
+        settled_schema_ids=tuple(settled),
     )
