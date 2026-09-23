@@ -1227,7 +1227,9 @@ async def test_dependency_tool_and_api_page_in_the_same_order(
 
     from_tool = await tool.ainvoke({"artifact_id": str(artifact.id)})
     url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/"
-    from_api = (await member_client.get(url)).json()
+    response = await member_client.get(url)
+    assert response.status_code == 200
+    from_api = response.json()
 
     tool_keys = [r["query_key"] for r in from_tool["semantic_queries"]]
     assert tool_keys == [r["query_key"] for r in from_api["semantic_queries"]]
