@@ -2,6 +2,8 @@
 Django test settings for Scout data agent platform.
 """
 
+import hashlib
+
 from .base import *
 
 DEBUG = False
@@ -24,10 +26,15 @@ if _db_url:
 else:
     _defaults = {"USER": "postgres", "PASSWORD": "", "HOST": "localhost", "PORT": "5432"}
 
+# Keyed by checkout so concurrent runs in separate worktrees don't drop each other's
+# test database mid-run, while --reuse-db still finds its own. Two concurrent runs in
+# the same checkout still need distinct TEST_DATABASE_NAMEs.
+_checkout_key = hashlib.sha256(str(BASE_DIR).encode()).hexdigest()[:8]
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": env("TEST_DATABASE_NAME", default="scout_test"),
+        "NAME": env("TEST_DATABASE_NAME", default=f"scout_test_{_checkout_key}"),
         "USER": env("DATABASE_USER", default=_defaults["USER"]),
         "PASSWORD": env("DATABASE_PASSWORD", default=_defaults["PASSWORD"]),
         "HOST": env("DATABASE_HOST", default=_defaults["HOST"]),
