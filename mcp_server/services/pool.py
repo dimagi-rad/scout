@@ -59,6 +59,9 @@ _POOL_MIN_SIZE = 1
 # connection slots. Matches the checkpointer's sizing.
 _POOL_MAX_SIZE = 10
 _POOL_MAX_IDLE_SECONDS = 60.0
+# One slot per concurrently live loop: the ASGI/worker loop plus any
+# async_to_sync loops running at once (bounded today by worker concurrency).
+# Raising worker concurrency past this turns slot waits into PoolTimeout.
 _MAX_POOLS = 4
 _SLOT_WAIT_SECONDS = 30.0
 _SLOT_POLL_SECONDS = 0.05
@@ -72,8 +75,11 @@ class _Entry:
     lifetime: AsyncGenerator[None, None]
 
 
-# Keyed by (base DSN tuple, owning loop). Mutated from several threads' loops.
-_pools: dict[tuple[tuple, asyncio.AbstractEventLoop], _Entry] = {}
+# (base DSN tuple, owning loop)
+_PoolKey = tuple[tuple, asyncio.AbstractEventLoop]
+
+# Mutated from several threads' loops; guarded by _state_lock.
+_pools: dict[_PoolKey, _Entry] = {}
 _opening = 0
 _state_lock = threading.Lock()
 _open_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
@@ -115,34 +121,53 @@ async def get_pool(params: dict[str, Any]) -> AsyncConnectionPool:
     ``prepare_threshold=0`` (PgBouncer-safe, matching the checkpointer pool).
     """
     loop = asyncio.get_running_loop()
-    key = (_pool_key(params), loop)
+    key: _PoolKey = (_pool_key(params), loop)
     entry = _pools.get(key)
     if entry is not None and not entry.pool.closed:
         return entry.pool
 
-    async with _open_lock(loop):
-        entry = _pools.get(key)
-        if entry is not None:
-            if not entry.pool.closed:
-                return entry.pool
-            # Never hand back a closed pool: that is what turned one failed
-            # teardown into PoolClosed for the rest of the process.
-            await entry.lifetime.aclose()
+    # One deadline per caller, including the wait for the loop's open lock, so
+    # callers queued behind a saturated cap don't each add a full slot wait.
+    deadline = time.monotonic() + _SLOT_WAIT_SECONDS
+    lock = _open_lock(loop)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=_SLOT_WAIT_SECONDS)
+    except TimeoutError:
+        raise PoolTimeout("timed out waiting to open a managed-DB pool") from None
+    try:
+        return await _get_or_open_pool(key, params, deadline)
+    finally:
+        lock.release()
 
-        await _reserve_slot()
-        try:
-            pool = await _open_pool(params)
-        except BaseException:
-            _release_slot()
-            raise
 
-        lifetime = _close_on_loop_shutdown(key, pool)
+async def _get_or_open_pool(key: _PoolKey, params: dict[str, Any], deadline: float):
+    entry = _pools.get(key)
+    if entry is not None:
+        if not entry.pool.closed:
+            return entry.pool
+        # Never hand back a closed pool: that is what turned one failed
+        # teardown into PoolClosed for the rest of the process.
+        await entry.lifetime.aclose()
+
+    await _reserve_slot(deadline)
+    try:
+        pool = await _open_pool(params)
+    except BaseException:
+        _release_slot()
+        raise
+
+    lifetime = _close_on_loop_shutdown(key, pool)
+    try:
         # First iteration registers the generator with this loop, whose shutdown
         # (asyncio.run / Runner) then closes the pool while the loop still runs.
         await anext(lifetime)
-        _commit_slot(key, _Entry(pool=pool, loop=loop, lifetime=lifetime))
-        logger.info("Opened managed-DB connection pool (max_size=%d)", _POOL_MAX_SIZE)
-        return pool
+    except BaseException:
+        _release_slot()
+        await _close_pool(pool)
+        raise
+    _commit_slot(key, _Entry(pool=pool, loop=key[1], lifetime=lifetime))
+    logger.info("Opened managed-DB connection pool (max_size=%d)", _POOL_MAX_SIZE)
+    return pool
 
 
 async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
@@ -166,9 +191,8 @@ async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
     return pool
 
 
-async def _reserve_slot() -> None:
+async def _reserve_slot(deadline: float) -> None:
     global _opening
-    deadline = time.monotonic() + _SLOT_WAIT_SECONDS
     while True:
         release_pools_of_finished_loops()
         with _state_lock:
@@ -197,14 +221,14 @@ def _release_slot() -> None:
         _opening -= 1
 
 
-def _commit_slot(key: tuple, entry: _Entry) -> None:
+def _commit_slot(key: _PoolKey, entry: _Entry) -> None:
     global _opening
     with _state_lock:
         _opening -= 1
         _pools[key] = entry
 
 
-def _forget(key: tuple, pool: AsyncConnectionPool) -> None:
+def _forget(key: _PoolKey, pool: AsyncConnectionPool) -> None:
     with _state_lock:
         entry = _pools.get(key)
         if entry is not None and entry.pool is pool:
@@ -212,7 +236,7 @@ def _forget(key: tuple, pool: AsyncConnectionPool) -> None:
 
 
 async def _close_on_loop_shutdown(
-    key: tuple, pool: AsyncConnectionPool
+    key: _PoolKey, pool: AsyncConnectionPool
 ) -> AsyncGenerator[None, None]:
     """Own ``pool`` for its loop's lifetime; closing the generator closes the pool.
 
@@ -224,7 +248,8 @@ async def _close_on_loop_shutdown(
         yield
     finally:
         _forget(key, pool)
-        if key[1].is_closed():
+        _, loop = key
+        if loop.is_closed():
             _abandon(pool)
         else:
             await _close_pool(pool)

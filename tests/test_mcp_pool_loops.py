@@ -138,10 +138,11 @@ def test_two_live_loops_keep_their_own_pools():
     for _ in range(200):
         if cached_while_both_live or errors:
             break
-        threading.Event().wait(0.05)
+        time.sleep(0.05)
     release.set()
     for t in threads:
         t.join(timeout=15)
+        assert not t.is_alive()
 
     assert errors == []
     assert cached_while_both_live == [2]
@@ -175,7 +176,6 @@ def test_live_pools_are_capped_and_a_new_loop_waits_for_a_slot(monkeypatch):
 
     holder = threading.Thread(target=_run_in_fresh_loop, args=(hold_a_slot,))
     holder.start()
-    assert holder_ready.wait(10)
 
     async def wait_then_release():
         waiter = asyncio.create_task(_select_one())
@@ -186,10 +186,12 @@ def test_live_pools_are_capped_and_a_new_loop_waits_for_a_slot(monkeypatch):
         return await waiter
 
     try:
+        assert holder_ready.wait(10)
         pool = _run_in_fresh_loop(wait_then_release)
     finally:
         release_holder.set()
         holder.join(timeout=15)
+    assert not holder.is_alive()
     assert pool.closed
 
 
@@ -214,6 +216,7 @@ def test_a_full_cap_times_out_instead_of_exceeding_it(monkeypatch):
     finally:
         release_holder.set()
         holder.join(timeout=15)
+    assert not holder.is_alive()
 
 
 # The abandoned loop's pool tasks are destroyed pending; that noise is the scenario.

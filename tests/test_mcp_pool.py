@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -230,3 +231,43 @@ def test_concurrent_sweeps_finalise_a_dead_loops_pool_once(monkeypatch):
     assert errors == []
     assert len(finalised) == 1
     assert pool_mod._pools == {}
+
+
+@pytest.mark.asyncio
+async def test_a_failure_registering_the_shutdown_hook_releases_the_slot(monkeypatch):
+    """Anything raising between reserving a slot and caching the pool must give the
+    slot back, or a few such failures would exhaust the cap for the process."""
+    monkeypatch.setattr(pool_mod, "_MAX_POOLS", 1)
+    orphan = _fake_pool()
+
+    async def refuses_first_iteration(key, pool):
+        raise RuntimeError("loop is shutting down")
+        yield
+
+    with (
+        patch.object(pool_mod, "AsyncConnectionPool", return_value=orphan),
+        patch.object(pool_mod, "_close_on_loop_shutdown", refuses_first_iteration),
+        pytest.raises(RuntimeError, match="shutting down"),
+    ):
+        await pool_mod.get_pool(_base_params("t_alpha"))
+    orphan.close.assert_awaited_once()
+
+    fresh = _fake_pool()
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=fresh):
+        assert await pool_mod.get_pool(_base_params("t_alpha")) is fresh
+
+
+@pytest.mark.asyncio
+async def test_callers_queued_on_one_loop_share_the_slot_wait_budget(monkeypatch):
+    """The Nth caller queued behind a saturated cap used to wait N slot timeouts."""
+    monkeypatch.setattr(pool_mod, "_MAX_POOLS", 0)
+    monkeypatch.setattr(pool_mod, "_SLOT_WAIT_SECONDS", 0.3)
+
+    started = time.monotonic()
+    results = await asyncio.gather(
+        *(pool_mod.get_pool(_base_params("t_alpha")) for _ in range(4)),
+        return_exceptions=True,
+    )
+
+    assert all(isinstance(r, pool_mod.PoolTimeout) for r in results)
+    assert time.monotonic() - started < 0.3 * 2
