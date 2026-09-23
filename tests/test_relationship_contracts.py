@@ -7,7 +7,7 @@ import pytest
 from django.db import connection
 
 from apps.semantic.models import SemanticDataset, SemanticModel, SemanticRelationship
-from apps.semantic.services import catalog
+from apps.semantic.services import catalog, cube_schema
 from mcp_server.pipeline_registry import (
     PipelineRegistry,
     RelationshipConfig,
@@ -260,3 +260,41 @@ def test_empty_optional_yaml_collections_are_normalized():
 def test_invalid_auxiliary_table_contract_is_rejected(value):
     with pytest.raises(ValueError, match="auxiliary_tables"):
         SourceConfig(name="forms", auxiliary_tables=value)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_catalog_warnings_survive_cube_promotion(workspace, monkeypatch):
+    monkeypatch.setattr(
+        catalog,
+        "load_physical_tables",
+        lambda workspace: (
+            "fixture",
+            [
+                catalog.PhysicalTable(
+                    "raw_visits", "table", "", [{"name": "username", "type": "jsonb"}]
+                ),
+                catalog.PhysicalTable(
+                    "raw_users", "table", "", [{"name": "username", "type": "text"}]
+                ),
+            ],
+        ),
+    )
+    model = catalog.ensure_semantic_model(workspace)
+    warnings = model.diagnostics
+    assert warnings[0]["code"] == "relationship_key_type"
+    assert warnings[0]["level"] == "warning"
+    monkeypatch.setattr(
+        cube_schema.CubeClient, "validate_schema", AsyncMock(return_value={"valid": True})
+    )
+    monkeypatch.setattr(cube_schema.CubeClient, "invalidate_schema_cache", AsyncMock())
+    monkeypatch.setattr(
+        cube_schema,
+        "load_workspace_context",
+        AsyncMock(
+            return_value=SimpleNamespace(schema_name="fixture", readonly_role="fixture_role")
+        ),
+    )
+    cube_schema.build_and_promote_cube_schema(workspace, model=model)
+    model.refresh_from_db()
+    assert model.diagnostics == warnings
+    assert model.metadata["catalog_diagnostics"] == warnings

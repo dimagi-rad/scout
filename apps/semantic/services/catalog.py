@@ -446,7 +446,8 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         diagnostics.extend(_sync_relationships(model, workspace))
         model.status = SemanticModel.Status.ACTIVE
         model.diagnostics = diagnostics
-        model.save(update_fields=["status", "diagnostics", "updated_at"])
+        model.metadata = {**(model.metadata or {}), "catalog_diagnostics": diagnostics}
+        model.save(update_fields=["status", "diagnostics", "metadata", "updated_at"])
         return model
 
 
@@ -658,6 +659,8 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                 if any(source is None or target is None for source, target in pairs):
                     continue
                 name = semantic_name(f"{from_dataset.name}_{rel.from_column}_to_{to_dataset.name}")
+                if name in curated_names:
+                    continue
                 if any(
                     not _relationship_key_type(source.data_type)
                     or _relationship_key_type(source.data_type)
@@ -695,8 +698,6 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                         for source, _ in pairs
                         if _relationship_key_type(source.data_type) == "string"
                     )
-                if name in curated_names:
-                    continue
                 SemanticRelationship.objects.update_or_create(
                     workspace=workspace,
                     name=name,

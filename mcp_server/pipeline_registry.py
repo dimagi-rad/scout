@@ -78,6 +78,7 @@ class RelationshipConfig:
             raise ValueError(
                 "Relationship additional_keys must contain source/target column pairs."
             )
+        self.additional_keys = [tuple(pair) for pair in self.additional_keys]
 
     @property
     def key_pairs(self) -> list[tuple[str, str]]:
