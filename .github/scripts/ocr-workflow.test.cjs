@@ -270,3 +270,18 @@ test('verified receipt from a different identity cannot authorize Claude reuse',
     assert.equal(h.outputs.claude_head, '');
   }
 });
+
+test('the trusted verify step, not the model, posts the Claude review', () => {
+  const workflow = require('node:fs').readFileSync(path.join(__dirname, '../workflows/ocr.yml'), 'utf8');
+  const steps = workflow.split(/      - name: /);
+  const claude = steps.find(step => step.startsWith('Run Claude review'));
+  const verify = steps.find(step => step.startsWith('Verify Claude receipt'));
+  assert.doesNotMatch(claude, /gh pr comment:|scout-claude-receipt|scout-claude-artifact/);
+  assert.match(claude, /structured review_comment field/);
+  // A review-sized comment in an env var can exceed the per-variable limit, so
+  // the verify step reads structured output from the execution file instead.
+  assert.doesNotMatch(verify, /structured_output|CLAUDE_RESULT/);
+  assert.match(verify, /EXECUTION_FILE: \$\{\{ steps\.claude\.outputs\.execution_file \}\}/);
+  assert.match(verify, /if: \$\{\{ !cancelled\(\)/);
+  assert.match(workflow, /  review:[\s\S]*permissions:\n      contents: read\n      pull-requests: write\n      issues: write\n/);
+});

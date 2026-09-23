@@ -72,10 +72,12 @@ function describeDenials(sdkMessages) {
   return lines;
 }
 
-function evaluateClaudeReview(input) {
+// Checks the run itself. Passing means the workflow may post Claude's comment;
+// evaluateClaudeReview then checks the posted artifact and the findings.
+function evaluateClaudeRun(input) {
   if (!isObject(input)) return block('Missing Claude review gate input.');
   const { expectedHead, expectedBase, expectedReceipt, currentPr, sdkMessages,
-    actionOutcome, actionConclusion, structuredResult, baselineIssueCommentIds, issueComments } = input;
+    actionOutcome, actionConclusion, structuredResult } = input;
   if (!isSha(expectedHead) || !isSha(expectedBase)) return block('Missing or malformed expected review revision.');
   if (!validReceipt(expectedReceipt) || expectedReceipt.head !== expectedHead || expectedReceipt.base !== expectedBase) {
     return block('Missing or malformed expected review receipt.');
@@ -96,9 +98,17 @@ function evaluateClaudeReview(input) {
   }
   if (!isObject(structuredResult) || structuredResult.complete !== true
       || structuredResult.reviewed_head !== expectedHead
-      || !Number.isSafeInteger(structuredResult.blocking_findings) || structuredResult.blocking_findings < 0) {
+      || !Number.isSafeInteger(structuredResult.blocking_findings) || structuredResult.blocking_findings < 0
+      || typeof structuredResult.review_comment !== 'string' || !structuredResult.review_comment.trim()) {
     return block('Claude returned incomplete or malformed structured review results.');
   }
+  return { passed: true };
+}
+
+function evaluateClaudeReview(input) {
+  const run = evaluateClaudeRun(input);
+  if (!run.passed) return run;
+  const { expectedReceipt, structuredResult, baselineIssueCommentIds, issueComments } = input;
   if (!Array.isArray(baselineIssueCommentIds) || !baselineIssueCommentIds.every(hasId)
       || !Array.isArray(issueComments) || !issueComments.every(comment => isObject(comment) && hasId(comment.id))) {
     return block('Missing or malformed GitHub review comment data.');
@@ -113,4 +123,22 @@ function evaluateClaudeReview(input) {
   return { passed: true, outcome: 'no_blocking_findings', newIssueCommentIds, blockingFindings };
 }
 
-module.exports = { evaluateClaudeReview, describeDenials };
+const COMMENT_LIMIT = 65536; // GitHub's issue comment body limit, in characters.
+// Leaves room for the receipt marker, whose JSON artifactMatches caps at 2048.
+const REVIEW_TEXT_LIMIT = COMMENT_LIMIT - 4096;
+const TRUNCATION_NOTE = "\n\n_The workflow truncated this review to fit GitHub's comment size limit._";
+
+// review_comment is untrusted model output. Every workflow state marker is an
+// HTML comment, so breaking each "<!--" opener stops the text from forging a
+// receipt, gate state or OCR summary, or making trusted-comment lookups ambiguous.
+function renderReviewComment(text, receipt) {
+  if (typeof text !== 'string' || !validReceipt(receipt)) throw new Error('Invalid review comment input.');
+  let body = text.replaceAll('<!--', '<!\u200b--').trim();
+  if (!body) throw new Error('Empty review comment.');
+  if (body.length > REVIEW_TEXT_LIMIT) {
+    body = body.slice(0, REVIEW_TEXT_LIMIT - TRUNCATION_NOTE.length).replace(/[\ud800-\udbff]$/, '') + TRUNCATION_NOTE;
+  }
+  return `${body}\n\n${RECEIPT_PREFIX}${JSON.stringify(receipt)} -->`;
+}
+
+module.exports = { evaluateClaudeRun, evaluateClaudeReview, describeDenials, finalResult, renderReviewComment, COMMENT_LIMIT };

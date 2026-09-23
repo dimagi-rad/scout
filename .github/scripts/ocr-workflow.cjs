@@ -2,7 +2,7 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { evaluateClaudeReview, describeDenials } = require('./claude-review-gate.cjs');
+const { evaluateClaudeRun, evaluateClaudeReview, describeDenials, finalResult, renderReviewComment } = require('./claude-review-gate.cjs');
 const { evaluateReview } = require('./ocr-gate.cjs');
 const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheckpointMatches } = require('./ocr-state.cjs');
 
@@ -235,14 +235,34 @@ async function finishClaude({ github, context, core, fs, env }) {
         || receipt.repository !== env.GITHUB_REPOSITORY || receipt.pr !== Number(env.PR_NUMBER)) throw new Error('Receipt identity mismatch.');
     const sdkMessages = JSON.parse(fs.readFileSync(env.EXECUTION_FILE, 'utf8'));
     for (const line of describeDenials(sdkMessages)) core.warning(line);
-    decision = evaluateClaudeReview({
+    // Read from the execution file, not a step output: a review-sized comment
+    // passed through env can exceed the per-variable limit and stop the step.
+    const structuredResult = Array.isArray(sdkMessages) ? finalResult(sdkMessages)?.structured_output : undefined;
+    const review = {
       expectedHead: env.REVIEW_HEAD, expectedBase: env.REVIEW_BASE, expectedReceipt: receipt,
       currentPr: { state: pr.state, head: pr.head.sha, base: pr.base.sha },
       actionOutcome: env.CLAUDE_OUTCOME, actionConclusion: env.CLAUDE_CONCLUSION,
-      sdkMessages,
-      structuredResult: JSON.parse(env.CLAUDE_RESULT),
-      baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments,
-    });
+      sdkMessages, structuredResult,
+    };
+    const run = evaluateClaudeRun(review);
+    const claudeState = readClaudeReceiptState(comments);
+    if (!run.passed) {
+      decision = run;
+    } else if (claudeState?.status !== 'pending' || claudeState.run !== String(context.runId)
+        || claudeState.attempt !== env.GITHUB_RUN_ATTEMPT) {
+      decision = { passed: false, reason: 'A newer Claude review attempt superseded this run.' };
+    } else {
+      // The workflow posts so the model needs no shell write: markdown in a
+      // gh pr comment argument trips the Bash permission checker (run 35856432255).
+      // The gate re-reads the PR and comments and verifies the artifact as before.
+      await github.rest.issues.createComment({ ...context.repo, issue_number: Number(env.PR_NUMBER),
+        body: renderReviewComment(structuredResult.review_comment, receipt) });
+      const { data: latestPr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
+      comments = await commentsFor(github, context, env.PR_NUMBER);
+      decision = evaluateClaudeReview({ ...review,
+        currentPr: { state: latestPr.state, head: latestPr.head.sha, base: latestPr.base.sha },
+        baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments });
+    }
     state = readState(comments);
     if (decision.passed && (!state || !state.passed || state.head !== env.REVIEW_HEAD || state.base !== env.REVIEW_BASE
         || state.policy !== env.POLICY || state.run !== String(context.runId))) {
