@@ -144,13 +144,8 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
     return {"error": _GENERIC_DENIED}
 
 
-def _live_tenant_ids(workspace) -> list:
-    return list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
-
-
 def _shares_live_tenant(user, tenant_ids) -> bool:
     # Pre-#380 any-of rule: the read gate's fallback while the rollout switch is off.
-    # Member admission still uses it until #561 moves admission to all-of too.
     if not tenant_ids:
         return True
     return TenantMembership.objects.filter(user=user, tenant_id__in=tenant_ids).exists()

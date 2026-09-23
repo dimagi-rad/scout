@@ -7,6 +7,7 @@ from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.db.models import Count, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework import status
@@ -23,11 +24,10 @@ from apps.users.services.tenant_resolution import (
     resolve_ocs_chatbots,
 )
 from apps.workspaces.access import (
-    _live_tenant_ids,
-    _shares_live_tenant,
     missing_tenants_by_workspace,
     missing_tenants_for_member,
     missing_tenants_payload,
+    remedy_text,
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
@@ -43,11 +43,19 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
     default_invite_expiry,
 )
+from apps.workspaces.services.credential_coverage import member_coverage_gaps
 from apps.workspaces.services.invite_notifications import (
-    describe_workspace_sources,
     notify_awaiting_access,
     send_pending_invite_email,
 )
+from apps.workspaces.services.member_coverage import (
+    MembersLackTenant,
+    add_tenant_covered_by_members,
+    admit_covered_member,
+    members_lacking_tenant,
+    missing_for_user,
+)
+from apps.workspaces.services.workspace_service import remove_workspace_tenant
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -108,6 +116,48 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
                     exc_info=True,
                 )
     return tried
+
+
+async def _arefresh_members_for_provider(users, provider) -> None:
+    """Refresh each user's own identities for ``provider`` concurrently.
+
+    Concurrent so the wait is bounded by one ``SHARE_REFRESH_TIMEOUT`` rather than
+    one per uncovered member.
+    """
+    await asyncio.gather(*(_arefresh_target_for_workspace(user, [provider]) for user in users))
+
+
+def _needed_text(missing) -> str:
+    return "; ".join(
+        f"'{t['tenant_name']}': {t['remedy']}" for t in missing_tenants_payload(missing)
+    )
+
+
+def _member_label(user) -> str:
+    name = user.get_full_name()
+    return f"{name} <{user.email}>" if name else user.email
+
+
+def _members_lack_source_body(tenant, gaps) -> dict:
+    names = ", ".join(_member_label(user) for user, _missing in gaps)
+    return {
+        "error": (
+            f"Can't add '{tenant.canonical_name}': {names} can't use it with their own "
+            "account yet, and every member must be able to use every source. They can "
+            "connect it in Connected Accounts once they have access to it; otherwise "
+            "remove them from this workspace or create a separate workspace for this source."
+        ),
+        "reason": "members_lack_source",
+        "members": [
+            {
+                "user_id": str(user.id),
+                "email": user.email,
+                "name": user.get_full_name(),
+                **missing_tenants_payload([missing])[0],
+            }
+            for user, missing in gaps
+        ],
+    }
 
 
 def _is_last_manager(workspace, membership):
@@ -322,30 +372,42 @@ class WorkspaceListView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        workspace = Workspace.objects.create(
-            name=name,
-            is_auto_created=False,
-            created_by=request.user,
-        )
-        tenants = []
-        first_tenant = None
-        for tenant in Tenant.objects.filter(id__in=tenant_ids):
-            WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-            if first_tenant is None:
-                first_tenant = tenant
-            tenants.append(
+        selected = list(Tenant.objects.filter(id__in=tenant_ids))
+        missing = tuple(member_coverage_gaps(request.user.pk, selected).values())
+        if missing:
+            return Response(
                 {
-                    "id": str(tenant.id),
-                    "tenant_name": tenant.canonical_name,
-                    "provider": tenant.provider,
-                }
+                    "error": (
+                        "You can't use every selected source with your own account yet. "
+                        f"Still needed — {_needed_text(missing)}."
+                    ),
+                    "missing_tenants": missing_tenants_payload(missing),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        WorkspaceMembership.objects.create(
-            workspace=workspace,
-            user=request.user,
-            role=WorkspaceRole.MANAGE,
-        )
+        with transaction.atomic():
+            workspace = Workspace.objects.create(
+                name=name,
+                is_auto_created=False,
+                created_by=request.user,
+            )
+            for tenant in selected:
+                WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
+            WorkspaceMembership.objects.create(
+                workspace=workspace,
+                user=request.user,
+                role=WorkspaceRole.MANAGE,
+            )
+        tenants = [
+            {
+                "id": str(tenant.id),
+                "tenant_name": tenant.canonical_name,
+                "provider": tenant.provider,
+            }
+            for tenant in selected
+        ]
+        first_tenant = selected[0] if selected else None
 
         display_name = (
             first_tenant.format_display_name(workspace.name) if first_tenant else workspace.name
@@ -563,7 +625,6 @@ class WorkspaceMemberListView(APIView):
         if role not in WorkspaceRole.values:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
 
-        tenant_ids = _live_tenant_ids(workspace)
         target = get_user_model().objects.filter(email__iexact=email).first()
 
         # No Scout account yet → pure pre-authorization; resolves on their first login.
@@ -577,19 +638,21 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_201_CREATED,
             )
 
-        if not _shares_live_tenant(target, tenant_ids):
+        missing = missing_for_user(target, workspace)
+        if missing:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
             # using their own token, then re-check — no manual reconnect needed.
-            providers = list(
-                workspace.workspace_tenants.values_list("tenant__provider", flat=True).distinct()
-            )
+            providers = sorted({t.provider for t in missing})
             async_to_sync(_arefresh_target_for_workspace)(target, providers)
 
-        # Still no live upstream access even after refresh → invite awaits it, rather
-        # than hard-failing: the invite resolves automatically once they gain access
-        # and log in (Root Cause A's live gate does the real enforcement regardless).
-        if not _shares_live_tenant(target, tenant_ids):
+        # Every member must cover every source (#381), so a target still missing
+        # one after the refresh gets an invite that awaits it rather than a hard
+        # failure: it resolves once they can use every source and sign in.
+        new_membership, created, missing = admit_covered_member(
+            workspace, target, role=role, invited_by=request.user
+        )
+        if missing:
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.AWAITING_ACCESS
             )
@@ -602,20 +665,11 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_201_CREATED,
             )
 
-        # authz-exempt: duplicate-membership check for the TARGET, not an access
-        # decision for the requester (whose access came via resolve_workspace above).
-        if WorkspaceMembership.objects.filter(workspace=workspace, user=target).exists():
+        if not created:
             return Response(
                 {"error": "User is already a member."},
                 status=status.HTTP_409_CONFLICT,
             )
-
-        new_membership = WorkspaceMembership.objects.create(
-            workspace=workspace,
-            user=target,
-            role=role,
-            invited_by=request.user,
-        )
         return Response(
             {
                 "result": "member",
@@ -765,6 +819,20 @@ class WorkspaceInviteDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _awaiting_invite_message(invite, user) -> str:
+    missing = missing_for_user(user, invite.workspace)
+    if not missing:
+        return (
+            f"You were invited to '{invite.workspace.name}' and can now use all of its "
+            "data sources. Sign in again to join."
+        )
+    return (
+        f"You were invited to '{invite.workspace.name}', which needs access to every one "
+        f"of its data sources. Still needed — {_needed_text(missing)}. It unlocks "
+        "automatically once you have them."
+    )
+
+
 class MyInvitesView(APIView):
     """GET /api/invites/ — the signed-in user's awaiting_access invites.
 
@@ -795,11 +863,7 @@ class MyInvitesView(APIView):
                 {
                     "id": str(i.id),
                     "workspace_name": i.workspace.name,
-                    "message": (
-                        f"You were invited to '{i.workspace.name}' but don't yet have access to "
-                        f"{describe_workspace_sources(i.workspace)}. Ask to be added there — it "
-                        f"unlocks automatically once you do."
-                    ),
+                    "message": _awaiting_invite_message(i, request.user),
                 }
                 for i in invites
             ]
@@ -834,8 +898,6 @@ class WorkspaceTenantView(APIView):
         return Response(tenants)
 
     def post(self, request, workspace_id):
-        from apps.workspaces.services.workspace_service import add_workspace_tenant
-
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
@@ -857,14 +919,33 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate the requesting user has access to this tenant (always, before idempotency check)
-        if not TenantMembership.objects.filter(user=request.user, tenant=tenant).exists():
+        # Validate the requesting user can use this tenant (always, before idempotency check)
+        requester_missing = tuple(member_coverage_gaps(request.user.pk, [tenant]).values())
+        if requester_missing:
             return Response(
-                {"error": "You do not have access to this tenant."},
+                {
+                    "error": (
+                        "You do not have access to this tenant. "
+                        f"To add it, {remedy_text(requester_missing[0])}."
+                    ),
+                    "missing_tenants": missing_tenants_payload(requester_missing),
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        wt, created = add_workspace_tenant(workspace, tenant)
+        # Refresh uncovered members with their own tokens before the locked recheck,
+        # so someone granted access upstream since their last login is not refused.
+        lacking = members_lacking_tenant(workspace, tenant)
+        if lacking:
+            async_to_sync(_arefresh_members_for_provider)(
+                [user for user, _missing in lacking], tenant.provider
+            )
+        try:
+            wt, created = add_tenant_covered_by_members(workspace, tenant)
+        except MembersLackTenant as refused:
+            return Response(
+                _members_lack_source_body(tenant, refused.gaps), status=status.HTTP_409_CONFLICT
+            )
         if not created:
             return Response(
                 {
@@ -880,8 +961,6 @@ class WorkspaceTenantView(APIView):
         )
 
     def delete(self, request, workspace_id, wt_id):
-        from apps.workspaces.services.workspace_service import remove_workspace_tenant
-
         workspace, membership, err = resolve_workspace(
             request, workspace_id, require_coverage=False
         )
