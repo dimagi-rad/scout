@@ -92,6 +92,26 @@ describe("LostAccessModal", () => {
     expect(screen.getByText(/don’t have access to any workspaces/)).toBeInTheDocument()
   })
 
+  it("links to the workspace's own page, where the user can leave or remove a source", async () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-workspace-settings"))
+
+    expect(navigate).toHaveBeenCalledWith(expect.stringMatching(/\/workspaces\/.*skelly$/))
+  })
+
+  it("does not cover the active workspace's own page", () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    render(
+      <MemoryRouter initialEntries={["/workspaces/skelly/skelly"]}>
+        <LostAccessModal />
+      </MemoryRouter>,
+    )
+
+    expect(screen.queryByTestId("lost-access-modal")).toBeNull()
+  })
+
   it("offers Connected Accounts even without a missing-source list", async () => {
     useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
     renderModal()

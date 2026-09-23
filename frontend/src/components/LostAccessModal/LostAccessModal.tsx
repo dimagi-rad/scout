@@ -33,8 +33,12 @@ export function LostAccessModal() {
   const active = domains.find((d) => d.id === activeDomainId)
   const accessible = useMemo(() => domains.filter(workspaceHasAccess), [domains])
 
-  // Connected Accounts is where the user fixes this, so the gate must not cover it.
-  const onRecoveryPage = location.pathname.replace(/\/+$/, "").endsWith(CONNECTIONS_PATH)
+  // Connected Accounts and the workspace's own page (remove a source, leave,
+  // delete) are where the user fixes this, so the gate must not cover them.
+  const path = location.pathname.replace(/\/+$/, "")
+  const onRecoveryPage =
+    path.endsWith(CONNECTIONS_PATH) ||
+    (activeDomainId !== null && path.startsWith("/workspaces/") && path.endsWith(`/${activeDomainId}`))
 
   // Only gate once the list has actually loaded and resolved to an orphan —
   // never during the initial load, or we'd flash the modal before we know.
@@ -100,13 +104,22 @@ export function LostAccessModal() {
           </p>
         )}
 
-        <button
-          data-testid="lost-access-connections"
-          onClick={() => navigate(CONNECTIONS_PATH)}
-          className="mt-3 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-        >
-          Open Connected Accounts
-        </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            data-testid="lost-access-connections"
+            onClick={() => navigate(CONNECTIONS_PATH)}
+            className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            Open Connected Accounts
+          </button>
+          <button
+            data-testid="lost-access-workspace-settings"
+            onClick={() => navigate(workspacePath(active))}
+            className="rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            Leave or edit this workspace
+          </button>
+        </div>
 
         {accessible.length > 0 ? (
           <div className="mt-5">
