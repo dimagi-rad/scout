@@ -459,6 +459,39 @@ async def test_invalid_stable_binding_fails_before_provider_rotation(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_account_deleted_before_preflight_is_a_classified_refresh_error(
+    oauth_identity, mode, monkeypatch
+):
+    """The disconnect race must reach callers as TokenRefreshError, not DoesNotExist.
+
+    Consumers catch only TokenRefreshError, so a raw ObjectDoesNotExist escaping
+    preflight would be a 500 rather than a reconnect prompt.
+    """
+    token, _connection = oauth_identity
+    await SocialAccount.objects.filter(pk=token.account_id).adelete()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a vanished account must not consume an upstream refresh grant")
+
+    if mode == "async":
+
+        async def unexpected_async(*args, **kwargs):
+            unexpected()
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", unexpected_async)
+        with pytest.raises(TokenRefreshError, match="reconnect") as excinfo:
+            await refresh_oauth_token_result(token, URL)
+    else:
+        monkeypatch.setattr(token_refresh.requests, "post", unexpected)
+        with pytest.raises(TokenRefreshError, match="reconnect") as excinfo:
+            await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+    assert type(excinfo.value) is TokenRefreshError
+    assert isinstance(excinfo.value.__cause__, SocialAccount.DoesNotExist)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
 async def test_unrelated_api_key_binding_does_not_poison_oauth_cas(
     oauth_identity, mode, httpx_mock, requests_mock
 ):
