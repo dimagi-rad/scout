@@ -3,6 +3,7 @@
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -31,6 +32,7 @@ from apps.workspaces.services.refresh_requests import (
     refresh_task_args,
 )
 from apps.workspaces.tasks import refresh_tenant_schema
+from config.procrastinate import JOB_RETENTION_HOURS
 
 
 @pytest.fixture
@@ -599,4 +601,58 @@ def test_initial_provision_row_is_not_treated_as_unverifiable_refresh(
     assert response.status_code == 409
     assert response.data == {"error": "A refresh is already in progress."}
     assert base.state == SchemaState.PROVISIONING
+    defer.assert_not_called()
+
+
+def _age_past_job_retention(candidate):
+    TenantSchema.objects.filter(id=candidate.id).update(
+        created_at=timezone.now() - timedelta(hours=JOB_RETENTION_HOURS + 1)
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("binding", ["bound", "legacy"])
+def test_candidate_whose_job_was_pruned_is_reconciled_and_retryable(
+    manage_client, workspace, tenant, tenant_membership, refresh_job, binding
+):
+    # prune_old_procrastinate_jobs deletes succeeded jobs after JOB_RETENTION_HOURS;
+    # a denied or mismatched delivery finishes "succeeded" and leaves its candidate
+    # PROVISIONING, so the queue evidence can legitimately disappear.
+    if binding == "bound":
+        candidate, _args, job_id = _bound_candidate(
+            tenant, workspace, tenant_membership, refresh_job
+        )
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM procrastinate_jobs WHERE id = %s", [job_id])
+    else:
+        candidate = TenantSchema.objects.create(
+            tenant=tenant, schema_name="legacy_pruned_job", state=SchemaState.PROVISIONING
+        )
+    _age_past_job_retention(candidate)
+
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+        defer.return_value = MagicMock(id=987656)
+        response = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    candidate.refresh_from_db()
+    assert response.status_code == 202
+    assert candidate.state == SchemaState.FAILED
+    defer.assert_called_once()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_bound_candidate_missing_its_job_within_retention_still_blocks_retry(
+    manage_client, workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM procrastinate_jobs WHERE id = %s", [job_id])
+
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+        response = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    candidate.refresh_from_db()
+    assert response.status_code == 409
+    assert response.data["code"] == "refresh_recovery_required"
+    assert candidate.state == SchemaState.PROVISIONING
     defer.assert_not_called()

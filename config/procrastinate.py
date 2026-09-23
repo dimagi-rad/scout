@@ -11,7 +11,12 @@ from asgiref.sync import sync_to_async
 from django.db import close_old_connections, reset_queries
 from procrastinate.contrib.django import app
 
-__all__ = ["app", "task"]
+__all__ = ["JOB_RETENTION_HOURS", "app", "task"]
+
+# procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~144 janitor
+# jobs/day plus every materialization/teardown/rebuild/resume. Keep finalized jobs
+# for a week (forensics + idempotency headroom) then prune (arch #255, 10#0).
+JOB_RETENTION_HOURS = 24 * 7
 
 
 def _cleanup_after() -> None:

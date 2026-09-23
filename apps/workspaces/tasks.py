@@ -75,7 +75,7 @@ from apps.workspaces.services.refresh_requests import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import parse_coverage
-from config.procrastinate import app, task
+from config.procrastinate import JOB_RETENTION_HOURS, app, task
 from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
@@ -2136,12 +2136,6 @@ async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
         if await _fail_zombie_materialization_run(run, reason):
             failed += 1
     return {"failed": failed}
-
-
-# procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~144 janitor
-# jobs/day plus every materialization/teardown/rebuild/resume. Keep finalized jobs
-# for a week (forensics + idempotency headroom) then prune (arch #255, 10#0).
-JOB_RETENTION_HOURS = 24 * 7
 
 
 @app.periodic(cron="17 3 * * *")

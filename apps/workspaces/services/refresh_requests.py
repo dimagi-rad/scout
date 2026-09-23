@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -14,6 +15,7 @@ from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import workspace_write_allowed
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant
+from config.procrastinate import JOB_RETENTION_HOURS
 
 REFRESH_TASK_NAME = "apps.workspaces.tasks.refresh_tenant_schema"
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled", "aborted"})
@@ -189,6 +191,17 @@ def activate_claimed_refresh_candidate(schema_id, job_id: int, accessed_at) -> b
     )
 
 
+def _job_was_pruned(candidate: TenantSchema) -> bool:
+    """Whether a candidate's missing queue job is explained by retention pruning.
+
+    A candidate is inserted in the same transaction as its job, and a running job's
+    row is never pruned, so a missing row older than the retention window can only
+    be a finished job that prune_old_procrastinate_jobs removed. A younger gap has
+    no such explanation and stays with the operator.
+    """
+    return candidate.created_at < timezone.now() - timedelta(hours=JOB_RETENTION_HOURS)
+
+
 def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
     """Settle only provably terminal legacy refresh candidates for a retry.
 
@@ -219,7 +232,12 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
                         id=candidate.refresh_job_id
                     )
                 except ProcrastinateJob.DoesNotExist:
-                    recovery_needed = True
+                    if _job_was_pruned(candidate):
+                        candidate.state = SchemaState.FAILED
+                        candidate.save(update_fields=["state"])
+                        reconciled += 1
+                    else:
+                        recovery_needed = True
                     continue
                 expected_args = refresh_task_args(candidate)
                 if (
@@ -244,6 +262,11 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
                     args__schema_id=str(candidate.id),
                 )[:2]
             )
+            if not jobs and _job_was_pruned(candidate):
+                candidate.state = SchemaState.FAILED
+                candidate.save(update_fields=["state"])
+                reconciled += 1
+                continue
             if len(jobs) != 1:
                 recovery_needed = True
                 continue
