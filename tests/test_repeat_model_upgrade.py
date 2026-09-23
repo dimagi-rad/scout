@@ -1,5 +1,6 @@
 """Rematerialization must preserve the source identity of existing repeat consumers."""
 
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -87,6 +88,20 @@ def source_names(tenant, assets):
         for asset in assets
         if (source := repeat_source(asset.sql_content, provider=tenant.provider)) is not None
     }
+
+
+LEGACY_ALIASES = {
+    # Before #235 (CommCare) and cede159 (Connect), _unique_alias never capped
+    # or digit-prefixed an alias. Before #426, dbt_column_alias could emit one
+    # literal alias twice.
+    "overlong": lambda _first: "x" * 75,
+    "leading_digit": lambda first: "1st_" + first,
+    "duplicate": lambda first: first,
+}
+
+
+def quoted_aliases(sql):
+    return re.findall(r'AS "([^"]+)"', sql)
 
 
 @pytest.mark.parametrize("paths", [PATHS, (FALLBACK, LITERAL)])
@@ -274,6 +289,15 @@ def test_canonical_case_removal_accepts_quoted_keys_and_reserved_aliases():
     assert generate_system_assets(tenant, {}, existing_assets=old) == []
 
 
+@pytest.mark.parametrize("legacy", LEGACY_ALIASES.values(), ids=LEGACY_ALIASES)
+def test_legacy_case_property_aliases_do_not_block_case_removal(legacy):
+    tenant = Tenant(provider="commcare", external_id="synthetic-case-removal")
+    old = case_assets(tenant)
+    first, *_, last = quoted_aliases(old[0].sql_content)
+    old[0].sql_content = old[0].sql_content.replace(f'AS "{last}"', f'AS "{legacy(first)}"')
+    assert generate_system_assets(tenant, {}, existing_assets=old) == []
+
+
 @pytest.mark.parametrize(
     "edit",
     [
@@ -384,6 +408,40 @@ def test_historical_connect_parent_does_not_accept_arbitrary_core_columns(replac
     old[0].sql_content = old[0].sql_content.replace("    username,", f"    {replacement},")
     with pytest.raises(RepeatModelMigrationRequired, match="original parent source"):
         generate(tenant, metadata(tenant), old)
+
+
+@pytest.mark.parametrize("legacy", LEGACY_ALIASES.values(), ids=LEGACY_ALIASES)
+@pytest.mark.parametrize("model", ["parent", "repeat"])
+def test_legacy_projection_aliases_never_change_source_identity(repeat_tenant, model, legacy):
+    data = metadata(repeat_tenant, extra_question=True)
+    data["form_definitions"]["urn:synthetic:registration"]["questions"].append(
+        {"value": "/data/note", "type": "Text"}
+    )
+    parent, *repeats = generate(repeat_tenant, data)
+    surviving = repeats[-1]
+    surviving.name = _repeat_base_model_name(parent.name, PATHS[-1])
+    edited = parent if model == "parent" else surviving
+    first, *_, last = [a for a in quoted_aliases(edited.sql_content) if a != "repeat_index"]
+    edited.sql_content = edited.sql_content.replace(f'AS "{last}"', f'AS "{legacy(first)}"')
+    result = generate(repeat_tenant, data, [parent, surviving])
+    assert source_names(repeat_tenant, result)[("data", "right", "a")] == surviving.name
+    regenerated = {asset.name: asset.sql_content for asset in result}
+    assert f'AS "{last}"' in regenerated[edited.name]
+
+
+@pytest.mark.parametrize("legacy", LEGACY_ALIASES.values(), ids=LEGACY_ALIASES)
+def test_legacy_projection_aliases_do_not_block_parent_removal(repeat_tenant, legacy):
+    data = metadata(repeat_tenant, [])
+    data["form_definitions"]["urn:synthetic:registration"]["questions"].append(
+        {"value": "/data/note", "type": "Text"}
+    )
+    (old,) = generate(repeat_tenant, data)
+    if repeat_tenant.provider == "commcare_connect":
+        old.name = "retired_visits"
+    first, *_, last = [a for a in quoted_aliases(old.sql_content) if a != "received_on"]
+    old.sql_content = old.sql_content.replace(f'AS "{last}"', f'AS "{legacy(first)}"')
+    result = generate(repeat_tenant, {"form_definitions": {}}, [old])
+    assert old.name not in {asset.name for asset in result}
 
 
 def test_repeat_migration_has_the_shared_materialization_error_contract():

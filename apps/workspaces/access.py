@@ -25,12 +25,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from apps.users.models import TenantMembership
-from apps.workspaces.models import WorkspaceMembership
+from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
 NOT_MEMBER = "not_member"
 TENANT_ACCESS_LOST = "tenant_access_lost"
+INSUFFICIENT_ROLE = "insufficient_role"
+
+_ROLE_RANK = {
+    WorkspaceRole.READ: 0,
+    WorkspaceRole.READ_WRITE: 1,
+    WorkspaceRole.MANAGE: 2,
+}
 
 _GENERIC_DENIED = "Workspace not found or access denied."
+TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
+TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
 
 
 @dataclass(frozen=True)
@@ -38,7 +47,8 @@ class WorkspaceAccess:
     """Outcome of an access decision.
 
     ``workspace``/``membership`` are set iff access is granted. On denial they are
-    ``None`` and ``denied_reason`` is one of ``NOT_MEMBER`` / ``TENANT_ACCESS_LOST``;
+    ``None`` and ``denied_reason`` is one of ``NOT_MEMBER`` / ``TENANT_ACCESS_LOST`` /
+    ``INSUFFICIENT_ROLE``;
     ``lost_tenant_names`` names the workspace's tenants the user no longer shares.
     """
 
@@ -146,7 +156,15 @@ async def acovers_live_tenants(user, tenant_ids) -> bool:
     return wanted <= covered
 
 
-def resolve_workspace_access_ex(user, workspace_id) -> WorkspaceAccess:
+def _role_satisfies(role: str, minimum_role: str) -> bool:
+    role_rank = _ROLE_RANK.get(role)
+    minimum_rank = _ROLE_RANK.get(minimum_role)
+    return role_rank is not None and minimum_rank is not None and role_rank >= minimum_rank
+
+
+def resolve_workspace_access_ex(
+    user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
+) -> WorkspaceAccess:
     """Resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
     try:
         wm = WorkspaceMembership.objects.select_related("workspace").get(
@@ -155,12 +173,18 @@ def resolve_workspace_access_ex(user, workspace_id) -> WorkspaceAccess:
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     rows = _tenant_rows(wm.workspace)
-    if _shares_live_tenant(user, [tid for tid, _name in rows]):
-        return WorkspaceAccess(workspace=wm.workspace, membership=wm)
-    return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, lost_tenant_names=_lost_names(rows))
+    if not _shares_live_tenant(user, [tid for tid, _name in rows]):
+        return WorkspaceAccess(
+            denied_reason=TENANT_ACCESS_LOST, lost_tenant_names=_lost_names(rows)
+        )
+    if not _role_satisfies(wm.role, minimum_role):
+        return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
+    return WorkspaceAccess(workspace=wm.workspace, membership=wm)
 
 
-async def aresolve_workspace_access_ex(user, workspace_id) -> WorkspaceAccess:
+async def aresolve_workspace_access_ex(
+    user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
+) -> WorkspaceAccess:
     """Async: resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
     try:
         wm = await WorkspaceMembership.objects.select_related("workspace").aget(
@@ -169,18 +193,67 @@ async def aresolve_workspace_access_ex(user, workspace_id) -> WorkspaceAccess:
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     rows = await _atenant_rows(wm.workspace)
-    if await _ashares_live_tenant(user, [tid for tid, _name in rows]):
-        return WorkspaceAccess(workspace=wm.workspace, membership=wm)
-    return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, lost_tenant_names=_lost_names(rows))
+    if not await _ashares_live_tenant(user, [tid for tid, _name in rows]):
+        return WorkspaceAccess(
+            denied_reason=TENANT_ACCESS_LOST, lost_tenant_names=_lost_names(rows)
+        )
+    if not _role_satisfies(wm.role, minimum_role):
+        return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
+    return WorkspaceAccess(workspace=wm.workspace, membership=wm)
 
 
-def resolve_workspace_access(user, workspace_id):
+def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
     """Return ``(workspace, WorkspaceMembership)`` if the user has access, else ``(None, None)``."""
-    result = resolve_workspace_access_ex(user, workspace_id)
+    result = resolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
     return result.workspace, result.membership
 
 
-async def aresolve_workspace_access(user, workspace_id):
+async def aresolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
     """Async: return ``(workspace, WorkspaceMembership)`` on access, else ``(None, None)``."""
-    result = await aresolve_workspace_access_ex(user, workspace_id)
+    result = await aresolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
     return result.workspace, result.membership
+
+
+def workspace_write_allowed(user, workspace_id) -> bool:
+    """Return whether an actor currently has shared-write authority."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return resolve_workspace_access_ex(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    ).granted
+
+
+async def aworkspace_read_allowed(user, workspace_id) -> bool:
+    """Return whether an actor currently has workspace read authority."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return (await aresolve_workspace_access_ex(user, workspace_id)).granted
+
+
+async def aworkspace_write_allowed(user, workspace_id) -> bool:
+    """Async twin of ``workspace_write_allowed``."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return (
+        await aresolve_workspace_access_ex(
+            user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+    ).granted
+
+
+def tool_write_denied() -> dict:
+    """Structured denial returned by local LangChain mutation tools."""
+    return {
+        "status": "denied",
+        "message": TOOL_WRITE_DENIED_MESSAGE,
+        "error": {"code": "FORBIDDEN", "message": TOOL_WRITE_DENIED_MESSAGE},
+    }
+
+
+def tool_read_denied() -> dict:
+    """Structured denial returned by local LangChain read tools."""
+    return {
+        "status": "denied",
+        "message": TOOL_READ_DENIED_MESSAGE,
+        "error": {"code": "FORBIDDEN", "message": TOOL_READ_DENIED_MESSAGE},
+    }

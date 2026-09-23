@@ -14,7 +14,7 @@ from django.contrib.auth import get_user_model
 from django.test import override_settings
 
 from apps.chat.models import Thread, ThreadJob
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -1051,6 +1051,10 @@ class TestCancelMaterialization:
         with (
             patch("mcp_server.server.MaterializationRun") as mock_cls,
             patch(
+                "mcp_server.server._authorize_materialization_write",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
                 "mcp_server.server._run_belongs_to_workspace",
                 new=AsyncMock(return_value=True),
             ),
@@ -1064,7 +1068,11 @@ class TestCancelMaterialization:
             mock_cls.RunState.CANCELLED = "cancelled"
             from mcp_server.server import cancel_materialization
 
-            result = asyncio.run(cancel_materialization(run_id=run_id, workspace_id="ws-1"))
+            result = asyncio.run(
+                cancel_materialization(
+                    run_id=run_id, workspace_id="ws-1", user_id="authorized-user"
+                )
+            )
 
         assert result["success"] is True
         assert result["data"]["cancelled"] is True
@@ -1095,6 +1103,10 @@ class TestCancelMaterialization:
         with (
             patch("mcp_server.server.MaterializationRun") as mock_cls,
             patch(
+                "mcp_server.server._authorize_materialization_write",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
                 "mcp_server.server._run_belongs_to_workspace",
                 new=AsyncMock(return_value=True),
             ),
@@ -1107,7 +1119,11 @@ class TestCancelMaterialization:
             mock_cls.RunState.FAILED = "failed"
             from mcp_server.server import cancel_materialization
 
-            result = asyncio.run(cancel_materialization(run_id=run_id, workspace_id="ws-1"))
+            result = asyncio.run(
+                cancel_materialization(
+                    run_id=run_id, workspace_id="ws-1", user_id="authorized-user"
+                )
+            )
 
         assert result["success"] is False
         assert "not in progress" in result["error"]["message"].lower()
@@ -1128,6 +1144,8 @@ async def test_cancel_materialization_aborts_job_and_flips_threadjob():
         external_id="mcpc", provider="commcare", canonical_name="MCPC"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user)
     schema = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="s_mcpc", state=SchemaState.ACTIVE
     )
@@ -1149,7 +1167,9 @@ async def test_cancel_materialization_aborts_job_and_flips_threadjob():
     abort = AsyncMock(return_value=None)
     with patch("mcp_server.server.procrastinate_app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = abort
-        result = await cancel_materialization(run_id=str(run.id), workspace_id=str(ws.id))
+        result = await cancel_materialization(
+            run_id=str(run.id), workspace_id=str(ws.id), user_id=str(user.id)
+        )
 
     assert result["success"] is True
     abort.assert_awaited_once_with(990011, abort=True)

@@ -8,6 +8,12 @@ from __future__ import annotations
 
 import logging
 
+from apps.common.errors import (
+    DenialScope,
+    ExpectedUpstreamError,
+    TokenRefreshError,
+    UpstreamAccessDenied,
+)
 from mcp_server.loaders.commcare_metadata import _extract_case_types, _extract_form_definitions
 from mcp_server.loaders.connect_base import ConnectBaseLoader
 
@@ -31,6 +37,8 @@ class ConnectMetadataLoader(ConnectBaseLoader):
             ]
             form_definitions = _extract_form_definitions(apps)
             case_types = _extract_case_types(apps)
+        except (ExpectedUpstreamError, TokenRefreshError):
+            raise
         except Exception:
             logger.exception(
                 "Failed to fetch app_structure for opportunity %s; continuing without form_definitions",
@@ -54,7 +62,13 @@ class ConnectMetadataLoader(ConnectBaseLoader):
 
     def _fetch_org_data(self) -> dict:
         url = f"{self.base_url}/export/opp_org_program_list/"
-        return self._get(url).json()
+        try:
+            return self._get(url).json()
+        except UpstreamAccessDenied as exc:
+            # This global endpoint does not establish which opportunity was
+            # denied. Do not revoke the opportunity currently being loaded.
+            exc.denial_scope = DenialScope.UNKNOWN
+            raise
 
     def _fetch_opportunity_detail(self) -> dict:
         url = f"{self.base_url}/export/opportunity/{self.opportunity_id}/"

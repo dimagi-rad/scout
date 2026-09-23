@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
 
+from apps.workspaces.access import aworkspace_write_allowed, tool_write_denied
+
 if TYPE_CHECKING:
     from apps.users.models import User
     from apps.workspaces.models import Workspace
@@ -53,6 +55,9 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         ``status: completed``, continue with the requested analysis in the same
         run — the data is ready.
         """
+        if not await aworkspace_write_allowed(user, workspace_id):
+            return tool_write_denied()
+
         # Inline import breaks a verified cycle: graph.base -> this module ->
         # workspaces.tasks -> graph.base (tasks imports build_agent_graph for the
         # resume path). Module-level fails with a partially-initialized import.

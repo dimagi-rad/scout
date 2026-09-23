@@ -11,7 +11,7 @@ from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
 from apps.workspaces import tasks as workspace_tasks
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
-from apps.workspaces.models import MaterializationRun
+from apps.workspaces.models import MaterializationRun, WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -170,7 +170,9 @@ async def cancel_job_view(request, workspace_id, thread_job_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    workspace, err = await aresolve_workspace(user, workspace_id)
+    workspace, err = await aresolve_workspace(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    )
     if err is not None:
         return err
 

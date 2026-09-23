@@ -16,7 +16,7 @@ from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.chat.models import Thread, ThreadArtifact
 from apps.semantic.services.query import _cube_query
 from apps.users.models import User
-from apps.workspaces.models import Workspace
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 
 def topic_query(**overrides):
@@ -224,6 +224,9 @@ async def test_artifact_write_publishes_and_updates_valid_time_query(
     user = await User.objects.acreate(email="filter-contract@localhost.invalid")
     workspace = await Workspace.objects.acreate(
         name="Synthetic date-filter contract", created_by=user
+    )
+    await WorkspaceMembership.objects.acreate(
+        workspace=workspace, user=user, role=WorkspaceRole.READ_WRITE
     )
     thread = await Thread.objects.acreate(workspace=workspace, user=user)
     write = next(

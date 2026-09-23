@@ -825,7 +825,7 @@ async def test_recovery_failure_prioritizes_source_remedy_over_downstream_cube_e
         assert recovery.error.count("Connected Accounts") == 1
         if tenants[0].get("tenant") == "source-alpha":
             assert "source-beta (commcare): access was removed upstream" in state["detail"]
-            assert "reconnecting will NOT restore it" in state["detail"]
+            assert "reconnecting alone does not change upstream permissions" in state["detail"]
             assert "Ask an admin on the affected provider" in state["detail"]
     if len(tenants) == 5:
         assert "Synthetic source 2" in recovery.error

@@ -19,6 +19,8 @@ from apps.chat.helpers import (
 )
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
+from apps.workspaces.models import WorkspaceRole
+from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +47,9 @@ async def _get_public_thread(share_token):
         return None
 
 
-async def _update_thread_sharing(thread, is_shared=None):
+async def _update_thread_sharing(thread, *, is_shared: bool):
     """Update sharing settings on a thread."""
-    if is_shared is not None:
-        thread.is_shared = is_shared
+    thread.is_shared = is_shared
     await thread.asave()
     return {
         "id": str(thread.id),
@@ -332,9 +333,22 @@ async def thread_share_view(request, workspace_id, thread_id):
     """
     user = request._authenticated_user
 
-    workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    if request.method == "PATCH":
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        if not isinstance(body, dict) or type(body.get("is_shared")) is not bool:
+            return JsonResponse({"error": "is_shared must be a boolean"}, status=400)
+
+        is_shared = body["is_shared"]
+        # Publishing changes shared content; revocation only removes the owner's exposure.
+        minimum_role = WorkspaceRole.READ_WRITE if is_shared else WorkspaceRole.READ
+        _workspace, err = await aresolve_workspace(user, workspace_id, minimum_role=minimum_role)
+    else:
+        _workspace, err = await aresolve_workspace(user, workspace_id)
+    if err is not None:
+        return err
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
@@ -350,14 +364,9 @@ async def thread_share_view(request, workspace_id, thread_id):
         )
 
     if request.method == "PATCH":
-        try:
-            body = json.loads(request.body)
-        except (json.JSONDecodeError, ValueError):
-            return JsonResponse({"error": "Invalid JSON"}, status=400)
-
         result = await _update_thread_sharing(
             thread,
-            is_shared=body.get("is_shared"),
+            is_shared=is_shared,
         )
         return JsonResponse(result)
 

@@ -24,7 +24,7 @@ from apps.users.models import (
     TenantMembership,
 )
 from apps.users.rate_limiting import check_rate_limit, record_attempt
-from apps.users.services.credential_resolver import aiter_social_tokens
+from apps.users.services.credential_resolver import aiter_fresh_access_tokens
 from apps.users.services.oauth_scope import (
     canonical_provider,
     is_active_identity,
@@ -83,10 +83,10 @@ async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
     team's chatbots undiscovered (#156). One team failing must not skip the rest.
     """
     resolved_any = False
-    for token_obj in await aiter_social_tokens(user, provider):
+    for account, access_token in await aiter_fresh_access_tokens(user, provider):
         try:
             resolved = await resolve_fn(
-                user, token_obj.token, social_account=token_obj.account, allow_replace=False
+                user, access_token, social_account=account, allow_replace=False
             )
         except Exception:
             logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
@@ -297,6 +297,7 @@ def _record_status(seen: dict[str, set[str]], provider: str, status: str) -> Non
 def providers_view(request):
     """Return OAuth providers configured for this site, with connection status if authenticated."""
     from apps.users.services.token_refresh import (
+        INTERACTIVE_DB_DEADLINE,
         TokenRefreshError,
         refresh_oauth_token,
         token_needs_refresh,
@@ -335,7 +336,9 @@ def providers_view(request):
             refresh_failed = False
             if can_refresh and token_needs_refresh(social_token.expires_at):
                 try:
-                    async_to_sync(refresh_oauth_token)(social_token, token_url)
+                    async_to_sync(refresh_oauth_token)(
+                        social_token, token_url, db_timeout=INTERACTIVE_DB_DEADLINE
+                    )
                 except TokenRefreshError:
                     refresh_failed = True
             refresh_failed = (

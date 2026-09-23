@@ -424,7 +424,7 @@ async def test_cancel_job_cross_user_blocked():
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=other,
-        role=WorkspaceRole.READ,
+        role=WorkspaceRole.READ_WRITE,
     )
     thread = await Thread.objects.acreate(workspace=ws, user=owner)
     tj = await ThreadJob.objects.acreate(

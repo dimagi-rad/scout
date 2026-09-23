@@ -9,8 +9,13 @@ from allauth.socialaccount.models import SocialToken
 
 from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantConnection
-from apps.users.services.oauth_scope import is_active_identity, provider_accounts
+from apps.users.services.oauth_scope import (
+    is_active_identity,
+    oauth_membership_scope_mismatch,
+    provider_accounts,
+)
 from apps.users.services.token_refresh import (
+    WORKER_DB_DEADLINE,
     TokenRefreshError,
     credential_fingerprint,
     get_token_url,
@@ -130,26 +135,6 @@ async def aiter_fresh_access_tokens(user, provider: str) -> list[tuple]:
     return pairs
 
 
-def _oauth_team_mismatch(membership, conn, token_obj) -> bool:
-    """True when the chatbot's team is known and this connection is scoped elsewhere.
-
-    The chatbot's team lives on the membership (``team_slug``). The team the
-    connection speaks for is ``conn.scope_key``, recorded when the credential was
-    authorised; the OIDC ``team`` claim on the token's own account is the fallback
-    for connections predating that field. When they differ we must not use this
-    token — fail closed.
-
-    Still needed after multi-token OAuth: memberships that a single shared
-    connection accumulated across two teams keep pointing at it until the user
-    re-authorises the second team, and serving them team A's token would be the
-    cross-team read this check was written to stop.
-    """
-    if not membership.team_slug:
-        return False
-    current = conn.scope_key or (getattr(token_obj.account, "extra_data", None) or {}).get("team")
-    return bool(current) and current != membership.team_slug
-
-
 async def aresolve_credential(membership) -> dict | None:
     """Resolve a credential dict for a TenantMembership, or return None.
 
@@ -174,7 +159,7 @@ async def aresolve_credential(membership) -> dict | None:
     token_obj = await aget_connection_token(conn)
     if not token_obj:
         return None
-    if _oauth_team_mismatch(membership, conn, token_obj):
+    if oauth_membership_scope_mismatch(membership, conn, token_obj.account):
         # This connection's credential belongs to a different team than this
         # chatbot. Fail closed (never serve another team's token), but surface a
         # distinct, actionable error so the user is told to connect that team —
@@ -206,7 +191,9 @@ async def aconnection_status(conn) -> str:
     return token_health(token_obj, conn.provider, refresh_failed=failed)
 
 
-def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
+def _make_token_refresher(
+    token_obj, token_url: str, credential: dict | None = None
+) -> Callable[[], str]:
     """Return a sync callable a loader invokes on a mid-run 401 to mint a fresh
     access token (arch #252, finding 14#3).
 
@@ -217,7 +204,10 @@ def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
     """
 
     def _refresh() -> str:
-        return refresh_oauth_token_sync(token_obj, token_url)
+        value = refresh_oauth_token_sync(token_obj, token_url, db_timeout=WORKER_DB_DEADLINE)
+        if credential is not None:
+            credential["value"] = value
+        return value
 
     return _refresh
 
@@ -225,12 +215,9 @@ def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
 async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
     """Build an OAuth credential dict, refreshing the token if near expiry.
 
-    Fails closed (raises ``CredentialResolutionError`` with ``AUTH_TOKEN_EXPIRED``)
-    when the token is at/near expiry and cannot be renewed. Serving a known-stale
-    token only provisions a schema and burns the discover phase before the first
-    authenticated request 401s, and no 401 downstream maps to actionable
-    re-authentication guidance — so we surface "reconnect your account" up front
-    instead of a doomed run (arch #252, finding 14#4).
+    Fails closed when a near-expiry token cannot be renewed. A rejected grant or
+    unrefreshable token needs reconnect; other refresh failures preserve their
+    distinct code so provider outages do not masquerade as revoked sign-in.
 
     When a refresh is possible the credential carries a ``refresh`` callable so
     loaders can renew the token mid-run and survive a token whose lifetime is
@@ -249,12 +236,19 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
         if not can_refresh:
             raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider))
         try:
-            token_value = await refresh_oauth_token(token_obj, token_url)
+            token_value = await refresh_oauth_token(
+                token_obj, token_url, db_timeout=WORKER_DB_DEADLINE
+            )
         except TokenRefreshError as e:
             logger.warning("Token refresh failed for provider %s; failing closed", provider)
-            raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider)) from e
+            message = (
+                _reauth_message(provider)
+                if e.code == AUTH_TOKEN_EXPIRED
+                else f"Sign-in refresh could not complete for {provider}."
+            )
+            raise CredentialResolutionError(e.code, message) from e
 
     cred: dict = {"type": "oauth", "value": token_value}
     if can_refresh:
-        cred["refresh"] = _make_token_refresher(token_obj, token_url)
+        cred["refresh"] = _make_token_refresher(token_obj, token_url, cred)
     return cred

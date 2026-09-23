@@ -217,6 +217,8 @@ class TenantConnection(models.Model):
         related_name="tenant_connections",
         help_text="The allauth identity holding this OAuth connection's token. Null for API keys.",
     )
+    upstream_denial_code = models.CharField(max_length=40, blank=True, default="", db_default="")
+    upstream_denied_at = models.DateTimeField(null=True, blank=True)
     oauth_refresh_failure_fingerprint = models.CharField(
         max_length=64,
         blank=True,
@@ -239,6 +241,56 @@ class TenantConnection(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.provider}:{self.credential_type}"
+
+
+class VerificationControl(models.Model):
+    connection = models.OneToOneField(
+        TenantConnection, on_delete=models.CASCADE, related_name="verification_control"
+    )
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_lease_token = models.UUIDField(null=True, blank=True)
+    last_attempt_outcome = models.CharField(max_length=40, blank=True, default="", db_default="")
+    last_attempt_error_code = models.CharField(max_length=80, blank=True, default="", db_default="")
+    last_attempt_observation_hash = models.CharField(
+        max_length=64, blank=True, default="", db_default=""
+    )
+    last_attempt_tenant_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Tenant ids the last attempt's outcome is authoritative for, as strings. "
+            "The lease is per connection, so this is what stops a waiter reusing a "
+            "receipt from an attempt that never covered its tenants."
+        ),
+    )
+
+    def __str__(self):
+        return f"VerificationControl({self.connection_id})"
+
+
+class UpstreamAccessProof(models.Model):
+    connection = models.ForeignKey(
+        TenantConnection, on_delete=models.CASCADE, related_name="access_proofs"
+    )
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="access_proofs")
+    credential_fingerprint = models.CharField(max_length=64)
+    account_identity = models.CharField(max_length=64, blank=True, default="", db_default="")
+    scope_key = models.CharField(max_length=255, blank=True, default="", db_default="")
+    observed_denied_at = models.DateTimeField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_result = models.CharField(max_length=40, blank=True, default="", db_default="")
+    last_error_code = models.CharField(max_length=80, blank=True, default="", db_default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection", "tenant"], name="unique_access_proof_connection_tenant"
+            )
+        ]
+
+    def __str__(self):
+        return f"UpstreamAccessProof({self.connection_id}, {self.tenant_id})"
 
 
 class LiveTenantMembershipManager(models.Manager):

@@ -28,7 +28,7 @@ from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
 from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
-from apps.workspaces.models import WorkspaceDataRecovery
+from apps.workspaces.models import WorkspaceDataRecovery, WorkspaceRole
 from apps.workspaces.services.data_recovery import artifact_data_state
 from apps.workspaces.tasks import (
     STALE_JOB_THRESHOLD,
@@ -1055,11 +1055,18 @@ class ArtifactQueryDataView(View):
 class ArtifactDataRecoveryView(View):
     """Inspect or start repair of the data surface behind an artifact."""
 
-    async def _resolve(self, request: HttpRequest, workspace_id, artifact_id):
+    async def _resolve(
+        self,
+        request: HttpRequest,
+        workspace_id,
+        artifact_id,
+        *,
+        minimum_role: str = WorkspaceRole.READ,
+    ):
         user = await request.auser()
         if not user.is_authenticated:
             return None, None, JsonResponse({"error": "Authentication required"}, status=401)
-        workspace, err = await aresolve_workspace(user, workspace_id)
+        workspace, err = await aresolve_workspace(user, workspace_id, minimum_role=minimum_role)
         if err:
             return None, None, err
         try:
@@ -1087,7 +1094,12 @@ class ArtifactDataRecoveryView(View):
         return JsonResponse(await _current_artifact_data_state(artifact))
 
     async def post(self, request: HttpRequest, workspace_id, artifact_id) -> JsonResponse:
-        user, artifact, err = await self._resolve(request, workspace_id, artifact_id)
+        user, artifact, err = await self._resolve(
+            request,
+            workspace_id,
+            artifact_id,
+            minimum_role=WorkspaceRole.READ_WRITE,
+        )
         if err:
             return err
 
@@ -1244,8 +1256,15 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
     DELETE /api/artifacts/<workspace_id>/<artifact_id>/ - Delete artifact.
     """
 
-    def _get_artifact_with_access(self, request: HttpRequest, workspace_id, artifact_id: str):
-        workspace, err = resolve_workspace(request.user, workspace_id)
+    def _get_artifact_with_access(
+        self,
+        request: HttpRequest,
+        workspace_id,
+        artifact_id: str,
+        *,
+        minimum_role: str,
+    ):
+        workspace, err = resolve_workspace(request.user, workspace_id, minimum_role=minimum_role)
         if err:
             return None, err
         artifact = get_object_or_404(
@@ -1257,7 +1276,12 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
         return artifact, None
 
     def patch(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
-        artifact, err = self._get_artifact_with_access(request, workspace_id, artifact_id)
+        artifact, err = self._get_artifact_with_access(
+            request,
+            workspace_id,
+            artifact_id,
+            minimum_role=WorkspaceRole.READ_WRITE,
+        )
         if err:
             return err
         try:
@@ -1279,7 +1303,12 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
         )
 
     def delete(self, request: HttpRequest, workspace_id, artifact_id: str) -> HttpResponse:
-        artifact, err = self._get_artifact_with_access(request, workspace_id, artifact_id)
+        artifact, err = self._get_artifact_with_access(
+            request,
+            workspace_id,
+            artifact_id,
+            minimum_role=WorkspaceRole.READ_WRITE,
+        )
         if err:
             return err
         artifact.soft_delete(deleted_by=request.user)
@@ -1290,7 +1319,9 @@ class ArtifactUndeleteView(LoginRequiredJsonMixin, View):
     """POST /api/artifacts/<workspace_id>/<artifact_id>/undelete/ — Restore a soft-deleted artifact."""
 
     def post(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
-        workspace, err = resolve_workspace(request.user, workspace_id)
+        workspace, err = resolve_workspace(
+            request.user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
         if err:
             return err
         artifact = get_object_or_404(Artifact.all_objects, pk=artifact_id, workspace=workspace)

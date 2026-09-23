@@ -4,6 +4,7 @@ Tests for OAuth token storage, encryption, retrieval, and refresh.
 
 import logging
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -122,16 +123,27 @@ class TestTokenRefresh:
     """Test the OAuth token refresh service."""
 
     @pytest.fixture(autouse=True)
-    def _mock_connection_health_storage(self, mocker):
-        connections = mocker.patch(
-            "apps.users.services.token_refresh._token_connections"
-        ).return_value
-        connections.aupdate = AsyncMock()
-        connections.filter.return_value.aupdate = AsyncMock()
+    def _isolate_persistence_for_http_unit_tests(self, mocker):
+        mocker.patch(
+            "apps.users.services.token_refresh._preflight_token",
+            return_value=SimpleNamespace(
+                refresh_token="old_refresh_token",
+                expires_at=None,
+            ),
+        )
+        mocker.patch(
+            "apps.users.services.token_refresh._arecord_refresh_failure",
+            new_callable=AsyncMock,
+        )
 
     @pytest.mark.asyncio
     async def test_refresh_updates_token(self, httpx_mock):
-        from apps.users.services.token_refresh import refresh_oauth_token
+        from apps.users.services.token_refresh import (
+            PersistedTokenSnapshot,
+            TokenRefreshResult,
+            TokenRefreshStatus,
+            refresh_oauth_token,
+        )
 
         token_url = "https://www.commcarehq.org/oauth/token/"
         httpx_mock.add_response(
@@ -151,12 +163,25 @@ class TestTokenRefresh:
         social_token.app.secret = "secret_456"
         social_token.asave = AsyncMock()
 
-        result = await refresh_oauth_token(social_token, token_url)
+        persisted = PersistedTokenSnapshot(
+            token_id=1,
+            account_id=1,
+            app_id=1,
+            access_token="new_access_token",
+            refresh_token="new_refresh_token",
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        with patch(
+            "apps.users.services.token_refresh._apersist_refresh_response",
+            new_callable=AsyncMock,
+            return_value=TokenRefreshResult(TokenRefreshStatus.APPLIED, persisted),
+        ):
+            result = await refresh_oauth_token(social_token, token_url)
 
         assert result == "new_access_token"
         assert social_token.token == "new_access_token"
         assert social_token.token_secret == "new_refresh_token"
-        social_token.asave.assert_awaited_once()
+        social_token.asave.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_refresh_failure_raises(self, httpx_mock):
@@ -184,7 +209,7 @@ class TestTokenRefresh:
             url=token_url,
             method="POST",
             status_code=400,
-            json={"error": "invalid_grant"},
+            json={"error": "invalid_grant", "description": "leaked-body-marker"},
         )
 
         social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
@@ -201,7 +226,8 @@ class TestTokenRefresh:
         assert all(r.levelno == logging.WARNING for r in records)
         assert not any(r.levelno >= logging.ERROR for r in records)
         assert not any(r.exc_info for r in records)
-        assert "invalid_grant" in caplog.text
+        assert "dead_refresh_token" not in caplog.text
+        assert "leaked-body-marker" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_refresh_500_logs_exception(self, httpx_mock, caplog):

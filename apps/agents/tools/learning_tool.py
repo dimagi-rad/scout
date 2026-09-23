@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 from apps.knowledge.models import AgentLearning, TableKnowledge
+from apps.workspaces.access import aworkspace_write_allowed, tool_write_denied
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -121,6 +122,9 @@ def create_save_learning_tool(workspace: Workspace, user: User):
             - message: Confirmation or error message
             - tables_affected: List of tables the learning applies to
         """
+        if not await aworkspace_write_allowed(user, workspace.id):
+            return tool_write_denied()
+
         if not description or len(description.strip()) < 20:
             return {
                 "status": "error",

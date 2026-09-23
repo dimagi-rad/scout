@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: node --test .github/scripts/ocr-gate.test.cjs
+      - run: node --test .github/scripts/ocr-*.test.cjs .github/scripts/claude-review-*.test.cjs
 
   test-cube-config:
     runs-on: ubuntu-latest

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1541,6 +1542,21 @@ async def test_canvas_write_tools_forbidden_for_read_role(workspace, read_user, 
     # Reads stay available to read-only members, matching the REST policy.
     read_result = await tools["canvas_read"].ainvoke({"selector": "graph"})
     assert "Canvas is empty" in read_result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_canvas_read_rechecks_removed_membership_before_thread_lookup(workspace, read_user):
+    from apps.agents.tools.canvas_tool import create_canvas_read_tool
+
+    conversation_id = str(uuid.uuid4())
+    tool = create_canvas_read_tool(workspace, read_user, conversation_id)
+    await read_user.workspace_memberships.filter(workspace=workspace).adelete()
+
+    result = await tool.ainvoke({"selector": "graph"})
+
+    assert "access denied" in result.lower()
+    assert not await Thread.objects.filter(id=conversation_id).aexists()
 
 
 @pytest.mark.django_db

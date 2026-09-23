@@ -8,11 +8,19 @@ from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
     WorkspaceDataRecovery,
+    WorkspaceMembership,
+    WorkspaceRole,
     WorkspaceTenant,
 )
 from mcp_server.server import run_materialization
 
 User = get_user_model()
+
+
+async def _grant_manage(workspace, user):
+    await WorkspaceMembership.objects.acreate(
+        workspace=workspace, user=user, role=WorkspaceRole.MANAGE
+    )
 
 
 @pytest.mark.asyncio
@@ -73,6 +81,7 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await _grant_manage(ws, user)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     job_mock = MagicMock(id=7777)
@@ -107,6 +116,7 @@ async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fai
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await _grant_manage(ws, user)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     job_mock = MagicMock(id=8888)
@@ -152,6 +162,7 @@ async def test_run_materialization_rejects_thread_owned_by_other_user():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await TenantMembership.objects.acreate(tenant=tenant, user=user_a)
     await TenantMembership.objects.acreate(tenant=tenant, user=user_b)
+    await _grant_manage(ws, user_b)
     foreign_thread = await Thread.objects.acreate(
         workspace=ws,
         user=user_a,
@@ -184,6 +195,7 @@ async def test_run_materialization_returns_already_in_progress_if_active_in_same
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await _grant_manage(ws, user)
 
     # Same thread holds the in-progress job and is also the caller.
     thread = await Thread.objects.acreate(workspace=ws, user=user)
@@ -224,6 +236,7 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await _grant_manage(ws, user)
 
     # Thread 1 has an in-progress job.
     thread1 = await Thread.objects.acreate(workspace=ws, user=user)

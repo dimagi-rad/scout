@@ -32,6 +32,19 @@ def account_scope(account) -> str:
     )
 
 
+def oauth_membership_scope_mismatch(membership, connection, account) -> bool:
+    """Return whether a known membership scope conflicts with its OAuth identity.
+
+    The immutable connection scope takes precedence over the legacy account
+    claim. Keep the raw comparison aligned with runtime credential resolution:
+    stored whitespace or other malformed scope data must fail closed.
+    """
+    if not membership.team_slug:
+        return False
+    current = connection.scope_key or (getattr(account, "extra_data", None) or {}).get("team")
+    return bool(current) and current != membership.team_slug
+
+
 def scope_account_ids(user_id, provider, scope_key):
     return [
         account.pk

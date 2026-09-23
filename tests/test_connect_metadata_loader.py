@@ -3,6 +3,12 @@ from unittest import mock
 import pytest
 import requests_mock as rm
 
+from apps.common.errors import (
+    ConnectAccessDeniedError,
+    ConnectTokenExpiredError,
+    UpstreamRefreshFailed,
+)
+from apps.users.services.token_refresh import TokenRefreshError, TokenRefreshUnavailable
 from mcp_server.loaders.connect_metadata import ConnectMetadataLoader
 
 BASE = "https://connect.example.com"
@@ -127,3 +133,59 @@ def test_load_includes_form_definitions_from_app_structure():
     q = {item["value"]: item for item in form["questions"]}
     assert q["/data/muac_group/muac"]["type"] == "Decimal"
     assert q["/data/muac_group/muac_confirmed"]["label"] == "MUAC confirmed"
+
+
+@pytest.mark.parametrize(
+    "status, error", [(401, ConnectTokenExpiredError), (403, ConnectAccessDeniedError)]
+)
+def test_app_structure_preserves_authoritative_denial(loader, status, error):
+    with rm.Mocker() as m:
+        m.get(f"{BASE}/export/opp_org_program_list/", json={})
+        m.get(f"{BASE}/export/opportunity/814/", json={"id": 814})
+        m.get(f"{BASE}/export/opportunity/814/app_structure/", status_code=status)
+        with pytest.raises(error):
+            loader.load()
+
+
+def test_app_structure_retains_fallback_for_inconclusive_failure(loader):
+    with rm.Mocker() as m:
+        m.get(f"{BASE}/export/opp_org_program_list/", json={})
+        m.get(f"{BASE}/export/opportunity/814/", json={"id": 814})
+        m.get(f"{BASE}/export/opportunity/814/app_structure/", status_code=503)
+        result = loader.load()
+        assert result["form_definitions"] == {}
+        assert result["case_types"] == []
+
+
+def test_global_org_denial_has_unknown_scope(loader):
+    with rm.Mocker() as m:
+        m.get(f"{BASE}/export/opp_org_program_list/", status_code=403)
+        with pytest.raises(ConnectAccessDeniedError) as caught:
+            loader.load()
+    assert caught.value.denial_scope == "unknown"
+
+
+def test_opportunity_denial_retains_tenant_scope(loader):
+    with rm.Mocker() as m:
+        m.get(f"{BASE}/export/opp_org_program_list/", json={})
+        m.get(f"{BASE}/export/opportunity/814/", status_code=403)
+        with pytest.raises(ConnectAccessDeniedError) as caught:
+            loader.load()
+    assert caught.value.denial_scope == "tenant"
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "configuration", "empty"])
+def test_app_structure_propagates_refresh_failure(loader, failure):
+    errors = {
+        "unavailable": TokenRefreshUnavailable("provider unavailable"),
+        "configuration": TokenRefreshError("invalid client"),
+        "empty": None,
+    }
+    refresh = mock.Mock(side_effect=errors[failure], return_value=None)
+    loader._refresh = refresh
+    with rm.Mocker() as m:
+        m.get(f"{BASE}/export/opp_org_program_list/", json={})
+        m.get(f"{BASE}/export/opportunity/814/", json={"id": 814})
+        m.get(f"{BASE}/export/opportunity/814/app_structure/", status_code=401)
+        with pytest.raises((TokenRefreshError, UpstreamRefreshFailed)):
+            loader.load()
