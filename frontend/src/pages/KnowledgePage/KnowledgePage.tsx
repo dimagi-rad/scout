@@ -68,11 +68,16 @@ export function KnowledgePage() {
   }, [activeDomainId, knowledgeFilter, knowledgeSearch, page, fetchKnowledge])
 
   useEffect(() => {
-    if (isNew && canWrite) {
+    if (!isNew) return
+    if (canWrite) {
       setEditItem(null)
       setFormOpen(true)
+    } else {
+      // The role can resolve to read after the form opened optimistically.
+      setFormOpen(false)
+      navigate("/knowledge", { replace: true })
     }
-  }, [isNew, canWrite])
+  }, [isNew, canWrite, navigate])
 
   useEffect(() => {
     if (id && !isNew && knowledgeItems.length > 0) {

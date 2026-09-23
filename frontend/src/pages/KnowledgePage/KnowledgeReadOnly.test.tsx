@@ -60,8 +60,8 @@ describe("knowledge for read-only members", () => {
 
     expect(screen.getByText("View Entry")).toBeInTheDocument()
     expect(screen.getByText(READ_ONLY_HINT)).toBeInTheDocument()
-    expect(screen.getByLabelText("Title")).toBeDisabled()
-    expect(screen.getByLabelText("Content")).toBeDisabled()
+    expect(screen.getByLabelText("Title")).toHaveAttribute("readonly")
+    expect(screen.getByLabelText("Content")).toHaveAttribute("readonly")
     expect(screen.queryByRole("button", { name: "Save Changes" })).not.toBeInTheDocument()
   })
 

@@ -164,12 +164,13 @@ export function KnowledgeForm({
               </div>
             )}
 
-            <fieldset disabled={readOnly} className="space-y-4">
+            <div className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="description">Description</Label>
                 <Textarea
                   id="description"
                   name="description"
+                  readOnly={readOnly}
                   value={form.description}
                   onChange={handleChange}
                   rows={3}
@@ -178,7 +179,11 @@ export function KnowledgeForm({
 
               <div className="space-y-2">
                 <Label htmlFor="category">Category</Label>
-                <Select value={form.category} onValueChange={(v) => setForm((prev) => ({ ...prev, category: v }))}>
+                <Select
+                  value={form.category}
+                  onValueChange={(v) => setForm((prev) => ({ ...prev, category: v }))}
+                  disabled={readOnly}
+                >
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -195,6 +200,7 @@ export function KnowledgeForm({
                 <Input
                   id="applies_to_tables"
                   name="applies_to_tables"
+                  readOnly={readOnly}
                   value={form.applies_to_tables}
                   onChange={handleChange}
                   placeholder="users, orders, products"
@@ -226,7 +232,7 @@ export function KnowledgeForm({
                   </div>
                 </div>
               )}
-            </fieldset>
+            </div>
 
             <DialogFooter className="mt-6">
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
@@ -268,12 +274,13 @@ export function KnowledgeForm({
             </div>
           )}
 
-          <fieldset disabled={readOnly} className="space-y-4">
+          <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="title">Title</Label>
               <Input
                 id="title"
                 name="title"
+                readOnly={readOnly}
                 value={form.title}
                 onChange={handleChange}
                 placeholder="Enter a title"
@@ -286,6 +293,7 @@ export function KnowledgeForm({
               <Textarea
                 id="content"
                 name="content"
+                readOnly={readOnly}
                 value={form.content}
                 onChange={handleChange}
                 placeholder="Markdown content (metric definitions, semantic-model notes, business rules, etc.)"
@@ -300,6 +308,7 @@ export function KnowledgeForm({
               <Input
                 id="tags"
                 name="tags"
+                readOnly={readOnly}
                 value={form.tags}
                 onChange={handleChange}
                 placeholder="metric, finance, revenue"
@@ -308,7 +317,7 @@ export function KnowledgeForm({
                 Comma-separated list of tags for categorization
               </p>
             </div>
-          </fieldset>
+          </div>
 
           <DialogFooter className="mt-6">
             <Button
