@@ -33,7 +33,13 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
-from apps.users.services.oauth_scope import account_scope, canonical_provider, provider_accounts
+from apps.users.services.oauth_scope import (
+    account_scope,
+    canonical_provider,
+    memberships_on_provider,
+    provider_accounts,
+    same_provider,
+)
 from apps.users.services.token_refresh import credential_fingerprint
 from apps.users.services.upstream_denial import record_validated_upstream_denial
 
@@ -169,7 +175,7 @@ def _locked_snapshot(
         observed_scope = account_scope(token.account)
         if (
             token.account.user_id != actor_user_id
-            or canonical_provider(token.account.provider) != canonical_provider(current.provider)
+            or not same_provider(token.account.provider, current.provider)
             or current.social_account_id != token.account_id
             or observed_scope != current.scope_key
             or (canonical_provider(current.provider) == "ocs" and not observed_scope)
@@ -309,28 +315,24 @@ def _claim_verification(
         ):
             return VerificationClaim(ClaimStatus.DENIED, requested)
         _configure_transaction_deadline(deadline, clock, cancelled)
-        history_rows = list(
+        history_rows = memberships_on_provider(
             TenantMembership.all_objects.filter(
                 user_id=actor_user_id, connection=current, tenant_id__in=requested
-            ).values_list(
-                "tenant_id",
-                "archived_at",
-                "tenant__provider",
-                "provider_metadata",
-            )
+            ),
+            current.provider,
+            "tenant_id",
+            "archived_at",
+            "provider_metadata",
         )
-        connection_provider = canonical_provider(current.provider)
         scoped_ocs_oauth = (
-            connection_provider == "ocs" and current.credential_type == TenantConnection.OAUTH
+            canonical_provider(current.provider) == "ocs"
+            and current.credential_type == TenantConnection.OAUTH
         )
         history = [
             (tenant_id, archived_at)
-            for tenant_id, archived_at, tenant_provider, metadata in history_rows
-            if canonical_provider(tenant_provider) == connection_provider
-            and (
-                not scoped_ocs_oauth
-                or (metadata or {}).get("team_slug") in (None, "", current.scope_key)
-            )
+            for tenant_id, archived_at, metadata in history_rows
+            if not scoped_ocs_oauth
+            or (metadata or {}).get("team_slug") in (None, "", current.scope_key)
         ]
         owned = {tenant_id for tenant_id, _archived_at in history}
         if owned != requested:
@@ -613,27 +615,22 @@ def _publish_verification_receipt(
             if current.upstream_denial_code:
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
-            connection_provider = canonical_provider(current.provider)
             # Claims match on the canonical provider, so publication must too or an
             # alias tenant stays claimable while never being published or archived.
-            # Canonicalize in Python: a provider__startswith filter would sweep
-            # commcare_connect into commcare.
             _configure_transaction_deadline(deadline, clock)
-            canonical_tenant_ids = [
-                tenant_id
-                for tenant_id, tenant_provider in TenantMembership.all_objects.filter(
-                    user_id=current.user_id,
-                    connection=current,
-                ).values_list("tenant_id", "tenant__provider")
-                if canonical_provider(tenant_provider) == connection_provider
-            ]
+            canonical_tenant_ids = memberships_on_provider(
+                TenantMembership.all_objects.filter(user_id=current.user_id, connection=current),
+                current.provider,
+                "tenant_id",
+            )
             owned_history = TenantMembership.all_objects.filter(
                 user_id=current.user_id,
                 connection=current,
                 tenant_id__in=canonical_tenant_ids,
             )
             scoped_ocs_oauth = (
-                connection_provider == "ocs" and current.credential_type == TenantConnection.OAUTH
+                canonical_provider(current.provider) == "ocs"
+                and current.credential_type == TenantConnection.OAUTH
             )
             returned_memberships = owned_history.filter(tenant_id__in=result.tenant_ids)
             if scoped_ocs_oauth:

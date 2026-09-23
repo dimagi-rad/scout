@@ -1285,7 +1285,9 @@ async def test_alias_provider_tenant_denial_is_attributed_not_lost(user):
     alias = await Tenant.objects.acreate(
         provider="commcare-custom", external_id="alias", canonical_name="Alias"
     )
-    await TenantMembership.objects.acreate(user=user, tenant=alias, connection=connection)
+    membership = await TenantMembership.objects.acreate(
+        user=user, tenant=alias, connection=connection
+    )
 
     async def provider(*args, **kwargs):
         return ProviderVerificationResult.tenant_denied("alias", ErrorCode.AUTH_ACCESS_DENIED)
@@ -1301,6 +1303,10 @@ async def test_alias_provider_tenant_denial_is_attributed_not_lost(user):
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.last_attempt_outcome == VerificationOutcome.TENANT_DENIED.value
     assert str(alias.id) in control.last_attempt_tenant_ids
+    # The denial must also stick: an exact provider match in the denial writer
+    # would leave the alias membership live after upstream refused it.
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is not None
 
 
 @pytest.mark.django_db(transaction=True)
