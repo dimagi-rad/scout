@@ -7,11 +7,19 @@ from typing import Any
 import yaml
 
 from apps.semantic.models import SemanticField, SemanticModel, SemanticRelationship
+from apps.semantic.services.cube_sql import embed_cube_sql
 from apps.semantic.services.field_sql import compile_dimension_sql, dataset_column_names
 
 
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     """Return a Cube-compatible schema document derived from a semantic model."""
+    datasets = list(model.datasets.filter(is_visible=True).prefetch_related("fields"))
+    references = {dataset.name for dataset in datasets} | {
+        f"{dataset.name}.{field.name}"
+        for dataset in datasets
+        for field in dataset.fields.all()
+        if field.is_visible
+    }
     relationships = SemanticRelationship.objects.filter(workspace=model.workspace).select_related(
         "from_dataset",
         "to_dataset",
@@ -27,12 +35,14 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             {
                 "name": relationship.to_dataset.name,
                 "relationship": relationship.relationship_type,
-                "sql": relationship.join_expression,
+                "sql": embed_cube_sql(
+                    relationship.join_expression, references=references | {"CUBE"}
+                ),
             }
         )
 
     cubes = []
-    for dataset in model.datasets.filter(is_visible=True).prefetch_related("fields"):
+    for dataset in datasets:
         fields = [field for field in dataset.fields.all() if field.is_visible]
         dimensions = [
             _cube_dimension(field, is_primary_key=_is_primary_key_field(dataset, field))
@@ -41,7 +51,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
         measures = [
-            _cube_measure(field)
+            _cube_measure(field, references=references | {f.name for f in fields} | {"CUBE"})
             for field in fields
             if field.field_type == SemanticField.FieldType.MEASURE
         ]
@@ -94,7 +104,7 @@ def _publication_scoped_sql(source_sql: str) -> str:
     # The bound revision fences Cube's SQL result cache AND queue without a
     # driver pool per publication. An empty legacy-context array is also true.
     return (
-        f"SELECT * FROM (\n{source_sql}\n) AS scout_source\n"  # noqa: S608
+        f"SELECT * FROM (\n{embed_cube_sql(source_sql)}\n) AS scout_source\n"  # noqa: S608
         "WHERE ARRAY[{SECURITY_CONTEXT.cubeDataRevision}]::text[] IS NOT NULL"
     )
 
@@ -128,7 +138,7 @@ def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> di
     return payload
 
 
-def _cube_measure(field: SemanticField) -> dict[str, Any]:
+def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, Any]:
     measure_type = field.measure_type or SemanticField.MeasureType.NUMBER
     payload = {
         "name": field.name,
@@ -137,10 +147,10 @@ def _cube_measure(field: SemanticField) -> dict[str, Any]:
     metadata = field.metadata or {}
     cube_sql = metadata.get("cube_sql")
     if isinstance(cube_sql, str) and cube_sql.strip():
-        payload["sql"] = cube_sql.strip()
+        payload["sql"] = embed_cube_sql(cube_sql.strip(), references=references)
     elif measure_type != SemanticField.MeasureType.COUNT:
         payload["sql"] = _cube_sql(field.expression)
-    filters = _cube_measure_filters(metadata.get("filters"))
+    filters = _cube_measure_filters(metadata.get("filters"), references=references)
     if filters:
         payload["filters"] = filters
     if field.description:
@@ -149,7 +159,7 @@ def _cube_measure(field: SemanticField) -> dict[str, Any]:
     return payload
 
 
-def _cube_measure_filters(value: Any) -> list[dict[str, str]]:
+def _cube_measure_filters(value: Any, *, references: set[str]) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
     filters: list[dict[str, str]] = []
@@ -158,7 +168,7 @@ def _cube_measure_filters(value: Any) -> list[dict[str, str]]:
             continue
         sql = item.get("sql")
         if isinstance(sql, str) and sql.strip():
-            filters.append({"sql": sql.strip()})
+            filters.append({"sql": embed_cube_sql(sql.strip(), references=references)})
     return filters
 
 
@@ -184,7 +194,7 @@ def _cube_type(data_type: str) -> str:
 def _cube_sql(expression: str) -> str:
     if expression == "*":
         return "*"
-    return f"{{CUBE}}.{_quote_identifier(expression)}"
+    return f"{{CUBE}}.{embed_cube_sql(_quote_identifier(expression))}"
 
 
 def _quote_identifier(value: str) -> str:
