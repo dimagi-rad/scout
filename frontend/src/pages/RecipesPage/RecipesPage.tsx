@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -40,6 +41,7 @@ export function RecipesPage() {
   } = useAppStore((s) => s.recipeActions)
 
   const { status: networkStatus } = useNetworkStatus()
+  const { canWrite } = useWorkspaceRole()
   const [runnerOpen, setRunnerOpen] = useState(false)
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
@@ -195,6 +197,7 @@ export function RecipesPage() {
             run={run}
             onBack={handleBackFromRun}
             onUpdateRun={handleUpdateRun}
+            canWrite={canWrite}
           />
         </div>
       )
@@ -212,6 +215,7 @@ export function RecipesPage() {
           onRun={handleRunFromDetail}
           onUpdateRun={handleUpdateRun}
           onViewRun={handleViewRun}
+          canWrite={canWrite}
         />
 
         <RecipeRunner
@@ -271,6 +275,7 @@ export function RecipesPage() {
           onView={handleView}
           onRun={handleRun}
           onDelete={handleDelete}
+          canWrite={canWrite}
         />
       )}
 

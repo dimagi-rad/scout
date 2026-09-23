@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { READ_ONLY_HINT } from "@/hooks/useWorkspaceRole"
 import { useAppStore } from "@/store/store"
 import type { Recipe, RecipeRun } from "@/store/recipeSlice"
 
@@ -24,6 +25,7 @@ interface RecipeRunDetailProps {
     runId: string,
     data: { is_shared?: boolean; is_public?: boolean },
   ) => Promise<void>
+  canWrite?: boolean
 }
 
 function formatDateTime(dateString: string | null | undefined): string {
@@ -64,7 +66,13 @@ function getStatusBadgeClass(status: RecipeRun["status"]): string {
   }
 }
 
-export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunDetailProps) {
+export function RecipeRunDetail({
+  recipe,
+  run,
+  onBack,
+  onUpdateRun,
+  canWrite = true,
+}: RecipeRunDetailProps) {
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const variableEntries = run.variable_values
@@ -194,7 +202,12 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
         </CardHeader>
         <CardContent className="space-y-4">
           <label
-            className="flex items-center gap-1.5 cursor-pointer text-sm"
+            className={
+              canWrite
+                ? "flex items-center gap-1.5 cursor-pointer text-sm"
+                : "flex items-center gap-1.5 text-sm"
+            }
+            title={canWrite ? undefined : READ_ONLY_HINT}
             data-testid="run-sharing-project"
           >
             <input
@@ -203,6 +216,7 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
               onChange={(e) =>
                 onUpdateRun(run.id, { is_shared: e.target.checked })
               }
+              disabled={!canWrite}
               className="h-4 w-4 rounded border-gray-300"
             />
             <Users className="h-4 w-4 text-muted-foreground" />

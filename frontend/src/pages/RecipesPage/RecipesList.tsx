@@ -9,6 +9,7 @@ interface RecipesListProps {
   onView: (recipe: Recipe) => void
   onRun: (recipe: Recipe) => void
   onDelete: (recipe: Recipe) => void
+  canWrite?: boolean
 }
 
 function formatDate(dateString: string | undefined): string {
@@ -21,7 +22,13 @@ function formatDate(dateString: string | undefined): string {
   })
 }
 
-export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListProps) {
+export function RecipesList({
+  recipes,
+  onView,
+  onRun,
+  onDelete,
+  canWrite = true,
+}: RecipesListProps) {
   if (recipes.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-8 text-center">
@@ -98,6 +105,7 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
                 size="sm"
                 onClick={() => onRun(recipe)}
                 className="flex-1"
+                data-testid={`recipe-run-${recipe.id}`}
               >
                 <Play className="mr-1 h-4 w-4" />
                 Run
@@ -106,18 +114,23 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
                 variant="ghost"
                 size="sm"
                 onClick={() => onView(recipe)}
+                data-testid={`recipe-view-${recipe.id}`}
               >
                 <Eye className="mr-1 h-4 w-4" />
                 View
               </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onDelete(recipe)}
-                className="text-destructive hover:text-destructive"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              {canWrite && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onDelete(recipe)}
+                  className="text-destructive hover:text-destructive"
+                  aria-label={`Delete ${recipe.name}`}
+                  data-testid={`recipe-delete-${recipe.id}`}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
