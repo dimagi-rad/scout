@@ -882,7 +882,7 @@ def test_installed_procrastinate_sigterm_finishes_running_job_without_claiming_n
         text=True,
     )
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + SUBPROCESS_TIMEOUT
         while not (tmp_path / "started").exists() and time.monotonic() < deadline:
             assert process.poll() is None
             time.sleep(0.01)
@@ -893,7 +893,7 @@ def test_installed_procrastinate_sigterm_finishes_running_job_without_claiming_n
         assert not (tmp_path / "completed").exists()
         assert not (tmp_path / "unexpected-claim").exists()
         (tmp_path / "release").touch()
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
         assert process.returncode == 0, stderr
         assert json.loads(stdout) == ["succeeded", "todo"]
         assert (tmp_path / "completed").exists()
