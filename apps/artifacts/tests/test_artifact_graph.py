@@ -240,7 +240,8 @@ async def test_graph_manager_description_only_edit(
     assert latest.description == description
     assert latest.data["story_doc"] == original.data["story_doc"]
     assert latest.version == 2
-    assert result["runtime"]["success"] is True
+    assert result["runtime"] is None
+    assert result["runtime_validation"] == "not_required_metadata_only"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -285,7 +286,7 @@ async def test_graph_manager_rejects_missing_or_invalid_description_edit(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["apply", "replace"])
-async def test_graph_manager_failed_description_edit_preserves_original(
+async def test_graph_manager_failed_document_edit_preserves_original(
     graph_tools, static_story_doc, action
 ):
     write = graph_tools["artifact_write"]
@@ -303,7 +304,13 @@ async def test_graph_manager_failed_description_edit_preserves_original(
         "description": "Must not be published",
     }
     if action == "replace":
-        edit["story_doc"] = static_story_doc
+        revised = deepcopy(static_story_doc)
+        revised["blocks"][0]["config"]["body"] = "Changed document"
+        edit["story_doc"] = revised
+    else:
+        edit["ops"] = [
+            {"op": "set", "target": "block/intro/config/body", "value": "Changed document"}
+        ]
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
         new=AsyncMock(return_value={"success": False, "summary": "Runtime failure"}),
@@ -318,6 +325,62 @@ async def test_graph_manager_failed_description_edit_preserves_original(
     assert (
         await Artifact.all_objects.filter(parent_artifact=original, is_deleted=True).acount() == 1
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["apply", "replace"])
+@pytest.mark.parametrize("description", ["New description", ""])
+async def test_metadata_edit_does_not_query_unavailable_data(
+    graph_tools, workspace, member_user, action, description
+):
+    doc = graph_doc()
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        artifact_type=ArtifactType.STORY,
+        title=doc["name"],
+        description="Original description",
+        data={"story_doc": doc},
+    )
+    edit = {"action": action, "artifact_id": str(original.id), "description": description}
+    if action == "replace":
+        edit["story_doc"] = doc
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(side_effect=AssertionError("Metadata edits must not contact Cube")),
+    ) as check:
+        result = await graph_tools["artifact_write"].ainvoke(edit)
+
+    check.assert_not_awaited()
+    assert result["status"] in {"updated", "replaced"}
+    assert result["runtime"] is None  # Do not claim a fresh successful data check.
+    assert result["runtime_validation"] == "not_required_metadata_only"
+    latest = await Artifact.objects.aget(id=result["artifact"]["id"])
+    assert latest.data == original.data
+    assert latest.description == description
+    assert latest.parent_artifact_id == original.id
+    assert latest.version == original.version + 1
+    assert await latest.semantic_query_records.acount() > 0
+    await original.arefresh_from_db()
+    assert original.description == "Original description"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_metadata_edit_cannot_skip_static_document_validation(graph_tools, workspace):
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        artifact_type=ArtifactType.STORY,
+        title="Invalid old artifact",
+        data={"story_doc": {"schema_version": 1, "name": "Invalid", "blocks": []}},
+    )
+    result = await graph_tools["artifact_write"].ainvoke(
+        {"action": "apply", "artifact_id": str(original.id), "description": "Description"}
+    )
+    assert result["status"] == "error"
+    assert result["diagnostics"]
+    assert await Artifact.all_objects.acount() == 1
 
 
 def test_graph_doc_rejects_empty_blocks():
@@ -947,6 +1010,8 @@ async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
         if item.name == "artifact_write"
     )
 
+    replacement = graph_doc()
+    replacement["blocks"][1]["config"]["queries"]["visits_by_day"]["limit"] = 99
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
         new=AsyncMock(return_value={"success": False, "summary": "0/1 queries ok"}),
@@ -955,7 +1020,8 @@ async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
             {
                 "action": "replace",
                 "artifact_id": str(original.id),
-                "story_doc": graph_doc(),
+                "story_doc": replacement,
+                "run_check": False,
             }
         )
 
