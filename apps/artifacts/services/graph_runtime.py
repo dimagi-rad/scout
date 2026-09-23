@@ -23,6 +23,22 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     entries = manifest.get("entries", [])[:MAX_CHECK_QUERIES]
     query_results = []
     actual_keys: dict[str, list[str]] = {}
+    if diagnostics:
+        return {
+            "success": False,
+            "diagnostics": diagnostics,
+            "queries": [],
+            "key_warnings": [],
+            "failures": [
+                {
+                    "category": "invalid_document",
+                    "code": "VALIDATION_ERROR",
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
+            "summary": "Document validation failed; no queries executed.",
+        }
     workspace = await Workspace.objects.aget(pk=artifact.workspace_id)
     for entry in entries:
         query = dict(entry.get("query") or {})
@@ -36,6 +52,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
                     "query_key": entry["key"],
                     "status": "error",
                     "error": message or "Semantic query failed",
+                    "failure": _query_failure(error),
                     "semantic_query": query,
                 }
             )
@@ -63,8 +80,42 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "unresolved_count": len(manifest.get("unresolved", [])),
         },
         "queries": query_results,
+        "failures": [
+            {"query_key": query["query_key"], **query["failure"]}
+            for query in query_results
+            if query["status"] == "error"
+        ]
+        + [
+            {
+                "category": "invalid_document",
+                "code": "RESULT_KEY_MISMATCH",
+                "retryable": False,
+                "recovery_action": None,
+            }
+            for _warning in key_warnings
+        ],
         "key_warnings": key_warnings,
         "summary": f"{ok_count}/{len(query_results)} queries ok",
+    }
+
+
+def _query_failure(error):
+    error = error if isinstance(error, dict) else {"message": str(error)}
+    code = str(error.get("code") or "UNKNOWN")
+    permission_required = code in {
+        "AUTH_ACCESS_DENIED",
+        "AUTH_TOKEN_EXPIRED",
+        "AUTH_CREDENTIAL_MISSING",
+        "WORKSPACE_TENANT_UNREACHABLE",
+    }
+    return {
+        "code": code,
+        "message": str(error.get("message") or "Semantic query failed")[:500],
+        "category": "permission_required"
+        if permission_required
+        else error.get("category", "runtime_failure"),
+        "retryable": not permission_required and error.get("retryable") is True,
+        "recovery_action": None if permission_required else error.get("recovery_action"),
     }
 
 

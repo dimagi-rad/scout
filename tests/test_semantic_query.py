@@ -350,15 +350,14 @@ async def test_run_semantic_query_returns_validation_error_for_expired_schema(
         {"measures": ["visits.count"], "limit": 10},
     )
 
-    assert result == {
-        "success": False,
-        "error": {
-            "code": "VALIDATION_ERROR",
-            "message": (
-                "No active schema for tenant '1529'. Run materialization first to load data."
-            ),
-        },
-    }
+    assert result["success"] is False
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+    assert (
+        result["error"]["message"]
+        == "No active schema for tenant '1529'. Run materialization first to load data."
+    )
+    assert result["error"]["category"] == "data_unavailable"
+    assert result["error"]["retryable"] is False
 
 
 def test_generate_cube_schema_from_semantic_model(semantic_model):

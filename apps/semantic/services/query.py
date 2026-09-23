@@ -14,14 +14,20 @@ from django.db import close_old_connections
 
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
-from apps.semantic.services.cube_client import CubeClient, CubeConfigurationError, CubeQueryError
+from apps.semantic.services.cube_client import (
+    CubeClient,
+    CubeConfigurationError,
+    CubeConnectionError,
+    CubeQueryError,
+)
 from apps.semantic.services.cube_schema import (
     CubeSchemaBuildError,
     build_cube_security_context,
     get_active_cube_schema,
 )
+from apps.semantic.services.query_outcomes import query_error, query_readiness_error
 from mcp_server.context import load_workspace_context
-from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR, error_response
+from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR
 
 MAX_SEMANTIC_LIMIT = 500
 SUPPORTED_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
@@ -29,6 +35,10 @@ SUPPORTED_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 
 class SemanticQueryError(ValueError):
     pass
+
+
+class SemanticMemberError(SemanticQueryError):
+    """A query's required member is missing, hidden, or changed type."""
 
 
 @dataclass
@@ -59,11 +69,19 @@ async def run_semantic_query(
             query_spec,
         )
     except SemanticCatalogUnavailable as exc:
-        return error_response(VALIDATION_ERROR, str(exc))
+        return await query_readiness_error(
+            workspace, query_spec, VALIDATION_ERROR, str(exc), category="data_unavailable"
+        )
+    except SemanticMemberError as exc:
+        return await query_readiness_error(
+            workspace, query_spec, VALIDATION_ERROR, str(exc), category="missing_model_dependency"
+        )
     except SemanticQueryError as exc:
-        return error_response(VALIDATION_ERROR, str(exc))
+        return query_error(VALIDATION_ERROR, str(exc), category="invalid_query")
     except CubeSchemaBuildError as exc:
-        return error_response(VALIDATION_ERROR, str(exc))
+        return await query_readiness_error(
+            workspace, query_spec, VALIDATION_ERROR, str(exc), category="data_unavailable"
+        )
 
     try:
         ctx = await load_workspace_context(str(workspace.id))
@@ -72,7 +90,9 @@ async def run_semantic_query(
         # not an agent-stream failure.  Keep it inside the semantic tool's
         # structured error envelope so the agent can explain that the data
         # needs to be materialized again.
-        return error_response(VALIDATION_ERROR, str(exc))
+        return await query_readiness_error(
+            workspace, query_spec, VALIDATION_ERROR, str(exc), category="data_unavailable"
+        )
     security_context = build_cube_security_context(
         workspace,
         compiled["model"],
@@ -86,11 +106,26 @@ async def run_semantic_query(
             security_context=security_context,
         )
     except CubeConfigurationError as exc:
-        return error_response(VALIDATION_ERROR, str(exc))
+        return query_error(VALIDATION_ERROR, str(exc), category="configuration_required")
+    except CubeConnectionError as exc:
+        return query_error(
+            CONNECTION_ERROR,
+            f"Cube query execution failed: {exc}",
+            category="transient_runtime_failure",
+            retryable=True,
+        )
     except CubeQueryError as exc:
-        return error_response(VALIDATION_ERROR, f"Cube query execution failed: {exc}")
+        return await query_readiness_error(
+            workspace,
+            query_spec,
+            VALIDATION_ERROR,
+            f"Cube query execution failed: {exc}",
+            category="invalid_query",
+        )
     except Exception as exc:
-        return error_response(CONNECTION_ERROR, f"Cube query execution failed: {exc}")
+        return query_error(
+            CONNECTION_ERROR, f"Cube query execution failed: {exc}", category="runtime_failure"
+        )
 
     return {
         "columns": result.get("columns", []),
@@ -289,14 +324,14 @@ def _resolve_member(
     dataset_name, field_name = member.split(".", 1)
     dataset = model.datasets.filter(name=dataset_name, is_visible=True).first()
     if dataset is None:
-        raise SemanticQueryError(f"Unknown dataset '{dataset_name}'.")
+        raise SemanticMemberError(f"Unknown dataset '{dataset_name}'.")
     field = dataset.fields.filter(name=field_name, is_visible=True).first()
     if field is None:
-        raise SemanticQueryError(f"Unknown semantic field '{member}'.")
+        raise SemanticMemberError(f"Unknown semantic field '{member}'.")
     allowed = expected_any or ({expected} if expected else None)
     if allowed and field.field_type not in allowed:
         allowed_display = ", ".join(sorted(allowed))
-        raise SemanticQueryError(f"Member '{member}' must be one of: {allowed_display}.")
+        raise SemanticMemberError(f"Member '{member}' must be one of: {allowed_display}.")
     return ResolvedMember(dataset=dataset, field=field, member=member)
 
 

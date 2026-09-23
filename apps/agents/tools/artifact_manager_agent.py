@@ -48,6 +48,7 @@ NESTED_MCP_TOOL_NAMES = frozenset(
 )
 NESTED_RECURSION_LIMIT = 50
 NESTED_MAX_TOKENS = 8192
+MAX_RUNTIME_FAILURES = 8
 SUBAGENT_TRACE_MAX_EVENTS = 200
 SUBAGENT_MESSAGE_MAX_CHARS = 40_000
 ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE = (
@@ -155,8 +156,14 @@ How to build data-backed blocks:
 
 Use `artifact_write(action="create")` for a new artifact, `replace` when
 rewriting the whole doc, `apply` for targeted edits, and `check` for runtime
-validation. If validation fails, correct the doc and call `artifact_write`
-again rather than explaining the failure to the parent. Treat
+validation. Use the backend's typed `runtime.failures`, not message matching:
+- `invalid_document` or `invalid_query`: correct the documented defect, then validate again.
+- `missing_model_dependency`: return the missing dependency to the parent; never invent member names.
+- `data_unavailable`: return the backend `recovery_action`; do not rewrite the artifact or start provider loads yourself.
+- `permission_required` or `configuration_required`: explain the required access/operator intervention, without retrying.
+- `transient_runtime_failure`: do not change the model/document; at most one bounded retry when `retryable=true`.
+- Unknown `runtime_failure`: stop and report it; do not guess a destructive repair.
+Treat
 `runtime.success=false`, `diagnostics`, and `key_warnings` as blocking
 publication failures. Do not set `run_check=false` to publish a user-facing
 artifact.
@@ -191,8 +198,7 @@ parent can inspect raw text and, with explicit user approval, delegate the
 model change to `canvas_manager` before returning here. Do not claim raw text
 analysis is impossible, invent topic labels, write SQL, save a placeholder
 dashboard, or keep retrying missing semantic member names. Existing schema or
-query execution errors are validation failures, not permission to invent a
-replacement data model.
+query execution errors must follow the typed outcome above, not invent a replacement data model.
 
 Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,
@@ -796,6 +802,11 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         "runtime_summary": _runtime_summary(runtime),
         "message": message[:1200] if isinstance(message, str) else str(message)[:1200],
     }
+    if isinstance(runtime, dict) and runtime.get("failures"):
+        summary["runtime_failures"] = runtime["failures"][:MAX_RUNTIME_FAILURES]
+        if artifact_result.get("status") == "error":
+            summary["status"] = "error"
+            summary["message"] = "Artifact was not published. Follow the typed runtime failures."
     if status == "needs_data_model" and isinstance(parsed_final, dict):
         requirements = parsed_final.get("data_requirements")
         if isinstance(requirements, list):

@@ -126,21 +126,22 @@ Rules:
   materialization-time metadata, not a verified live value.
 - If the user asks for a count, run `semantic_query` with the relevant
   `dataset.count` measure to get a verified live number, then report that.
-- If semantic queries return `NOT_FOUND` or `VALIDATION_ERROR`,
-  tell the user the data is unavailable and offer to re-run materialization.
+- If semantic queries fail, follow their typed `category`, `retryable`, and
+  `recovery_action`; a validation error alone does not prove data is unavailable.
   Do NOT cite `row_count` as a consolation answer.
 - Treat `row_count` as advisory only — useful for sizing
   expectations (small / medium / large), not as an answer.
 
 ## When the Schema is Broken
 
-If `list_datasets` or `semantic_catalog` reports a dataset but `describe_dataset` or `semantic_query`
-against it returns `NOT_FOUND` or `VALIDATION_ERROR`, the catalog and the data
-have drifted. STOP exploring. Do exactly one of:
-
-1. If `run_materialization` is available, use it to rebuild the data.
-2. If it is unavailable, tell the user the data isn't currently queryable. A
-   read-write workspace role is required to re-materialize it.
+When a semantic query fails, use its backend classification:
+- `invalid_query`: fix the query shape, not the data model or persistence layer.
+- `missing_model_dependency`: inspect the named member and propose the smallest model/artifact change; obtain explicit permission before saving model changes.
+- `data_unavailable`: report the supplied `recovery_action`. Only offer materialization when it explicitly says `materialization`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation.
+- `permission_required` or `configuration_required`: request the indicated access/operator help; retries cannot grant access or configure Cube.
+- `transient_runtime_failure`: preserve the query/model and use at most one bounded retry if `retryable=true`.
+- Unclassified errors: report the failure rather than guessing which data to rebuild.
+The outcome is guidance, not authorization. Existing workspace roles and approval requirements still apply.
 
 Do NOT:
 
