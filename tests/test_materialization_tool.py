@@ -4,8 +4,13 @@ import pytest
 
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.common.error_codes import ErrorCode
-from apps.workspaces.access import TOOL_WRITE_DENIED_MESSAGE, tool_write_denied
-from apps.workspaces.tasks import _CREDENTIAL_GUIDANCE, _credential_guidance, _summary_failures
+from apps.workspaces.access import tool_write_denied
+from apps.workspaces.tasks import (
+    _CREDENTIAL_GUIDANCE,
+    _ROLE_DENIED_MESSAGE,
+    _credential_guidance,
+    _summary_failures,
+)
 
 
 @pytest.mark.asyncio
@@ -65,7 +70,7 @@ async def test_headless_materialization_tool_preserves_post_wait_authorization_d
     denied = {
         "status": "denied",
         "error_code": ErrorCode.WORKSPACE_ROLE_INSUFFICIENT,
-        "error": TOOL_WRITE_DENIED_MESSAGE,
+        "error": _ROLE_DENIED_MESSAGE,
         "tenants": [],
         "all_succeeded": False,
         "guidance": [],
