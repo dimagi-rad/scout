@@ -39,6 +39,17 @@ export function writeErrorMessage(
   canWrite: boolean,
 ): string {
   if (!(error instanceof ApiError) || error.status !== 403) return fallback
+  const body = asRecord(error.body)
+  // Lost upstream access has its own actionable copy (access_denied_body).
+  if (body?.reason === "tenant_access_lost") return error.message
   if (!canWrite || /role required/i.test(error.message)) return READ_ONLY_DENIAL
-  return error.message
+  // A non-JSON 403 (e.g. Django's CSRF failure page) carries no usable message;
+  // the caller's "try again" is the right advice there.
+  return body?.error || body?.detail ? error.message : fallback
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
 }
