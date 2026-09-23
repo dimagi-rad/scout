@@ -9,14 +9,16 @@ import httpx
 import pytest
 import requests
 
-from tests.network_guard import OutboundNetworkBlocked, guard
+from tests.network_guard import OutboundNetworkBlocked, _service_hosts, guard
 
 # A reserved TLD guarantees nothing real is reached if the guard ever regresses.
 BLOCKED_URL = "https://guard-check.invalid/oauth/token/"
 
 
 @pytest.fixture
-def expect_blocked():
+def expect_blocked(_block_outbound_network):
+    # Requesting the guard fixture makes this one tear down first, so it drains
+    # the expected violation before the guard checks for unexpected ones.
     yield
     violations = guard.drain()
     assert violations, "the guard did not record the blocked attempt"
@@ -114,7 +116,21 @@ def test_allow_network_marker_disables_the_guard(monkeypatch):
     assert guard.drain() == []
 
 
-def test_allows_configured_service_hosts():
+def test_service_hosts_come_from_the_test_environment(monkeypatch):
+    monkeypatch.setenv("CUBE_API_URL", "http://cube:4000/cubejs-api/v1")
+    monkeypatch.setenv("DATABASE_HOST", "Postgres")
+    monkeypatch.setenv("MCP_SERVER_URL", "")
+    hosts = _service_hosts()
+    assert {"cube", "postgres"} <= hosts
+    assert "" not in hosts
+
+
+def test_local_request_whose_query_carries_a_url_is_allowed(local_server):
+    url = f"{local_server}?next=https://www.commcarehq.org/a/"
+    assert requests.get(url, timeout=5).status_code == 204
+
+
+def test_allows_loopback_hosts():
     assert guard.is_allowed("localhost")
     assert guard.is_allowed("127.0.0.2")
     assert guard.is_allowed(b"::1")

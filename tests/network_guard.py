@@ -10,9 +10,10 @@ so a stubbed call never reaches the guard):
   through. Patching ``socket`` does not work: async httpx connects via
   ``loop.sock_connect`` and anyio captures ``getaddrinfo`` at import time.
 - urllib3's ``_make_request`` and, for proxy tunnels, the connection's socket
-  creation, which every ``requests`` call goes through. This sits below the requests adapter on
-  purpose: the retry tests stub ``HTTPSConnectionPool._make_request`` so the real
-  urllib3 ``Retry`` runs, and a guard above that layer would flag them.
+  creation, which every ``requests`` (and botocore) call goes through. This sits
+  below the requests adapter on purpose: the retry tests stub
+  ``HTTPSConnectionPool._make_request`` so the real urllib3 ``Retry`` runs, and a
+  guard above that layer would flag them.
 
 Checking where the socket connects is not enough either: with ``HTTPS_PROXY`` set
 (safe-chain sets it for ``uv run``) the connection goes to a localhost proxy,
@@ -21,7 +22,11 @@ which then reaches production on the test's behalf.
 A blocked attempt raises ``OutboundNetworkBlocked`` and is also recorded, and the
 autouse fixture fails the test at teardown if anything was recorded. The second
 half matters because application code often catches broad exceptions: the PR497
-tests passed on the transport error of the unstubbed call.
+tests passed on the transport error of the unstubbed call. Attempts recorded
+outside a test (higher-scoped fixtures, threads that outlive their test) fail the
+next test, or the session if no test follows.
+
+Out of scope by construction: raw-socket clients such as psycopg and smtplib.
 """
 
 from __future__ import annotations
@@ -79,7 +84,7 @@ def _is_loopback(host: str) -> bool:
 
 class _Guard:
     def __init__(self) -> None:
-        self.allowed_hosts = set(_LOCAL_HOSTS)
+        self._allowed_hosts: set[str] | None = None
         self.enabled = True
         self.violations: list[str] = []
         self._lock = threading.Lock()
@@ -91,10 +96,17 @@ class _Guard:
         host = (host or "").strip("[]").lower()
         return (
             not self.enabled
-            or host in self.allowed_hosts
+            or host in self.allowed_hosts()
             or host.endswith(".localhost")
             or _is_loopback(host)
         )
+
+    def allowed_hosts(self) -> set[str]:
+        # Lazy: .env lands in os.environ when Django settings load, which may be
+        # after this plugin configures.
+        if self._allowed_hosts is None:
+            self._allowed_hosts = set(_LOCAL_HOSTS) | _service_hosts()
+        return self._allowed_hosts
 
     def check(self, host: str | bytes | None, port: int | None, via: str) -> None:
         if self.is_allowed(host):
@@ -123,7 +135,6 @@ class _Guard:
     def install(self) -> None:
         if self._originals:
             return
-        self.allowed_hosts |= _service_hosts()
         guard = self
 
         pool_request = httpcore.ConnectionPool.handle_request
@@ -141,10 +152,12 @@ class _Guard:
         make_request = urllib3.connectionpool.HTTPConnectionPool._make_request
 
         def guarded_make_request(pool, conn, method, url, *args, **kwargs):
-            # Through a forwarding proxy the pool is the proxy's and the URL is absolute.
-            target = urlsplit(url) if "://" in url else None
-            host = target.hostname if target else pool.host
-            guard.check(host, target.port if target else pool.port, "requests/urllib3")
+            # Through a forwarding proxy the pool is the proxy's and the URL is
+            # absolute; otherwise it is a path whose query may itself contain "://".
+            target = urlsplit(url) if url.startswith(("http://", "https://")) else None
+            host = (target.hostname if target else None) or pool.host
+            port = (target.port if target else None) or pool.port
+            guard.check(host, port, "requests/urllib3")
             return make_request(pool, conn, method, url, *args, **kwargs)
 
         new_conn = urllib3.connection.HTTPConnection._new_conn
@@ -186,17 +199,46 @@ def pytest_unconfigure(config):
     guard.uninstall()
 
 
+def _opted_out(item) -> bool:
+    return bool(item.get_closest_marker("allow_network") or item.get_closest_marker("smoke"))
+
+
+def _report(violations: list[str]) -> str:
+    return "\n".join(dict.fromkeys(violations))
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    # A hook rather than the fixture so the opt-out also covers class- and
+    # session-scoped fixtures, which are set up before any function fixture.
+    guard.enabled = not _opted_out(item)
+    leftovers = guard.drain()
+    if leftovers:
+        pytest.fail(
+            "Blocked outbound request(s) recorded before this test started "
+            "(a higher-scoped fixture, or a thread from an earlier test):\n" + _report(leftovers),
+            pytrace=False,
+        )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    guard.enabled = True
+
+
+def pytest_sessionfinish(session, exitstatus):
+    leftovers = guard.drain()
+    if leftovers:
+        session.config.get_terminal_writer().line(
+            "Blocked outbound request(s) recorded after the last test:\n" + _report(leftovers),
+            red=True,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 @pytest.fixture(autouse=True)
-def _block_outbound_network(request):
-    opted_out = request.node.get_closest_marker("allow_network") or request.node.get_closest_marker(
-        "smoke"
-    )
-    guard.enabled = not opted_out
-    guard.drain()
-    try:
-        yield
-    finally:
-        guard.enabled = True
-        violations = guard.drain()
+def _block_outbound_network():
+    yield
+    violations = guard.drain()
     if violations:
-        pytest.fail("\n".join(dict.fromkeys(violations)), pytrace=False)
+        pytest.fail(_report(violations), pytrace=False)
