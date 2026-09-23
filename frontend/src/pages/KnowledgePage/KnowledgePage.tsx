@@ -3,6 +3,7 @@ import { useNavigate, useParams, useLocation } from "react-router-dom"
 import { Download, Loader2, Plus, Upload } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
+import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { useWorkspaceRole, writeErrorMessage } from "@/hooks/useWorkspaceRole"
 import { Button } from "@/components/ui/button"
 import {
@@ -22,6 +23,7 @@ export function KnowledgePage() {
   const { id } = useParams<{ id: string }>()
   const location = useLocation()
   const navigate = useNavigate()
+  const isCurrentAccount = useIsCurrentAccount()
   const importInputRef = useRef<HTMLInputElement>(null)
 
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -134,11 +136,12 @@ export function KnowledgePage() {
     setIsDeleting(true)
     try {
       await deleteKnowledge(deleteItem.id)
-      setDeleteItem(null)
+      if (isCurrentAccount()) setDeleteItem(null)
     } catch (error) {
+      if (!isCurrentAccount()) return
       setDeleteError(writeErrorMessage(error, "Couldn’t delete this item. Try again.", canWrite))
     } finally {
-      setIsDeleting(false)
+      if (isCurrentAccount()) setIsDeleting(false)
     }
   }
 
