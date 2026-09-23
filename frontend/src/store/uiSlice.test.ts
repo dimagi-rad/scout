@@ -83,3 +83,73 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
     expect(useAppStore.getState().threadsAccessLostMessage).toBeNull()
   })
 })
+
+describe("uiSlice upstream-verification denials", () => {
+  beforeEach(() => {
+    useAppStore.setState({ activeDomainId: "ws-1", threads: [], threadsStatus: "idle" })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const unavailable = "We couldn't verify your access to this workspace right now. Please retry shortly."
+
+  it("flags a temporary verification failure as retryable", async () => {
+    vi.spyOn(api, "get").mockRejectedValue(
+      new ApiError(403, unavailable, {
+        error: unavailable,
+        reason: "verification_unavailable",
+        retryable: true,
+      }),
+    )
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().threadsAccessLostMessage).toBe(unavailable)
+    expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
+  })
+
+  it("does not offer a verification retry for an expired sign-in", async () => {
+    const expired = "Your sign-in for one of this workspace's sources has expired."
+    vi.spyOn(api, "get").mockRejectedValue(
+      new ApiError(403, expired, { error: expired, reason: "credential_expired", retryable: false }),
+    )
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().threadsAccessLostMessage).toBe(expired)
+    expect(useAppStore.getState().threadsAccessRetryable).toBe(false)
+  })
+
+  it("retries verification then reloads threads from the server", async () => {
+    const post = vi.spyOn(api, "post").mockResolvedValue({ has_access: true } as never)
+    const fetched = [thread("t3", "Recovered chat")]
+    vi.spyOn(api, "get").mockResolvedValue(fetched as never)
+    useAppStore.setState({ threadsAccessRetryable: true, threadsAccessLostMessage: unavailable })
+
+    await useAppStore.getState().uiActions.retryAccessVerification("ws-1")
+
+    expect(post).toHaveBeenCalledWith("/api/workspaces/ws-1/access/verify/", {})
+    expect(useAppStore.getState().threads).toEqual(fetched)
+    expect(useAppStore.getState().threadsAccessRetryable).toBe(false)
+    expect(useAppStore.getState().threadsAccessLostMessage).toBeNull()
+  })
+
+  it("keeps a failed retry's denial without a second recheck", async () => {
+    vi.spyOn(api, "post").mockRejectedValue(
+      new ApiError(403, unavailable, {
+        error: unavailable,
+        reason: "verification_unavailable",
+        retryable: true,
+      }),
+    )
+    const get = vi.spyOn(api, "get")
+
+    await useAppStore.getState().uiActions.retryAccessVerification("ws-1")
+
+    expect(get).not.toHaveBeenCalled()
+    expect(useAppStore.getState().threadsAccessLostMessage).toBe(unavailable)
+    expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
+  })
+})

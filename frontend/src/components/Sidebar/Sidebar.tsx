@@ -38,6 +38,9 @@ export function Sidebar() {
   const threads = useAppStore((s) => s.threads)
   const threadsStatus = useAppStore((s) => s.threadsStatus)
   const threadsAccessLostMessage = useAppStore((s) => s.threadsAccessLostMessage)
+  const threadsAccessRetryable = useAppStore((s) => s.threadsAccessRetryable)
+  const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
+  const [retryingVerification, setRetryingVerification] = useState(false)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
@@ -263,6 +266,23 @@ export function Sidebar() {
                 data-testid="sidebar-threads-access-lost"
               >
                 <p>{threadsAccessLostMessage}</p>
+                {threadsAccessRetryable && (
+                  <button
+                    type="button"
+                    disabled={retryingVerification}
+                    onClick={() => {
+                      if (!activeDomainId) return
+                      setRetryingVerification(true)
+                      void retryAccessVerification(activeDomainId).finally(() =>
+                        setRetryingVerification(false),
+                      )
+                    }}
+                    className="mt-1 text-primary underline-offset-2 hover:underline disabled:opacity-50"
+                    data-testid="sidebar-threads-retry-verification"
+                  >
+                    {retryingVerification ? "Verifying…" : "Retry verification"}
+                  </button>
+                )}
               </div>
             )}
             {threadsStatus === "error" && !threadsAccessLostMessage && (
