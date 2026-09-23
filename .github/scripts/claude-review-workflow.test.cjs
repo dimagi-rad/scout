@@ -546,21 +546,30 @@ test("an oversized review is truncated to fit GitHub's comment limit", async () 
 
 // Mirrors @octokit/request-error: class RequestError, name "HttpError".
 class RequestError extends Error {}
-function apiError(status, message = "PRIVATE response body", headers = {}) {
+function apiError(status, headers = {}, message = "PRIVATE response body") {
   const error = new RequestError(message);
   error.name = "HttpError";
   error.status = status;
   error.response = { headers, data: { message } };
   return error;
 }
+const networkError = (code) => Object.assign(new Error("PRIVATE socket"), { code });
 
-function flaky(h, method, errors) {
+// Fails the (skip + 1)th and following matching reads, one per error. In a
+// passing finishClaude the PR is read at evidence loading (0), posted-review
+// verification (1) and checkpoint recheck (2); comments at evidence loading (0),
+// verification (1), receipt publication (2), checkpoint (3) and persistence (4).
+function flaky(h, method, errors, skip = 0) {
   const original = method === "pr" ? h.github.rest.pulls.get : h.github.paginate;
+  let seen = 0;
   let thrown = 0;
   const wrapped = async (...args) => {
-    if ((method === "pr" || args[0] === h.github.rest.issues.listComments) && thrown < errors.length) {
-      thrown += 1;
-      throw errors[thrown - 1];
+    if (method === "pr" || args[0] === h.github.rest.issues.listComments) {
+      seen += 1;
+      if (seen > skip && thrown < errors.length) {
+        thrown += 1;
+        throw errors[thrown - 1];
+      }
     }
     return original(...args);
   };
@@ -569,32 +578,46 @@ function flaky(h, method, errors) {
   return () => thrown;
 }
 
-const receiptBody = (h) =>
-  h.comments.find((c) => c.body.startsWith("<!-- scout-claude-review -->")).body;
+const RECEIPT_MARKER = "<!-- scout-claude-review -->";
+function receiptBody(h) {
+  const receipt = h.comments.find((c) => c.body.startsWith(RECEIPT_MARKER));
+  assert.ok(receipt, "expected a Claude receipt comment");
+  return receipt.body;
+}
+function assertNoPrivate(h) {
+  for (const text of [...(h.warnings || []), h.summary || "", ...h.comments.map((c) => c.body)]) {
+    assert.doesNotMatch(text, /PRIVATE|secondary/);
+  }
+}
 
-test("a transient API error while loading evidence is retried and the review verifies", async () => {
-  for (const [method, error] of [
-    ["pr", apiError(502)],
-    ["comments", apiError(503)],
-    ["pr", apiError(403, "PRIVATE: You have exceeded a secondary rate limit")],
-    ["comments", apiError(429)],
-    ["pr", Object.assign(new Error("PRIVATE socket"), { code: "ECONNRESET" })],
+test("a transient read error anywhere in verification is retried and the review verifies", async () => {
+  for (const [method, skip, error, warning, wait] of [
+    ["pr", 0, apiError(502), "the PR fetch after RequestError, HTTP 502", 2000],
+    ["comments", 0, apiError(503), "the comments fetch after RequestError, HTTP 503", 2000],
+    ["pr", 0, apiError(403, {}, "PRIVATE secondary rate limit"), "the PR fetch after RequestError, HTTP 403", 60000],
+    ["pr", 0, apiError(403, { "retry-after": "3" }), "the PR fetch after RequestError, HTTP 403", 3000],
+    ["comments", 0, apiError(429, { "retry-after": "1" }), "the comments fetch after RequestError, HTTP 429", 2000],
+    ["pr", 0, networkError("ECONNRESET"), "the PR fetch after Error", 2000],
+    ["comments", 0, networkError("EAI_AGAIN"), "the comments fetch after Error", 2000],
+    ["pr", 1, apiError(502), "the PR fetch after RequestError, HTTP 502", 2000],
+    ["comments", 1, apiError(502), "the comments fetch after RequestError, HTTP 502", 2000],
+    ["comments", 2, apiError(502), "the receipt comments fetch after RequestError, HTTP 502", 2000],
+    ["pr", 2, apiError(502), "the PR recheck after RequestError, HTTP 502", 2000],
+    ["comments", 3, apiError(502), "the comments fetch after RequestError, HTTP 502", 2000],
+    ["comments", 4, apiError(502), "the comments fetch after RequestError, HTTP 502", 2000],
   ]) {
+    const label = `${method}#${skip} ${error.status ?? error.code}`;
     const h = await prepared();
     h.warnings = [];
     const delays = [];
-    const calls = flaky(h, method, [error]);
+    const thrownCount = flaky(h, method, [error], skip);
     await finishClaude({ ...h, delay: async (ms) => delays.push(ms) });
-    assert.deepEqual(h.failures, [], `${method} ${error.status}`);
-    assert.equal(h.outputs.claude_verified, "true");
-    assert.equal(calls(), 1);
-    assert.deepEqual(delays, [2000]);
-    assert.equal(h.warnings.length, 1);
-    assert.match(
-      h.warnings[0],
-      /^Retrying the (PR|comments) fetch after [A-Za-z]+(, HTTP \d{3})? \(attempt 2 of 3\)\.$/,
-    );
-    assert.doesNotMatch(h.warnings.join("\n"), /PRIVATE|secondary/);
+    assert.deepEqual(h.failures, [], label);
+    assert.equal(h.outputs.claude_verified, "true", label);
+    assert.equal(thrownCount(), 1, label);
+    assert.deepEqual(delays, [wait], label);
+    assert.deepEqual(h.warnings, [`Retrying ${warning} (attempt 2 of 3).`], label);
+    assertNoPrivate(h);
   }
 });
 
@@ -606,42 +629,51 @@ test("a persistent evidence-loading failure blocks and logs only the stage, clas
     const h = await prepared();
     h.warnings = [];
     const delays = [];
-    const calls = flaky(h, method, [apiError(502), apiError(502), apiError(502)]);
+    const thrownCount = flaky(h, method, [apiError(502), apiError(502), apiError(502)]);
     await finishClaude({ ...h, delay: async (ms) => delays.push(ms) });
-    assert.equal(calls(), 3);
+    assert.equal(thrownCount(), 3);
     assert.deepEqual(delays, [2000, 5000]);
-    assert.equal(
-      h.warnings.at(-1),
-      `Claude verification stopped during ${stage} (RequestError, HTTP 502).`,
-    );
+    assert.equal(h.warnings.at(-1), `Claude verification stopped during ${stage} (RequestError, HTTP 502).`);
     assert.notEqual(h.outputs.claude_verified, "true");
     assert.deepEqual(h.failures, ["Claude review evidence could not be loaded or validated."]);
     assert.match(receiptBody(h), /Claude review: blocked/);
     assert.equal(readState(h.comments).claudeHead, null);
-    for (const text of [h.warnings.join("\n"), h.summary, ...h.comments.map((c) => c.body)]) {
-      assert.doesNotMatch(text, /PRIVATE/);
-    }
+    assertNoPrivate(h);
   }
 });
 
-test("permanent API errors are not retried", async () => {
-  for (const error of [
-    apiError(404),
-    apiError(403, "PRIVATE Resource not accessible"),
-    new Error("PRIVATE bug"),
+test("a persistent failure after the verified receipt names the checkpoint stage", async () => {
+  const h = await prepared();
+  h.warnings = [];
+  const thrownCount = flaky(h, "pr", [apiError(502), apiError(502), apiError(502)], 2);
+  await finishClaude({ ...h, delay: async () => {} });
+  assert.equal(thrownCount(), 3);
+  assert.equal(
+    h.warnings.at(-1),
+    "Claude receipt publication stopped during checkpoint pr recheck (RequestError, HTTP 502).",
+  );
+  assert.deepEqual(h.failures, ["Claude review receipt or checkpoint could not be published safely."]);
+  assert.match(receiptBody(h), /Claude review: blocked/);
+  assert.equal(readState(h.comments).claudeHead, null);
+  assertNoPrivate(h);
+});
+
+test("permanent errors and long rate-limit waits are not retried", async () => {
+  for (const [error, summary] of [
+    [apiError(404), "RequestError, HTTP 404"],
+    [apiError(403, {}, "PRIVATE Resource not accessible"), "RequestError, HTTP 403"],
+    [apiError(429, { "retry-after": "120" }), "RequestError, HTTP 429"],
+    [new Error("PRIVATE bug"), "Error"],
   ]) {
     const h = await prepared();
     h.warnings = [];
     const delays = [];
-    const calls = flaky(h, "pr", [error]);
+    const thrownCount = flaky(h, "pr", [error]);
     await finishClaude({ ...h, delay: async (ms) => delays.push(ms) });
-    assert.equal(calls(), 1);
+    assert.equal(thrownCount(), 1);
     assert.deepEqual(delays, []);
-    assert.match(
-      h.warnings.at(-1),
-      /^Claude verification stopped during pr fetch \((RequestError, HTTP 40[34]|Error)\)\.$/,
-    );
-    assert.doesNotMatch(h.warnings.join("\n"), /PRIVATE/);
+    assert.deepEqual(h.warnings, [`Claude verification stopped during pr fetch (${summary}).`]);
+    assertNoPrivate(h);
   }
 });
 
@@ -663,8 +695,7 @@ test("local evidence failures name their sub-stage without transcript content", 
     await finishClaude(h);
     assert.deepEqual(h.warnings, [`Claude verification stopped during ${expected}.`]);
     assert.notEqual(h.outputs.claude_verified, "true");
-    for (const text of [h.summary, ...h.comments.map((c) => c.body)]) {
-      assert.doesNotMatch(text, /PRIVATE/);
-    }
+    assertNoPrivate(h);
   }
 });
+

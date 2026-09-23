@@ -42,25 +42,42 @@ const defaultDelay = ms => new Promise(resolve => setTimeout(resolve, ms));
 // there blocked PR #550 (run 35895493640) until a manual re-run. Only idempotent
 // reads are retried; never the comment write.
 const READ_RETRY_DELAYS = [2000, 5000];
+// GitHub asks clients to wait out rate limits (retry-after, else at least a
+// minute); retrying sooner extends the block. Longer waits are not worth holding the job.
+const RATE_LIMIT_WAIT = 60000;
 
 function httpStatus(error) {
   const status = error?.status;
   return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
 }
 
-function isTransientReadError(error) {
+function isRateLimited(error) {
   const status = httpStatus(error);
-  if (status === null) return typeof error?.code === 'string' && /^(?:E[A-Z]+|UND_ERR_[A-Z_]+)$/.test(error.code);
-  if (status >= 500 || status === 429) return true;
-  // Secondary rate limits are 403s with retry-after or a fixed message;
-  // primary limits and permission errors will not clear within a short backoff.
+  if (status === 429) return true;
+  // Secondary limits are 403s with retry-after or a fixed message; other 403s
+  // (permissions, primary limit) will not clear within a bounded wait.
   return status === 403 && (error.response?.headers?.['retry-after'] !== undefined
     || /secondary rate limit/i.test(String(error.message)));
 }
 
+// Milliseconds to wait before retrying, or null when the error is not worth retrying.
+function readRetryDelay(error, attempt) {
+  const status = httpStatus(error);
+  if (isRateLimited(error)) {
+    const header = Number(error.response?.headers?.['retry-after']);
+    const wait = Number.isFinite(header) && header >= 0 ? header * 1000 : RATE_LIMIT_WAIT;
+    return wait <= RATE_LIMIT_WAIT ? Math.max(wait, READ_RETRY_DELAYS[attempt]) : null;
+  }
+  const transient = status === null
+    ? typeof error?.code === 'string' && /^(?:E[A-Z][A-Z0-9_]*|UND_ERR_[A-Z_]+)$/.test(error.code)
+    : status >= 500;
+  return transient ? READ_RETRY_DELAYS[attempt] : null;
+}
+
 // Fixed vocabulary only: error messages can echo request or transcript content.
+// The class name (RequestError) is logged rather than error.name, which is caller-set.
 function safeErrorSummary(error) {
-  const name = error?.constructor?.name || error?.name;
+  const name = error?.constructor?.name;
   const status = httpStatus(error);
   const label = typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(name) ? name : 'UnknownError';
   return status === null ? label : `${label}, HTTP ${status}`;
@@ -71,9 +88,10 @@ async function retryRead(label, read, { core, delay }) {
     try {
       return await read();
     } catch (error) {
-      if (attempt >= READ_RETRY_DELAYS.length || !isTransientReadError(error)) throw error;
+      const wait = attempt < READ_RETRY_DELAYS.length ? readRetryDelay(error, attempt) : null;
+      if (wait === null) throw error;
       core.warning(`Retrying ${label} after ${safeErrorSummary(error)} (attempt ${attempt + 2} of ${READ_RETRY_DELAYS.length + 1}).`);
-      await (delay || defaultDelay)(READ_RETRY_DELAYS[attempt]);
+      await (delay || defaultDelay)(wait);
     }
   }
 }
@@ -208,8 +226,8 @@ const trustedClaudeReceipt = comment => comment?.user?.login === 'github-actions
   && (!comment.performed_via_github_app || comment.performed_via_github_app.slug === 'github-actions')
   && typeof comment.body === 'string' && comment.body.startsWith(CLAUDE_MARKER);
 
-async function publishClaudeReceipt({ github, context, core, env }, status, reason, summarize = true) {
-  const comments = await commentsFor(github, context, env.PR_NUMBER);
+async function publishClaudeReceipt({ github, context, core, env, delay }, status, reason, summarize = true) {
+  const comments = await retryRead('the receipt comments fetch', () => commentsFor(github, context, env.PR_NUMBER), { core, delay });
   const receipts = comments.filter(trustedClaudeReceipt);
   if (receipts.length > 1) throw new Error('Ambiguous Claude receipt state.');
   const previous = receipts[0];
@@ -369,7 +387,8 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
     core.warning(`Claude verification stopped during ${stage} (${safeErrorSummary(error)}).`);
   }
   try {
-    const published = await publishClaudeReceipt({ github, context, core, env }, decision.passed ? 'verified' : 'blocked',
+    stage = 'receipt publication';
+    const published = await publishClaudeReceipt({ github, context, core, env, delay }, decision.passed ? 'verified' : 'blocked',
       decision.passed ? 'Review completed with no high or critical findings.' : decision.reason, false);
     if (!published) {
       core.setFailed('A newer Claude review attempt superseded this run.');
@@ -381,8 +400,12 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
       return;
     }
     // Re-read after receipt publication; no stale checkpoint may be advanced.
-    await currentPR(github, context, env);
-    comments = await commentsFor(github, context, env.PR_NUMBER);
+    stage = 'checkpoint pr recheck';
+    // currentPR's "PR changed" error has no status, so it fails fast rather than retrying.
+    await retryRead('the PR recheck', () => currentPR(github, context, env), { core, delay });
+    stage = 'checkpoint comments fetch';
+    comments = await readComments();
+    stage = 'checkpoint update';
     const latest = readState(comments);
     if (!latest || JSON.stringify(latest) !== JSON.stringify(state)
         || !currentVerifiedReceipt(comments, env, context)) throw new Error('Review checkpoint or attempt changed.');
@@ -392,7 +415,8 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
     state.claudeHead = env.REVIEW_HEAD;
     await github.rest.issues.updateComment({ ...context.repo, comment_id: comment.id,
       body: comment.body.replace(previousMarker, encodeState(state)) });
-    const persistedComments = await commentsFor(github, context, env.PR_NUMBER);
+    stage = 'checkpoint persistence check';
+    const persistedComments = await readComments();
     const persisted = readState(persistedComments);
     if (!persisted || JSON.stringify(persisted) !== JSON.stringify(state)
         || !currentVerifiedReceipt(persistedComments, env, context)) {
@@ -401,10 +425,11 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
     await core.summary.addRaw(published).write();
     core.setOutput('claude_verified', 'true');
     core.info('Recorded verified Claude review for future incremental follow-ups.');
-  } catch {
+  } catch (error) {
     const reason = 'Claude review receipt or checkpoint could not be published safely.';
+    core.warning(`Claude receipt publication stopped during ${stage} (${safeErrorSummary(error)}).`);
     core.setFailed(reason);
-    try { await publishClaudeReceipt({ github, context, core, env }, 'blocked', reason); }
+    try { await publishClaudeReceipt({ github, context, core, env, delay }, 'blocked', reason); }
     catch { core.warning('The blocked Claude receipt could not be published.'); }
   }
 }
