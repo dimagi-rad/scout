@@ -152,4 +152,15 @@ describe("uiSlice upstream-verification denials", () => {
     expect(useAppStore.getState().threadsAccessLostMessage).toBe(unavailable)
     expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
   })
+
+  it("offers a recheck after upstream access was removed", async () => {
+    const lost = "Your access to one of this workspace's sources was removed upstream."
+    vi.spyOn(api, "get").mockRejectedValue(
+      new ApiError(403, lost, { error: lost, reason: "upstream_access_lost", retryable: false }),
+    )
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
+  })
 })

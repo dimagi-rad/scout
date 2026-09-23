@@ -36,13 +36,22 @@ const ACCESS_DENIAL_REASONS = new Set([
   "verification_in_progress",
 ])
 
+// A lost-access denial is also rechecked on request: once an admin restores access
+// upstream, only an explicit verification can restore the archived membership.
+const RECHECKABLE_REASONS = new Set([
+  "tenant_access_lost",
+  "upstream_access_lost",
+  "verification_unavailable",
+  "verification_in_progress",
+])
+
 function accessDenial(error: unknown): { message: string; retryable: boolean } | null {
   if (!(error instanceof ApiError) || typeof error.body !== "object" || error.body === null) {
     return null
   }
-  const body = error.body as { reason?: unknown; retryable?: unknown }
+  const body = error.body as { reason?: unknown }
   if (typeof body.reason !== "string" || !ACCESS_DENIAL_REASONS.has(body.reason)) return null
-  return { message: error.message, retryable: body.retryable === true }
+  return { message: error.message, retryable: RECHECKABLE_REASONS.has(body.reason) }
 }
 
 export interface UiSlice {
@@ -53,8 +62,8 @@ export interface UiSlice {
   // Actionable message when the user lost upstream (tenant) access to the
   // workspace — distinct from a retryable outage. null in every other case.
   threadsAccessLostMessage: string | null
-  // The denial is a temporary upstream-verification failure, so the user can
-  // retry verification instead of reconnecting or asking an admin.
+  // An explicit upstream recheck can resolve this denial (a temporary failure, or
+  // access an admin may since have restored), so offer "Retry verification".
   threadsAccessRetryable: boolean
   uiActions: {
     newThread: () => void
