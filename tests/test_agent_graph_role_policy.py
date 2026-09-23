@@ -238,3 +238,33 @@ async def test_read_unloaded_guidance_points_to_write_member(workspace, tenant, 
     else:
         assert "not currently queryable" in context
         assert "workspace member with write access" in context
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize("loaded", [False, True])
+async def test_write_multi_tenant_guidance_matches_single_tenant(
+    workspace, tenant, interactive, loaded
+):
+    other = await Tenant.objects.acreate(
+        provider="commcare", external_id="other", canonical_name="Other"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+    if loaded:
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=workspace, schema_name="view", state=SchemaState.ACTIVE
+        )
+
+    context = await _fetch_semantic_model_context(
+        workspace, interactive=interactive, write_capable=True
+    )
+
+    assert "{tenant_name}__{table_name}" in context
+    if loaded:
+        assert "Data is loaded" in context
+        assert "Run materialization to rebuild the semantic catalog" in context
+    else:
+        assert "No data has been loaded yet" in context
+        assert ("returns IMMEDIATELY" in context) is interactive
+        assert ("BLOCKS" in context) is not interactive

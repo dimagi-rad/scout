@@ -357,13 +357,7 @@ async def _fetch_semantic_model_context(
                 return (
                     _HEADLESS_MATERIALIZE_GUIDANCE
                     if not interactive
-                    else (
-                        "No data has been loaded yet. Call `run_materialization` to start "
-                        "loading. This tool returns IMMEDIATELY with `status: started` — do "
-                        "NOT call other data tools in the same turn. Acknowledge to the user "
-                        "in ONE sentence and end your turn. The system will resume the "
-                        "conversation automatically when materialization completes."
-                    )
+                    else _INTERACTIVE_MATERIALIZE_GUIDANCE
                 )
             if ts.state == SchemaState.MATERIALIZING:
                 if not write_capable:
@@ -375,11 +369,7 @@ async def _fetch_semantic_model_context(
                 )
             if not write_capable:
                 return _READ_ONLY_LOADED_SQL_GUIDANCE
-            return (
-                "Data is loaded, but no semantic datasets are available yet. "
-                "Run materialization to rebuild the semantic catalog, then use "
-                "`list_datasets` and `semantic_query`."
-            )
+            return _LOADED_REBUILD_GUIDANCE
         if tenant_count > 1:
             vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
             if vs is not None and vs.state == SchemaState.MATERIALIZING:
@@ -390,31 +380,40 @@ async def _fetch_semantic_model_context(
                     if not interactive
                     else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
+            loaded = vs is not None and vs.state == SchemaState.ACTIVE
             if not write_capable:
                 guidance = (
-                    _READ_ONLY_LOADED_SQL_GUIDANCE
-                    if vs is not None and vs.state == SchemaState.ACTIVE
-                    else _READ_ONLY_MATERIALIZE_GUIDANCE
+                    _READ_ONLY_LOADED_SQL_GUIDANCE if loaded else _READ_ONLY_MATERIALIZE_GUIDANCE
                 )
-                return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}"
-            return (
-                f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
-                "No semantic datasets are available yet. Call `run_materialization` "
-                "to load workspace data and rebuild the semantic catalog."
-            )
+            elif loaded:
+                guidance = _LOADED_REBUILD_GUIDANCE
+            elif not interactive:
+                guidance = _HEADLESS_MATERIALIZE_GUIDANCE
+            else:
+                guidance = _INTERACTIVE_MATERIALIZE_GUIDANCE
+            return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}"
         if not write_capable:
             return _READ_ONLY_MATERIALIZE_GUIDANCE
         return (
-            _HEADLESS_MATERIALIZE_GUIDANCE
-            if not interactive
-            else (
-                "No data has been loaded yet. Call `run_materialization` to start "
-                "loading. This tool returns IMMEDIATELY with `status: started` — do "
-                "NOT call other data tools in the same turn. Acknowledge to the user "
-                "in ONE sentence and end your turn. The system will resume the "
-                "conversation automatically when materialization completes."
-            )
+            _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else _INTERACTIVE_MATERIALIZE_GUIDANCE
         )
+
+
+# No `pipeline=` arg: run_materialization's LLM-facing schema is empty (all params
+# injected server-side); naming an argument it can't accept confused the agent (02#6).
+_INTERACTIVE_MATERIALIZE_GUIDANCE = (
+    "No data has been loaded yet. Call `run_materialization` to start "
+    "loading. This tool returns IMMEDIATELY with `status: started` — do "
+    "NOT call other data tools in the same turn. Acknowledge to the user "
+    "in ONE sentence and end your turn. The system will resume the "
+    "conversation automatically when materialization completes."
+)
+
+_LOADED_REBUILD_GUIDANCE = (
+    "Data is loaded, but no semantic datasets are available yet. "
+    "Run materialization to rebuild the semantic catalog, then use "
+    "`list_datasets` and `semantic_query`."
+)
 
 
 # Only the thread that dispatched a load has a completion callback.
