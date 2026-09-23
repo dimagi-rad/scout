@@ -111,7 +111,7 @@ async def test_agent_node_applies_cache_control_breakpoints():
     """
     workspace = MagicMock()
     workspace.id = "ws-cc"
-    user = MagicMock()
+    user = MagicMock(is_authenticated=False)
     user.id = "u3"
 
     captured = {}
@@ -168,7 +168,7 @@ async def test_agent_node_prunes_history():
     """agent_node bounds replayed history via prune_messages (01#3)."""
     workspace = MagicMock()
     workspace.id = "ws-prune"
-    user = MagicMock()
+    user = MagicMock(is_authenticated=False)
 
     captured = {}
 
