@@ -226,6 +226,7 @@ async function finishClaude({ github, context, core, fs, env }) {
   core.setOutput('claude_verified', 'false');
   let decision = { passed: false, reason: 'Claude review evidence could not be loaded or validated.' };
   let comments, state;
+  let stage = 'evidence loading';
   try {
     const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
     comments = await commentsFor(github, context, env.PR_NUMBER);
@@ -255,8 +256,10 @@ async function finishClaude({ github, context, core, fs, env }) {
       // The workflow posts so the model needs no shell write: markdown in a
       // gh pr comment argument trips the Bash permission checker (run 35856432255).
       // The gate re-reads the PR and comments and verifies the artifact as before.
+      stage = 'review posting';
       const { data: posted } = await github.rest.issues.createComment({ ...context.repo,
         issue_number: Number(env.PR_NUMBER), body: renderReviewComment(structuredResult.review_comment, receipt) });
+      stage = 'posted review verification';
       const { data: latestPr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
       comments = await commentsFor(github, context, env.PR_NUMBER);
       // The listing can lag the write. The create response is GitHub's own record
@@ -273,7 +276,10 @@ async function finishClaude({ github, context, core, fs, env }) {
         || state.policy !== env.POLICY || state.run !== String(context.runId))) {
       decision = { passed: false, reason: 'The accepted OCR checkpoint no longer matches this Claude review.' };
     }
-  } catch { /* Deliberately do not log raw transcript or exceptions; denials are sanitized above. */ }
+  } catch {
+    // Deliberately do not log raw transcript or exceptions; denials are sanitized above.
+    core.warning(`Claude verification stopped during ${stage}.`);
+  }
   try {
     const published = await publishClaudeReceipt({ github, context, core, env }, decision.passed ? 'verified' : 'blocked',
       decision.passed ? 'Review completed with no high or critical findings.' : decision.reason, false);

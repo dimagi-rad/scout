@@ -521,6 +521,18 @@ test("a created comment missing from the listing still needs a trusted receipt",
   }
 });
 
+test("a failed post names the stage without exposing the error", async () => {
+  const h = await prepared();
+  h.github.rest.issues.createComment = async () => {
+    throw Error("PRIVATE API");
+  };
+  await finishClaude(h);
+  assert.deepEqual(h.warnings, ["Claude verification stopped during review posting."]);
+  assert.ok(h.failures.length);
+  assert.notEqual(h.outputs.claude_verified, "true");
+  assert.doesNotMatch(h.summary, /PRIVATE/);
+});
+
 test("an oversized review is truncated to fit GitHub's comment limit", async () => {
   const h = await prepared();
   patchResult(h, { review_comment: "x".repeat(70000) });
