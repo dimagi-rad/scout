@@ -29,6 +29,13 @@ class SourceConfig:
     progress_unit: str = "rows"
     auxiliary_tables: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self):
+        if not isinstance(self.auxiliary_tables, dict) or any(
+            not isinstance(name, str) or not name or not isinstance(description, str)
+            for name, description in self.auxiliary_tables.items()
+        ):
+            raise ValueError("auxiliary_tables must map table names to descriptions.")
+
     @property
     def physical_table_name(self) -> str:
         """Physical PostgreSQL table name. Defaults to raw_{name}."""
@@ -62,7 +69,7 @@ class RelationshipConfig:
             raise ValueError("Pipeline relationships require an explicit supported cardinality.")
         if self.require_unique_target and self.relationship_type == "one_to_many":
             raise ValueError("A one-to-many relationship cannot require a unique target key.")
-        if any(
+        if not isinstance(self.additional_keys, list) or any(
             not isinstance(pair, (list, tuple))
             or len(pair) != 2
             or not all(isinstance(column, str) and column for column in pair)
@@ -166,7 +173,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
             table_name=s.get("table_name", ""),
             resumable=s.get("resumable", True),
             progress_unit=s.get("progress_unit", "rows"),
-            auxiliary_tables=s.get("auxiliary_tables", {}),
+            auxiliary_tables=s.get("auxiliary_tables") or {},
         )
         for s in data.get("sources", [])
     ]
@@ -192,7 +199,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
             to_column=r["to_column"],
             description=r.get("description", ""),
             relationship_type=r.get("relationship_type", "many_to_one"),
-            additional_keys=r.get("additional_keys", []),
+            additional_keys=r.get("additional_keys") or [],
             require_unique_target=r.get("require_unique_target", False),
         )
         for r in rel_raw

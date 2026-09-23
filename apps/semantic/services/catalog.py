@@ -641,6 +641,13 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
 
     active_names: set[str] = set()
     diagnostics = []
+    curated_names = {
+        name
+        for name, metadata in SemanticRelationship.objects.filter(workspace=workspace).values_list(
+            "name", "metadata"
+        )
+        if not (metadata or {}).get("generated")
+    }
     for pipeline in get_registry().list():
         for rel in pipeline.relationships:
             for from_dataset, to_dataset in _relationship_endpoints(rel, datasets_by_table):
@@ -661,7 +668,7 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                 ):
                     diagnostics.append(
                         {
-                            "severity": "warning",
+                            "level": "warning",
                             "code": "relationship_key_type",
                             "message": f"Relationship '{name}' requires compatible scalar keys; arrays/objects require a bridge.",
                         }
@@ -688,10 +695,7 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                         for source, _ in pairs
                         if _relationship_key_type(source.data_type) == "string"
                     )
-                existing = SemanticRelationship.objects.filter(
-                    workspace=workspace, name=name
-                ).first()
-                if existing is not None and not (existing.metadata or {}).get("generated"):
+                if name in curated_names:
                     continue
                 SemanticRelationship.objects.update_or_create(
                     workspace=workspace,

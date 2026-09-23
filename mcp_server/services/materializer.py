@@ -1348,6 +1348,7 @@ def _write_forms(
             """
         ).format(schema=sid)
     )
+    cur.execute(psql.SQL("CREATE INDEX ON {}.raw_form_cases (case_id)").format(sid))
     return total
 
 

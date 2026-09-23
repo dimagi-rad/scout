@@ -8,7 +8,12 @@ from django.db import connection
 
 from apps.semantic.models import SemanticDataset, SemanticModel, SemanticRelationship
 from apps.semantic.services import catalog
-from mcp_server.pipeline_registry import PipelineRegistry, RelationshipConfig
+from mcp_server.pipeline_registry import (
+    PipelineRegistry,
+    RelationshipConfig,
+    SourceConfig,
+    _parse_pipeline,
+)
 from mcp_server.services.materializer import _write_forms
 from mcp_server.services.metadata import pipeline_list_tables
 
@@ -228,3 +233,30 @@ def test_refresh_preserves_hand_authored_relationship_with_generated_name(worksp
     relationship.refresh_from_db()
     assert relationship.join_expression == "curated expression"
     assert relationship.relationship_type == "one_to_one"
+
+
+def test_empty_optional_yaml_collections_are_normalized():
+    pipeline = _parse_pipeline(
+        {
+            "pipeline": "example",
+            "provider": "commcare",
+            "sources": [{"name": "forms", "auxiliary_tables": None}],
+            "relationships": [
+                {
+                    "from_table": "a",
+                    "from_column": "id",
+                    "to_table": "b",
+                    "to_column": "id",
+                    "additional_keys": None,
+                }
+            ],
+        }
+    )
+    assert pipeline.sources[0].auxiliary_tables == {}
+    assert pipeline.relationships[0].key_pairs == [("id", "id")]
+
+
+@pytest.mark.parametrize("value", [None, [], "raw_forms", {"raw_forms": 1}])
+def test_invalid_auxiliary_table_contract_is_rejected(value):
+    with pytest.raises(ValueError, match="auxiliary_tables"):
+        SourceConfig(name="forms", auxiliary_tables=value)
