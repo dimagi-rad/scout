@@ -101,11 +101,11 @@ export function KnowledgePage() {
   }, [setSearch])
 
   const handleNewClick = () => {
-    navigate("/knowledge/new")
+    navigate(`${listPath}/new`)
   }
 
   const handleEdit = (item: KnowledgeItem) => {
-    navigate(`/knowledge/${item.id}`)
+    navigate(`${listPath}/${item.id}`)
   }
 
   const handleDelete = (item: KnowledgeItem) => {
