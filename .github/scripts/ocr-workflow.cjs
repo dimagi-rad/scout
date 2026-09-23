@@ -29,6 +29,57 @@ async function currentPR(github, context, env) {
   return pr;
 }
 
+// The upstream action performs another checkout. Keep the validated policy from
+// the executing trusted workflow revision, not the PR comparison base or
+// whatever happens to be checked out afterward.
+function snapshotPolicy({ fs, env }) {
+  const snapshot = path.join(env.RUNNER_TEMP, 'scout-ocr-policy');
+  fs.mkdirSync(snapshot, { recursive: true });
+  for (const file of policyFiles.filter((file) => file.endsWith('.cjs'))) {
+    fs.copyFileSync(path.join(env.GITHUB_WORKSPACE, file), path.join(snapshot, path.basename(file)));
+  }
+}
+
+// issue_comment runs are attached to the default branch, not the PR, so the PR
+// keeps showing the `review` check from the last pull_request_target run even
+// after an @ocr re-run passes (PR #501). Mirror manual runs onto the PR head
+// under the same name; GitHub shows the most recent check run per name.
+const REVIEW_CHECK = 'review';
+const CHECK_CONCLUSIONS = { success: 'success', failure: 'failure', cancelled: 'cancelled' };
+
+function reviewRunUrl(context, env) {
+  return `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${context.runId}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
+}
+
+async function startReviewCheck({ github, context, core, fs, env }) {
+  if (context.eventName !== 'issue_comment') return;
+  snapshotPolicy({ fs, env });
+  try {
+    const { data } = await github.rest.checks.create({
+      ...context.repo, name: REVIEW_CHECK, head_sha: env.REVIEW_HEAD, status: 'in_progress',
+      external_id: String(context.runId), details_url: reviewRunUrl(context, env),
+      output: { title: 'Review re-run in progress',
+        summary: `Requested with an \`@ocr\` comment. [Workflow run](${reviewRunUrl(context, env)})` },
+    });
+    core.setOutput('check_run_id', String(data.id));
+  } catch (error) {
+    // Visibility only: never block the review because the mirror check failed.
+    core.warning(`Could not create the PR review check: ${error.message}`);
+  }
+}
+
+async function finishReviewCheck({ github, context, core, env }) {
+  if (context.eventName !== 'issue_comment' || !/^[1-9][0-9]*$/.test(env.CHECK_RUN_ID || '')) return;
+  const conclusion = CHECK_CONCLUSIONS[env.JOB_STATUS] || 'failure';
+  const title = { success: 'Review passed', failure: 'Review failed', cancelled: 'Review cancelled' }[conclusion];
+  await github.rest.checks.update({
+    ...context.repo, check_run_id: Number(env.CHECK_RUN_ID), status: 'completed', conclusion,
+    output: { title,
+      summary: `Result of the \`@ocr\` re-run for \`${env.REVIEW_HEAD}\`. See the PR comments for the gate and review. [Workflow run](${reviewRunUrl(context, env)})` },
+  });
+  core.info(`PR review check marked ${conclusion}.`);
+}
+
 async function prepareReview({ github, context, core, fs, env }) {
   await currentPR(github, context, env);
   const hash = crypto.createHash('sha256');
@@ -49,14 +100,7 @@ async function prepareReview({ github, context, core, fs, env }) {
     selection = { full: true, checkpoint: null, sourceRun: null, claudeHead: null,
       reason: 'native checkpoint does not match accepted gate' };
   }
-  // The upstream action performs another checkout. Keep the validated policy from
-  // the executing trusted workflow revision, not the PR comparison base or
-  // whatever happens to be checked out afterward.
-  const snapshot = path.join(env.RUNNER_TEMP, 'scout-ocr-policy');
-  fs.mkdirSync(snapshot, { recursive: true });
-  for (const file of policyFiles.filter((file) => file.endsWith('.cjs'))) {
-    fs.copyFileSync(path.join(env.GITHUB_WORKSPACE, file), path.join(snapshot, path.basename(file)));
-  }
+  snapshotPolicy({ fs, env });
   for (const [key, value] of Object.entries({
     full_review: String(selection.full), checkpoint: selection.checkpoint || '',
     source_run: selection.sourceRun || '', claude_head: selection.claudeHead || '',
@@ -321,4 +365,4 @@ async function finishClaude({ github, context, core, fs, env }) {
   }
 }
 
-module.exports = { prepareReview, finishReview, prepareClaude, finishClaude };
+module.exports = { prepareReview, finishReview, prepareClaude, finishClaude, startReviewCheck, finishReviewCheck };
