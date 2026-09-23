@@ -69,10 +69,12 @@ prune_workers() {
       echo "::warning title=Worker prune incomplete::Could not list stopped $destination workers."
       continue
     }
-    # A container that is already gone is fine; report any that still exist.
+    # A container that is already gone is fine; report every other failure,
+    # including an unreachable daemon or a timeout.
     not_removed=$(tail -n "+$((WORKER_RETAIN + 1))" <<< "$stopped" | while read -r container; do
-      if [[ -n "$container" ]] && ! run_docker rm "$container" >/dev/null && \
-         run_docker inspect --format '{{.Id}}' "$container" >/dev/null 2>&1; then
+      [[ -n "$container" ]] || continue
+      if ! error=$(run_docker rm "$container" 2>&1 >/dev/null) && \
+         [[ "$error" != *"No such container"* ]]; then
         echo "$container"
       fi
     done)

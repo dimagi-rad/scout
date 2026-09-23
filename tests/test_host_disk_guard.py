@@ -43,9 +43,11 @@ if args[0] == "ps":
     if f"ps {destination}" in state["fail"]:
         sys.exit(1)
     print("\n".join(state["stopped"].get(destination, [])))
-elif args[0] == "rm" and f"rm {args[1]}" in state["fail"]:
+elif args[0] == "rm" and args[1] in state["missing"]:
+    print(f"Error response from daemon: No such container: {args[1]}", file=sys.stderr)
     sys.exit(1)
-elif args[0] == "inspect" and args[-1] in state.get("missing", []):
+elif args[0] == "rm" and f"rm {args[1]}" in state["fail"]:
+    print("Cannot connect to the Docker daemon", file=sys.stderr)
     sys.exit(1)
 elif args[0] == "info":
     print(state.get("root", "/"))
@@ -204,7 +206,7 @@ def test_listing_or_removal_failures_do_not_abort_the_rest_of_the_prune(guard):
     assert _removed(commands) == ["gone", "p5", "s4"]
     assert "1 stopped production worker(s) could not be removed" in result.stdout
 
-    result, commands = guard("prune-workers", stopped=stopped, fail={"rm gone"}, missing={"gone"})
+    result, commands = guard("prune-workers", stopped=stopped, missing={"gone"})
     assert result.returncode == 0, result.stderr
     assert "could not be removed" not in result.stdout
     assert ["image", "prune", "--force"] in commands
@@ -276,6 +278,8 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
         ["kamal", "prune", "images"],
     ]
     assert f'-c "$config"{" -d staging" if destination else ""}' in free_run
+    configs = shlex.split(free_run.split("for config in", 1)[1].split(";", 1)[0])
+    assert configs == [f"config/{name}" for name in KAMAL_CONFIGS if name != "deploy-worker.yml"]
     assert shlex.split(kamal_prunes[1].rstrip("\\")) == [
         "kamal",
         "prune",
@@ -332,6 +336,7 @@ def test_prune_step_tolerates_some_failures_but_not_all(
     )
     assert result.returncode == expected, result.stdout + result.stderr
     commands = len(calls.read_text().splitlines())
+    assert commands == 6
     if failing:
         tools = failing.split()
         failures = (commands - 1 if "kamal" in tools else 0) + ("ssh" in tools)
