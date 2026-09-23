@@ -27,6 +27,7 @@ class SourceConfig:
     # the rows they write ("rows"); OCS messages advance one session-detail
     # fetch at a time, so their progress is denominated in "sessions".
     progress_unit: str = "rows"
+    auxiliary_tables: dict[str, str] = field(default_factory=dict)
 
     @property
     def physical_table_name(self) -> str:
@@ -52,6 +53,28 @@ class RelationshipConfig:
     to_table: str
     to_column: str
     description: str = ""
+    relationship_type: str = "many_to_one"
+    additional_keys: list[tuple[str, str]] = field(default_factory=list)
+    require_unique_target: bool = False
+
+    def __post_init__(self):
+        if self.relationship_type not in {"many_to_one", "one_to_many", "one_to_one"}:
+            raise ValueError("Pipeline relationships require an explicit supported cardinality.")
+        if self.require_unique_target and self.relationship_type == "one_to_many":
+            raise ValueError("A one-to-many relationship cannot require a unique target key.")
+        if any(
+            not isinstance(pair, (list, tuple))
+            or len(pair) != 2
+            or not all(isinstance(column, str) and column for column in pair)
+            for pair in self.additional_keys
+        ):
+            raise ValueError(
+                "Relationship additional_keys must contain source/target column pairs."
+            )
+
+    @property
+    def key_pairs(self) -> list[tuple[str, str]]:
+        return [(self.from_column, self.to_column), *self.additional_keys]
 
 
 @dataclass
@@ -143,6 +166,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
             table_name=s.get("table_name", ""),
             resumable=s.get("resumable", True),
             progress_unit=s.get("progress_unit", "rows"),
+            auxiliary_tables=s.get("auxiliary_tables", {}),
         )
         for s in data.get("sources", [])
     ]
@@ -167,6 +191,9 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
             to_table=r["to_table"],
             to_column=r["to_column"],
             description=r.get("description", ""),
+            relationship_type=r.get("relationship_type", "many_to_one"),
+            additional_keys=r.get("additional_keys", []),
+            require_unique_target=r.get("require_unique_target", False),
         )
         for r in rel_raw
     ]

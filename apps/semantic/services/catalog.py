@@ -68,6 +68,7 @@ class PhysicalTable:
     materialized_at: str | None = None
     primary_key: str = ""
     source_tenant_ids: tuple[str, ...] = ()
+    source_table_name: str = ""
 
 
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_]+")
@@ -299,6 +300,13 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                     if sources is not None
                     else SchemaManager().tenant_ids_for_view(table_name, tenants)
                 ),
+                source_table_name=(
+                    table_name
+                    if ts is not None
+                    else sources[table_name].source_table_name
+                    if sources is not None
+                    else ""
+                ),
             )
         )
     return schema_name, physical_tables
@@ -409,6 +417,11 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                         "materialized_at": table.materialized_at,
                         "row_count_verified": False,
                         **(
+                            {"source_table_name": table.source_table_name}
+                            if table.source_table_name
+                            else {}
+                        ),
+                        **(
                             {"source_tenant_ids": list(table.source_tenant_ids)}
                             if table.source_tenant_ids
                             else {}
@@ -430,7 +443,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         ).exclude(id__in=existing_physical_dataset_ids).update(is_visible=False)
 
         diagnostics = _sync_custom_datasets(model, workspace, schema_name)
-        _sync_relationships(model, workspace)
+        diagnostics.extend(_sync_relationships(model, workspace))
         model.status = SemanticModel.Status.ACTIVE
         model.diagnostics = diagnostics
         model.save(update_fields=["status", "diagnostics", "updated_at"])
@@ -566,6 +579,25 @@ def _relationship_endpoints(rel, datasets_by_table: dict[str, list[SemanticDatas
     views (``<prefix>__<table>``) prefix-for-prefix so tenant A's visits only
     join tenant A's users.
     """
+    scoped: dict[tuple[str, str], list[SemanticDataset]] = {}
+    legacy: dict[str, list[SemanticDataset]] = {}
+    for table_name, datasets in datasets_by_table.items():
+        for dataset in datasets:
+            metadata = dataset.metadata or {}
+            if "source_table_name" in metadata:
+                owners = metadata.get("source_tenant_ids", [])
+                if len(owners) == 1:
+                    scoped.setdefault((owners[0], metadata["source_table_name"]), []).append(
+                        dataset
+                    )
+            else:
+                legacy.setdefault(table_name, []).append(dataset)
+    for (owner, source_table), from_datasets in scoped.items():
+        if source_table == rel.from_table:
+            for from_dataset in from_datasets:
+                for to_dataset in scoped.get((owner, rel.to_table), []):
+                    yield from_dataset, to_dataset
+    datasets_by_table = legacy
     for from_dataset in datasets_by_table.get(rel.from_table, []):
         for to_dataset in datasets_by_table.get(rel.to_table, []):
             yield from_dataset, to_dataset
@@ -579,7 +611,7 @@ def _relationship_endpoints(rel, datasets_by_table: dict[str, list[SemanticDatas
                 yield from_dataset, to_dataset
 
 
-def _sync_relationships(model: SemanticModel, workspace) -> None:
+def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]:
     """Derive dataset relationships from the pipelines' declared table links.
 
     Pipeline YAMLs declare physical foreign-key-ish links (from_table/from_column
@@ -608,31 +640,74 @@ def _sync_relationships(model: SemanticModel, workspace) -> None:
         )
 
     active_names: set[str] = set()
+    diagnostics = []
     for pipeline in get_registry().list():
         for rel in pipeline.relationships:
             for from_dataset, to_dataset in _relationship_endpoints(rel, datasets_by_table):
-                from_field = visible_field(from_dataset, rel.from_column)
-                to_field = visible_field(to_dataset, rel.to_column)
-                if from_field is None or to_field is None:
+                pairs = [
+                    (visible_field(from_dataset, source), visible_field(to_dataset, target))
+                    for source, target in rel.key_pairs
+                ]
+                if any(source is None or target is None for source, target in pairs):
                     continue
                 name = semantic_name(f"{from_dataset.name}_{rel.from_column}_to_{to_dataset.name}")
-                relationship_type = (
-                    SemanticRelationship.RelationshipType.ONE_TO_ONE
-                    if rel.from_column == from_dataset.primary_key
-                    else SemanticRelationship.RelationshipType.MANY_TO_ONE
-                )
+                if any(
+                    not _relationship_key_type(source.data_type)
+                    or _relationship_key_type(source.data_type)
+                    != _relationship_key_type(target.data_type)
+                    or (source.metadata or {}).get("cube_sql")
+                    or (target.metadata or {}).get("cube_sql")
+                    for source, target in pairs
+                ):
+                    diagnostics.append(
+                        {
+                            "severity": "warning",
+                            "code": "relationship_key_type",
+                            "message": f"Relationship '{name}' requires compatible scalar keys; arrays/objects require a bridge.",
+                        }
+                    )
+                    continue
+                predicates = [
+                    f"{{{from_dataset.name}.{source.name}}} = {{{to_dataset.name}.{target.name}}}"
+                    for source, target in pairs
+                ]
+                if rel.require_unique_target:
+                    # An incomplete API identity is useful only when it resolves to one row.
+                    columns = ", ".join(
+                        _quoted_identifier(target.expression) for _, target in pairs
+                    )
+                    members = ", ".join(
+                        f"{{{to_dataset.name}.{target.name}}}" for _, target in pairs
+                    )
+                    predicates.append(
+                        f"({members}) IN (SELECT {columns} FROM {_quoted_identifier(to_dataset.table_name)} "  # noqa: S608
+                        f"GROUP BY {columns} HAVING COUNT(*) = 1)"
+                    )
+                    predicates.extend(
+                        f"{{{from_dataset.name}.{source.name}}} <> ''"
+                        for source, _ in pairs
+                        if _relationship_key_type(source.data_type) == "string"
+                    )
+                existing = SemanticRelationship.objects.filter(
+                    workspace=workspace, name=name
+                ).first()
+                if existing is not None and not (existing.metadata or {}).get("generated"):
+                    continue
                 SemanticRelationship.objects.update_or_create(
                     workspace=workspace,
                     name=name,
                     defaults={
                         "from_dataset": from_dataset,
                         "to_dataset": to_dataset,
-                        "relationship_type": relationship_type,
-                        "join_expression": (
-                            f"{{{from_dataset.name}.{from_field.name}}} = "
-                            f"{{{to_dataset.name}.{to_field.name}}}"
-                        ),
-                        "metadata": {"generated": True, "description": rel.description},
+                        "relationship_type": rel.relationship_type,
+                        "join_expression": " AND ".join(predicates),
+                        "metadata": {
+                            "generated": True,
+                            "description": rel.description,
+                            "key_pairs": rel.key_pairs,
+                            "key_scope": "source_tenant",
+                            "require_unique_target": rel.require_unique_target,
+                        },
                     },
                 )
                 active_names.add(name)
@@ -641,6 +716,24 @@ def _sync_relationships(model: SemanticModel, workspace) -> None:
         workspace=workspace,
         metadata__generated=True,
     ).exclude(name__in=active_names).delete()
+    return diagnostics
+
+
+def _quoted_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _relationship_key_type(data_type: str) -> str | None:
+    value = data_type.lower()
+    if value in _NUMERIC_TYPES:
+        return "number"
+    if value in {"text", "character varying", "varchar", "character", "char", "uuid"}:
+        return "uuid" if value == "uuid" else "string"
+    if value in {"boolean", "bool"}:
+        return "boolean"
+    if value in {"date", "timestamp without time zone", "timestamp with time zone"}:
+        return value
+    return None
 
 
 def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annotation) -> None:

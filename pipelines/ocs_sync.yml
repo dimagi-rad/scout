@@ -27,14 +27,18 @@ relationships:
     from_column: experiment_id
     to_table: raw_experiments
     to_column: experiment_id
+    relationship_type: many_to_one
     description: "Sessions belong to a chatbot"
   - from_table: raw_messages
     from_column: session_id
     to_table: raw_sessions
     to_column: session_id
+    relationship_type: many_to_one
     description: "Messages belong to a session"
   - from_table: raw_sessions
     from_column: participant_identifier
     to_table: raw_participants
     to_column: identifier
-    description: "Sessions reference the participant"
+    relationship_type: many_to_one
+    require_unique_target: true
+    description: "Match only an unambiguous participant in this chatbot. The session API omits participant ID/platform; duplicate identifiers across platforms remain unmatched, never guessed."
