@@ -12,6 +12,8 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion"
+import { READ_ONLY_HINT, writeErrorMessage } from "@/hooks/useWorkspaceRole"
+import { cn } from "@/lib/utils"
 import type { Recipe, RecipeRun } from "@/store/recipeSlice"
 
 interface RecipeDetailProps {
@@ -25,6 +27,7 @@ interface RecipeDetailProps {
     data: { is_shared?: boolean; is_public?: boolean },
   ) => Promise<void>
   onViewRun: (runId: string) => void
+  canWrite?: boolean
 }
 
 const variableTypeBadgeStyles: Record<string, string> = {
@@ -62,26 +65,65 @@ function getStatusIcon(status: RecipeRun["status"]) {
   }
 }
 
-export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun, onViewRun }: RecipeDetailProps) {
+export function RecipeDetail({
+  recipe,
+  runs,
+  onBack,
+  onSave,
+  onRun,
+  onUpdateRun,
+  onViewRun,
+  canWrite = true,
+}: RecipeDetailProps) {
   const [name, setName] = useState(recipe.name)
   const [description, setDescription] = useState(recipe.description)
   const [prompt, setPrompt] = useState(recipe.prompt || "")
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
+  const [writeError, setWriteError] = useState<string | null>(null)
+  const [runShareError, setRunShareError] = useState<{ runId: string; message: string } | null>(
+    null,
+  )
 
   useEffect(() => {
     setName(recipe.name)
     setDescription(recipe.description)
     setPrompt(recipe.prompt || "")
     setHasChanges(false)
+    setWriteError(null)
+    setRunShareError(null)
   }, [recipe])
+
+  const reportWriteError = useCallback(
+    (error: unknown) => {
+      setWriteError(writeErrorMessage(error, "Couldn’t save this change. Try again.", canWrite))
+    },
+    [canWrite],
+  )
 
   const handleSharingChange = useCallback(
     async (field: "is_shared" | "is_public", value: boolean) => {
-      await onSave({ [field]: value })
+      setWriteError(null)
+      try {
+        await onSave({ [field]: value })
+      } catch (error) {
+        reportWriteError(error)
+      }
     },
-    [onSave],
+    [onSave, reportWriteError],
   )
+
+  const handleRunSharingChange = async (runId: string, value: boolean) => {
+    setRunShareError(null)
+    try {
+      await onUpdateRun(runId, { is_shared: value })
+    } catch (error) {
+      setRunShareError({
+        runId,
+        message: writeErrorMessage(error, "Couldn’t update sharing. Try again.", canWrite),
+      })
+    }
+  }
 
   const handleNameChange = (value: string) => {
     setName(value)
@@ -100,6 +142,7 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
 
   const handleSave = async () => {
     setSaving(true)
+    setWriteError(null)
     try {
       await onSave({
         name,
@@ -107,6 +150,8 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         prompt,
       })
       setHasChanges(false)
+    } catch (error) {
+      reportWriteError(error)
     } finally {
       setSaving(false)
     }
@@ -128,20 +173,39 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={onRun}>
+          <Button variant="outline" onClick={onRun} data-testid="recipe-detail-run">
             <Play className="mr-1 h-4 w-4" />
             Run
           </Button>
-          <Button onClick={handleSave} disabled={saving || !hasChanges}>
-            {saving ? (
-              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-            ) : (
-              <Save className="mr-1 h-4 w-4" />
-            )}
-            Save
-          </Button>
+          {canWrite ? (
+            <Button
+              onClick={handleSave}
+              disabled={saving || !hasChanges}
+              data-testid="recipe-save"
+            >
+              {saving ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Save className="mr-1 h-4 w-4" />
+              )}
+              Save
+            </Button>
+          ) : (
+            <span
+              className="text-sm text-muted-foreground"
+              data-testid="recipe-readonly-hint"
+            >
+              {READ_ONLY_HINT}
+            </span>
+          )}
         </div>
       </div>
+
+      {writeError && (
+        <p className="text-sm text-destructive" role="alert" data-testid="recipe-write-error">
+          {writeError}
+        </p>
+      )}
 
       <Card>
         <CardHeader>
@@ -155,6 +219,7 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
               value={name}
               onChange={(e) => handleNameChange(e.target.value)}
               placeholder="Recipe name"
+              readOnly={!canWrite}
             />
           </div>
           <div className="space-y-2">
@@ -165,6 +230,7 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
               onChange={(e) => handleDescriptionChange(e.target.value)}
               placeholder="What does this recipe do?"
               rows={2}
+              readOnly={!canWrite}
             />
           </div>
         </CardContent>
@@ -181,6 +247,7 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
             placeholder="Enter the prompt template. Use {{variable_name}} for variable placeholders."
             rows={8}
             className="font-mono text-sm"
+            readOnly={!canWrite}
             data-testid="recipe-prompt-editor"
           />
           <p className="mt-2 text-xs text-muted-foreground">
@@ -195,13 +262,15 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         </CardHeader>
         <CardContent className="space-y-4">
           <label
-            className="flex items-start gap-3 cursor-pointer"
+            className={cn("flex items-start gap-3", canWrite && "cursor-pointer")}
+            title={canWrite ? undefined : READ_ONLY_HINT}
             data-testid="recipe-sharing-project"
           >
             <input
               type="checkbox"
               checked={recipe.is_shared}
               onChange={(e) => handleSharingChange("is_shared", e.target.checked)}
+              disabled={!canWrite}
               className="mt-0.5 h-4 w-4 rounded border-gray-300"
             />
             <div className="flex-1">
@@ -322,18 +391,35 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
                         </button>
 
                         <div className="flex items-center gap-4 border-t pt-2">
-                          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                          <label
+                            className={cn(
+                              "flex items-center gap-1.5 text-xs",
+                              canWrite && "cursor-pointer",
+                            )}
+                            title={canWrite ? undefined : READ_ONLY_HINT}
+                          >
                             <input
                               type="checkbox"
                               checked={run.is_shared}
                               onChange={(e) =>
-                                onUpdateRun(run.id, { is_shared: e.target.checked })
+                                void handleRunSharingChange(run.id, e.target.checked)
                               }
+                              disabled={!canWrite}
                               className="h-3.5 w-3.5 rounded border-gray-300"
+                              data-testid={`recipe-run-share-${run.id}`}
                             />
                             <Users className="h-3 w-3 text-muted-foreground" />
                             <span className="text-muted-foreground">Project</span>
                           </label>
+                          {runShareError?.runId === run.id && (
+                            <p
+                              className="text-xs text-destructive"
+                              role="alert"
+                              data-testid={`recipe-run-share-error-${run.id}`}
+                            >
+                              {runShareError.message}
+                            </p>
+                          )}
                         </div>
                       </div>
                     ))}
