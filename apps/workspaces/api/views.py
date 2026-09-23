@@ -34,6 +34,7 @@ from apps.workspaces.services.schema_manager import SchemaManager, get_managed_d
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from apps.workspaces.tasks import (
     JOB_RETENTION_HOURS,
+    drop_failed_refresh_schema,
     refresh_tenant_schema,
 )
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
@@ -506,6 +507,8 @@ class RefreshSchemaView(APIView):
                 legacy_jobs,
                 pruned_before=timezone.now() - timedelta(hours=JOB_RETENTION_HOURS),
             )
+            for settled_id in legacy.settled_schema_ids:
+                drop_failed_refresh_schema.defer(schema_id=str(settled_id))
             if legacy.recovery_needed:
                 return Response(
                     {

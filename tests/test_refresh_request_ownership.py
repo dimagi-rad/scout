@@ -38,7 +38,7 @@ from apps.workspaces.services.refresh_requests import (
     reconcile_legacy_refresh_candidates,
     refresh_task_args,
 )
-from apps.workspaces.tasks import refresh_tenant_schema
+from apps.workspaces.tasks import drop_failed_refresh_schema, refresh_tenant_schema
 
 JOB_RETENTION = timedelta(hours=24 * 7)
 
@@ -533,6 +533,13 @@ def manage_client(user):
     return client
 
 
+@pytest.fixture
+def queued_schema_drops():
+    # procrastinate_jobs is unmanaged, so a real defer would outlive the test.
+    with patch("apps.workspaces.api.views.drop_failed_refresh_schema.defer") as drop:
+        yield drop
+
+
 def _run_refresh(job_id, args):
     return async_to_sync(refresh_tenant_schema.func)(
         context=SimpleNamespace(job=SimpleNamespace(id=job_id)), **args
@@ -659,9 +666,59 @@ def test_pipeline_failure_cleanup_cannot_drop_candidate_that_became_active(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_settled_candidate_is_retryable(
-    manage_client, workspace, tenant, tenant_membership, refresh_job
+@pytest.mark.parametrize(
+    ("taken_to", "dropped"), [(SchemaState.FAILED, True), (SchemaState.ACTIVE, False)]
+)
+def test_lost_activation_drops_the_loaded_schema_only_if_it_was_failed(
+    workspace, tenant, tenant_membership, refresh_job, taken_to, dropped
 ):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    def load_then_lose_ownership(*_args, **_kwargs):
+        TenantSchema.objects.filter(id=candidate.id).update(state=taken_to)
+
+    with (
+        patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            return_value={"type": "api_key", "value": "token"},
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
+        patch("apps.workspaces.tasks.run_pipeline", side_effect=load_then_lose_ownership),
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+    ):
+        result = _run_refresh(job_id, args)
+
+    candidate.refresh_from_db()
+    assert result == {"status": "ignored"}
+    assert candidate.state == taken_to
+    assert [call.args[0].id for call in teardown.call_args_list] == (
+        [candidate.id] if dropped else []
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("state", "dropped"),
+    [(SchemaState.FAILED, True), (SchemaState.ACTIVE, False), (SchemaState.PROVISIONING, False)],
+)
+def test_failed_refresh_drop_only_touches_failed_rows(tenant, state, dropped):
+    schema = TenantSchema.objects.create(tenant=tenant, schema_name="dropped_r1", state=state)
+
+    with patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown:
+        async_to_sync(drop_failed_refresh_schema.func)(schema_id=str(schema.id))
+
+    assert teardown.called is dropped
+    schema.refresh_from_db()
+    assert schema.state == state
+
+
+@pytest.mark.django_db(transaction=True)
+def test_settled_candidate_is_retryable_and_its_schema_drop_queued(
+    manage_client, workspace, tenant, tenant_membership, refresh_job, queued_schema_drops
+):
+    # The worker may have died after CREATE SCHEMA or mid-load; nothing else ever
+    # sweeps FAILED rows, so settling one must also queue its physical drop.
     candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     _set_job(job_id, status="failed")
 
@@ -671,11 +728,12 @@ def test_settled_candidate_is_retryable(
     assert response.status_code == 202
     assert candidate.state == SchemaState.FAILED
     assert TenantSchema.objects.get(id=response.data["schema_id"]).refresh_job_id == 987657
+    queued_schema_drops.assert_called_once_with(schema_id=str(candidate.id))
 
 
 @pytest.mark.django_db(transaction=True)
 def test_candidate_whose_job_was_pruned_does_not_lock_out_refresh(
-    manage_client, workspace, tenant, tenant_membership, refresh_job
+    manage_client, workspace, tenant, tenant_membership, refresh_job, queued_schema_drops
 ):
     candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     _delete_job(job_id)
@@ -691,7 +749,7 @@ def test_candidate_whose_job_was_pruned_does_not_lock_out_refresh(
 
 @pytest.mark.django_db(transaction=True)
 def test_in_flight_candidate_answers_already_in_progress(
-    manage_client, workspace, tenant, tenant_membership, refresh_job
+    manage_client, workspace, tenant, tenant_membership, refresh_job, queued_schema_drops
 ):
     _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
 
@@ -704,7 +762,7 @@ def test_in_flight_candidate_answers_already_in_progress(
 
 @pytest.mark.django_db(transaction=True)
 def test_initial_provision_row_answers_already_in_progress(
-    manage_client, workspace, tenant, tenant_membership
+    manage_client, workspace, tenant, tenant_membership, queued_schema_drops
 ):
     TenantSchema.objects.create(
         tenant=tenant,
@@ -721,7 +779,7 @@ def test_initial_provision_row_answers_already_in_progress(
 
 @pytest.mark.django_db(transaction=True)
 def test_unverifiable_candidate_requires_operator_recovery(
-    manage_client, workspace, tenant, tenant_membership, refresh_job
+    manage_client, workspace, tenant, tenant_membership, refresh_job, queued_schema_drops
 ):
     candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     _set_job(job_id, args={"schema_id": str(candidate.id)})
@@ -738,7 +796,7 @@ def test_unverifiable_candidate_requires_operator_recovery(
 
 @pytest.mark.django_db(transaction=True)
 def test_legacy_job_search_runs_before_the_tenant_lock(
-    manage_client, workspace, tenant, tenant_membership, refresh_job
+    manage_client, workspace, tenant, tenant_membership, refresh_job, queued_schema_drops
 ):
     legacy = TenantSchema.objects.create(
         tenant=tenant, schema_name="legacy_lock_order", state=SchemaState.PROVISIONING
