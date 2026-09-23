@@ -77,7 +77,10 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     # Check each resolved period independently; combining both key sets would
     # let a valid current result hide a broken previous-period result.
     key_warnings = _key_contract_warnings(
-        [{"key": entry["name"], "result_keys": expected_result_keys(entry)} for entry in entries],
+        [
+            {"key": entry["name"], "result_keys": sorted(expected_result_keys(entry))}
+            for entry in entries
+        ],
         actual_keys,
     )
     ok_count = sum(1 for item in query_results if item["status"] == "ok")

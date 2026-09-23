@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { comparisonPeriod, previousPeriod, resolvePresetRange } from "./runtime"
+import type { DateContext } from "./types"
 
 describe("deterministic calendar dates", () => {
   it("does not convert a calendar date to the previous UTC day in positive-offset browsers", () => {
@@ -15,5 +16,15 @@ describe("deterministic calendar dates", () => {
   it("keeps adjacent comparison windows across DST and clamps leap days", () => {
     expect(previousPeriod({ start: "2026-03-03", end: "2026-03-09" })).toEqual({ start: "2026-02-24", end: "2026-03-02", preset: "previous_period" })
     expect(comparisonPeriod({ start: "2024-02-29", end: "2024-03-02" }, "previous_year")).toEqual({ start: "2023-02-28", end: "2023-03-02", preset: "previous_year" })
+  })
+  it("calculates missing comparison metadata from the selected bounds", () => {
+    const range = { start: "2026-03-03", end: "2026-03-09", preset: "last_7_days" }
+    const context: DateContext = {
+      as_of: "2026-03-09T12:00:00Z", timezone: "UTC", today: "2026-03-09",
+      presets: { last_7_days: { ...range, comparisons: {} } },
+    }
+    expect(comparisonPeriod(range, "previous_period", context)).toEqual({
+      start: "2026-02-24", end: "2026-03-02", preset: "previous_period",
+    })
   })
 })

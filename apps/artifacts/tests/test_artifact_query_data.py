@@ -512,3 +512,29 @@ async def test_narrative_document_preserves_explicit_stored_queries(
     assert response.status_code == 200
     assert [query["name"] for query in response.json()["queries"]] == ["submissions", "daily"]
     assert run.await_count == 2
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body,status", [(b"", 200), (b"{", 400), (b"\xff", 400)])
+async def test_inspector_validates_json_separately_from_dates(
+    live_artifact, member_client, workspace, body, status
+):
+    live_artifact.data = {"story_doc": story()}
+    await live_artifact.asave(update_fields=["data"])
+    await cache.aclear()
+    with patch(
+        "apps.artifacts.views.run_semantic_query",
+        new=AsyncMock(return_value=MOCK_SUBMISSIONS_RESULT),
+    ) as run:
+        response = await member_client.post(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
+            body,
+            content_type="application/json",
+        )
+    assert response.status_code == status
+    if status == 400:
+        assert response.json()["error"] == "Request body must be valid UTF-8 JSON."
+        run.assert_not_awaited()
+    else:
+        run.assert_awaited_once()

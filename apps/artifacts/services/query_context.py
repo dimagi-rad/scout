@@ -27,8 +27,8 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
             not isinstance(block, dict)
             or not isinstance(block.get("id"), str)
             or not isinstance(block.get("type"), str)
-            or not isinstance(block.get("config") or {}, dict)
-            or not isinstance(block.get("inputs") or {}, dict)
+            or (block.get("config") is not None and not isinstance(block.get("config"), dict))
+            or (block.get("inputs") is not None and not isinstance(block.get("inputs"), dict))
         ):
             raise DateContextError(
                 f"Invalid artifact block at index {index}; date bindings cannot be resolved."
@@ -67,10 +67,13 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
             )
 
     def bound(block, port):
-        binding = (block.get("inputs") or {}).get(port)
-        if binding is None:
+        inputs = block.get("inputs") or {}
+        if port not in inputs:
             return None
+        binding = inputs[port]
         if not isinstance(binding, dict):
+            raise DateContextError(f"Invalid {port} binding.")
+        if ("$ref" in binding) == ("value" in binding):
             raise DateContextError(f"Invalid {port} binding.")
         if "$ref" in binding:
             if not isinstance(binding["$ref"], str) or binding["$ref"] not in sources:
@@ -97,7 +100,7 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
                 )
         else:
             value = bound(block, "date_range")
-            if value is not None:
+            if "date_range" in (block.get("inputs") or {}):
                 query["date_range"] = value
             queries.append({"name": entry["query_key"], **resolve_query_dates(query, context)})
     return queries, context

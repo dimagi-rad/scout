@@ -112,13 +112,19 @@ export class StoryEngine implements StoryEngineApi {
       }
 
       if (node.spec.initialOutputs) {
-        const values = node.spec.initialOutputs(node.block.config ?? {})
-        for (const port of node.ports.outputs) {
-          this.outputs.set(outputKey(node.id, port.name), {
-            status: "ready",
-            value: values[port.name],
-            epoch: 1,
-          })
+        try {
+          const values = node.spec.initialOutputs(node.block.config ?? {})
+          for (const port of node.ports.outputs) {
+            this.outputs.set(outputKey(node.id, port.name), {
+              status: "ready",
+              value: values[port.name],
+              epoch: 1,
+            })
+          }
+        } catch (error) {
+          node.configError = `Invalid config: ${message(error)}`
+          this.diagnostics.push({ severity: "error", blockId: node.id, message: node.configError })
+          this.publishStatusAll(node, "error", node.configError)
         }
       }
     }

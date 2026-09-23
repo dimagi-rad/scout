@@ -33,19 +33,17 @@ def query_context(value=None) -> dict:
         zone = ZoneInfo(zone_name)
     except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
         raise DateContextError("Use a valid IANA timezone in query_context.timezone.") from exc
-    instant = value.get("as_of")
-    try:
-        now = (
-            datetime.fromisoformat(instant.replace("Z", "+00:00"))
-            if "as_of" in value
-            else timezone.now()
-        )
+    if "as_of" in value:
+        try:
+            now = datetime.fromisoformat(value["as_of"].replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise DateContextError(
+                "query_context.as_of must be an ISO timestamp with a timezone."
+            ) from exc
         if now.tzinfo is None:
-            raise ValueError("offset required")
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise DateContextError(
-            "query_context.as_of must be an ISO timestamp with a timezone."
-        ) from exc
+            raise DateContextError("query_context.as_of must be an ISO timestamp with a timezone.")
+    else:
+        now = timezone.now()
     try:
         return {
             "as_of": now.isoformat(),

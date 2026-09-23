@@ -89,8 +89,9 @@ export function normalizeComparisonPreset(value: unknown): ComparisonPreset {
 
 export function comparisonPeriod(range: DateRange, preset: ComparisonPreset, context?: DateContext): DateRange {
   const resolved = range.preset && context?.presets[range.preset]
-  if (resolved && resolved.start === range.start && resolved.end === range.end) {
-    return { ...resolved.comparisons[preset], preset }
+  const comparison = resolved && resolved.comparisons?.[preset]
+  if (resolved && comparison && resolved.start === range.start && resolved.end === range.end) {
+    return { ...comparison, preset }
   }
   if (preset === "previous_period") return previousPeriod(range)
 

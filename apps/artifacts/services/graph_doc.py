@@ -501,7 +501,7 @@ def collect_query_specs(doc: Any) -> list[dict[str, Any]]:
                                 "block_id": block_id,
                                 "block_type": block_type,
                                 "path": f"blocks.{block_id}.config.queries.{name}",
-                                "date_range_bound": _has_input_ref(block, "date_range"),
+                                "date_range_bound": _has_input_binding(block, "date_range"),
                                 "compare_bound": bool(config.get("compare")),
                             }
                         )
@@ -515,7 +515,7 @@ def collect_query_specs(doc: Any) -> list[dict[str, Any]]:
                     "block_id": block_id,
                     "block_type": block_type,
                     "path": f"blocks.{block_id}.config.query",
-                    "date_range_bound": _has_input_ref(block, "date_range"),
+                    "date_range_bound": _has_input_binding(block, "date_range"),
                     "compare_bound": False,
                 }
             )
@@ -722,7 +722,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             )
         else:
-            require_time = bool(config.get("compare")) or _has_input_ref(block, "date_range")
+            require_time = bool(config.get("compare")) or _has_input_binding(block, "date_range")
             for name, query in queries.items():
                 diagnostics.extend(
                     query_diagnostics(
@@ -738,7 +738,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 config["query"],
                 block_id=block_id,
                 path="config.query",
-                require_time_dimension=_has_input_ref(block, "date_range"),
+                require_time_dimension=_has_input_binding(block, "date_range"),
             )
         )
     if block_type == "graph" and "recharts" in config:
@@ -1290,9 +1290,9 @@ def _string_list(value: Any) -> list[str] | None:
     return value
 
 
-def _has_input_ref(block: dict[str, Any], input_name: str) -> bool:
+def _has_input_binding(block: dict[str, Any], input_name: str) -> bool:
     binding = (block.get("inputs") or {}).get(input_name)
-    return isinstance(binding, dict) and "$ref" in binding
+    return isinstance(binding, dict) and ("$ref" in binding or "value" in binding)
 
 
 def _apply_op(doc: dict[str, Any], op: dict[str, Any]) -> None:

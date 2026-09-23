@@ -226,16 +226,18 @@ function dateDraftErrors(draft: DateFilterDraft) {
 function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
   const dateContext = useContext(ArtifactDateContext)
   const state = useOutput(engine, outputKey(block.id, "value"))
-  const value = asDateRange(state.value) ?? resolvePresetRange(stringValue(config.default), dateContext)
   const [draft, setDraft] = useState<DateFilterDraft | null>(null)
   const hintId = useId()
+  if (state.status !== "ready") return <DateControlStatus state={state} />
+  const value = asDateRange(state.value)
+  if (!value) return <DateControlStatus state={{ ...state, status: "error", error: "The date range is incomplete" }} />
   // Source outputs survive data refreshes. A genuinely new source value (for
   // example, a changed block config) supersedes a draft without remounting inputs.
   const pending = draft?.source === state.value ? draft : null
   const displayed = pending?.value ?? value
   const errors = pending ? dateDraftErrors(pending) : null
 
-  function editDate(field: "start" | "end", text: string, invalid: boolean) {
+  const editDate = (field: "start" | "end", text: string, invalid: boolean) => {
     const next: DateFilterDraft = {
       source: state.value,
       value: { ...displayed, [field]: text, preset: "custom" },
@@ -309,9 +311,12 @@ function PeriodSelectorComponent({ block, config, engine }: BlockComponentProps)
   const dateContext = useContext(ArtifactDateContext)
   const currentState = useOutput(engine, outputKey(block.id, "current"))
   const previousState = useOutput(engine, outputKey(block.id, "previous"))
-  const value = asDateRange(currentState.value) ?? resolvePresetRange(stringValue(config.default_range) ?? "last_30_days", dateContext)
+  if (currentState.status !== "ready") return <DateControlStatus state={currentState} />
+  if (previousState.status !== "ready") return <DateControlStatus state={previousState} />
+  const value = asDateRange(currentState.value)
+  const previous = asDateRange(previousState.value)
+  if (!value || !previous) return <DateControlStatus state={{ ...currentState, status: "error", error: "The comparison dates are incomplete" }} />
   const comparison = normalizeComparisonPreset(config.default_comparison)
-  const previous = asDateRange(previousState.value) ?? comparisonPeriod(value, comparison, dateContext)
   const comparisonLabel = COMPARISON_LABELS[comparison]
 
   return (
@@ -341,6 +346,17 @@ function PeriodSelectorComponent({ block, config, engine }: BlockComponentProps)
         </dl>
         {dateContext && <p className="text-sm text-muted-foreground">Reporting timezone: {dateContext.timezone}.</p>}
       </div>
+    </div>
+  )
+}
+
+function DateControlStatus({ state }: { state: OutputState }) {
+  if (state.status !== "error" && state.status !== "blocked") return null
+  return (
+    <div role="alert" data-testid="artifact-date-control-error" className="rounded-xl border border-border bg-card p-4 text-sm text-card-foreground">
+      <p className="font-medium">Date control needs updating</p>
+      <p className="mt-1 break-words text-muted-foreground">{state.error}</p>
+      <p className="mt-2">Ask Scout to set a supported date preset for this block. Queries using this control are paused.</p>
     </div>
   )
 }

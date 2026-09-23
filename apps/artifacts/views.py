@@ -965,7 +965,12 @@ class ArtifactQueryDataView(View):
         static_data = artifact.data or {}
 
         try:
-            runtime = json.loads(request.body) if request.method == "POST" else None
+            runtime = (
+                json.loads(request.body) if request.method == "POST" and request.body else None
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JsonResponse({"error": "Request body must be valid UTF-8 JSON."}, status=400)
+        try:
             doc = static_data.get("story_doc")
             if isinstance(doc, dict) and doc.get("blocks"):
                 queries, resolved_context = resolve_artifact_queries(doc, runtime)
@@ -973,7 +978,7 @@ class ArtifactQueryDataView(View):
                     queries = artifact.semantic_queries
             else:
                 queries, resolved_context = artifact.semantic_queries, None
-        except (DateContextError, json.JSONDecodeError) as exc:
+        except DateContextError as exc:
             logger.warning("Artifact %s date context rejected: %s", artifact.id, exc)
             return JsonResponse(
                 {

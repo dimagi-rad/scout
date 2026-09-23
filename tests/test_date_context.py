@@ -215,6 +215,32 @@ def test_malformed_saved_blocks_fail_validation(block):
         resolve_artifact_queries(doc, CONTEXT)
 
 
+@pytest.mark.parametrize("field", ["config", "inputs"])
+@pytest.mark.parametrize("value", [[], False, 0, ""])
+def test_falsy_malformed_block_fields_fail_closed(field, value):
+    doc = story()
+    doc["blocks"][1][field] = value
+    with pytest.raises(DateContextError, match="Invalid artifact block"):
+        resolve_artifact_queries(doc, CONTEXT)
+
+
+@pytest.mark.parametrize("binding", [None, {"value": None}, {"value": {}, "$ref": "range.value"}])
+def test_malformed_date_binding_is_not_an_all_time_query(binding):
+    doc = story()
+    doc["blocks"][1]["inputs"]["date_range"] = binding
+    with pytest.raises(DateContextError):
+        resolve_artifact_queries(doc, CONTEXT)
+
+
+def test_literal_date_binding_requires_a_time_dimension_at_write_time():
+    doc = story()
+    doc["blocks"][1]["inputs"]["date_range"] = {
+        "value": {"start": "2026-01-01", "end": "2026-03-31"}
+    }
+    doc["blocks"][1]["config"]["queries"]["sessions"].pop("time_dimension")
+    assert any(d["code"] == "query_window_without_time_dimension" for d in validate_doc(doc))
+
+
 @pytest.mark.asyncio
 async def test_chat_tool_forwards_date_intent(monkeypatch):
     workspace = object()
