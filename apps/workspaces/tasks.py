@@ -1408,9 +1408,13 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
 def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
     if access is not None and access.denied_reason == TENANT_ACCESS_LOST:
         projects = ", ".join(access.lost_tenant_names) or "this workspace's data sources"
+        # Both causes stay named: a lost membership can't tell a disconnect from
+        # upstream removal, and a different member may be reading this card.
         return (
-            f"The requesting user no longer has upstream access to: {projects}. "
-            f"Their {_CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]}"
+            f"The requesting user no longer has access to: {projects} through a connected "
+            "account. If they disconnected it, they should reconnect it in Settings → "
+            "Connections; if their access was removed in the provider, an admin there "
+            "must restore it."
         )
     return (
         "The requesting user no longer has a read-write or manage workspace role. "
