@@ -38,12 +38,18 @@ test('lookalike bot, other app, duplicate markers and malformed comments block',
   for (const value of [null, {}, [null], [{ body: marker(RECEIPT) }]]) blocked(input({ issueComments: value }));
   for (const value of [null, {}, [''], [null]]) blocked(input({ baselineIssueCommentIds: value }));
 });
+// Denials stay fatal even on a complete, receipted review (PR #487): PR498 reported
+// 0 findings after 25 denials, so a refused reviewer's clean verdict is not evidence.
 test('SDK permission denials are blocking and only safe tool names are returned', () => {
-  const denials = [{ tool_name: 'Bash', tool_input: 'SECRET' }, { tool_name: 'unsafe\nSECRET' }];
+  const denials = [{ tool_name: 'Bash', tool_input: { command: 'cat SECRET' } }, { tool_name: 'unsafe\nSECRET' }];
   const value = input(); value.sdkMessages[0].permission_denials = denials;
   const result = blocked(value);
   assert.deepEqual(result.deniedTools, ['Bash', 'unknown']);
   assert.equal(result.denialCount, 2); assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+  assert.equal(result.outcome, undefined);
+  assert.match(result.reason, /run log lists the denied calls/);
+  value.sdkMessages[0].permission_denials = denials.slice(0, 1);
+  assert.equal(blocked(value).denialCount, 1);
 });
 test('missing, malformed or unsuccessful SDK data blocks', () => {
   for (const sdkMessages of [undefined, null, {}, [], [{ type: 'assistant' }], [{ type: 'result', subtype: 'error', is_error: true }]]) blocked(input({ sdkMessages }));
@@ -101,18 +107,10 @@ test('denial diagnostics tolerate missing or malformed execution data', () => {
   }
   assert.deepEqual(describeDenials([{ type: 'result', permission_denials: [null] }]), ['Denied tool call 1: unknown']);
 });
-test('denial tool inputs never appear in the gate reason', () => {
-  const value = input();
-  value.sdkMessages[0].permission_denials = [{ tool_name: 'Bash', tool_input: { command: 'cat SECRET' } }];
-  const result = blocked(value);
-  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
-  assert.match(result.reason, /run log lists the denied calls/);
-});
-
-test('one denial blocks even a complete review with a valid receipt (PR #487 policy)', () => {
-  const value = input();
-  value.sdkMessages[0].permission_denials = [{ tool_name: 'Bash', tool_input: { command: 'git show HEAD:x | head' } }];
-  const result = blocked(value);
-  assert.equal(result.denialCount, 1);
-  assert.equal(result.outcome, undefined);
+test('denial diagnostics are capped so the annotation limit cannot hide the count', () => {
+  const denials = Array.from({ length: 13 }, () => ({ tool_name: 'Bash', tool_input: { command: 'x' } }));
+  const lines = describeDenials([{ type: 'result', permission_denials: denials }]);
+  assert.equal(lines.length, 11);
+  assert.equal(lines[9], 'Denied tool call 10: Bash command="x"');
+  assert.equal(lines[10], '...and 3 more denied tool call(s).');
 });

@@ -409,6 +409,7 @@ test("Claude reviewer tools are an exact read-only allowlist", () => {
     "utf8",
   );
   const lines = workflow.match(/--allowedTools "([^"]*)"/g);
+  assert.ok(lines, "ocr.yml must declare a double-quoted --allowedTools value");
   assert.equal(lines.length, 1);
   const tools = lines[0].slice('--allowedTools "'.length, -1).split(",");
   // git grep is excluded because -O/--open-files-in-pager runs an arbitrary
