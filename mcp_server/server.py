@@ -124,7 +124,7 @@ async def _authorize_read(workspace_id: str, user_id: str) -> None:
         raise _WorkspaceAccessDenied(access_denied_body(access)["error"])
 
 
-async def _resolve_mcp_context(workspace_id: str, user_id: str = ""):
+async def _resolve_mcp_context(workspace_id: str, *, user_id: str):
     """Load a QueryContext for the workspace the acting user may read."""
     if not workspace_id:
         raise ValueError("workspace_id is required")
@@ -172,7 +172,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
         "list_tables", workspace_id, user_id=user_id, thread_id=thread_id
     ) as tc:
         try:
-            ctx = await _resolve_mcp_context(workspace_id, user_id)
+            ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
             tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
             return tc["result"]
@@ -255,7 +255,7 @@ async def describe_table(
         "describe_table", workspace_id, user_id=user_id, thread_id=thread_id, table_name=table_name
     ) as tc:
         try:
-            ctx = await _resolve_mcp_context(workspace_id, user_id)
+            ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
             tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
             return tc["result"]
@@ -318,7 +318,7 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
         "get_metadata", workspace_id, user_id=user_id, thread_id=thread_id
     ) as tc:
         try:
-            ctx = await _resolve_mcp_context(workspace_id, user_id)
+            ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
             tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
             return tc["result"]
@@ -769,7 +769,7 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
         "query", workspace_id, user_id=user_id, thread_id=thread_id, sql=sql
     ) as tc:
         try:
-            ctx = await _resolve_mcp_context(workspace_id, user_id)
+            ctx = await _resolve_mcp_context(workspace_id, user_id=user_id)
         except _WorkspaceAccessDenied as e:
             tc["result"] = error_response(AUTH_ACCESS_DENIED, str(e))
             return tc["result"]
@@ -1610,7 +1610,8 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         if last_run and last_run.completed_at:
             last_materialized_at = last_run.completed_at.isoformat()
 
-        ctx = await _resolve_mcp_context(workspace_id)
+        # Authorized at the top of this tool; do not pay for the check twice.
+        ctx = await _resolve_mcp_context(workspace_id, user_id="")
         tables = await workspace_list_tables(ctx)
 
         # Source coverage of the ACTIVE view, not refresh completion or data freshness.
