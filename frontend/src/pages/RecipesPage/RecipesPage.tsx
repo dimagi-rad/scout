@@ -160,11 +160,7 @@ export function RecipesPage() {
     }
     if (!isCurrentAccount()) return
     setDeleteDialogRecipe(null)
-
-    if (id === deleteDialogRecipe.id) {
-      navigate("/recipes")
-    }
-  }, [deleteDialogRecipe, isDeleting, deleteRecipe, id, navigate, isCurrentAccount, canWrite])
+  }, [deleteDialogRecipe, isDeleting, deleteRecipe, isCurrentAccount, canWrite])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {
@@ -238,37 +234,6 @@ export function RecipesPage() {
           onRun={handleExecuteRun}
           onRunComplete={handleRunComplete}
         />
-
-        <AlertDialog
-          open={!!deleteDialogRecipe}
-          onOpenChange={() => !isDeleting && setDeleteDialogRecipe(null)}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete Recipe</AlertDialogTitle>
-              <AlertDialogDescription>
-                Are you sure you want to delete "{deleteDialogRecipe?.name}"? This
-                action cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            {deleteError && (
-              <p className="text-sm text-destructive" role="alert">
-                {deleteError}
-              </p>
-            )}
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <Button
-                variant="destructive"
-                onClick={handleConfirmDelete}
-                disabled={isDeleting}
-                data-testid="recipe-confirm-delete"
-              >
-                Delete
-              </Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
       </div>
     )
   }
@@ -312,7 +277,7 @@ export function RecipesPage() {
 
       <AlertDialog
         open={!!deleteDialogRecipe}
-        onOpenChange={() => !isDeleting && setDeleteDialogRecipe(null)}
+        onOpenChange={(open) => !open && !isDeleting && setDeleteDialogRecipe(null)}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -328,7 +293,7 @@ export function RecipesPage() {
             </p>
           )}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
             <Button
               variant="destructive"
               onClick={handleConfirmDelete}

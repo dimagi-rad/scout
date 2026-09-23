@@ -81,6 +81,9 @@ export function RecipeDetail({
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const [writeError, setWriteError] = useState<string | null>(null)
+  const [runShareError, setRunShareError] = useState<{ runId: string; message: string } | null>(
+    null,
+  )
 
   useEffect(() => {
     setName(recipe.name)
@@ -88,6 +91,7 @@ export function RecipeDetail({
     setPrompt(recipe.prompt || "")
     setHasChanges(false)
     setWriteError(null)
+    setRunShareError(null)
   }, [recipe])
 
   const reportWriteError = useCallback(
@@ -110,11 +114,14 @@ export function RecipeDetail({
   )
 
   const handleRunSharingChange = async (runId: string, value: boolean) => {
-    setWriteError(null)
+    setRunShareError(null)
     try {
       await onUpdateRun(runId, { is_shared: value })
     } catch (error) {
-      reportWriteError(error)
+      setRunShareError({
+        runId,
+        message: writeErrorMessage(error, "Couldn’t update sharing. Try again.", canWrite),
+      })
     }
   }
 
@@ -404,6 +411,15 @@ export function RecipeDetail({
                             <Users className="h-3 w-3 text-muted-foreground" />
                             <span className="text-muted-foreground">Project</span>
                           </label>
+                          {runShareError?.runId === run.id && (
+                            <p
+                              className="text-xs text-destructive"
+                              role="alert"
+                              data-testid={`recipe-run-share-error-${run.id}`}
+                            >
+                              {runShareError.message}
+                            </p>
+                          )}
                         </div>
                       </div>
                     ))}
