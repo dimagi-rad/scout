@@ -10,6 +10,7 @@ from django.db import transaction
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 
+from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import workspace_write_allowed
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant
@@ -200,10 +201,15 @@ def reconcile_legacy_refresh_candidates(tenant) -> LegacyRefreshReconciliation:
     recovery_needed = False
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant.id)
+        # provision() holds the tenant's base-named row in PROVISIONING during its
+        # CREATE SCHEMA; that row never has a refresh job, so demanding queue
+        # evidence for it would misreport an initial load as a broken refresh.
         candidates = list(
-            TenantSchema.objects.select_for_update().filter(
-                tenant=tenant,
-                state=SchemaState.PROVISIONING,
+            TenantSchema.objects.select_for_update()
+            .filter(tenant=tenant, state=SchemaState.PROVISIONING)
+            .exclude(
+                refresh_job_id__isnull=True,
+                schema_name=tenant_schema_name(tenant.provider, tenant.external_id),
             )
         )
         for candidate in candidates:

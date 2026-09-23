@@ -14,6 +14,7 @@ from procrastinate.contrib.django.models import ProcrastinateJob
 from rest_framework.test import APIClient
 
 from apps.common.error_codes import ErrorCode
+from apps.common.identifiers import tenant_schema_name
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
     SchemaState,
@@ -26,6 +27,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.refresh_requests import (
     REFRESH_TASK_NAME,
     claim_refresh_candidate,
+    reconcile_legacy_refresh_candidates,
     refresh_task_args,
 )
 from apps.workspaces.tasks import refresh_tenant_schema
@@ -575,3 +577,26 @@ def test_owned_request_for_unlinked_tenant_reports_unlinked_workspace(
     assert "role" not in result["error"].lower()
     assert candidate.state == SchemaState.FAILED
     create.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_initial_provision_row_is_not_treated_as_unverifiable_refresh(
+    manage_client, workspace, tenant, tenant_membership
+):
+    # SchemaManager.provision() holds its base-named row in PROVISIONING while it
+    # runs CREATE SCHEMA; no refresh job ever exists for it.
+    base = TenantSchema.objects.create(
+        tenant=tenant,
+        schema_name=tenant_schema_name(tenant.provider, tenant.external_id),
+        state=SchemaState.PROVISIONING,
+    )
+
+    assert reconcile_legacy_refresh_candidates(tenant).recovery_needed is False
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+        response = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    base.refresh_from_db()
+    assert response.status_code == 409
+    assert response.data == {"error": "A refresh is already in progress."}
+    assert base.state == SchemaState.PROVISIONING
+    defer.assert_not_called()
