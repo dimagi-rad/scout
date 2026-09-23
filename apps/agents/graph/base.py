@@ -231,7 +231,7 @@ def _system_prompt_cache_key(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
-    write_capable: bool = True,
+    write_capable: bool = False,
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
@@ -268,7 +268,7 @@ async def _semantic_catalog_context(workspace) -> str:
 
 
 async def _fetch_semantic_model_context(
-    workspace, interactive: bool = True, write_capable: bool = True
+    workspace, interactive: bool = True, write_capable: bool = False
 ) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
@@ -1112,7 +1112,7 @@ async def _build_system_prompt(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
-    write_capable: bool = True,
+    write_capable: bool = False,
 ) -> tuple[str, str]:
     """Assemble the workspace system prompt as a (stable, volatile) split.
 
