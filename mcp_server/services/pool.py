@@ -126,8 +126,9 @@ async def get_pool(params: dict[str, Any]) -> AsyncConnectionPool:
     if entry is not None and not entry.pool.closed:
         return entry.pool
 
-    # One deadline per caller, including the wait for the loop's open lock, so
-    # callers queued behind a saturated cap don't each add a full slot wait.
+    # One deadline per caller for the lock and slot waits, so callers queued
+    # behind a saturated cap don't each add a full slot wait (the pool's own
+    # open timeout still comes on top).
     deadline = time.monotonic() + _SLOT_WAIT_SECONDS
     lock = _open_lock(loop)
     try:
@@ -140,7 +141,9 @@ async def get_pool(params: dict[str, Any]) -> AsyncConnectionPool:
         lock.release()
 
 
-async def _get_or_open_pool(key: _PoolKey, params: dict[str, Any], deadline: float):
+async def _get_or_open_pool(
+    key: _PoolKey, params: dict[str, Any], deadline: float
+) -> AsyncConnectionPool:
     entry = _pools.get(key)
     if entry is not None:
         if not entry.pool.closed:
@@ -148,7 +151,12 @@ async def _get_or_open_pool(key: _PoolKey, params: dict[str, Any], deadline: flo
         # Never hand back a closed pool: that is what turned one failed
         # teardown into PoolClosed for the rest of the process.
         if _claim(key, entry):
-            await entry.lifetime.aclose()
+            try:
+                await entry.lifetime.aclose()
+            except Exception:
+                # The pool was already closed; failing its cleanup must not
+                # fail a request we can serve with a fresh pool.
+                logger.warning("Failed to finalise closed managed-DB pool %r", entry.pool.name)
 
     await _reserve_slot(deadline)
     try:
@@ -164,8 +172,7 @@ async def _get_or_open_pool(key: _PoolKey, params: dict[str, Any], deadline: flo
         await anext(lifetime)
     except BaseException:
         _release_slot()
-        with contextlib.suppress(Exception):
-            await _close_pool(pool)
+        await _close_quietly(pool, "after its shutdown hook failed to register")
         raise
     _commit_slot(key, _Entry(pool=pool, loop=key[1], lifetime=lifetime))
     logger.info("Opened managed-DB connection pool (max_size=%d)", _POOL_MAX_SIZE)
@@ -188,11 +195,17 @@ async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
     try:
         await pool.open(wait=True, timeout=10)
     except BaseException:
-        # Never let cleanup replace the reason the open failed.
-        with contextlib.suppress(Exception):
-            await _close_pool(pool)
+        await _close_quietly(pool, "after a failed open")
         raise
     return pool
+
+
+async def _close_quietly(pool: AsyncConnectionPool, context: str) -> None:
+    """Close without letting a cleanup error replace the one being raised."""
+    try:
+        await _close_pool(pool)
+    except Exception:
+        logger.warning("Failed to close managed-DB pool %r %s", pool.name, context, exc_info=True)
 
 
 async def _reserve_slot(deadline: float) -> None:
@@ -326,6 +339,10 @@ def release_pools_of_finished_loops() -> None:
     with _state_lock:
         # Claim under the lock so two threads never drive the same generator.
         dead = [_pools.pop(key) for key, entry in list(_pools.items()) if entry.loop.is_closed()]
+        # A contended asyncio.Lock binds to its loop, so its value pins the weak
+        # key forever; nothing can await on a closed loop, so drop its lock.
+        for loop in [loop for loop in list(_open_locks) if loop.is_closed()]:
+            _open_locks.pop(loop, None)
     for entry in dead:
         # Drive the generator's finally by hand; with the loop closed it never awaits.
         closer = entry.lifetime.aclose()
@@ -334,7 +351,8 @@ def release_pools_of_finished_loops() -> None:
         except StopIteration:
             pass
         except Exception:
-            # Already claimed: one bad entry must not strand the rest.
+            # We popped these, so nobody else will retry them: a raise here
+            # would strand every entry behind this one.
             logger.exception("Failed to release managed-DB pool %r", entry.pool.name)
         else:
             closer.close()
@@ -349,9 +367,12 @@ async def close_all_pools() -> None:
     """
     loop = asyncio.get_running_loop()
     release_pools_of_finished_loops()
-    with _state_lock:
-        # Claim under the lock, as the sweep does, so nothing drives these twice.
-        mine = [_pools.pop(key) for key in list(_pools) if key[1] is loop]
+    # Holding the loop's open lock means no open on this loop is mid-flight, so
+    # one can't commit a pool right after we snapshot.
+    async with _open_lock(loop):
+        with _state_lock:
+            # Claim under the lock, as the sweep does, so nothing drives these twice.
+            mine = [_pools.pop(key) for key in list(_pools) if key[1] is loop]
 
     # Isolate per-pool failures, or the first raising close would strand every
     # pool behind it — already evicted, so unreachable and leaked for the process.

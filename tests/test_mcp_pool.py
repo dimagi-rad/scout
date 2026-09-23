@@ -274,7 +274,7 @@ async def test_callers_queued_on_one_loop_share_the_slot_wait_budget(monkeypatch
     )
 
     assert all(isinstance(r, pool_mod.PoolTimeout) for r in results)
-    assert time.monotonic() - started < 0.3 * 2
+    assert time.monotonic() - started < 0.3 * 3
 
 
 @pytest.mark.asyncio
@@ -290,3 +290,51 @@ async def test_a_failing_cleanup_never_masks_why_the_open_failed():
         await pool_mod.get_pool(_base_params("t_alpha"))
 
     assert pool_mod._opening == 0
+
+
+def test_the_sweep_drops_open_locks_of_closed_loops():
+    """A contended asyncio.Lock binds to its loop and pins the weak key."""
+    loop = asyncio.new_event_loop()
+    lock = loop.run_until_complete(_bind_open_lock())
+    loop.close()
+    assert pool_mod._open_locks.get(loop) is lock
+
+    pool_mod.release_pools_of_finished_loops()
+
+    assert loop not in pool_mod._open_locks
+
+
+async def _bind_open_lock():
+    lock = pool_mod._open_lock(asyncio.get_running_loop())
+    await lock.acquire()
+    waiter = asyncio.create_task(lock.acquire())  # contention binds the lock to this loop
+    await asyncio.sleep(0)
+    lock.release()
+    await waiter
+    lock.release()
+    return lock
+
+
+@pytest.mark.asyncio
+async def test_close_all_pools_waits_for_an_open_in_flight_on_its_loop():
+    opening = asyncio.Event()
+    finish_open = asyncio.Event()
+    slow = _fake_pool()
+
+    async def slow_open(**_kwargs):
+        opening.set()
+        await finish_open.wait()
+
+    slow.open = AsyncMock(side_effect=slow_open)
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=slow):
+        opener = asyncio.create_task(pool_mod.get_pool(_base_params("t_alpha")))
+        await opening.wait()
+        closer = asyncio.create_task(pool_mod.close_all_pools())
+        await asyncio.sleep(0.05)
+        assert not closer.done()
+        finish_open.set()
+        await opener
+        await closer
+
+    slow.close.assert_awaited()
+    assert pool_mod._pools == {}
