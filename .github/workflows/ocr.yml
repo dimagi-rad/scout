@@ -132,8 +132,8 @@ jobs:
           llm_extra_body: '{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}'
           # OCR checks the token budget before each file group queues for a slot,
           # against a diff-size estimate, so the first review_concurrency + 1
-          # groups (3 here) always run however many tokens they burn; only later
-          # groups can be skipped. Size PRs by file groups, not lines: see
+          # groups always run however many tokens they burn; only later groups
+          # can be skipped. Size PRs by file groups, not lines: see
           # docs/development/automated-code-review.md ("How the token budget works").
           review_concurrency: '2'
           review_task_timeout: '15'
