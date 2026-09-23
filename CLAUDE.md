@@ -6,7 +6,7 @@ Self-hosted data agent platform for AI-powered database querying.
 
 ```bash
 # Backend
-docker compose up platform-db mcp-server  # Start dependencies
+docker compose up -d --build --wait platform-db cube  # PostgreSQL + Cube dependencies
 uv run python manage.py runserver         # Django dev server (or use uvicorn below)
 uv run uvicorn config.asgi:application --reload --port 8000 --lifespan off  # ASGI dev server
 uv run python manage.py migrate           # Run migrations
@@ -16,7 +16,8 @@ uv run python manage.py procrastinate worker  # Run background task worker
 cd frontend && bun install && bun dev     # Dev server on :5173
 cd frontend && bun run build              # Production build (runs tsc first)
 
-# All dev servers at once (Django :8000, MCP :8100, Vite :5173)
+# After starting Docker dependencies and applying migrations:
+# Django :8000, MCP :8100, worker, Vite :5173 (Cube stays in Docker :4000/:4010)
 uv run honcho -f Procfile.dev start
 
 # Full stack via Docker
@@ -36,6 +37,26 @@ uv run ruff format .                      # Python format
 # on staged files, so formatting never drifts into someone else's diff.
 uv run prek install
 ```
+
+### Local development setup (including returning developers)
+
+Keep your existing `.env`; compare it with `.env.example` and add missing settings.
+The host-run Django/MCP/worker processes need `CUBE_API_URL=http://localhost:4000`,
+`CUBE_VALIDATOR_URL=http://localhost:4010`, and a non-empty `CUBEJS_API_SECRET`.
+The Compose Cube service reads the same signing secret from `.env`; do not set
+different secrets for the host processes and Cube. If you override `CUBE_PORT`
+or `CUBE_VALIDATOR_PORT`, update the corresponding host URLs too.
+
+Start `platform-db` and `cube` using the dependency command above, run
+`uv run python manage.py migrate`, then start Honcho. `Procfile.dev` owns the
+host processes only; it does not launch or shut down those Docker services.
+Do not also launch the Compose API/MCP/frontend when using Honcho.
+
+The web process runs Django's system checks before starting. Missing Cube
+configuration produces `semantic.W001` with setup guidance; this is a local
+configuration check, not a network health check. Check Cube's runtime and
+validator separately with `curl --fail http://localhost:4000/readyz` and
+`curl --fail http://localhost:4010/readyz` (or your configured ports).
 
 ## Architecture
 
@@ -83,6 +104,7 @@ Required (see `.env.example`):
 - `ANTHROPIC_API_KEY` - Claude API key for LangGraph agent
 - `DB_CREDENTIAL_KEY` - Fernet key for encrypting project DB credentials
 - `DJANGO_SECRET_KEY` - Django secret key
+- `CUBE_API_URL`, `CUBE_VALIDATOR_URL`, `CUBEJS_API_SECRET` - Semantic runtime and validator (see local setup above)
 
 Optional:
 - `MCP_SERVER_URL` - MCP server URL (default: `http://localhost:8100/mcp`)

@@ -5,14 +5,14 @@ from invoke import Context, task
 
 @task
 def dev(c: Context) -> None:
-    """Start all dev servers (Django :8000, MCP :8100, Vite :5173) via honcho."""
+    """Start host dev processes via honcho; run inv deps and migrations first."""
     c.run("uv run honcho -f Procfile.dev start", pty=True)
 
 
 @task
 def deps(c: Context) -> None:
-    """Start Docker dependencies: platform-db and mcp-server."""
-    c.run("docker compose up platform-db mcp-server", pty=True)
+    """Start and wait for PostgreSQL + Cube; Honcho owns the MCP process."""
+    c.run("docker compose up -d --build --wait platform-db cube", pty=True)
 
 
 @task
