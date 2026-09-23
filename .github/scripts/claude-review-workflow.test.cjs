@@ -62,7 +62,7 @@ function harness() {
     setSecret: (value) => (h.secrets = (h.secrets || []).concat(value)),
     setOutput: (k, v) => (h.outputs[k] = v),
     info() {},
-    warning() {},
+    warning: (w) => (h.warnings = (h.warnings || []).concat(w)),
     setFailed: (r) => h.failures.push(r),
     summary: {
       addRaw(s) {
@@ -378,4 +378,27 @@ test("checkpoint write must be observed before claiming successful persistence",
   assert.notEqual(h.outputs.claude_verified, "true");
   assert.ok(h.failures.length);
   assert.doesNotMatch(h.summary, /Claude review: verified/);
+});
+
+test("denied tool calls are logged to the run but kept out of PR comments", async () => {
+  const h = await prepared();
+  reviewed(h);
+  h.files["/sdk.json"] = JSON.stringify([
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      permission_denials: [
+        { tool_name: "Bash", tool_input: { command: "git grep PRIVATE | head" } },
+      ],
+    },
+  ]);
+  await finishClaude(h);
+  assert.deepEqual(h.warnings, [
+    'Denied tool call 1: Bash command="git grep PRIVATE | head"',
+  ]);
+  assert.ok(h.failures.length);
+  assert.equal(readState(h.comments).claudeHead, null);
+  for (const c of h.comments) assert.doesNotMatch(c.body, /PRIVATE/);
+  assert.doesNotMatch(h.summary, /PRIVATE/);
 });

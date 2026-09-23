@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { evaluateClaudeReview } = require('./claude-review-gate.cjs');
+const { evaluateClaudeReview, describeDenials } = require('./claude-review-gate.cjs');
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40);
 const RECEIPT = { nonce: 'c'.repeat(64), repository: 'owner/repo', pr: 42, run: '123', attempt: '1', head: HEAD, base: BASE };
 const marker = receipt => `<!-- scout-claude-artifact:v1 ${JSON.stringify(receipt)} -->`;
@@ -78,4 +78,33 @@ test('quoting the generic marker prefix is not a second receipt artifact', () =>
   const c = comment();
   c.body = 'The generic prefix `<!-- scout-claude-artifact:` is validated.\n' + c.body;
   assert.equal(evaluateClaudeReview(input({ issueComments: [c] })).passed, true);
+});
+
+test('denial diagnostics name each call with truncated, printable input', () => {
+  const long = `git grep foo | head ${'x'.repeat(300)}`;
+  const lines = describeDenials([{ type: 'result', permission_denials: [
+    { tool_name: 'Bash', tool_input: { command: 'git grep -n foo\n::error::injected\u001b[31m' } },
+    { tool_name: 'Read', tool_input: { file_path: '/tmp/x.json' } },
+    { tool_name: 'Bash', tool_input: { command: long } },
+    { tool_name: 'bad\nname', tool_input: 'not an object' },
+  ] }]);
+  assert.equal(lines.length, 4);
+  assert.equal(lines[0], 'Denied tool call 1: Bash command="git grep -n foo?::error::injected?[31m"');
+  assert.equal(lines[1], 'Denied tool call 2: Read file_path="/tmp/x.json"');
+  assert.equal(lines[2], `Denied tool call 3: Bash command=${JSON.stringify(`${long.slice(0, 200)}...`)}`);
+  assert.equal(lines[3], 'Denied tool call 4: unknown');
+  for (const line of lines) assert.match(line, /^[\x20-\x7e]+$/);
+});
+test('denial diagnostics tolerate missing or malformed execution data', () => {
+  for (const value of [undefined, null, {}, [], [{ type: 'result' }], [{ type: 'result', permission_denials: 'x' }]]) {
+    assert.deepEqual(describeDenials(value), []);
+  }
+  assert.deepEqual(describeDenials([{ type: 'result', permission_denials: [null] }]), ['Denied tool call 1: unknown']);
+});
+test('denial tool inputs never appear in the gate reason', () => {
+  const value = input();
+  value.sdkMessages[0].permission_denials = [{ tool_name: 'Bash', tool_input: { command: 'cat SECRET' } }];
+  const result = blocked(value);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+  assert.match(result.reason, /run log lists the denied calls/);
 });
