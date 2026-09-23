@@ -60,6 +60,8 @@ class OutboundNetworkBlocked(RuntimeError):
     """Raised when a test tries to reach a non-local host."""
 
 
+# Read on every check: caching would freeze whatever a monkeypatching test had set
+# when the first request happened, and .env may only land once settings load.
 def _service_hosts() -> set[str]:
     hosts = set()
     for var in _SERVICE_URL_ENV_VARS:
@@ -84,7 +86,6 @@ def _is_loopback(host: str) -> bool:
 
 class _Guard:
     def __init__(self) -> None:
-        self._allowed_hosts: set[str] | None = None
         self.enabled = True
         self.violations: list[str] = []
         self._lock = threading.Lock()
@@ -96,17 +97,11 @@ class _Guard:
         host = (host or "").strip("[]").lower()
         return (
             not self.enabled
-            or host in self.allowed_hosts()
+            or host in _LOCAL_HOSTS
+            or host in _service_hosts()
             or host.endswith(".localhost")
             or _is_loopback(host)
         )
-
-    def allowed_hosts(self) -> set[str]:
-        # Lazy: .env lands in os.environ when Django settings load, which may be
-        # after this plugin configures.
-        if self._allowed_hosts is None:
-            self._allowed_hosts = set(_LOCAL_HOSTS) | _service_hosts()
-        return self._allowed_hosts
 
     def check(self, host: str | bytes | None, port: int | None, via: str) -> None:
         if self.is_allowed(host):
@@ -156,7 +151,7 @@ class _Guard:
             # absolute; otherwise it is a path whose query may itself contain "://".
             target = urlsplit(url) if url.startswith(("http://", "https://")) else None
             host = (target.hostname if target else None) or pool.host
-            port = (target.port if target else None) or pool.port
+            port = target.port if target else pool.port
             guard.check(host, port, "requests/urllib3")
             return make_request(pool, conn, method, url, *args, **kwargs)
 
@@ -233,7 +228,8 @@ def pytest_sessionfinish(session, exitstatus):
             "Blocked outbound request(s) recorded after the last test:\n" + _report(leftovers),
             red=True,
         )
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        if session.exitstatus == pytest.ExitCode.OK:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture(autouse=True)
