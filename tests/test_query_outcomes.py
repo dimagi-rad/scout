@@ -1,5 +1,6 @@
 """Readiness classifications survive semantic execution, graph checks, and handoff."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -169,3 +170,67 @@ async def test_invalid_document_never_runs_queries(monkeypatch):
     result = await graph_runtime.check_graph_artifact(artifact)
     execute.assert_not_awaited()
     assert result["failures"][0]["category"] == "invalid_document"
+
+
+@pytest.mark.asyncio
+async def test_batch_readiness_is_inspected_once_and_not_shared_between_requests(monkeypatch):
+    inspect = AsyncMock(
+        return_value={
+            "status": "needs_materialization",
+            "queryable": False,
+            "recovery_action": "materialization",
+        }
+    )
+    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    workspace = SimpleNamespace(id="workspace")
+    queries = [{"measures": ["visits.count"]}, {"measures": ["forms.count"]}]
+    readiness = query_outcomes.QueryReadiness(workspace, queries)
+    await asyncio.gather(
+        *[
+            query_outcomes.query_readiness_error(
+                workspace,
+                query,
+                "VALIDATION_ERROR",
+                "Unavailable",
+                category="data_unavailable",
+                readiness=readiness,
+            )
+            for query in queries
+        ]
+    )
+    inspect.assert_awaited_once()
+    assert inspect.await_args.args[0].semantic_queries == queries
+    await query_outcomes.QueryReadiness(workspace, queries).surface()
+    assert inspect.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_warning_only_document_still_executes_queries(monkeypatch):
+    monkeypatch.setattr(
+        graph_runtime,
+        "validate_doc",
+        lambda doc: [{"severity": "warning", "code": "unknown_input"}],
+    )
+    monkeypatch.setattr(graph_runtime.Workspace.objects, "aget", AsyncMock(return_value=object()))
+    execute = AsyncMock(return_value={"columns": [], "rows": [], "row_count": 0})
+    monkeypatch.setattr(graph_runtime, "run_semantic_query", execute)
+    artifact = SimpleNamespace(
+        workspace_id="workspace",
+        data={
+            "story_doc": {
+                "schema_version": 1,
+                "name": "Warnings",
+                "blocks": [
+                    {
+                        "id": "q",
+                        "type": "semantic_query",
+                        "config": {"queries": {"count": {"measures": ["visits.count"]}}},
+                    }
+                ],
+            }
+        },
+    )
+    result = await graph_runtime.check_graph_artifact(artifact)
+    execute.assert_awaited_once()
+    assert result["success"] is True
+    assert result["diagnostics"][0]["severity"] == "warning"

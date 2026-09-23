@@ -5,9 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 from apps.semantic.services.query import run_semantic_query
+from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.workspaces.models import Workspace
 
-from .graph_doc import expected_result_keys, member_to_key, normalize_doc, validate_doc
+from .graph_doc import (
+    diagnostics_have_errors,
+    expected_result_keys,
+    member_to_key,
+    normalize_doc,
+    validate_doc,
+)
 from .graph_manifest import build_semantic_query_manifest
 
 CHECK_ROW_LIMIT = 50
@@ -23,7 +30,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     entries = manifest.get("entries", [])[:MAX_CHECK_QUERIES]
     query_results = []
     actual_keys: dict[str, list[str]] = {}
-    if diagnostics:
+    if diagnostics_have_errors(diagnostics):
         return {
             "success": False,
             "diagnostics": diagnostics,
@@ -40,10 +47,11 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "summary": "Document validation failed; no queries executed.",
         }
     workspace = await Workspace.objects.aget(pk=artifact.workspace_id)
+    readiness = QueryReadiness(workspace, [entry.get("query") or {} for entry in entries])
     for entry in entries:
         query = dict(entry.get("query") or {})
         query.setdefault("limit", CHECK_ROW_LIMIT)
-        result = await run_semantic_query(workspace, query, user_id=user_id)
+        result = await run_semantic_query(workspace, query, user_id=user_id, readiness=readiness)
         if not result.get("success", True) or result.get("error"):
             error = result.get("error")
             message = error.get("message") if isinstance(error, dict) else str(error)
@@ -72,7 +80,9 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     key_warnings = _key_contract_warnings(manifest.get("entries", []), actual_keys)
     ok_count = sum(1 for item in query_results if item["status"] == "ok")
     return {
-        "success": not diagnostics and not key_warnings and ok_count == len(query_results),
+        "success": not diagnostics_have_errors(diagnostics)
+        and not key_warnings
+        and ok_count == len(query_results),
         "diagnostics": diagnostics,
         "manifest": {
             "schema_version": manifest.get("schema_version"),
@@ -87,12 +97,14 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
         ]
         + [
             {
+                "query_key": warning.get("query_key"),
+                "message": warning.get("message", ""),
                 "category": "invalid_document",
                 "code": "RESULT_KEY_MISMATCH",
                 "retryable": False,
                 "recovery_action": None,
             }
-            for _warning in key_warnings
+            for warning in key_warnings
         ],
         "key_warnings": key_warnings,
         "summary": f"{ok_count}/{len(query_results)} queries ok",

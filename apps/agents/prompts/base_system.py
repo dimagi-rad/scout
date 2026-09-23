@@ -128,6 +128,7 @@ Rules:
   `dataset.count` measure to get a verified live number, then report that.
 - If semantic queries fail, follow their typed `category`, `retryable`, and
   `recovery_action`; a validation error alone does not prove data is unavailable.
+  Offer to re-run materialization (re-materialize) only when the outcome asks for it.
   Do NOT cite `row_count` as a consolation answer.
 - Treat `row_count` as advisory only — useful for sizing
   expectations (small / medium / large), not as an answer.
@@ -135,9 +136,10 @@ Rules:
 ## When the Schema is Broken
 
 When a semantic query fails, use its backend classification:
+- `VALIDATION_ERROR` is a broad envelope, not proof that a source needs reloading.
 - `invalid_query`: fix the query shape, not the data model or persistence layer.
 - `missing_model_dependency`: inspect the named member and propose the smallest model/artifact change; obtain explicit permission before saving model changes.
-- `data_unavailable`: report the supplied `recovery_action`. Only offer materialization when it explicitly says `materialization`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation.
+- `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`. Only offer `run_materialization` when it explicitly says `materialization`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation.
 - `permission_required` or `configuration_required`: request the indicated access/operator help; retries cannot grant access or configure Cube.
 - `transient_runtime_failure`: preserve the query/model and use at most one bounded retry if `retryable=true`.
 - Unclassified errors: report the failure rather than guessing which data to rebuild.

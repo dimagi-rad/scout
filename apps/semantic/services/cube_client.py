@@ -48,6 +48,10 @@ class CubeQueryError(RuntimeError):
     """Raised when Cube accepts the request but rejects the query payload."""
 
 
+class CubeAuthenticationError(CubeQueryError):
+    """Scout's server-to-server Cube credentials were rejected; not a user grant."""
+
+
 class CubeConnectionError(RuntimeError):
     """A transient Cube failure, distinct from an invalid semantic query."""
 
@@ -136,6 +140,10 @@ class CubeClient:
                     error = payload.get("error") if isinstance(payload, dict) else None
                     # Authentication and malformed requests always fail fast,
                     # even if their message happens to mention a connection.
+                    if response.status_code in {401, 403}:
+                        raise CubeAuthenticationError(
+                            str(error) if error else "Cube rejected Scout's service credentials."
+                        )
                     if response.status_code in {400, 401, 403, 404, 422}:
                         if error:
                             raise CubeQueryError(str(error))
