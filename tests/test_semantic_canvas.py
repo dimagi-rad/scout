@@ -3,10 +3,14 @@
 import asyncio
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from django.db import connections, transaction
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
@@ -1003,14 +1007,73 @@ def test_canvas_refresh_reinfers_changed_columns(
     assert result["objects"][0]["fields"]["columns"] == [{"name": "username", "type": "bigint"}]
 
 
-def test_canvas_failed_probe_is_not_sticky(canvas, pending_dataset_op):
+def test_canvas_publishes_with_refreshed_model_version(
+    canvas, workspace, pending_dataset_op, monkeypatch, user
+):
+    apply_operations(canvas, [pending_dataset_op])
+    refreshed = _refresh_canvas_catalog(workspace, monkeypatch, ["raw_visits"])
+    assert refreshed.version > canvas.semantic_model.version
+    publisher = Mock()
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", publisher)
+    assert commit_canvas(canvas, user)["blocked"] is False
+    assert publisher.call_args.kwargs["model"].version == refreshed.version
+
+
+def test_canvas_failed_probe_retries_after_polling_ttl(canvas, pending_dataset_op, monkeypatch):
+    now = canvas_service.timezone.now()
     canvas_service.infer_custom_dataset_columns.side_effect = [
         RuntimeError("temporary outage"),
         [{"name": "username", "type": "text"}],
     ]
     initial = apply_operations(canvas, [pending_dataset_op])
     assert initial["can_commit"] is False
+    validation_time = canvas.changes.get().updated_at
+    for _ in range(3):
+        assert canvas_projection(canvas)["can_commit"] is False
+    assert canvas_service.infer_custom_dataset_columns.call_count == 1
+    assert canvas.changes.get().updated_at == validation_time
+    monkeypatch.setattr(
+        canvas_service.timezone,
+        "now",
+        lambda: now + timedelta(seconds=canvas_service.CUSTOM_DATASET_FAILURE_CACHE_SECONDS + 1),
+    )
     assert canvas_projection(canvas)["can_commit"] is True
+    assert canvas_service.infer_custom_dataset_columns.call_count == 2
+
+
+def test_canvas_commit_retries_failed_probe_without_waiting_for_ttl(
+    canvas, pending_dataset_op, monkeypatch, user
+):
+    canvas_service.infer_custom_dataset_columns.side_effect = [
+        RuntimeError("temporary outage"),
+        [{"name": "username", "type": "text"}],
+    ]
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", Mock())
+    assert apply_operations(canvas, [pending_dataset_op])["can_commit"] is False
+    assert commit_canvas(canvas, user)["blocked"] is False
+    assert canvas_service.infer_custom_dataset_columns.call_count == 2
+
+
+def test_cube_status_updates_do_not_invalidate_canvas_validation(
+    canvas, pending_dataset_op, monkeypatch, user
+):
+    apply_operations(canvas, [pending_dataset_op])
+    model = SemanticModel.objects.get(pk=canvas.semantic_model_id)
+    model.metadata = {"last_build": {"status": "deferred"}}
+    model.save(update_fields=["metadata", "updated_at"])
+    assert canvas_projection(canvas)["can_commit"] is True
+    assert canvas_service.infer_custom_dataset_columns.call_count == 1
+
+    original = canvas_commit_module._commit_transaction
+
+    def record_build_before_commit(canvas, pending, user):
+        model.save(update_fields=["metadata", "updated_at"])
+        return original(canvas, pending, user)
+
+    monkeypatch.setattr(canvas_commit_module, "_commit_transaction", record_build_before_commit)
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", Mock())
+    assert commit_canvas(canvas, user)["blocked"] is False
+    assert canvas_service.infer_custom_dataset_columns.call_count == 1
 
 
 def test_canvas_commit_blocks_catalog_change_after_validation(
@@ -1027,8 +1090,58 @@ def test_canvas_commit_blocks_catalog_change_after_validation(
     result = commit_canvas(canvas, user)
     assert result["blocked"] is True
     assert result["blocking_diagnostics"][0]["code"] == "CATALOG_CHANGED"
+    assert result["blocking_diagnostics"][0]["object_uuid"] == ""
     assert not CustomDataset.objects.filter(workspace=workspace, name="visit_stats").exists()
     assert canvas.changes.get().change_type == SemanticCanvasChange.ChangeType.CREATE
+
+
+@pytest.mark.django_db(transaction=True)
+def test_canvas_commit_does_not_wait_for_a_catalog_refresh(
+    canvas, pending_dataset_op, user, monkeypatch
+):
+    apply_operations(canvas, [pending_dataset_op])
+    locked = Event()
+    release = Event()
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", Mock())
+
+    def hold_catalog_lock():
+        try:
+            with transaction.atomic():
+                SemanticModel.objects.select_for_update().get(pk=canvas.semantic_model_id)
+                locked.set()
+                assert release.wait(5)
+        finally:
+            connections["default"].close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        holder = executor.submit(hold_catalog_lock)
+        try:
+            assert locked.wait(5)
+            result = commit_canvas(canvas, user)
+            assert result["blocked"] is True
+            assert result["blocking_diagnostics"][0]["code"] == "CATALOG_CHANGED"
+            assert canvas.changes.get().change_type == SemanticCanvasChange.ChangeType.CREATE
+        finally:
+            release.set()
+        holder.result(timeout=5)
+
+
+def test_canvas_commit_blocks_model_deactivation_after_validation(
+    canvas, pending_dataset_op, user, monkeypatch
+):
+    apply_operations(canvas, [pending_dataset_op])
+    original = canvas_commit_module._commit_transaction
+
+    def deactivate_before_commit(canvas, pending, user):
+        SemanticModel.objects.filter(pk=canvas.semantic_model_id).update(
+            status=SemanticModel.Status.ERROR
+        )
+        return original(canvas, pending, user)
+
+    monkeypatch.setattr(canvas_commit_module, "_commit_transaction", deactivate_before_commit)
+    result = commit_canvas(canvas, user)
+    assert result["blocked"] is True
+    assert result["blocking_diagnostics"][0]["code"] == "CATALOG_CHANGED"
 
 
 @pytest.mark.parametrize("object_type", ["dataset", "custom_dataset"])

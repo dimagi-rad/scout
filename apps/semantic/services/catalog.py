@@ -373,7 +373,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         raise SemanticCatalogUnavailable("No queryable datasets are available.")
 
     with transaction.atomic():
-        model, _ = SemanticModel.objects.select_for_update().get_or_create(
+        model, created = SemanticModel.objects.select_for_update().get_or_create(
             workspace=workspace,
             defaults={"name": f"{workspace.name} Semantic Model"},
         )
@@ -433,7 +433,9 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         _sync_relationships(model, workspace)
         model.status = SemanticModel.Status.ACTIVE
         model.diagnostics = diagnostics
-        model.save(update_fields=["status", "diagnostics", "updated_at"])
+        if not created:
+            model.version += 1
+        model.save(update_fields=["version", "status", "diagnostics", "updated_at"])
         return model
 
 

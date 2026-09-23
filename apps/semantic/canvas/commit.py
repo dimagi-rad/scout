@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.utils import timezone
 
 from apps.semantic.canvas.objects import (
@@ -23,7 +23,12 @@ from apps.semantic.canvas.objects import (
     is_canvas_created,
     is_custom_dataset_field,
 )
-from apps.semantic.canvas.service import ChangeType, ObjectType, base_and_state
+from apps.semantic.canvas.service import (
+    ChangeType,
+    ObjectType,
+    base_and_state,
+    custom_dataset_catalog_revision,
+)
 from apps.semantic.models import (
     CustomDataset,
     SemanticCanvasChange,
@@ -59,7 +64,7 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
     if not pending:
         return {"committed": [], "blocked": False, "conflicts": [], "blocking_diagnostics": []}
 
-    diagnostics = compute_diagnostics(canvas, changes)
+    diagnostics = compute_diagnostics(canvas, changes, retry_failed_sql=True)
     blocking = [d for d in diagnostics if d["severity"] == "error" and d["code"] != "CONFLICT"]
     conflicts = [_conflict_entry(canvas, c) for c in changes if _state_of(canvas, c) == "conflict"]
     if blocking:
@@ -89,8 +94,9 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
                     "severity": "error",
                     "code": "CATALOG_CHANGED",
                     "object": "canvas",
+                    "object_uuid": "",
                     "path": "",
-                    "message": "The semantic catalog changed during validation. Review the canvas diagnostics and save again; your drafts are preserved.",
+                    "message": "The semantic catalog is being updated or changed during validation. Review the canvas diagnostics and save again; your drafts are preserved.",
                 }
             ],
         }
@@ -145,18 +151,25 @@ def _commit_transaction(canvas, pending: list[SemanticCanvasChange], user) -> li
     with transaction.atomic():
         # Catalog refresh takes this same lock; a probe from before that refresh
         # must not be committed after it using stale inferred columns.
-        model = SemanticModel.objects.select_for_update().get(pk=canvas.semantic_model_id)
+        try:
+            model = SemanticModel.objects.select_for_update(nowait=True).get(
+                pk=canvas.semantic_model_id
+            )
+        except OperationalError as exc:
+            if getattr(exc.__cause__, "sqlstate", None) == "55P03":
+                raise _CatalogChanged from exc
+            raise
         for change in pending:
             if (
                 change.object_type == ObjectType.CUSTOM_DATASET
                 and change.change_type == ChangeType.CREATE
             ):
                 validation = change.fields.get("_validation") or {}
-                if (
-                    model.status != SemanticModel.Status.ACTIVE
-                    or validation.get("catalog_revision") != model.updated_at.isoformat()
-                ):
+                if model.status != SemanticModel.Status.ACTIVE or validation.get(
+                    "catalog_revision"
+                ) != custom_dataset_catalog_revision(model):
                     raise _CatalogChanged
+        canvas.semantic_model = model
         workspace = canvas.workspace
         for change in pending:
             # Capture identity before settle/delete clears the draft fields.
