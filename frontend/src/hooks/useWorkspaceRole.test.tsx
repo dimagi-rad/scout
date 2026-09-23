@@ -19,10 +19,10 @@ describe("useWorkspaceRole", () => {
       activeDomainId: "ws-read",
     })
     const { result } = renderHook(() => useWorkspaceRole())
-    expect(result.current).toEqual({ role: "read", canWrite: false, canManage: false })
+    expect(result.current).toEqual({ role: "read", canWrite: false })
 
     act(() => useAppStore.setState({ activeDomainId: "ws-manage" }))
-    expect(result.current).toEqual({ role: "manage", canWrite: true, canManage: true })
+    expect(result.current).toEqual({ role: "manage", canWrite: true })
   })
 
   it("reads an explicit workspace over the active one", () => {
@@ -31,12 +31,12 @@ describe("useWorkspaceRole", () => {
       activeDomainId: "ws-read",
     })
     const { result } = renderHook(() => useWorkspaceRole("ws-rw"))
-    expect(result.current).toEqual({ role: "read_write", canWrite: true, canManage: false })
+    expect(result.current).toEqual({ role: "read_write", canWrite: true })
   })
 
   it("stays writable while the role is unknown so the server remains the gate", () => {
     const { result } = renderHook(() => useWorkspaceRole("ws-missing"))
-    expect(result.current).toEqual({ role: null, canWrite: true, canManage: false })
+    expect(result.current).toEqual({ role: null, canWrite: true })
   })
 })
 
@@ -65,6 +65,13 @@ describe("writeErrorMessage", () => {
       lost_tenants: ["Alpha"],
     })
     expect(writeErrorMessage(lost, "Try again.", false)).toBe(lost.message)
+  })
+
+  it("keeps a specific server reason for read members", () => {
+    const owner = new ApiError(403, "Only the thread owner can change sharing.", {
+      error: "Only the thread owner can change sharing.",
+    })
+    expect(writeErrorMessage(owner, "Try again.", false)).toBe(owner.message)
   })
 
   it("keeps the fallback for a 403 without a JSON message such as a CSRF failure", () => {
