@@ -1,4 +1,4 @@
-import { ApiError } from "@/api/client"
+import { ApiError, asRecord } from "@/api/client"
 import type { WorkspaceRole } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 
@@ -7,10 +7,12 @@ export const READ_ONLY_HINT = "Read-only access — ask a workspace manager"
 export const READ_ONLY_DENIAL =
   "You have read-only access to this workspace. Ask a workspace manager for read-write access."
 
+// access_denied_body's generic copy; older views omit the trailing period.
+const GENERIC_DENIAL = /^Workspace not found or access denied\.?$/
+
 export interface WorkspaceRoleAccess {
   role: WorkspaceRole | null
   canWrite: boolean
-  canManage: boolean
 }
 
 /**
@@ -24,7 +26,7 @@ export function useWorkspaceRole(workspaceId?: string | null): WorkspaceRoleAcce
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const id = workspaceId ?? activeDomainId
   const role = useAppStore((s) => s.domains.find((d) => d.id === id)?.role ?? null)
-  return { role, canWrite: role !== "read", canManage: role === "manage" }
+  return { role, canWrite: role !== "read" }
 }
 
 /**
@@ -39,17 +41,15 @@ export function writeErrorMessage(
   canWrite: boolean,
 ): string {
   if (!(error instanceof ApiError) || error.status !== 403) return fallback
+  if (/role required/i.test(error.message)) return READ_ONLY_DENIAL
   const body = asRecord(error.body)
-  // Lost upstream access has its own actionable copy (access_denied_body).
-  if (body?.reason === "tenant_access_lost") return error.message
-  if (!canWrite || /role required/i.test(error.message)) return READ_ONLY_DENIAL
+  const serverMessage = Boolean(body?.error || body?.detail)
+  // Only the generic denial is ambiguous; a specific server reason (lost
+  // upstream access, thread ownership, ...) is more actionable than ours.
+  if (!canWrite && (!serverMessage || GENERIC_DENIAL.test(error.message))) {
+    return READ_ONLY_DENIAL
+  }
   // A non-JSON 403 (e.g. Django's CSRF failure page) carries no usable message;
   // the caller's "try again" is the right advice there.
-  return body?.error || body?.detail ? error.message : fallback
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
+  return serverMessage ? error.message : fallback
 }
