@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, type ReactNode } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
@@ -160,7 +160,11 @@ export function RecipesPage() {
     }
     if (!isCurrentAccount()) return
     setDeleteDialogRecipe(null)
-  }, [deleteDialogRecipe, isDeleting, deleteRecipe, isCurrentAccount, canWrite])
+
+    if (id === deleteDialogRecipe.id) {
+      navigate("/recipes")
+    }
+  }, [deleteDialogRecipe, isDeleting, deleteRecipe, id, navigate, isCurrentAccount, canWrite])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {
@@ -195,10 +199,12 @@ export function RecipesPage() {
     [navigate],
   )
 
+  let body: ReactNode = null
+
   if (id && runId && currentRecipe) {
     const run = recipeRuns.find((r) => r.id === runId)
     if (run) {
-      return (
+      body = (
         <div className="container mx-auto px-8 py-8">
           <RecipeRunDetail
             key={run.id}
@@ -213,8 +219,8 @@ export function RecipesPage() {
     }
   }
 
-  if (id && currentRecipe) {
-    return (
+  if (!body && id && currentRecipe) {
+    body = (
       <div className="container mx-auto px-8 py-8">
         <RecipeDetail
           recipe={currentRecipe}
@@ -238,7 +244,7 @@ export function RecipesPage() {
     )
   }
 
-  return (
+  body ??= (
     <div className="container mx-auto px-8 py-8">
       <div className="mb-8">
         <h1 className="text-2xl font-bold">Recipes</h1>
@@ -274,7 +280,14 @@ export function RecipesPage() {
         onRun={handleExecuteRun}
         onRunComplete={handleRunComplete}
       />
+    </div>
+  )
 
+  // One dialog outside the branches: the list also renders at /recipes/:id
+  // until the detail loads, and a branch switch must not unmount it.
+  return (
+    <>
+      {body}
       <AlertDialog
         open={!!deleteDialogRecipe}
         onOpenChange={(open) => !open && !isDeleting && setDeleteDialogRecipe(null)}
@@ -305,6 +318,6 @@ export function RecipesPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </>
   )
 }
