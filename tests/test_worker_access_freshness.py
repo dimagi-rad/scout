@@ -14,6 +14,8 @@ from apps.users.models import Tenant, TenantMembership, UpstreamAccessProof
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant
 from apps.workspaces.services.access_freshness import (
+    FRESHNESS_DENIAL_REASONS,
+    FRESHNESS_ERROR_CODES,
     UPSTREAM_ACCESS_LOST,
     VerificationBudget,
     arecheck_tenant_access,
@@ -239,3 +241,7 @@ async def test_tenant_recheck_refuses_an_archived_membership(tenant, user, upstr
 
     assert reason == UPSTREAM_ACCESS_LOST
     assert upstream_provider.requests == []
+
+
+def test_every_freshness_denial_reason_has_a_registry_code():
+    assert set(FRESHNESS_ERROR_CODES) == set(FRESHNESS_DENIAL_REASONS)

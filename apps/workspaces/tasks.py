@@ -153,8 +153,8 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
         "data source from the workspace."
     ),
     ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE: (
-        "Scout could not confirm your access with the provider just now. Nothing "
-        "was removed — retry shortly."
+        "access could not be confirmed with the provider just now — nothing was "
+        "removed; retry shortly."
     ),
     ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
         "in this workspace but not connected to your account, so this run did not "
@@ -394,7 +394,7 @@ async def refresh_tenant_schema(
         new_schema.state = SchemaState.FAILED
         await new_schema.asave(update_fields=["state"])
         return {
-            "error": "Upstream access could not be confirmed",
+            "error": access_denied_body(WorkspaceAccess(denied_reason=denial_reason))["error"],
             "error_code": str(FRESHNESS_ERROR_CODES[denial_reason]),
         }
 
@@ -684,10 +684,15 @@ async def materialize_workspace_core(
             if denial is not None:
                 pending = memberships[index:]
                 attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
+                denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
                 tenant_results.extend(
-                    _preflight_failure(later.tenant, denial["error"], denial["error_code"])
+                    denied_by_tenant.get(str(later.tenant_id))
+                    or _preflight_failure(later.tenant, denial["error"], denial["error_code"])
                     for later in pending
                 )
+                # Only source loads stop here. The derived view and Cube rebuilds below
+                # read already-published tenant data and keep other members' views
+                # consistent; the Cube gate treats these skipped tenants as failed.
                 break
             # The workspace can stay accessible through another tenant after this
             # recheck archived this one, so the membership itself must still be live.
@@ -1660,6 +1665,11 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
     if result.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
         # A role denial is not a source failure; don't label it as one.
         return str(result.get("error") or _ROLE_DENIED_MESSAGE)[:1000]
+    if result.get("status") == "denied" and result.get("error_code") in set(
+        FRESHNESS_ERROR_CODES.values()
+    ):
+        # A requester whose access could not be confirmed is not a failed source.
+        return str(result.get("error") or "")[:1000]
     # A failed source commonly causes a downstream Cube *skip*, not a Cube
     # failure. Show the source remedy first; never infer auth advice by parsing
     # human/provider error text, or conflate missing credentials with a 403.
