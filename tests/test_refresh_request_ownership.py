@@ -1068,3 +1068,45 @@ def test_periodic_sweep_settles_dead_refresh_without_a_retry(
     status_response = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
     assert status_response.data["state"] == SchemaState.FAILED
     assert status_response.data["error"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_real_enqueue_is_claimed_and_published_by_the_worker(
+    manage_client, workspace, tenant, tenant_membership
+):
+    # No mocked defer: the view's queued arguments must be exactly what the task
+    # accepts and what the claim compares against.
+    response = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+    assert response.status_code == 202
+    candidate = TenantSchema.objects.get(id=response.data["schema_id"])
+    try:
+        job = ProcrastinateJob.objects.get(id=candidate.refresh_job_id)
+        assert job.task_name == REFRESH_TASK_NAME
+        assert job.args == refresh_task_args(candidate)
+        assert all(isinstance(value, str) for value in job.args.values())
+        _set_job(job.id, status="doing")
+
+        with (
+            patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
+            patch(
+                "apps.workspaces.tasks.aresolve_credential",
+                return_value={"type": "api_key", "value": "token"},
+            ),
+            patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
+            patch("apps.workspaces.tasks.run_pipeline") as pipeline,
+            patch("apps.workspaces.tasks._rebuild_dependent_view_schemas"),
+            patch("apps.workspaces.tasks._rebuild_single_tenant_semantic_models"),
+        ):
+            result = _run_refresh(job.id, job.args)
+
+        candidate.refresh_from_db()
+        assert result["status"] == "active", result
+        assert pipeline.call_args.kwargs["target_schema"].id == candidate.id
+        assert candidate.state == SchemaState.ACTIVE
+        assert candidate.refresh_claimed_at is not None
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM procrastinate_jobs WHERE task_name = %s AND args->>'workspace_id' = %s",
+                [REFRESH_TASK_NAME, str(workspace.id)],
+            )
