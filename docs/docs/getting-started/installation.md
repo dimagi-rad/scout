@@ -34,7 +34,6 @@ cp -n .env.example .env
 At minimum, set these variables in `.env`:
 
 ```
-DATABASE_URL=postgresql://platform:devpassword@localhost:5432/agent_platform
 DJANGO_SECRET_KEY=your-secret-key
 ANTHROPIC_API_KEY=sk-ant-...
 DB_CREDENTIAL_KEY=your-fernet-key
@@ -43,8 +42,10 @@ CUBE_VALIDATOR_URL=http://localhost:4010
 CUBEJS_API_SECRET=your-local-cube-signing-secret
 ```
 
-The database URL above matches Compose's local defaults. If you change
-`PLATFORM_DB_PASSWORD` or `PLATFORM_DB_PORT`, update the host URL too. Cube and
+Keep the matching `DATABASE_URL` and `PLATFORM_DB_PASSWORD` values copied from
+`.env.example`. If you change `PLATFORM_DB_PASSWORD` or `PLATFORM_DB_PORT`, update
+the host URL too. An existing PostgreSQL volume keeps its original password;
+editing `.env` does not rotate that database password. Cube and
 the host processes read the same `CUBEJS_API_SECRET` from `.env`; their values
 must match. If you change `CUBE_PORT` or `CUBE_VALIDATOR_PORT`, update the
 corresponding host URLs.
@@ -105,6 +106,9 @@ Each process is color-coded and labeled in the output. Ctrl+C stops these four
 host processes, not the Docker dependencies. The web process runs Django system
 checks first; missing Cube settings produce `semantic.W001` setup guidance.
 This checks configuration only, not service reachability.
+An ERROR-level system check stops the web process and Honcho's other processes;
+resolve that error before restarting. Cube's missing-setting warnings do not
+stop startup.
 
 ## Docker setup
 

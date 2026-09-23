@@ -48,5 +48,5 @@ def test_dependency_command_starts_cube_without_a_duplicate_mcp():
     context.run.assert_called_once()
     command = shlex.split(context.run.call_args.args[0])
     assert command[:3] == ["docker", "compose", "up"]
-    assert {"-d", "--build", "--wait", "platform-db", "cube"} <= set(command)
-    assert "mcp-server" not in command
+    assert set(command[3:]) == {"-d", "--build", "--wait", "platform-db", "cube"}
+    assert context.run.call_args.kwargs["pty"] is True

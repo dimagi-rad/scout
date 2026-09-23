@@ -20,8 +20,8 @@ cd frontend && bun run build              # Production build (runs tsc first)
 # Django :8000, MCP :8100, worker, Vite :5173 (Cube stays in Docker :4000/:4010)
 uv run honcho -f Procfile.dev start
 
-# Full stack via Docker
-docker compose up                         # All services (api :8000, frontend :3000, mcp :8100)
+# Docker services (API :8000, frontend :3000, local MCP :8100, DB, Cube :4000/:4010)
+docker compose up                         # Worker must be started separately
 
 # Tests
 uv run pytest                             # All backend tests
@@ -57,6 +57,8 @@ configuration produces `semantic.W001` with setup guidance; this is a local
 configuration check, not a network health check. Check Cube's runtime and
 validator separately with `curl --fail http://localhost:4000/readyz` and
 `curl --fail http://localhost:4010/readyz` (or your configured ports).
+ERROR-level system checks stop the web process and therefore Honcho's other
+processes; fix those errors before restarting. Warnings do not stop startup.
 
 ## Architecture
 
