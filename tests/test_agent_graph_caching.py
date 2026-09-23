@@ -88,7 +88,9 @@ async def test_system_prompt_cache_separates_canvas_write_mode():
         MockRetriever.return_value = mock_retriever
 
         readonly, _ = await _build_system_prompt(workspace, user, canvas_write=False)
-        writable, _ = await _build_system_prompt(workspace, user, canvas_write=True)
+        writable, _ = await _build_system_prompt(
+            workspace, user, canvas_write=True, write_capable=True
+        )
 
         assert "role is read-only" in readonly
         assert "delegate the whole job to the `canvas_manager` tool" in writable

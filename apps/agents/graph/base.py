@@ -1220,7 +1220,7 @@ Dataset editing vocabulary:
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
 
-    if interactive and canvas_write:
+    if interactive and canvas_write and write_capable:
         stable_sections.append("""
 ## Semantic Canvas (dataset editing)
 
