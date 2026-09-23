@@ -447,8 +447,9 @@ _READ_ONLY_LOADED_SQL_GUIDANCE = (
     "Data is loaded, but no semantic datasets are available yet. "
     "Use `list_tables` and `describe_table` to inspect the loaded tables, then "
     "read-only `query` SQL to analyze them. This user's workspace role is read-only; "
-    "a read-write workspace role is required to rebuild the semantic catalog, so tell "
-    "the user a workspace member with write access can refresh it."
+    "a read-write workspace role is required to rebuild the semantic catalog. If the "
+    "user asks for semantic datasets or a refresh, a workspace member with write "
+    "access can do it."
 )
 
 _READ_ONLY_MATERIALIZE_GUIDANCE = (
@@ -493,16 +494,7 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     if ts is None:
         if not interactive:
             return _HEADLESS_MATERIALIZE_GUIDANCE
-        # No `pipeline=` arg: run_materialization's LLM-facing schema is empty
-        # (all params injected server-side); naming an argument it can't accept
-        # confused the agent (finding 02#6).
-        return (
-            "No data has been loaded yet. Call `run_materialization` to start "
-            "loading. This tool returns IMMEDIATELY with `status: started` — do "
-            "NOT call other data tools in the same turn. Acknowledge to the user "
-            "in ONE sentence and end your turn. The system will resume the "
-            "conversation automatically when materialization completes."
-        )
+        return _INTERACTIVE_MATERIALIZE_GUIDANCE
 
     if ts.state == SchemaState.MATERIALIZING:
         if not interactive:
