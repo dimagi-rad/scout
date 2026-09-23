@@ -39,6 +39,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "manifest": manifest_summary,
             "queries": [],
             "key_warnings": [],
+            "query_context": None,
             "summary": "Date context could not be resolved",
         }
     entries = resolved[:MAX_CHECK_QUERIES]
@@ -73,7 +74,12 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
                 "semantic_query": result.get("semantic_query", query),
             }
         )
-    key_warnings = _key_contract_warnings(manifest.get("entries", []), actual_keys)
+    # Check each resolved period independently; combining both key sets would
+    # let a valid current result hide a broken previous-period result.
+    key_warnings = _key_contract_warnings(
+        [{"key": entry["name"], "result_keys": expected_result_keys(entry)} for entry in entries],
+        actual_keys,
+    )
     ok_count = sum(1 for item in query_results if item["status"] == "ok")
     return {
         "success": not diagnostics and not key_warnings and ok_count == len(query_results),

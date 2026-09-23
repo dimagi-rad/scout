@@ -484,3 +484,31 @@ def test_cache_context_without_timezone_uses_default(live_artifact, settings):
         live_artifact, resolved_queries=[{"query_context": {"timezone": settings.TIME_ZONE}}]
     )
     assert first == second
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_narrative_document_preserves_explicit_stored_queries(
+    live_artifact, member_client, workspace
+):
+    live_artifact.data = {
+        "story_doc": {
+            "schema_version": 1,
+            "blocks": [
+                {"id": "summary", "type": "tldr", "config": {"text": "Visits overview"}},
+            ],
+        }
+    }
+    await live_artifact.asave(update_fields=["data"])
+    with patch(
+        "apps.artifacts.views.run_semantic_query",
+        new=AsyncMock(return_value=MOCK_SUBMISSIONS_RESULT),
+    ) as run:
+        response = await member_client.post(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
+            CONTEXT,
+            content_type="application/json",
+        )
+    assert response.status_code == 200
+    assert [query["name"] for query in response.json()["queries"]] == ["submissions", "daily"]
+    assert run.await_count == 2

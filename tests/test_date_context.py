@@ -322,6 +322,11 @@ def test_timestamp_conversion_outside_calendar_is_validation_error():
         validate_date_filter({"operator": "afterDate", "values": ["0001-01-01T00:00:00+02:00"]})
 
 
+def test_date_filter_invalid_timezone_is_validation_error():
+    with pytest.raises(DateContextError, match="valid IANA timezone"):
+        validate_date_filter({"operator": "afterDate", "values": ["2026-09-16"]}, "not/a/zone")
+
+
 @pytest.mark.asyncio
 async def test_runtime_date_errors_preserve_document_diagnostics():
     doc = story()
@@ -330,3 +335,27 @@ async def test_runtime_date_errors_preserve_document_diagnostics():
     assert result["success"] is False
     assert {d["code"] for d in result["diagnostics"]} >= {"date_context", "date_preset"}
     assert result["manifest"]["entry_count"] == 1
+    assert result["query_context"] is None
+
+
+@pytest.mark.asyncio
+async def test_comparison_checks_previous_period_keys_independently(monkeypatch):
+    monkeypatch.setattr(
+        "apps.artifacts.services.graph_runtime.Workspace.objects.aget",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        "apps.artifacts.services.graph_runtime.run_semantic_query",
+        AsyncMock(
+            side_effect=[
+                {"columns": ["sessions.count"], "rows": [[18]], "row_count": 1},
+                {"columns": ["unrelated.count"], "rows": [[10]], "row_count": 1},
+            ]
+        ),
+    )
+    artifact = SimpleNamespace(workspace_id="workspace", data={"story_doc": story(compare=True)})
+    result = await check_graph_artifact(artifact)
+    assert result["success"] is False
+    assert len(result["key_warnings"]) == 1
+    assert result["key_warnings"][0]["query_key"] == "q.sessions_previous"
+    assert result["key_warnings"][0]["expected_key"] == "sessions_count"

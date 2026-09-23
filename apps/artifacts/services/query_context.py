@@ -1,6 +1,8 @@
 """Resolve graph source bindings before inspection or runtime validation."""
 
 from apps.semantic.services.date_context import (
+    DEFAULT_COMPARISON,
+    DEFAULT_PRESET,
     DateContextError,
     comparison_range,
     query_context,
@@ -47,14 +49,14 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
     for key, block in blocks.items():
         config = block.get("config") or {}
         if block["type"] == "date_filter":
-            value = overrides.get(key, {"preset": config.get("default", "last_30_days")})
+            value = overrides.get(key, {"preset": config.get("default", DEFAULT_PRESET)})
             sources[f"{key}.value"] = resolve_date_range(value, context)
         elif block["type"] == "period_selector":
             current = resolve_date_range(
-                overrides.get(key, {"preset": config.get("default_range", "last_30_days")}), context
+                overrides.get(key, {"preset": config.get("default_range", DEFAULT_PRESET)}), context
             )
             previous = comparison_range(
-                current, config.get("default_comparison", "previous_period"), context
+                current, config.get("default_comparison", DEFAULT_COMPARISON), context
             )
             sources.update(
                 {

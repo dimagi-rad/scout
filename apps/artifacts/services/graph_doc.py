@@ -14,6 +14,8 @@ from typing import Any
 
 from apps.semantic.services.date_context import (
     COMPARISONS,
+    DEFAULT_COMPARISON,
+    DEFAULT_PRESET,
     PRESETS,
     DateContextError,
     validate_date_filter,
@@ -680,7 +682,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     if block_type in {"date_filter", "period_selector"}:
         preset = config.get(
-            "default" if block_type == "date_filter" else "default_range", "last_30_days"
+            "default" if block_type == "date_filter" else "default_range", DEFAULT_PRESET
         )
         if preset not in PRESETS:
             diagnostics.append(
@@ -692,7 +694,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
             )
         if (
             block_type == "period_selector"
-            and config.get("default_comparison", "previous_period") not in COMPARISONS
+            and config.get("default_comparison", DEFAULT_COMPARISON) not in COMPARISONS
         ):
             diagnostics.append(
                 problem(

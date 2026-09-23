@@ -16,6 +16,8 @@ from django.utils import timezone
 
 PRESETS = ("last_7_days", "last_30_days", "last_90_days", "month_to_date", "today", "yesterday")
 COMPARISONS = ("previous_period", "previous_year")
+DEFAULT_PRESET = "last_30_days"
+DEFAULT_COMPARISON = "previous_period"
 
 
 class DateContextError(ValueError):
@@ -175,7 +177,10 @@ def validate_date_filter(spec: dict, timezone_name: str | None = None) -> None:
     if len(values) not in allowed_lengths:
         raise DateContextError(f"Invalid number of dates for {operator}.")
     parsed = []
-    zone = ZoneInfo(timezone_name or settings.TIME_ZONE)
+    try:
+        zone = ZoneInfo(timezone_name or settings.TIME_ZONE)
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        raise DateContextError("Use a valid IANA timezone for date filters.") from exc
     for index, value in enumerate(values):
         try:
             if not isinstance(value, str):
@@ -191,7 +196,7 @@ def validate_date_filter(spec: dict, timezone_name: str | None = None) -> None:
             )
         except (OverflowError, TypeError, ValueError) as exc:
             raise DateContextError(
-                "Date filters require ISO dates, not preset strings. For relative dates use date_range={preset: last_30_days}."
+                f"Unsupported date filter value {value!r}. Use ISO calendar dates or timestamps within the supported calendar range. For relative dates use date_range={{preset: last_30_days}}."
             ) from exc
     if len(parsed) == 2 and parsed[0] > parsed[1]:
         raise DateContextError("Date range start must be on or before its end.")
