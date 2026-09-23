@@ -80,8 +80,8 @@ class VerificationAttemptReceipt:
     (so a tenant it archived as omitted is excluded), TENANT_DENIED records the denied
     tenant, and credential-level outcomes record the tenants the attempt requested.
 
-    Match with :func:`attempt_receipt_matches`, which requires the caller's tenants to
-    fall inside this scope; do not read the outcome without that check.
+    Match with :func:`attempt_receipt_matches`, which owns the scope policy; do not
+    read the outcome without that check.
     """
 
     lease_token: uuid.UUID
@@ -234,28 +234,42 @@ def _completed_attempt(control) -> VerificationAttemptReceipt | None:
     )
 
 
+# Outcomes whose verdict belongs to specific tenants rather than to the whole
+# connection. Only these are gated on the receipt's recorded tenant scope.
+_TENANT_SCOPED_OUTCOMES = frozenset(
+    {VerificationOutcome.COMPLETE, VerificationOutcome.TENANT_DENIED}
+)
+
+
 def attempt_receipt_matches(receipt, lease_token, observation, requested_tenant_ids) -> bool:
     """Whether a receipt's outcome may be reused for exactly these tenants.
 
-    Requires the same lease and credential observation *and* that every requested
-    tenant falls inside the attempt's recorded scope. Without the scope check a waiter
-    holding the winner's lease would match a receipt from an attempt that never
-    covered its tenants — and a COMPLETE outcome would then read as success for a
-    tenant that same publication archived as omitted.
+    Requires the same lease and credential observation. A tenant-scoped outcome
+    (COMPLETE, TENANT_DENIED) additionally requires every requested tenant to fall
+    inside the attempt's recorded scope: without that, a waiter holding the winner's
+    lease would match a receipt from an attempt that never covered its tenants, and a
+    COMPLETE would read as success for a tenant that same publication archived as
+    omitted.
 
-    Receipts written before the scope was recorded carry an empty scope and so match
-    nothing, which fails closed.
+    A connection-level outcome (credential rejected, unreachable, indeterminate)
+    applies to every tenant on the connection, so any requested set may reuse it
+    rather than forcing a second upstream call.
+
+    Receipts written before the scope was recorded carry an empty scope and match
+    nothing, whatever the outcome, which fails closed.
     """
     requested = _tenant_scope(requested_tenant_ids)
-    return bool(
+    if not (
         receipt
         and lease_token
         and observation
         and requested
+        and receipt.tenant_ids
         and receipt.lease_token == lease_token
         and receipt.observation_hash == _observation_hash(observation)
-        and requested <= receipt.tenant_ids
-    )
+    ):
+        return False
+    return receipt.outcome not in _TENANT_SCOPED_OUTCOMES or requested <= receipt.tenant_ids
 
 
 def _deadline_expired(deadline, clock) -> bool:
