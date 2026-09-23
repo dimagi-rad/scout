@@ -4,13 +4,18 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
+from asgiref.sync import async_to_sync
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
+from procrastinate.contrib.django.models import ProcrastinateJob
+from rest_framework.test import APIClient
 
+from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
@@ -31,7 +36,9 @@ from apps.workspaces.services.refresh_requests import (
     fail_claimed_refresh_candidate,
     find_legacy_refresh_jobs,
     reconcile_legacy_refresh_candidates,
+    refresh_task_args,
 )
+from apps.workspaces.tasks import refresh_tenant_schema
 
 JOB_RETENTION = timedelta(hours=24 * 7)
 
@@ -517,3 +524,296 @@ def test_locked_reconciliation_never_scans_queue_args(tenant, tenant_membership,
         for q in queries.captured_queries
         if "procrastinate_jobs" in q["sql"] and "'schema_id'" in q["sql"]
     ]
+
+
+@pytest.fixture
+def manage_client(user):
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+def _run_refresh(job_id, args):
+    return async_to_sync(refresh_tenant_schema.func)(
+        context=SimpleNamespace(job=SimpleNamespace(id=job_id)), **args
+    )
+
+
+def _post_refresh(client, workspace, *, job_id=987650):
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+        defer.return_value = MagicMock(id=job_id)
+        response = client.post(f"/api/workspaces/{workspace.id}/refresh/")
+    return response, defer
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("state", [SchemaState.ACTIVE, SchemaState.MATERIALIZING])
+def test_duplicate_delivery_never_runs_physical_work(
+    workspace, tenant, tenant_membership, refresh_job, state
+):
+    candidate, args, job_id = _bound_candidate(
+        tenant, workspace, tenant_membership, refresh_job, state=state
+    )
+
+    with (
+        patch("apps.workspaces.tasks.run_pipeline") as pipeline,
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create,
+    ):
+        result = _run_refresh(job_id, args)
+
+    candidate.refresh_from_db()
+    assert result == {"status": "ignored"}
+    assert candidate.state == state
+    create.assert_not_called()
+    pipeline.assert_not_called()
+    teardown.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mismatched_job_reports_a_request_mismatch_not_a_role(
+    workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, args, _job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    stray_job_id = refresh_job(args)
+
+    with patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create:
+        result = _run_refresh(stray_job_id, args)
+
+    candidate.refresh_from_db()
+    assert result["status"] == "rejected"
+    assert result["error_code"] == ErrorCode.REFRESH_REQUEST_MISMATCH
+    assert "role" not in result["error"].lower()
+    assert candidate.state == SchemaState.PROVISIONING
+    create.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("lose", "error_code", "phrase"),
+    [
+        ("role", ErrorCode.WORKSPACE_ROLE_INSUFFICIENT, "role required"),
+        ("membership", ErrorCode.WORKSPACE_TENANT_UNREACHABLE, "no longer has access"),
+        ("workspace_link", ErrorCode.WORKSPACE_TENANT_UNREACHABLE, "no longer part of"),
+    ],
+)
+def test_denied_refresh_reports_which_authority_was_lost(
+    workspace, tenant, tenant_membership, refresh_job, lose, error_code, phrase
+):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    if lose == "role":
+        WorkspaceMembership.objects.filter(workspace=workspace, user=tenant_membership.user).update(
+            role=WorkspaceRole.READ
+        )
+    elif lose == "membership":
+        TenantMembership.objects.filter(id=tenant_membership.id).delete()
+    else:
+        WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).delete()
+
+    with patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create:
+        result = _run_refresh(job_id, args)
+
+    candidate.refresh_from_db()
+    assert result["status"] == "denied"
+    assert result["error_code"] == error_code
+    assert phrase in result["error"]
+    assert result["retry_required"] is True
+    assert candidate.state == SchemaState.FAILED
+    create.assert_not_called()
+
+
+def _stub_registry(tenant):
+    pipeline = MagicMock(provider=tenant.provider, name="refresh_pipeline")
+    registry = MagicMock()
+    registry.list.return_value = [pipeline]
+    registry.get.return_value = pipeline
+    return registry
+
+
+@pytest.mark.django_db(transaction=True)
+def test_pipeline_failure_cleanup_cannot_drop_candidate_that_became_active(
+    workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    def activate_then_fail(*_args, **_kwargs):
+        TenantSchema.objects.filter(id=candidate.id).update(state=SchemaState.ACTIVE)
+        raise RuntimeError("late pipeline failure")
+
+    with (
+        patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            return_value={"type": "api_key", "value": "token"},
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
+        patch("apps.workspaces.tasks.run_pipeline", side_effect=activate_then_fail),
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+    ):
+        result = _run_refresh(job_id, args)
+
+    candidate.refresh_from_db()
+    assert result["error"] == "Materialization failed"
+    assert candidate.state == SchemaState.ACTIVE
+    teardown.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_settled_candidate_is_retryable(
+    manage_client, workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    _set_job(job_id, status="failed")
+
+    response, _defer = _post_refresh(manage_client, workspace, job_id=987657)
+
+    candidate.refresh_from_db()
+    assert response.status_code == 202
+    assert candidate.state == SchemaState.FAILED
+    assert TenantSchema.objects.get(id=response.data["schema_id"]).refresh_job_id == 987657
+
+
+@pytest.mark.django_db(transaction=True)
+def test_candidate_whose_job_was_pruned_does_not_lock_out_refresh(
+    manage_client, workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    _delete_job(job_id)
+    _age_past_retention(candidate)
+
+    response, defer = _post_refresh(manage_client, workspace)
+
+    candidate.refresh_from_db()
+    assert response.status_code == 202
+    assert candidate.state == SchemaState.FAILED
+    defer.assert_called_once()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_in_flight_candidate_answers_already_in_progress(
+    manage_client, workspace, tenant, tenant_membership, refresh_job
+):
+    _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    response, defer = _post_refresh(manage_client, workspace)
+
+    assert response.status_code == 409
+    assert response.data == {"error": "A refresh is already in progress."}
+    defer.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_initial_provision_row_answers_already_in_progress(
+    manage_client, workspace, tenant, tenant_membership
+):
+    TenantSchema.objects.create(
+        tenant=tenant,
+        schema_name=tenant_schema_name(tenant.provider, tenant.external_id),
+        state=SchemaState.PROVISIONING,
+    )
+
+    response, defer = _post_refresh(manage_client, workspace)
+
+    assert response.status_code == 409
+    assert response.data == {"error": "A refresh is already in progress."}
+    defer.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unverifiable_candidate_requires_operator_recovery(
+    manage_client, workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    _set_job(job_id, args={"schema_id": str(candidate.id)})
+
+    response, defer = _post_refresh(manage_client, workspace)
+
+    candidate.refresh_from_db()
+    assert response.status_code == 409
+    assert response.data["code"] == ErrorCode.REFRESH_RECOVERY_REQUIRED
+    assert "operator" in response.data["error"].lower()
+    assert candidate.state == SchemaState.PROVISIONING
+    defer.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_legacy_job_search_runs_before_the_tenant_lock(
+    manage_client, workspace, tenant, tenant_membership, refresh_job
+):
+    legacy = TenantSchema.objects.create(
+        tenant=tenant, schema_name="legacy_lock_order", state=SchemaState.PROVISIONING
+    )
+    refresh_job(
+        {"schema_id": str(legacy.id), "membership_id": str(tenant_membership.id)},
+        status="failed",
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        response, _defer = _post_refresh(manage_client, workspace)
+
+    assert response.status_code == 202
+    sql = [query["sql"] for query in queries.captured_queries]
+    searches = [i for i, q in enumerate(sql) if "procrastinate_jobs" in q and "'schema_id'" in q]
+    tenant_lock = next(
+        i for i, q in enumerate(sql) if 'FROM "users_tenant"' in q and "FOR UPDATE" in q
+    )
+    assert searches
+    assert max(searches) < tenant_lock
+    assert all("FOR UPDATE" not in sql[i] for i in searches)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_dispatch_and_candidate_binding_roll_back_together(
+    manage_client, workspace, tenant, tenant_membership
+):
+    before_jobs = ProcrastinateJob.objects.filter(task_name=REFRESH_TASK_NAME).count()
+    original_save = TenantSchema.save
+
+    def fail_binding_save(schema, *args, **kwargs):
+        if "refresh_job_id" in (kwargs.get("update_fields") or ()):
+            raise RuntimeError("binding write failed")
+        return original_save(schema, *args, **kwargs)
+
+    with patch.object(TenantSchema, "save", fail_binding_save):
+        with pytest.raises(RuntimeError, match="binding write failed"):
+            manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert not TenantSchema.objects.filter(tenant=tenant, state=SchemaState.PROVISIONING).exists()
+    assert ProcrastinateJob.objects.filter(task_name=REFRESH_TASK_NAME).count() == before_jobs
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_refresh_posts_create_one_bound_job(workspace, tenant, tenant_membership):
+    user_id = tenant_membership.user_id
+    workspace_id = workspace.id
+    barrier = threading.Barrier(2)
+
+    def post_refresh():
+        try:
+            client = APIClient()
+            user = tenant_membership.user.__class__.objects.get(id=user_id)
+            client.force_authenticate(user=user)
+            barrier.wait(timeout=10)
+            return client.post(f"/api/workspaces/{workspace_id}/refresh/").status_code
+        finally:
+            connection.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses = sorted(
+                future.result(timeout=15)
+                for future in [executor.submit(post_refresh) for _ in range(2)]
+            )
+
+        assert statuses == [202, 409]
+        candidate = TenantSchema.objects.get(tenant=tenant, state=SchemaState.PROVISIONING)
+        assert candidate.refresh_job_id is not None
+        job = ProcrastinateJob.objects.get(id=candidate.refresh_job_id)
+        assert job.task_name == refresh_tenant_schema.name == REFRESH_TASK_NAME
+        assert job.args == refresh_task_args(candidate)
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM procrastinate_jobs WHERE task_name = %s AND args->>'workspace_id' = %s",
+                [REFRESH_TASK_NAME, str(workspace_id)],
+            )
