@@ -25,6 +25,7 @@ from apps.workspaces.access import (
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_MISSING,
+    UPSTREAM_ACCESS_LOST,
     VERIFICATION_UNAVAILABLE,
     VerificationBudget,
 )
@@ -122,7 +123,9 @@ def test_authoritative_revocation_denies_and_archives(user, workspace, tenant, u
     result = resolve_workspace_access_ex(user, workspace.id)
 
     assert not result.granted
-    assert result.denied_reason == TENANT_ACCESS_LOST
+    assert result.denied_reason == UPSTREAM_ACCESS_LOST
+    assert result.lost_tenant_names == (tenant.canonical_name,)
+    assert not result.retryable
     membership = TenantMembership.all_objects.get(user=user, tenant=tenant)
     assert membership.archived_at is not None
     assert WorkspaceMembership.objects.filter(workspace=workspace, user=user).exists()
@@ -260,7 +263,7 @@ async def test_async_background_budget_rechecks_like_interactive(
         user, workspace.id, verification=VerificationBudget.BACKGROUND
     )
 
-    assert result.denied_reason == TENANT_ACCESS_LOST
+    assert result.denied_reason == UPSTREAM_ACCESS_LOST
     assert len(upstream_provider.requests) == 1
 
 
@@ -286,3 +289,15 @@ def test_unexpected_verification_error_is_a_retryable_denial(user, workspace, te
     assert result.denied_reason == VERIFICATION_UNAVAILABLE
     assert result.retryable
     assert TenantMembership.objects.filter(user=user, tenant=tenant).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_revocation_already_on_record_stays_a_coverage_loss(
+    user, workspace, tenant, upstream_provider
+):
+    TenantMembership.objects.filter(user=user, tenant=tenant).update(archived_at=timezone.now())
+
+    result = resolve_workspace_access_ex(user, workspace.id)
+
+    assert result.denied_reason == TENANT_ACCESS_LOST
+    assert upstream_provider.requests == []
