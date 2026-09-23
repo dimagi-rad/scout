@@ -230,7 +230,7 @@ def _completed_attempt(control) -> VerificationAttemptReceipt | None:
 
 # Outcomes whose verdict belongs to specific tenants rather than to the whole
 # connection. Only these are gated on the receipt's recorded tenant scope.
-TENANT_SCOPED_OUTCOMES = frozenset(
+_TENANT_SCOPED_OUTCOMES = frozenset(
     {VerificationOutcome.COMPLETE, VerificationOutcome.TENANT_DENIED}
 )
 
@@ -263,7 +263,7 @@ def attempt_receipt_matches(receipt, lease_token, observation, requested_tenant_
         and receipt.observation_hash == _observation_hash(observation)
     ):
         return False
-    return receipt.outcome not in TENANT_SCOPED_OUTCOMES or requested <= receipt.tenant_ids
+    return receipt.outcome not in _TENANT_SCOPED_OUTCOMES or requested <= receipt.tenant_ids
 
 
 def _deadline_expired(deadline, clock) -> bool:

@@ -1,7 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from uuid import uuid4
 
@@ -1326,6 +1326,9 @@ def test_receipt_scope_gate_applies_only_to_tenant_scoped_outcomes(
     )
     # The scope exemption must not weaken the lease and observation gates.
     assert not matches(receipt, uuid4(), observation, {uncovered})
+    assert not matches(
+        receipt, lease, replace(observation, credential_fingerprint="rotated"), {uncovered}
+    )
     assert not matches(receipt, lease, observation, set())
 
 
