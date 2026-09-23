@@ -41,7 +41,7 @@ def fixture_io(settings, monkeypatch):
     monkeypatch.setattr(subject.WorkspaceMembership.objects, "create", Mock())
     monkeypatch.setattr(subject.Tenant.objects, "create", Mock(side_effect=tenants))
     monkeypatch.setattr(subject.WorkspaceTenant.objects, "create", Mock())
-    monkeypatch.setattr(subject.TenantMembership.objects, "bulk_create", Mock())
+    monkeypatch.setattr(subject, "grant_tenant_access", Mock())
     monkeypatch.setattr(subject, "_create_table", Mock())
     monkeypatch.setattr(subject, "build_and_promote_cube_schema", Mock(return_value=object()))
     monkeypatch.setattr(subject.SemanticDataset.objects, "aget", AsyncMock(return_value=dataset))

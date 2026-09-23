@@ -19,6 +19,7 @@ from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.chat.models import Thread, ThreadArtifact
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.tenant_access import usable_connection
 
 
 @pytest.fixture
@@ -36,7 +37,11 @@ def workspace(db):
 @pytest.fixture
 def member_user(db, workspace):
     user = User.objects.create_user(email="graph@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant=workspace.tenant)
+    TenantMembership.objects.create(
+        user=user,
+        tenant=workspace.tenant,
+        connection=usable_connection(user, workspace.tenant.provider),
+    )
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user
 

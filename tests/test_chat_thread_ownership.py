@@ -19,6 +19,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.tenant_access import ausable_connection
 
 User = get_user_model()
 
@@ -95,7 +96,9 @@ async def test_chat_rejects_turn_while_resume_running_on_same_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
         thread=thread,
@@ -149,7 +152,9 @@ async def test_chat_does_not_authorize_foreign_thread_on_transient_lookup_error(
     )
     # The attacker needs a TenantMembership to pass the single-tenant access gate
     # and actually reach the thread-ownership check (the path under test).
-    await TenantMembership.objects.acreate(user=attacker, tenant=tenant)
+    await TenantMembership.objects.acreate(
+        user=attacker, tenant=tenant, connection=await ausable_connection(attacker, tenant.provider)
+    )
     owners_thread = await Thread.objects.acreate(workspace=ws, user=owner)
 
     # Plain client: @csrf_protect is bypassed when the client does not enforce
@@ -309,7 +314,9 @@ async def test_chat_rejection_logs_warning(caplog):
     )
     # The attacker needs a TenantMembership to pass the single-tenant access gate
     # and actually reach the thread-ownership check (the bug under test).
-    await TenantMembership.objects.acreate(user=attacker, tenant=tenant)
+    await TenantMembership.objects.acreate(
+        user=attacker, tenant=tenant, connection=await ausable_connection(attacker, tenant.provider)
+    )
     owners_thread = await Thread.objects.acreate(workspace=ws, user=owner)
 
     client = AsyncClient(enforce_csrf_checks=True)
@@ -363,7 +370,9 @@ async def test_messages_view_404_for_foreign_owned_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=other, role=WorkspaceRole.READ_WRITE
     )
-    await TenantMembership.objects.acreate(user=other, tenant=tenant)  # pass the live-tenant gate
+    await TenantMembership.objects.acreate(
+        user=other, tenant=tenant, connection=await ausable_connection(other, tenant.provider)
+    )  # pass the live-tenant gate
     owners_thread = await Thread.objects.acreate(workspace=ws, user=owner)
 
     client = AsyncClient()
@@ -388,7 +397,9 @@ async def test_messages_view_empty_for_nonexistent_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # pass the live-tenant gate
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )  # pass the live-tenant gate
 
     # A random UUID that has no Thread row yet.
     fresh_thread_id = "22222222-2222-2222-2222-222222222222"

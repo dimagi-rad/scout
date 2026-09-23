@@ -18,6 +18,7 @@ from apps.common.errors import ExpectedStateError
 from apps.semantic.models import SemanticModel
 from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, ensure_semantic_model
+from apps.users.models import TenantConnection
 from apps.workspaces.models import SchemaState, TenantSchema
 from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
@@ -34,6 +35,8 @@ def unresolvable_tenant_schema(db, tenant):
     """A tenant whose provider has no pipeline YAML, with a live schema."""
     tenant.provider = UNKNOWN_PROVIDER
     tenant.save(update_fields=["provider"])
+    # Keep members' credentials usable: access requires a same-provider connection.
+    TenantConnection.objects.filter(memberships__tenant=tenant).update(provider=UNKNOWN_PROVIDER)
     return TenantSchema.objects.create(
         tenant=tenant,
         schema_name="t_mystery",
