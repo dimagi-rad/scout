@@ -10,6 +10,7 @@ not pay another TLS handshake.
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -188,4 +189,44 @@ async def test_close_all_pools_closes_every_pool_even_when_one_raises():
 
     bad.close.assert_awaited_once()
     good.close.assert_awaited_once()
+    assert pool_mod._pools == {}
+
+
+def test_concurrent_sweeps_finalise_a_dead_loops_pool_once(monkeypatch):
+    """Two threads sweeping at once used to drive the same generator twice and
+    raise "aclose(): asynchronous generator is already running" out of get_pool."""
+    loop = asyncio.new_event_loop()
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=_fake_pool()):
+        loop.run_until_complete(pool_mod.get_pool(_base_params("t_alpha")))
+    loop.close()
+
+    inside = threading.Event()
+    release = threading.Event()
+    finalised = []
+    forget = pool_mod._forget
+
+    def slow_forget(key, pool):
+        finalised.append(pool)
+        inside.set()
+        release.wait(5)
+        forget(key, pool)
+
+    monkeypatch.setattr(pool_mod, "_forget", slow_forget)
+    errors = []
+
+    def sweep():
+        try:
+            pool_mod.release_pools_of_finished_loops()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=sweep)
+    first.start()
+    assert inside.wait(5)
+    sweep()  # runs while the first sweep is still inside the generator's finally
+    release.set()
+    first.join(5)
+
+    assert errors == []
+    assert len(finalised) == 1
     assert pool_mod._pools == {}

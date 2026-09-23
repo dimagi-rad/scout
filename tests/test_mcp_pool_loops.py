@@ -13,6 +13,7 @@ import asyncio
 import gc
 import os
 import threading
+import time
 import uuid
 
 import psycopg
@@ -77,6 +78,14 @@ def _backend_connections() -> int:
             "SELECT count(*) FROM pg_stat_activity WHERE application_name = %s", (_APP_NAME,)
         ).fetchone()
     return row[0]
+
+
+def _settled_backend_connections(timeout: float = 2.0) -> int:
+    """A backend leaves pg_stat_activity shortly after its client disconnects."""
+    deadline = time.monotonic() + timeout
+    while (count := _backend_connections()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return count
 
 
 def _cached_pool_count() -> int:
@@ -149,7 +158,7 @@ def test_connections_stay_bounded_across_many_sequential_loops():
     for _ in range(35):
         _run_in_fresh_loop(_hold_connections, 3)
 
-    assert _backend_connections() == 0
+    assert _settled_backend_connections() == 0
     assert _cached_pool_count() == 0
 
 
@@ -224,5 +233,5 @@ def test_a_loop_closed_without_shutdown_hooks_does_not_break_later_loops():
 
     assert _run_in_fresh_loop(later).closed
     assert _cached_pool_count() == 0
-    assert _backend_connections() == 0
+    assert _settled_backend_connections() == 0
     gc.collect()  # surface the destroyed-task noise here, under this test's filter

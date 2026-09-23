@@ -28,6 +28,11 @@ loops really do reach ``get_pool``: the ASGI/worker loop, plus the fresh loop
   connections), because production and staging share one RDS instance with
   tight ``max_connections``. At the cap, a new loop waits for a slot rather than
   evicting a live loop's pool — eviction is what made two live loops thrash.
+
+Pools only learn their loop is finished from its shutdown. A loop that is
+stopped but never closed, or a pool first opened after ``shutdown_asyncgens``
+already ran, keeps its slot until a later sweep sees the loop closed (the
+sweep runs on every new-pool request and after each test).
 """
 
 from __future__ import annotations
@@ -171,6 +176,15 @@ async def _reserve_slot() -> None:
                 _opening += 1
                 return
         if time.monotonic() >= deadline:
+            with _state_lock:
+                idle_loops = sum(1 for entry in _pools.values() if not entry.loop.is_running())
+            # A loop that stopped without being closed keeps its slot: nothing
+            # signals that it is finished. Name that case so it is diagnosable.
+            logger.warning(
+                "Managed-DB pool cap reached: %d pools cached, %d on loops not running",
+                len(_pools),
+                idle_loops,
+            )
             raise PoolTimeout(
                 f"all {_MAX_POOLS} managed-DB pool slots are held by other event loops"
             )
@@ -233,14 +247,18 @@ async def _close_pool(pool: AsyncConnectionPool) -> None:
     idle = _idle_connections(pool)
     try:
         await pool.close()
-    except asyncio.CancelledError:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            raise
-    finally:
+    except BaseException as exc:
+        # Only a close that raised skipped its own connection cleanup; on success
+        # the snapshot may include connections a client has since checked out.
         for conn in idle:
             with contextlib.suppress(Exception):
                 await conn.close()
+        current = asyncio.current_task()
+        stray_cancel = isinstance(exc, asyncio.CancelledError) and not (
+            current is not None and current.cancelling()
+        )
+        if not stray_cancel:
+            raise
 
 
 def _abandon(pool: AsyncConnectionPool) -> None:
@@ -264,7 +282,8 @@ def release_pools_of_finished_loops() -> None:
     ``_MAX_POOLS`` slots forever.
     """
     with _state_lock:
-        dead = [entry for entry in _pools.values() if entry.loop.is_closed()]
+        # Claim under the lock so two threads never drive the same generator.
+        dead = [_pools.pop(key) for key, entry in list(_pools.items()) if entry.loop.is_closed()]
     for entry in dead:
         # Drive the generator's finally by hand; with the loop closed it never awaits.
         closer = entry.lifetime.aclose()
