@@ -205,8 +205,16 @@ Frame clarifying questions helpfully:
 """
 
 
+PLACEHOLDERS = frozenset(
+    {"query_failure_fix", "unavailable_count_guidance", "schema_drift_guidance"}
+)
+
+
 def _render(**values: str) -> str:
-    # str.format would turn any literal brace added to the prompt into an import error.
+    # str.format would turn any literal brace added to the prompt into an import error,
+    # so the placeholder set is declared and checked in both directions instead.
+    if set(values) != PLACEHOLDERS:
+        raise ValueError(f"base system prompt needs exactly {sorted(PLACEHOLDERS)}")
     prompt = _BASE_SYSTEM_PROMPT_TEMPLATE
     for name, value in values.items():
         placeholder = "{" + name + "}"
@@ -228,7 +236,10 @@ BASE_SYSTEM_PROMPT = _render(
 1. If the user has already asked you to refresh or rebuild the data, call
    `run_materialization`.
 2. Otherwise, tell the user the data isn't currently queryable and ask whether
-   to re-materialize before calling `run_materialization`; it is long-running.""",
+   to re-materialize before calling `run_materialization`.
+
+`run_materialization` returns immediately with `status: started`; acknowledge
+that in one sentence and end your turn.""",
 )
 
 # Headless (recipe) runs have no user to answer an ask-first question and no

@@ -18,6 +18,7 @@ from apps.agents.graph.base import (
 from apps.agents.prompts.base_system import (
     BASE_SYSTEM_PROMPT,
     HEADLESS_BASE_SYSTEM_PROMPT,
+    PLACEHOLDERS,
     READ_ONLY_BASE_SYSTEM_PROMPT,
 )
 from apps.users.models import Tenant
@@ -272,12 +273,8 @@ def test_every_base_prompt_variant_keeps_the_shared_guardrails(prompt):
         "pg_tables",
     ):
         assert invariant in prompt
-    for placeholder in (
-        "{query_failure_fix}",
-        "{unavailable_count_guidance}",
-        "{schema_drift_guidance}",
-    ):
-        assert placeholder not in prompt
+    for name in PLACEHOLDERS:
+        assert "{" + name + "}" not in prompt
 
 
 @pytest.mark.asyncio
