@@ -21,6 +21,7 @@ from apps.artifacts.services.graph_doc import (
 from apps.artifacts.services.graph_manifest import (
     build_semantic_query_manifest,
     manifest_entry_summary,
+    sort_manifest_entries,
     sync_artifact_semantic_query_manifest,
 )
 from apps.artifacts.services.graph_runtime import check_graph_artifact
@@ -139,7 +140,10 @@ def create_artifact_graph_tools(
         manifest = build_semantic_query_manifest(story_doc_from_artifact_data(artifact.data))
         clean_limit = max(1, min(int(limit or 50), 100))
         clean_offset = max(0, int(offset or 0))
-        entries = sorted(manifest["entries"], key=lambda entry: entry["key"])
+        # The collation sort is a raw cursor, which Django has no async form of.
+        entries = await sync_to_async(sort_manifest_entries, thread_sensitive=True)(
+            manifest["entries"]
+        )
         total_count = len(entries)
         page = entries[clean_offset : clean_offset + clean_limit]
         persisted = {
