@@ -2,7 +2,7 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { evaluateClaudeReview } = require('./claude-review-gate.cjs');
+const { evaluateClaudeReview, describeDenials } = require('./claude-review-gate.cjs');
 const { evaluateReview } = require('./ocr-gate.cjs');
 const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheckpointMatches } = require('./ocr-state.cjs');
 
@@ -233,11 +233,13 @@ async function finishClaude({ github, context, core, fs, env }) {
     env = { ...env, CLAUDE_RECEIPT: JSON.stringify(receipt) };
     if (receipt.run !== String(context.runId) || receipt.attempt !== env.GITHUB_RUN_ATTEMPT
         || receipt.repository !== env.GITHUB_REPOSITORY || receipt.pr !== Number(env.PR_NUMBER)) throw new Error('Receipt identity mismatch.');
+    const sdkMessages = JSON.parse(fs.readFileSync(env.EXECUTION_FILE, 'utf8'));
+    for (const line of describeDenials(sdkMessages)) core.warning(line);
     decision = evaluateClaudeReview({
       expectedHead: env.REVIEW_HEAD, expectedBase: env.REVIEW_BASE, expectedReceipt: receipt,
       currentPr: { state: pr.state, head: pr.head.sha, base: pr.base.sha },
       actionOutcome: env.CLAUDE_OUTCOME, actionConclusion: env.CLAUDE_CONCLUSION,
-      sdkMessages: JSON.parse(fs.readFileSync(env.EXECUTION_FILE, 'utf8')),
+      sdkMessages,
       structuredResult: JSON.parse(env.CLAUDE_RESULT),
       baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments,
     });
@@ -246,7 +248,7 @@ async function finishClaude({ github, context, core, fs, env }) {
         || state.policy !== env.POLICY || state.run !== String(context.runId))) {
       decision = { passed: false, reason: 'The accepted OCR checkpoint no longer matches this Claude review.' };
     }
-  } catch { /* Deliberately do not log raw transcript, tool inputs or exceptions. */ }
+  } catch { /* Deliberately do not log raw transcript or exceptions; denials are sanitized above. */ }
   try {
     const published = await publishClaudeReceipt({ github, context, core, env }, decision.passed ? 'verified' : 'blocked',
       decision.passed ? 'Review completed with no high or critical findings.' : decision.reason, false);
