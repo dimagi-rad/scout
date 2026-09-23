@@ -527,7 +527,7 @@ test("a failed post names the stage without exposing the error", async () => {
     throw Error("PRIVATE API");
   };
   await finishClaude(h);
-  assert.deepEqual(h.warnings, ["Claude verification stopped during review posting."]);
+  assert.deepEqual(h.warnings, ["Claude verification stopped during review posting (Error)."]);
   assert.ok(h.failures.length);
   assert.notEqual(h.outputs.claude_verified, "true");
   assert.doesNotMatch(h.summary, /PRIVATE/);
@@ -542,4 +542,129 @@ test("an oversized review is truncated to fit GitHub's comment limit", async () 
   assert.ok(posted.body.length <= 65536);
   assert.match(posted.body, /truncated this review/);
   assert.equal(h.outputs.claude_verified, "true");
+});
+
+// Mirrors @octokit/request-error: class RequestError, name "HttpError".
+class RequestError extends Error {}
+function apiError(status, message = "PRIVATE response body", headers = {}) {
+  const error = new RequestError(message);
+  error.name = "HttpError";
+  error.status = status;
+  error.response = { headers, data: { message } };
+  return error;
+}
+
+function flaky(h, method, errors) {
+  const original = method === "pr" ? h.github.rest.pulls.get : h.github.paginate;
+  let thrown = 0;
+  const wrapped = async (...args) => {
+    if ((method === "pr" || args[0] === h.github.rest.issues.listComments) && thrown < errors.length) {
+      thrown += 1;
+      throw errors[thrown - 1];
+    }
+    return original(...args);
+  };
+  if (method === "pr") h.github.rest.pulls.get = wrapped;
+  else h.github.paginate = wrapped;
+  return () => thrown;
+}
+
+const receiptBody = (h) =>
+  h.comments.find((c) => c.body.startsWith("<!-- scout-claude-review -->")).body;
+
+test("a transient API error while loading evidence is retried and the review verifies", async () => {
+  for (const [method, error] of [
+    ["pr", apiError(502)],
+    ["comments", apiError(503)],
+    ["pr", apiError(403, "PRIVATE: You have exceeded a secondary rate limit")],
+    ["comments", apiError(429)],
+    ["pr", Object.assign(new Error("PRIVATE socket"), { code: "ECONNRESET" })],
+  ]) {
+    const h = await prepared();
+    h.warnings = [];
+    const delays = [];
+    const calls = flaky(h, method, [error]);
+    await finishClaude({ ...h, delay: async (ms) => delays.push(ms) });
+    assert.deepEqual(h.failures, [], `${method} ${error.status}`);
+    assert.equal(h.outputs.claude_verified, "true");
+    assert.equal(calls(), 1);
+    assert.deepEqual(delays, [2000]);
+    assert.equal(h.warnings.length, 1);
+    assert.match(
+      h.warnings[0],
+      /^Retrying the (PR|comments) fetch after [A-Za-z]+(, HTTP \d{3})? \(attempt 2 of 3\)\.$/,
+    );
+    assert.doesNotMatch(h.warnings.join("\n"), /PRIVATE|secondary/);
+  }
+});
+
+test("a persistent evidence-loading failure blocks and logs only the stage, class and status", async () => {
+  for (const [method, stage] of [
+    ["pr", "pr fetch"],
+    ["comments", "comments fetch"],
+  ]) {
+    const h = await prepared();
+    h.warnings = [];
+    const delays = [];
+    const calls = flaky(h, method, [apiError(502), apiError(502), apiError(502)]);
+    await finishClaude({ ...h, delay: async (ms) => delays.push(ms) });
+    assert.equal(calls(), 3);
+    assert.deepEqual(delays, [2000, 5000]);
+    assert.equal(
+      h.warnings.at(-1),
+      `Claude verification stopped during ${stage} (RequestError, HTTP 502).`,
+    );
+    assert.notEqual(h.outputs.claude_verified, "true");
+    assert.deepEqual(h.failures, ["Claude review evidence could not be loaded or validated."]);
+    assert.match(receiptBody(h), /Claude review: blocked/);
+    assert.equal(readState(h.comments).claudeHead, null);
+    for (const text of [h.warnings.join("\n"), h.summary, ...h.comments.map((c) => c.body)]) {
+      assert.doesNotMatch(text, /PRIVATE/);
+    }
+  }
+});
+
+test("permanent API errors are not retried", async () => {
+  for (const error of [
+    apiError(404),
+    apiError(403, "PRIVATE Resource not accessible"),
+    new Error("PRIVATE bug"),
+  ]) {
+    const h = await prepared();
+    h.warnings = [];
+    const delays = [];
+    const calls = flaky(h, "pr", [error]);
+    await finishClaude({ ...h, delay: async (ms) => delays.push(ms) });
+    assert.equal(calls(), 1);
+    assert.deepEqual(delays, []);
+    assert.match(
+      h.warnings.at(-1),
+      /^Claude verification stopped during pr fetch \((RequestError, HTTP 40[34]|Error)\)\.$/,
+    );
+    assert.doesNotMatch(h.warnings.join("\n"), /PRIVATE/);
+  }
+});
+
+test("local evidence failures name their sub-stage without transcript content", async () => {
+  const receiptFile = "/tmp/scout-claude-receipt.json";
+  for (const [mutate, expected] of [
+    [(h) => delete h.files[receiptFile], "receipt read (Error)"],
+    [(h) => (h.files[receiptFile] = "PRIVATE {"), "receipt read (SyntaxError)"],
+    [
+      (h) => (h.files[receiptFile] = JSON.stringify({ ...JSON.parse(h.files[receiptFile]), run: "999" })),
+      "receipt identity (Error)",
+    ],
+    [(h) => delete h.files["/sdk.json"], "execution file read (Error)"],
+    [(h) => (h.files["/sdk.json"] = "PRIVATE transcript {"), "execution file parse (SyntaxError)"],
+  ]) {
+    const h = await prepared();
+    h.warnings = [];
+    mutate(h);
+    await finishClaude(h);
+    assert.deepEqual(h.warnings, [`Claude verification stopped during ${expected}.`]);
+    assert.notEqual(h.outputs.claude_verified, "true");
+    for (const text of [h.summary, ...h.comments.map((c) => c.body)]) {
+      assert.doesNotMatch(text, /PRIVATE/);
+    }
+  }
 });
