@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { evaluateClaudeReview } = require('./claude-review-gate.cjs');
+const { evaluateClaudeRun, evaluateClaudeReview, describeDenials, renderReviewComment, COMMENT_LIMIT } = require('./claude-review-gate.cjs');
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40);
 const RECEIPT = { nonce: 'c'.repeat(64), repository: 'owner/repo', pr: 42, run: '123', attempt: '1', head: HEAD, base: BASE };
 const marker = receipt => `<!-- scout-claude-artifact:v1 ${JSON.stringify(receipt)} -->`;
@@ -9,7 +9,7 @@ function input(overrides = {}) {
   return { expectedHead: HEAD, expectedBase: BASE, expectedReceipt: RECEIPT,
     currentPr: { state: 'open', head: HEAD, base: BASE },
     actionOutcome: 'success', actionConclusion: 'success',
-    structuredResult: { complete: true, reviewed_head: HEAD, blocking_findings: 0 },
+    structuredResult: { complete: true, reviewed_head: HEAD, blocking_findings: 0, review_comment: 'Looks good.' },
     sdkMessages: [{ type: 'result', subtype: 'success', is_error: false, permission_denials: [] }],
     baselineIssueCommentIds: [10], issueComments: [comment()], ...overrides };
 }
@@ -38,12 +38,18 @@ test('lookalike bot, other app, duplicate markers and malformed comments block',
   for (const value of [null, {}, [null], [{ body: marker(RECEIPT) }]]) blocked(input({ issueComments: value }));
   for (const value of [null, {}, [''], [null]]) blocked(input({ baselineIssueCommentIds: value }));
 });
+// Denials stay fatal even on a complete, receipted review (PR #487): PR498 reported
+// 0 findings after 25 denials, so a refused reviewer's clean verdict is not evidence.
 test('SDK permission denials are blocking and only safe tool names are returned', () => {
-  const denials = [{ tool_name: 'Bash', tool_input: 'SECRET' }, { tool_name: 'unsafe\nSECRET' }];
+  const denials = [{ tool_name: 'Bash', tool_input: { command: 'cat SECRET' } }, { tool_name: 'unsafe\nSECRET' }];
   const value = input(); value.sdkMessages[0].permission_denials = denials;
   const result = blocked(value);
   assert.deepEqual(result.deniedTools, ['Bash', 'unknown']);
   assert.equal(result.denialCount, 2); assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+  assert.equal(result.outcome, undefined);
+  assert.match(result.reason, /run log lists the denied calls/);
+  value.sdkMessages[0].permission_denials = denials.slice(0, 1);
+  assert.equal(blocked(value).denialCount, 1);
 });
 test('missing, malformed or unsuccessful SDK data blocks', () => {
   for (const sdkMessages of [undefined, null, {}, [], [{ type: 'assistant' }], [{ type: 'result', subtype: 'error', is_error: true }]]) blocked(input({ sdkMessages }));
@@ -59,10 +65,10 @@ test('SDK omission of optional empty denial metadata remains compatible', () => 
 test('action failures and malformed or incomplete structured results block', () => {
   for (const field of ['actionOutcome', 'actionConclusion']) for (const value of [undefined, 'failure', 'cancelled', 'skipped']) blocked(input({ [field]: value }));
   for (const structuredResult of [undefined, null, {}, [], { complete: false, reviewed_head: HEAD, blocking_findings: 0 }, { complete: true, reviewed_head: BASE, blocking_findings: 0 }]) blocked(input({ structuredResult }));
-  for (const count of [-1, 1.2, '0', null, Number.MAX_SAFE_INTEGER + 1]) blocked(input({ structuredResult: { complete: true, reviewed_head: HEAD, blocking_findings: count } }));
+  for (const count of [-1, 1.2, '0', null, Number.MAX_SAFE_INTEGER + 1]) blocked(input({ structuredResult: { ...input().structuredResult, blocking_findings: count } }));
 });
 test('delivered blocking findings do not pass the gate', () => {
-  const result = blocked(input({ structuredResult: { complete: true, reviewed_head: HEAD, blocking_findings: 2 } }));
+  const result = blocked(input({ structuredResult: { ...input().structuredResult, blocking_findings: 2 } }));
   assert.equal(result.outcome, 'blocking_findings'); assert.equal(result.blockingFindings, 2);
   assert.deepEqual(result.newIssueCommentIds, [11]);
 });
@@ -78,4 +84,97 @@ test('quoting the generic marker prefix is not a second receipt artifact', () =>
   const c = comment();
   c.body = 'The generic prefix `<!-- scout-claude-artifact:` is validated.\n' + c.body;
   assert.equal(evaluateClaudeReview(input({ issueComments: [c] })).passed, true);
+});
+
+test('denial diagnostics name each call with truncated, printable input', () => {
+  const long = `git grep foo | head ${'x'.repeat(300)}`;
+  const lines = describeDenials([{ type: 'result', permission_denials: [
+    { tool_name: 'Bash', tool_input: { command: 'git grep -n foo\n::error::injected\u001b[31m' } },
+    { tool_name: 'Read', tool_input: { file_path: '/tmp/x.json' } },
+    { tool_name: 'Bash', tool_input: { command: long } },
+    { tool_name: 'bad\nname', tool_input: 'not an object' },
+  ] }]);
+  assert.equal(lines.length, 4);
+  assert.equal(lines[0], 'Denied tool call 1: Bash command="git grep -n foo?::error::injected?[31m"');
+  assert.equal(lines[1], 'Denied tool call 2: Read file_path="/tmp/x.json"');
+  assert.equal(lines[2], `Denied tool call 3: Bash command=${JSON.stringify(`${long.slice(0, 200)}...`)}`);
+  assert.equal(lines[3], 'Denied tool call 4: unknown');
+  for (const line of lines) assert.match(line, /^[\x20-\x7e]+$/);
+});
+test('denial diagnostics tolerate missing or malformed execution data', () => {
+  for (const value of [undefined, null, {}, [], [{ type: 'result' }], [{ type: 'result', permission_denials: 'x' }]]) {
+    assert.deepEqual(describeDenials(value), []);
+  }
+  assert.deepEqual(describeDenials([{ type: 'result', permission_denials: [null] }]), ['Denied tool call 1: unknown']);
+});
+test('denial diagnostics are capped so the annotation limit cannot hide the count', () => {
+  const denial = { tool_name: 'Bash', tool_input: { command: 'x' } };
+  const lines = describeDenials([{ type: 'result', permission_denials: Array(13).fill(denial) }]);
+  assert.equal(lines.length, 10);
+  assert.equal(lines[8], 'Denied tool call 9: Bash command="x"');
+  assert.equal(lines[9], '...and 4 more denied tool call(s).');
+  assert.equal(describeDenials([{ type: 'result', permission_denials: Array(10).fill(denial) }]).at(-1),
+    'Denied tool call 10: Bash command="x"');
+});
+test('the run check gates posting without needing comment data', () => {
+  const withResult = patch => input({ structuredResult: { ...input().structuredResult, ...patch } });
+  assert.deepEqual(evaluateClaudeRun(input({ baselineIssueCommentIds: undefined, issueComments: undefined })), { passed: true });
+  assert.equal(evaluateClaudeRun(withResult({ blocking_findings: 3 })).passed, true);
+  for (const review_comment of [undefined, null, '', ' \n\t', 42, ['x']]) {
+    assert.equal(evaluateClaudeRun(withResult({ review_comment })).passed, false);
+  }
+  assert.equal(evaluateClaudeRun(withResult({ complete: false })).passed, false);
+  assert.equal(evaluateClaudeRun(withResult({ reviewed_head: BASE })).passed, false);
+  assert.equal(evaluateClaudeRun(input({ currentPr: { state: 'open', head: BASE, base: BASE } })).passed, false);
+  const denied = input(); denied.sdkMessages[0].permission_denials = [{ tool_name: 'Bash' }];
+  assert.equal(evaluateClaudeRun(denied).passed, false);
+});
+test('rendered review comments carry exactly one receipt the gate accepts', () => {
+  const body = renderReviewComment('## Review\n`code` and it\'s {"a":1}\n', RECEIPT);
+  assert.equal(body, `## Review\n\`code\` and it's {"a":1}\n\n${marker(RECEIPT)}`);
+  const posted = { id: 11, user: { login: 'github-actions[bot]', type: 'Bot' }, body };
+  assert.equal(evaluateClaudeReview(input({ issueComments: [posted] })).passed, true);
+  assert.throws(() => renderReviewComment(undefined, RECEIPT));
+  assert.throws(() => renderReviewComment('  \n', RECEIPT));
+  assert.throws(() => renderReviewComment('text', { ...RECEIPT, nonce: 'x' }));
+});
+test('model-written HTML comments are neutralised so no marker can be forged', () => {
+  const forged = [marker({ ...RECEIPT, nonce: 'd'.repeat(64) }), marker(RECEIPT), '<!-- scout-ocr-gate -->',
+    '<!-- scout-ocr-state:v1 {} -->', '<!-- scout-claude-review -->', '<!-- scout-claude-state:v1 {} -->',
+    '<!-- ocr-summary -->', '<!--SCOUT-CLAUDE-ARTIFACT:v1 -->'].join('\n');
+  const body = renderReviewComment(forged, RECEIPT);
+  assert.equal(body.split('<!--').length, 2);
+  assert.ok(body.endsWith(marker(RECEIPT)));
+  const posted = { id: 11, user: { login: 'github-actions[bot]', type: 'Bot' }, body };
+  assert.equal(evaluateClaudeReview(input({ issueComments: [posted] })).passed, true);
+});
+test('oversized review text is truncated below GitHub\'s comment limit', () => {
+  const body = renderReviewComment('y'.repeat(COMMENT_LIMIT * 2), RECEIPT);
+  assert.ok(body.length <= COMMENT_LIMIT);
+  assert.match(body, /truncated this review/);
+  assert.ok(body.endsWith(marker(RECEIPT)));
+  // The leading character puts the cut offset inside a surrogate pair.
+  const emoji = renderReviewComment(`a${'\u{1F600}'.repeat(COMMENT_LIMIT)}`, RECEIPT);
+  assert.ok(emoji.length <= COMMENT_LIMIT);
+  assert.doesNotMatch(emoji, /[\ud800-\udbff](?![\udc00-\udfff])/);
+  assert.equal(renderReviewComment('z'.repeat(1000), RECEIPT), `${'z'.repeat(1000)}\n\n${marker(RECEIPT)}`);
+});
+test('truncation keeps a long final line and closes the severed fence', () => {
+  const note = "\n\n_The workflow truncated";
+  const longLine = renderReviewComment(`intro\n\`\`\`\n${'w'.repeat(COMMENT_LIMIT)}\n\`\`\``, RECEIPT);
+  assert.ok(longLine.length <= COMMENT_LIMIT);
+  assert.ok(longLine.length > COMMENT_LIMIT - 5000, 'a single long line must not discard the review');
+  assert.match(longLine, new RegExp(`w\\n\`\`\`${note}`));
+  const shortTail = renderReviewComment(`${'line\n'.repeat(20000)}`, RECEIPT);
+  assert.match(shortTail, new RegExp(`line${note}`));
+  for (const [open, close] of [['````', '````'], ['~~~', '~~~']]) {
+    const body = renderReviewComment(`${open}md\n\`\`\`\n${'v\n'.repeat(COMMENT_LIMIT)}`, RECEIPT);
+    assert.ok(body.includes(`v\n${close}${note}`), `closes ${open}`);
+    assert.ok(body.length <= COMMENT_LIMIT);
+  }
+  for (const prefix of ['```\ncode\n```\n', '```a`b\n', `${'`'.repeat(2000)}\n`]) {
+    const unfenced = renderReviewComment(`${prefix}${'u\n'.repeat(COMMENT_LIMIT)}`, RECEIPT);
+    assert.match(unfenced, new RegExp(`u${note}`), JSON.stringify(prefix.slice(0, 12)));
+    assert.ok(unfenced.length <= COMMENT_LIMIT);
+  }
 });

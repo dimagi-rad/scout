@@ -2,7 +2,7 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { evaluateClaudeReview } = require('./claude-review-gate.cjs');
+const { evaluateClaudeRun, evaluateClaudeReview, describeDenials, finalResult, renderReviewComment } = require('./claude-review-gate.cjs');
 const { evaluateReview } = require('./ocr-gate.cjs');
 const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheckpointMatches } = require('./ocr-state.cjs');
 
@@ -226,6 +226,7 @@ async function finishClaude({ github, context, core, fs, env }) {
   core.setOutput('claude_verified', 'false');
   let decision = { passed: false, reason: 'Claude review evidence could not be loaded or validated.' };
   let comments, state;
+  let stage = 'evidence loading';
   try {
     const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
     comments = await commentsFor(github, context, env.PR_NUMBER);
@@ -233,20 +234,52 @@ async function finishClaude({ github, context, core, fs, env }) {
     env = { ...env, CLAUDE_RECEIPT: JSON.stringify(receipt) };
     if (receipt.run !== String(context.runId) || receipt.attempt !== env.GITHUB_RUN_ATTEMPT
         || receipt.repository !== env.GITHUB_REPOSITORY || receipt.pr !== Number(env.PR_NUMBER)) throw new Error('Receipt identity mismatch.');
-    decision = evaluateClaudeReview({
+    const sdkMessages = JSON.parse(fs.readFileSync(env.EXECUTION_FILE, 'utf8'));
+    for (const line of describeDenials(sdkMessages)) core.warning(line);
+    // Read from the execution file, not a step output: a review-sized comment
+    // passed through env can exceed the per-variable limit and stop the step.
+    const structuredResult = Array.isArray(sdkMessages) ? finalResult(sdkMessages)?.structured_output : undefined;
+    const review = {
       expectedHead: env.REVIEW_HEAD, expectedBase: env.REVIEW_BASE, expectedReceipt: receipt,
       currentPr: { state: pr.state, head: pr.head.sha, base: pr.base.sha },
       actionOutcome: env.CLAUDE_OUTCOME, actionConclusion: env.CLAUDE_CONCLUSION,
-      sdkMessages: JSON.parse(fs.readFileSync(env.EXECUTION_FILE, 'utf8')),
-      structuredResult: JSON.parse(env.CLAUDE_RESULT),
-      baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments,
-    });
+      sdkMessages, structuredResult,
+    };
+    const run = evaluateClaudeRun(review);
+    const claudeState = readClaudeReceiptState(comments);
+    if (!run.passed) {
+      decision = run;
+    } else if (claudeState?.status !== 'pending' || claudeState.run !== String(context.runId)
+        || claudeState.attempt !== env.GITHUB_RUN_ATTEMPT) {
+      decision = { passed: false, reason: 'A newer Claude review attempt superseded this run.' };
+    } else {
+      // The workflow posts so the model needs no shell write: markdown in a
+      // gh pr comment argument trips the Bash permission checker (run 35856432255).
+      // The gate re-reads the PR and comments and verifies the artifact as before.
+      stage = 'review posting';
+      const { data: posted } = await github.rest.issues.createComment({ ...context.repo,
+        issue_number: Number(env.PR_NUMBER), body: renderReviewComment(structuredResult.review_comment, receipt) });
+      stage = 'posted review verification';
+      const { data: latestPr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
+      comments = await commentsFor(github, context, env.PR_NUMBER);
+      // The listing can lag the write. The create response is GitHub's own record
+      // of the comment, and it still has to pass the full artifact check.
+      if (posted?.id && !comments.some(comment => String(comment.id) === String(posted.id))) {
+        comments = [...comments, posted];
+      }
+      decision = evaluateClaudeReview({ ...review,
+        currentPr: { state: latestPr.state, head: latestPr.head.sha, base: latestPr.base.sha },
+        baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments });
+    }
     state = readState(comments);
     if (decision.passed && (!state || !state.passed || state.head !== env.REVIEW_HEAD || state.base !== env.REVIEW_BASE
         || state.policy !== env.POLICY || state.run !== String(context.runId))) {
       decision = { passed: false, reason: 'The accepted OCR checkpoint no longer matches this Claude review.' };
     }
-  } catch { /* Deliberately do not log raw transcript, tool inputs or exceptions. */ }
+  } catch {
+    // Deliberately do not log raw transcript or exceptions; denials are sanitized above.
+    core.warning(`Claude verification stopped during ${stage}.`);
+  }
   try {
     const published = await publishClaudeReceipt({ github, context, core, env }, decision.passed ? 'verified' : 'blocked',
       decision.passed ? 'Review completed with no high or critical findings.' : decision.reason, false);
