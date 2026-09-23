@@ -16,7 +16,7 @@ WORKER_RETAIN=3
 run_docker() { timeout --foreground 60s docker "$@"; }
 
 prune_workers() {
-  local account home destination label stopped
+  local account home destination label stopped not_removed
   # Worker deploys skip Kamal's service-wide prune so a stopped worker named by
   # either destination's pending drain receipt survives (DEPLOYMENT.md). Only
   # prune when no receipt exists anywhere; otherwise leave cleanup to an operator.
@@ -33,10 +33,11 @@ prune_workers() {
   fi
   home=$(cut -d: -f6 <<< "$account")
   local kamal="$home/.kamal"
-  if [[ "$home" != /* || -L "$kamal" || \
+  if [[ "$home" != /* || "$home" == / || -L "$home" || ! -d "$home" || ! -r "$home" || ! -x "$home" || \
+        -L "$kamal" || \
         ( -e "$kamal" && ( ! -d "$kamal" || ! -r "$kamal" || ! -x "$kamal" ) ) || \
         -e "$kamal/scout-worker-drains-v1" || -L "$kamal/scout-worker-drains-v1" ]]; then
-    echo "::warning title=Worker prune skipped::Legacy or unreadable drain metadata; inspect it before pruning workers."
+    echo "::warning title=Worker prune skipped::Unreadable home, or legacy or unreadable drain metadata; inspect it before pruning workers."
     return 0
   fi
   local root="$home/.scout-worker-drains-v1"
@@ -65,13 +66,16 @@ prune_workers() {
     stopped=$(run_docker ps --all --no-trunc --quiet \
       --filter label=service=scout-worker --filter "label=destination=$label" \
       --filter status=created --filter status=exited --filter status=dead) || {
-      echo "::warning title=Worker prune skipped::Could not list stopped $destination workers."
+      echo "::warning title=Worker prune incomplete::Could not list stopped $destination workers."
       continue
     }
-    tail -n "+$((WORKER_RETAIN + 1))" <<< "$stopped" | while read -r container; do
-      # Best effort: Kamal may already have removed it since the listing.
-      if [[ -n "$container" ]]; then run_docker rm "$container" >/dev/null || true; fi
-    done
+    # Best effort (Kamal may already have removed one), but report failures.
+    not_removed=$(tail -n "+$((WORKER_RETAIN + 1))" <<< "$stopped" | while read -r container; do
+      if [[ -n "$container" ]] && ! run_docker rm "$container" >/dev/null; then echo "$container"; fi
+    done)
+    if [[ -n "$not_removed" ]]; then
+      echo "::warning title=Worker prune incomplete::$(wc -l <<< "$not_removed" | tr -d ' ') stopped $destination worker(s) could not be removed."
+    fi
   done
   # Only images no container references; stopped rollback containers keep theirs.
   run_docker image prune --force >/dev/null
@@ -83,7 +87,7 @@ check() {
   local root available_kb available_gb
   root=$(run_docker info --format '{{.DockerRootDir}}' 2>/dev/null) || root=/
   [[ -e "$root" ]] || root=/
-  available_kb=$(df -Pk -- "$root" 2>/dev/null | awk 'NR == 2 { print $4 }') || available_kb=""
+  available_kb=$(df -Pk -- "$root" | awk 'NR == 2 { print $4 }') || available_kb=""
   [[ "$available_kb" =~ ^[0-9]+$ ]] || {
     echo "::error title=Host disk check failed::Could not read free space for $root. Follow DEPLOYMENT.md: Host disk full."
     exit 1

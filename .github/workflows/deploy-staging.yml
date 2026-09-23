@@ -126,26 +126,28 @@ jobs:
       - name: Free host disk space
         timeout-minutes: 10
         run: |
-          failed=0
+          worker_failed=0 kamal_failed=0 kamal_total=0
           ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
             "scout@$SCOUT_EC2_IP" bash -s -- prune-workers < scripts/host-disk-guard.sh \
-            || { failed=$((failed + 1)); echo "::warning title=Prune failed::Worker container prune failed."; }
+            || { worker_failed=1; echo "::warning title=Prune failed::Worker container prune failed."; }
           # Same service-wide prune `kamal deploy` runs after a successful deploy.
           # Workers are excluded: the host script above guards their receipts.
           for config in config/deploy.yml config/deploy-mcp.yml config/deploy-cube.yml config/deploy-frontend.yml; do
+            kamal_total=$((kamal_total + 1))
             kamal prune all -c "$config" -d staging \
-              || { failed=$((failed + 1)); echo "::warning title=Prune failed::kamal prune all -c $config failed."; }
+              || { kamal_failed=$((kamal_failed + 1)); echo "::warning title=Prune failed::kamal prune all -c $config failed."; }
           done
+          kamal_total=$((kamal_total + 1))
           kamal prune images -c config/deploy-worker.yml -d staging \
-            || { failed=$((failed + 1)); echo "::warning title=Prune failed::Worker image prune failed."; }
-          if (( failed > 0 )); then
-            echo "Host prune: $failed of 6 commands failed; see the step's warnings." >> "$GITHUB_STEP_SUMMARY"
+            || { kamal_failed=$((kamal_failed + 1)); echo "::warning title=Prune failed::Worker image prune failed."; }
+          if (( worker_failed + kamal_failed > 0 )); then
+            echo "Host prune: $((worker_failed + kamal_failed)) of $((kamal_total + 1)) commands failed; see the step's warnings." >> "$GITHUB_STEP_SUMMARY"
           fi
-          # One failure is tolerable (the disk check below is the real gate), but
-          # all of them failing means pruning is broken (e.g. a stale Kamal lock),
-          # which would otherwise stay invisible until the disk fills again.
-          if (( failed == 6 )); then
-            echo "::error title=Host prune failed::Every prune command failed. Check SSH and kamal lock status before retrying."
+          # The disk check below is the real gate, so one failure only warns. Every
+          # Kamal prune failing means pruning itself is broken (e.g. a stale Kamal
+          # lock), which would otherwise stay invisible until the disk fills again.
+          if (( kamal_failed == kamal_total )); then
+            echo "::error title=Host prune failed::Every kamal prune failed. Check kamal lock status and SSH before retrying."
             exit 1
           fi
 

@@ -49,7 +49,7 @@ test('first failure opens a labelled issue that links the run and mentions the p
   assert.deepEqual(created.labels, [LABEL]);
   assert.match(created.body, /deploy stage failed for `aaaaaaaaaaaa`/);
   assert.match(created.body, /@merger/);
-  assert.ok(created.body.includes(': https://github.com/o/r/actions/runs/42\n'));
+  assert.ok(created.body.includes(': https://github.com/o/r/actions/runs/42\n'), created.body);
 });
 
 test('repeat failures comment on the open issue instead of opening another', async () => {

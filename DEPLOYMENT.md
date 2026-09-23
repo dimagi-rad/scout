@@ -685,8 +685,8 @@ pending drain receipt (see [Migration-safe backend handoff](#migration-safe-back
 1. `Free host disk space` — `kamal prune all` for API, MCP, Cube and frontend
    (the same service-wide prune `kamal deploy` runs on success), a worker image
    prune, and the receipt-guarded worker container prune described above. Every
-   role keeps `retain_containers: 3`. A single prune failure is a warning; if all
-   of them fail (for example a stale Kamal lock), the step fails.
+   role keeps `retain_containers: 3`. A single prune failure is a warning; if every
+   `kamal prune` fails (for example a stale Kamal lock), the step fails.
 2. `Check host disk space` — fails the deploy with a clear error when Docker's
    filesystem has less than `HOST_MIN_FREE_GB` (8 GB) free, and warns below twice that.
 

@@ -160,15 +160,18 @@ def test_malformed_account_record_keeps_every_stopped_worker(guard, record):
     assert commands == []
 
 
-def test_unreadable_kamal_directory_keeps_every_stopped_worker(guard):
-    kamal = guard.home / ".kamal"
-    kamal.mkdir()
-    kamal.chmod(0o000)
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permission bits")
+@pytest.mark.parametrize("unreadable", ["home", "home/.kamal"])
+def test_unreadable_home_or_kamal_keeps_every_stopped_worker(guard, unreadable):
+    (guard.home / ".kamal").mkdir()
+    directory = guard.home.parent / unreadable
+    directory.chmod(0o000)
     try:
         result, commands = guard("prune-workers", stopped={"production": ["p1", "p2", "p3", "p4"]})
     finally:
-        kamal.chmod(0o700)
+        directory.chmod(0o700)
     assert result.returncode == 0, result.stderr
+    assert "Unreadable home, or legacy or unreadable drain metadata" in result.stdout
     assert commands == []
 
 
@@ -177,11 +180,12 @@ def test_listing_or_removal_failures_do_not_abort_the_rest_of_the_prune(guard):
     result, commands = guard("prune-workers", stopped=stopped, fail={"rm gone"})
     assert result.returncode == 0, result.stderr
     assert _removed(commands) == ["gone", "p5", "s4"]
+    assert "1 stopped production worker(s) could not be removed" in result.stdout
     assert ["image", "prune", "--force"] in commands
 
     result, commands = guard("prune-workers", stopped=stopped, fail={"ps production"})
     assert result.returncode == 0, result.stderr
-    assert "Could not list stopped production workers" in result.stdout
+    assert "Worker prune incomplete::Could not list stopped production workers" in result.stdout
     assert _removed(commands) == ["s4"]
     assert ["image", "prune", "--force"] in commands
 
@@ -272,7 +276,9 @@ def test_every_role_retains_three_stopped_containers(config_name, destination):
 
 
 @pytest.mark.parametrize(("name", "destination"), WORKFLOWS)
-@pytest.mark.parametrize(("failing", "expected"), [("", 0), ("kamal", 0), ("kamal ssh", 1)])
+@pytest.mark.parametrize(
+    ("failing", "expected"), [("", 0), ("ssh", 0), ("kamal", 1), ("kamal ssh", 1)]
+)
 def test_prune_step_tolerates_some_failures_but_not_all(
     tmp_path, name, destination, failing, expected
 ):
