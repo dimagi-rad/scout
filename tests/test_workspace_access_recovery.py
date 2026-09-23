@@ -123,3 +123,27 @@ def test_retry_requires_post(user, workspace):
     client.force_login(user)
 
     assert client.get(f"/api/workspaces/{workspace.id}/access/verify/").status_code == 405
+
+
+@pytest.mark.django_db(transaction=True)
+def test_terminal_denials_are_throttled_too(user, workspace, tenant, upstream_provider):
+    TenantMembership.objects.filter(user=user, tenant=tenant).update(archived_at=timezone.now())
+    upstream_provider.domains = []
+
+    first = _retry(user, workspace)
+    second = _retry(user, workspace)
+
+    assert first.status_code == 403
+    assert second.status_code == 403
+    assert len(upstream_provider.requests) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_retry_that_observes_revocation_names_it(user, workspace, tenant, upstream_provider):
+    make_proof_stale(user, tenant)
+    upstream_provider.domains = []
+
+    response = _retry(user, workspace)
+
+    assert response.json()["reason"] == "upstream_access_lost"
+    assert response.json()["lost_tenants"] == [tenant.canonical_name]

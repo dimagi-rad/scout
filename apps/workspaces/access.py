@@ -362,23 +362,29 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     if not tenant_ids or not freshness_enforced():
         return local
     cooldown_key = f"access-verify-retry:{user.pk}:{workspace_id}"
-    # A lease stops simultaneous checks but not a stream of failing retries.
+    # A lease stops simultaneous checks but not a stream of failing retries; a
+    # history with a revoked tombstone can never short-circuit as fresh, so every
+    # unthrottled retry would be a real provider round-trip.
     if await cache.aget(cooldown_key):
+        if (
+            local.granted
+            and (await acheck_freshness(user.pk, await _alive_tenant_ids(local.workspace))).fresh
+        ):
+            return local
         return _freshness_denied(VERIFICATION_UNAVAILABLE)
+    await cache.aset(cooldown_key, 1, RETRY_COOLDOWN_SECONDS)
     retry_reason = await averify_membership_history(
         user.pk, tenant_ids, budget=VerificationBudget.INTERACTIVE
     )
+    admission = UpstreamAdmission(admitted=False, rechecked=True, reason=retry_reason)
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
     if not result.granted:
         if retry_reason in RETRYABLE_REASONS:
-            await cache.aset(cooldown_key, 1, RETRY_COOLDOWN_SECONDS)
             return _freshness_denied(retry_reason)
-        return result
+        return _attribute_observed_denial(result, admission)
     final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
     if final.fresh:
         return result
-    await cache.aset(cooldown_key, 1, RETRY_COOLDOWN_SECONDS)
-    admission = UpstreamAdmission(admitted=False, rechecked=True, reason=retry_reason)
     return _freshness_denied(final_denial_reason(admission, final))
 
 
