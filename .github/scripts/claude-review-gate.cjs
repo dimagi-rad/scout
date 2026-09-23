@@ -39,6 +39,39 @@ function safeToolNames(denials) {
   }))].sort();
 }
 
+// The gate and the denial log must read the same message, or the log could
+// contradict the block reason.
+const finalResult = sdkMessages => sdkMessages.findLast(message => isObject(message) && message.type === 'result');
+
+const DENIAL_INPUT_LIMIT = 200;
+// GitHub shows only the first 10 warning annotations per step.
+const DENIAL_LIST_LIMIT = 10;
+
+function sanitizeDenialInput(value) {
+  if (typeof value !== 'string') return '';
+  const printable = value.replace(/[^\x20-\x7e]/g, '?');
+  return printable.length > DENIAL_INPUT_LIMIT ? `${printable.slice(0, DENIAL_INPUT_LIMIT)}...` : printable;
+}
+
+// Run-log diagnostics only: tool inputs are model-authored from untrusted PR
+// content, so they must never reach a PR comment or the gate's reason.
+function describeDenials(sdkMessages) {
+  if (!Array.isArray(sdkMessages)) return [];
+  const result = finalResult(sdkMessages);
+  if (!result || !Array.isArray(result.permission_denials)) return [];
+  const denials = result.permission_denials;
+  const shown = denials.length > DENIAL_LIST_LIMIT ? DENIAL_LIST_LIMIT - 1 : denials.length;
+  const lines = denials.slice(0, shown).map((denial, index) => {
+    const [tool] = safeToolNames([denial]);
+    const toolInput = isObject(denial) && isObject(denial.tool_input) ? denial.tool_input : {};
+    const field = ['command', 'file_path', 'path', 'pattern'].find(key => typeof toolInput[key] === 'string');
+    const detail = field ? ` ${field}=${JSON.stringify(sanitizeDenialInput(toolInput[field]))}` : '';
+    return `Denied tool call ${index + 1}: ${tool}${detail}`;
+  });
+  if (shown < denials.length) lines.push(`...and ${denials.length - shown} more denied tool call(s).`);
+  return lines;
+}
+
 function evaluateClaudeReview(input) {
   if (!isObject(input)) return block('Missing Claude review gate input.');
   const { expectedHead, expectedBase, expectedReceipt, currentPr, sdkMessages,
@@ -51,14 +84,14 @@ function evaluateClaudeReview(input) {
   if (currentPr.head !== expectedHead || currentPr.base !== expectedBase) return block('The pull request changed during Claude review.');
   if (actionOutcome !== 'success' || actionConclusion !== 'success') return block('The Claude action did not finish successfully.');
   if (!Array.isArray(sdkMessages)) return block('Missing or malformed Claude execution data.');
-  const result = sdkMessages.findLast(message => isObject(message) && message.type === 'result');
+  const result = finalResult(sdkMessages);
   if (!result) return block('Claude execution data has no final result.');
   if (result.subtype !== 'success' || result.is_error !== false) return block('Claude did not finish successfully.');
   if (Object.hasOwn(result, 'permission_denials') && !Array.isArray(result.permission_denials)) return block('Claude returned malformed permission denial metadata.');
   const denials = result.permission_denials || [];
   if (denials.length) {
     const deniedTools = safeToolNames(denials);
-    return block(`Claude review had ${denials.length} permission denial(s): ${deniedTools.join(', ')}.`,
+    return block(`Claude review had ${denials.length} permission denial(s): ${deniedTools.join(', ')}. The run log lists the denied calls.`,
       { denialCount: denials.length, deniedTools });
   }
   if (!isObject(structuredResult) || structuredResult.complete !== true
@@ -80,4 +113,4 @@ function evaluateClaudeReview(input) {
   return { passed: true, outcome: 'no_blocking_findings', newIssueCommentIds, blockingFindings };
 }
 
-module.exports = { evaluateClaudeReview };
+module.exports = { evaluateClaudeReview, describeDenials };
