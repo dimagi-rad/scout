@@ -39,8 +39,9 @@ describe("materialization controls by role", () => {
   it.each([
     ["read", false],
     ["read_write", true],
+    [null, true],
   ] as const)("%s members see Stop: %s", (role, visible) => {
-    asRole(role)
+    if (role) asRole(role)
     render(<MaterializationProgressBanner job={job} workspaceId={WORKSPACE_ID} />)
 
     expect(screen.getByTestId("materialization-progress-banner")).toBeInTheDocument()
