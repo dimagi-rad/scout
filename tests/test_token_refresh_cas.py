@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
 from datetime import timedelta
 from unittest import mock
@@ -30,9 +31,19 @@ from apps.users.services.token_refresh import (
     refresh_oauth_token_result,
     refresh_oauth_token_result_sync,
 )
-from tests.row_locks import row_locked, user_row
 
 URL = "https://provider.example/o/token/"
+
+
+def _hold_user_lock(user_id, acquired, release):
+    try:
+        with transaction.atomic():
+            user_model = TenantConnection._meta.get_field("user").remote_field.model
+            user_model.objects.select_for_update().get(pk=user_id)
+            acquired.set()
+            assert release.wait(timeout=10)
+    finally:
+        django_connection.close()
 
 
 @pytest.fixture
@@ -831,9 +842,22 @@ def _stubbed_provider(payload=None):
         yield calls
 
 
+@contextlib.contextmanager
 def _user_row_locked(user_id, hold_seconds=8.0):
     """Hold a competing lock on the User row the refresh must take."""
-    return row_locked(user_row(user_id), release_after=hold_seconds, acquire_timeout=5)
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_user_lock, args=(user_id, acquired, release))
+    locker.start()
+    timer = threading.Timer(hold_seconds, release.set)
+    timer.start()
+    try:
+        assert acquired.wait(5), "lock holder never acquired the row"
+        yield
+    finally:
+        release.set()
+        timer.cancel()
+        locker.join(5)
 
 
 @pytest.mark.django_db(transaction=True)

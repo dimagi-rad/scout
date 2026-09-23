@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import threading
 import time
 import uuid
@@ -11,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
+from django.db import connection as django_connection
+from django.db import transaction
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
@@ -44,7 +45,6 @@ from apps.users.services.token_refresh import (
     TokenRefreshStatus,
     credential_fingerprint,
 )
-from tests.row_locks import arow_locked, control_row, user_row
 
 
 @pytest.fixture
@@ -57,6 +57,27 @@ def api_connection(user, tenant):
     )
     membership = TenantMembership.objects.create(user=user, tenant=tenant, connection=connection)
     return connection, membership
+
+
+def _hold_user_lock(user_id, acquired, release):
+    try:
+        with transaction.atomic():
+            user_model = TenantConnection._meta.get_field("user").remote_field.model
+            user_model.objects.select_for_update().get(pk=user_id)
+            acquired.set()
+            assert release.wait(timeout=10)
+    finally:
+        django_connection.close()
+
+
+def _hold_control_lock(connection_id, acquired, release):
+    try:
+        with transaction.atomic():
+            VerificationControl.objects.select_for_update().get(connection_id=connection_id)
+            acquired.set()
+            assert release.wait(timeout=10)
+    finally:
+        django_connection.close()
 
 
 @pytest.mark.asyncio
@@ -774,13 +795,26 @@ async def test_cancellation_during_initial_claim_drains_and_releases_lease(
     user, tenant, api_connection
 ):
     connection, _membership = api_connection
-    async with arow_locked(user_row(user.id)) as release:
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
+    locker.start()
+    # Release in a finally: an assertion failing before release.set() would otherwise
+    # leave _hold_user_lock holding SELECT FOR UPDATE on the user row for its full 10s
+    # timeout, and under transaction=True the teardown TRUNCATE blocks behind it --
+    # turning one failure into a cascade across neighbouring tests.
+    try:
+        assert await asyncio.to_thread(acquired.wait, 2)
+
         task = asyncio.create_task(verify_connection_access(user.id, connection.id, {tenant.id}))
         await asyncio.sleep(0.05)
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+    finally:
+        release.set()
+        await asyncio.to_thread(locker.join, 2)
     await asyncio.sleep(0.05)
 
     control = await VerificationControl.objects.filter(connection=connection).afirst()
@@ -931,13 +965,23 @@ async def test_cancellation_cleanup_is_bounded_when_control_is_locked(user, tena
     await asyncio.wait_for(provider_started.wait(), timeout=2)
     control = await VerificationControl.objects.aget(connection=connection)
     owned_lease = control.lease_token
-    async with arow_locked(control_row(connection.id), release_after=0.5) as release:
-        started = time.monotonic()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        elapsed = time.monotonic() - started
-        blocker_still_held_at_return = not release.is_set()
+    acquired = threading.Event()
+    release = threading.Event()
+    locker = threading.Thread(target=_hold_control_lock, args=(connection.id, acquired, release))
+    locker.start()
+    assert await asyncio.to_thread(acquired.wait, 2)
+    timer = threading.Timer(0.5, release.set)
+    timer.start()
+
+    started = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    elapsed = time.monotonic() - started
+    blocker_still_held_at_return = not release.is_set()
+    release.set()
+    await asyncio.to_thread(locker.join, 2)
+    timer.cancel()
 
     assert elapsed < 0.2
     assert blocker_still_held_at_return
@@ -951,27 +995,33 @@ async def test_publication_lock_wait_crossing_deadline_cannot_publish_success(
     user, tenant, api_connection
 ):
     connection, _membership = api_connection
+    acquired = threading.Event()
     release = threading.Event()
-    # The lock is taken mid-verification, so its context outlives the provider call.
-    locks = contextlib.AsyncExitStack()
+    locker = None
 
     async def provider(*args, **kwargs):
-        await locks.enter_async_context(
-            arow_locked(user_row(user.id), release=release, release_after=0.5)
-        )
+        nonlocal locker
+        locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
+        locker.start()
+        assert await asyncio.to_thread(acquired.wait, 2)
         return ProviderVerificationResult.complete({tenant.external_id})
 
-    async with locks:
-        started = time.monotonic()
-        result = await verify_connection_access(
-            user.id,
-            connection.id,
-            {tenant.id},
-            deadline=time.monotonic() + 0.15,
-            provider_verifier=provider,
-        )
-        elapsed = time.monotonic() - started
-        blocker_still_held_at_return = not release.is_set()
+    timer = threading.Timer(0.5, release.set)
+    timer.start()
+    started = time.monotonic()
+    result = await verify_connection_access(
+        user.id,
+        connection.id,
+        {tenant.id},
+        deadline=time.monotonic() + 0.15,
+        provider_verifier=provider,
+    )
+    elapsed = time.monotonic() - started
+    blocker_still_held_at_return = not release.is_set()
+    release.set()
+    if locker is not None:
+        await asyncio.to_thread(locker.join, 2)
+    timer.cancel()
 
     assert result.status == AccessVerificationStatus.UNAVAILABLE
     assert elapsed < 0.3
