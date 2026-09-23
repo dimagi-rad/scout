@@ -40,7 +40,8 @@ export function Sidebar() {
   const threadsAccessLostMessage = useAppStore((s) => s.threadsAccessLostMessage)
   const threadsAccessRetryable = useAppStore((s) => s.threadsAccessRetryable)
   const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
-  const [retryingVerification, setRetryingVerification] = useState(false)
+  const [verifyingWorkspaceId, setVerifyingWorkspaceId] = useState<string | null>(null)
+  const retryingVerification = verifyingWorkspaceId !== null && verifyingWorkspaceId === activeDomainId
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
@@ -272,9 +273,12 @@ export function Sidebar() {
                     disabled={retryingVerification}
                     onClick={() => {
                       if (!activeDomainId) return
-                      setRetryingVerification(true)
-                      void retryAccessVerification(activeDomainId).finally(() =>
-                        setRetryingVerification(false),
+                      const workspaceId = activeDomainId
+                      setVerifyingWorkspaceId(workspaceId)
+                      void retryAccessVerification(workspaceId).finally(() =>
+                        setVerifyingWorkspaceId((current) =>
+                          current === workspaceId ? null : current,
+                        ),
                       )
                     }}
                     className="mt-1 text-primary underline-offset-2 hover:underline disabled:opacity-50"
@@ -282,6 +286,15 @@ export function Sidebar() {
                   >
                     {retryingVerification ? "Verifying…" : "Retry verification"}
                   </button>
+                )}
+                {!threadsAccessRetryable && (
+                  <Link
+                    to={`${pathPrefix}/settings/connections`}
+                    className="mt-1 block text-primary underline-offset-2 hover:underline"
+                    data-testid="sidebar-threads-connected-accounts"
+                  >
+                    Open Connected Accounts
+                  </Link>
                 )}
               </div>
             )}

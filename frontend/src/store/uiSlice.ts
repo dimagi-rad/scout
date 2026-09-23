@@ -160,6 +160,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
             return
           }
           console.error("[Scout] Access verification retry failed:", error)
+          return
         }
         if (!isCurrent()) return
         await get().uiActions.fetchThreads(workspaceId)
