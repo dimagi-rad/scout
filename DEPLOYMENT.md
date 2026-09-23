@@ -26,9 +26,9 @@ target with **no in-repo IaC** (issue #248, finding 11#1):
 - **Compute:** ECS Fargate (cluster `labs-jj-cluster`; services
   `labs-jj-scout-web`, `labs-jj-scout-mcp`, `labs-jj-scout-worker`) — **not**
   EC2/Kamal like production.
-- **AWS account:** the Connect Labs account (its ECR registry is set by the
-  `ECR_REGISTRY` value in `deploy-labs.yml`) — distinct from the
-  Scout-production account.
+- **AWS account:** the Connect Labs account (its ECR registry host is the
+  `ECR_REGISTRY_LABS` Actions variable read by `deploy-labs.yml`) — distinct
+  from the Scout-production account.
 - **Path prefix:** served under `/scout` via `FORCE_SCRIPT_NAME`
   (`config/settings/connectlabs.py`) and the nginx `/scout/...` locations
   (`frontend/nginx.prod.conf`). Frontend builds set `VITE_BASE_PATH=/scout`.
@@ -105,6 +105,7 @@ image version. Deploy and rollback by the exact version, not a shared `latest` a
 | `SCOUT_ECR_REGISTRY` | CloudFormation output `ECRRegistry` |
 | `SCOUT_SENTRY_ORG` | Sentry org slug (e.g. `dimagi`). |
 | `SCOUT_SENTRY_FRONTEND_PROJECT` | Sentry project slug for the React app (e.g. `scout-frontend`). |
+| `ECR_REGISTRY_LABS` | ECR registry host in the Connect Labs AWS account; used only by `deploy-labs.yml` (see [Connect-labs](#connect-labs-ecs-fargate)). |
 
 ### AWS Secrets Manager
 
