@@ -12,7 +12,8 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion"
-import { READ_ONLY_HINT } from "@/hooks/useWorkspaceRole"
+import { READ_ONLY_HINT, writeErrorMessage } from "@/hooks/useWorkspaceRole"
+import { cn } from "@/lib/utils"
 import type { Recipe, RecipeRun } from "@/store/recipeSlice"
 
 interface RecipeDetailProps {
@@ -79,6 +80,7 @@ export function RecipeDetail({
   const [prompt, setPrompt] = useState(recipe.prompt || "")
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
+  const [writeError, setWriteError] = useState<string | null>(null)
 
   useEffect(() => {
     setName(recipe.name)
@@ -87,12 +89,33 @@ export function RecipeDetail({
     setHasChanges(false)
   }, [recipe])
 
+  const reportWriteError = useCallback(
+    (error: unknown) => {
+      setWriteError(writeErrorMessage(error, "Couldn’t save this change. Try again.", canWrite))
+    },
+    [canWrite],
+  )
+
   const handleSharingChange = useCallback(
     async (field: "is_shared" | "is_public", value: boolean) => {
-      await onSave({ [field]: value })
+      setWriteError(null)
+      try {
+        await onSave({ [field]: value })
+      } catch (error) {
+        reportWriteError(error)
+      }
     },
-    [onSave],
+    [onSave, reportWriteError],
   )
+
+  const handleRunSharingChange = async (runId: string, value: boolean) => {
+    setWriteError(null)
+    try {
+      await onUpdateRun(runId, { is_shared: value })
+    } catch (error) {
+      reportWriteError(error)
+    }
+  }
 
   const handleNameChange = (value: string) => {
     setName(value)
@@ -111,6 +134,7 @@ export function RecipeDetail({
 
   const handleSave = async () => {
     setSaving(true)
+    setWriteError(null)
     try {
       await onSave({
         name,
@@ -118,6 +142,8 @@ export function RecipeDetail({
         prompt,
       })
       setHasChanges(false)
+    } catch (error) {
+      reportWriteError(error)
     } finally {
       setSaving(false)
     }
@@ -166,6 +192,12 @@ export function RecipeDetail({
           )}
         </div>
       </div>
+
+      {writeError && (
+        <p className="text-sm text-destructive" role="alert" data-testid="recipe-write-error">
+          {writeError}
+        </p>
+      )}
 
       <Card>
         <CardHeader>
@@ -222,7 +254,7 @@ export function RecipeDetail({
         </CardHeader>
         <CardContent className="space-y-4">
           <label
-            className={canWrite ? "flex items-start gap-3 cursor-pointer" : "flex items-start gap-3"}
+            className={cn("flex items-start gap-3", canWrite && "cursor-pointer")}
             title={canWrite ? undefined : READ_ONLY_HINT}
             data-testid="recipe-sharing-project"
           >
@@ -352,18 +384,17 @@ export function RecipeDetail({
 
                         <div className="flex items-center gap-4 border-t pt-2">
                           <label
-                            className={
-                              canWrite
-                                ? "flex items-center gap-1.5 cursor-pointer text-xs"
-                                : "flex items-center gap-1.5 text-xs"
-                            }
+                            className={cn(
+                              "flex items-center gap-1.5 text-xs",
+                              canWrite && "cursor-pointer",
+                            )}
                             title={canWrite ? undefined : READ_ONLY_HINT}
                           >
                             <input
                               type="checkbox"
                               checked={run.is_shared}
                               onChange={(e) =>
-                                onUpdateRun(run.id, { is_shared: e.target.checked })
+                                void handleRunSharingChange(run.id, e.target.checked)
                               }
                               disabled={!canWrite}
                               className="h-3.5 w-3.5 rounded border-gray-300"

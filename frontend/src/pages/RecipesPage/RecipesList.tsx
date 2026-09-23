@@ -105,7 +105,7 @@ export function RecipesList({
                 size="sm"
                 onClick={() => onRun(recipe)}
                 className="flex-1"
-                data-testid={`recipe-run-${recipe.id}`}
+                data-testid={`recipe-run-button-${recipe.id}`}
               >
                 <Play className="mr-1 h-4 w-4" />
                 Run

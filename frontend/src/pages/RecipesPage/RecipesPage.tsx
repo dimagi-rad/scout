@@ -3,10 +3,10 @@ import { useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
-import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { useWorkspaceRole, writeErrorMessage } from "@/hooks/useWorkspaceRole"
+import { Button } from "@/components/ui/button"
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -45,6 +45,7 @@ export function RecipesPage() {
   const [runnerOpen, setRunnerOpen] = useState(false)
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   // Refetch on workspace change so the previous workspace's recipes don't
   // linger (they then 404 against the new workspace id).
@@ -139,20 +140,27 @@ export function RecipesPage() {
   )
 
   const handleDelete = useCallback((recipe: Recipe) => {
+    setDeleteError(null)
     setDeleteDialogRecipe(recipe)
   }, [])
 
   const handleConfirmDelete = useCallback(async () => {
     if (!deleteDialogRecipe) return
 
-    await deleteRecipe(deleteDialogRecipe.id)
+    try {
+      await deleteRecipe(deleteDialogRecipe.id)
+    } catch (error) {
+      if (!isCurrentAccount()) return
+      setDeleteError(writeErrorMessage(error, "Couldn’t delete this recipe. Try again.", canWrite))
+      return
+    }
     if (!isCurrentAccount()) return
     setDeleteDialogRecipe(null)
 
     if (id === deleteDialogRecipe.id) {
       navigate("/recipes")
     }
-  }, [deleteDialogRecipe, deleteRecipe, id, navigate, isCurrentAccount])
+  }, [deleteDialogRecipe, deleteRecipe, id, navigate, isCurrentAccount, canWrite])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {
@@ -238,11 +246,20 @@ export function RecipesPage() {
                 action cannot be undone.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {deleteError && (
+              <p className="text-sm text-destructive" role="alert">
+                {deleteError}
+              </p>
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleConfirmDelete}>
+              <Button
+                variant="destructive"
+                onClick={handleConfirmDelete}
+                data-testid="recipe-confirm-delete"
+              >
                 Delete
-              </AlertDialogAction>
+              </Button>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
@@ -299,11 +316,20 @@ export function RecipesPage() {
               action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError && (
+            <p className="text-sm text-destructive" role="alert">
+              {deleteError}
+            </p>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleConfirmDelete}>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDelete}
+              data-testid="recipe-confirm-delete"
+            >
               Delete
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
