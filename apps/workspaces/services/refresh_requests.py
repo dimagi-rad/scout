@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.db import transaction
 from django.db.models import Q
@@ -23,6 +23,10 @@ REFRESH_TASK_NAME = "apps.workspaces.tasks.refresh_tenant_schema"
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled", "aborted"})
 _LEGACY_ARG_KEYS = frozenset({"schema_id", "membership_id"})
 _CONTEXT_ARG_KEYS = frozenset({"schema_id", "membership_id", "actor_user_id", "workspace_id"})
+# created_at is stamped at INSERT, not COMMIT, so a candidate the pre-lock scan could
+# not see may carry a timestamp slightly before the scan. Its request transaction
+# (insert, defer, bind) is short, so anything older than this was genuinely missed.
+UNSCANNED_GRACE = timedelta(minutes=5)
 
 
 # "rejected" means the queued job is not the request its candidate records, so the
@@ -360,10 +364,10 @@ def _legacy_candidate_outcome(
 ) -> tuple[str, str]:
     job_ids = legacy_jobs.job_ids.get(candidate.id)
     if job_ids is None:
-        if candidate.created_at >= legacy_jobs.scanned_at:
+        if candidate.created_at >= legacy_jobs.scanned_at - UNSCANNED_GRACE:
             # Committed after the pre-lock scan, so its queue evidence was simply
             # not looked for yet; the next reconciliation will see it.
-            return _KEEP, "created after the queue scan"
+            return _KEEP, "created around or after the queue scan"
         return _RECOVER, "was not visible to the queue scan"
     jobs = list(
         ProcrastinateJob.objects.select_for_update(of=("self",))

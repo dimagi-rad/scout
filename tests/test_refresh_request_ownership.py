@@ -33,6 +33,7 @@ from apps.workspaces.services.refresh_requests import (
     DENIED_ROLE_REQUIRED,
     DENIED_WORKSPACE_UNLINKED,
     REFRESH_TASK_NAME,
+    UNSCANNED_GRACE,
     RefreshClaim,
     activate_claimed_refresh_candidate,
     claim_refresh_candidate,
@@ -1186,3 +1187,29 @@ def test_legacy_materializing_row_does_not_block_refresh(
 
     assert response.status_code == 202
     defer.assert_called_once()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("inserted_before_scan", "recovery_needed"),
+    [(timedelta(seconds=30), False), (UNSCANNED_GRACE + timedelta(minutes=1), True)],
+    ids=["commit-lagging-insert", "long-unseen"],
+)
+def test_unbound_candidate_inserted_before_scan_but_committed_after_stays_in_flight(
+    tenant, inserted_before_scan, recovery_needed
+):
+    # created_at is stamped at INSERT; an old-code refresh can insert before the scan
+    # and commit after it, so a fresh candidate the scan could not see stays in flight.
+    legacy_jobs = find_legacy_refresh_jobs(tenant)
+    late = TenantSchema.objects.create(
+        tenant=tenant, schema_name="unbound_commit_lag", state=SchemaState.PROVISIONING
+    )
+    TenantSchema.objects.filter(id=late.id).update(
+        created_at=legacy_jobs.scanned_at - inserted_before_scan
+    )
+
+    result = _reconcile(tenant, legacy_jobs)
+
+    late.refresh_from_db()
+    assert result.recovery_needed is recovery_needed
+    assert late.state == SchemaState.PROVISIONING
