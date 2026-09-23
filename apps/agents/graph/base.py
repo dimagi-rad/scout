@@ -28,7 +28,7 @@ from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
 )
-from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
+from apps.agents.prompts.base_system import select_base_system_prompt
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
@@ -195,6 +195,19 @@ ESCALATION_MESSAGE = (
     "Would you like me to run materialization?"
 )
 
+# A headless run has nobody to answer the interactive question.
+HEADLESS_ESCALATION_MESSAGE = (
+    "I've encountered repeated schema errors — the tables I expected to "
+    "find aren't queryable. The data may need to be re-materialized before "
+    "this run can complete."
+)
+
+READ_ONLY_ESCALATION_MESSAGE = (
+    "I've encountered repeated schema errors — the tables I expected to "
+    "find aren't queryable. The data may need to be refreshed, which a "
+    "workspace member with write access can do."
+)
+
 
 def _should_escalate(messages: list) -> bool:
     """Detect a panic loop: last N trailing tool messages all returned an
@@ -348,13 +361,7 @@ async def _fetch_semantic_model_context(
                 return (
                     _HEADLESS_MATERIALIZE_GUIDANCE
                     if not interactive
-                    else (
-                        "No data has been loaded yet. Call `run_materialization` to start "
-                        "loading. This tool returns IMMEDIATELY with `status: started` — do "
-                        "NOT call other data tools in the same turn. Acknowledge to the user "
-                        "in ONE sentence and end your turn. The system will resume the "
-                        "conversation automatically when materialization completes."
-                    )
+                    else _INTERACTIVE_MATERIALIZE_GUIDANCE
                 )
             if ts.state == SchemaState.MATERIALIZING:
                 if not write_capable:
@@ -366,11 +373,7 @@ async def _fetch_semantic_model_context(
                 )
             if not write_capable:
                 return _READ_ONLY_LOADED_SQL_GUIDANCE
-            return (
-                "Data is loaded, but no semantic datasets are available yet. "
-                "Run materialization to rebuild the semantic catalog, then use "
-                "`list_datasets` and `semantic_query`."
-            )
+            return _LOADED_REBUILD_GUIDANCE
         if tenant_count > 1:
             vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
             if vs is not None and vs.state == SchemaState.MATERIALIZING:
@@ -381,31 +384,40 @@ async def _fetch_semantic_model_context(
                     if not interactive
                     else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
+            loaded = vs is not None and vs.state == SchemaState.ACTIVE
             if not write_capable:
                 guidance = (
-                    _READ_ONLY_LOADED_SQL_GUIDANCE
-                    if vs is not None and vs.state == SchemaState.ACTIVE
-                    else _READ_ONLY_MATERIALIZE_GUIDANCE
+                    _READ_ONLY_LOADED_SQL_GUIDANCE if loaded else _READ_ONLY_MATERIALIZE_GUIDANCE
                 )
-                return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}"
-            return (
-                f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
-                "No semantic datasets are available yet. Call `run_materialization` "
-                "to load workspace data and rebuild the semantic catalog."
-            )
+            elif loaded:
+                guidance = _LOADED_REBUILD_GUIDANCE
+            elif not interactive:
+                guidance = _HEADLESS_MATERIALIZE_GUIDANCE
+            else:
+                guidance = _INTERACTIVE_MATERIALIZE_GUIDANCE
+            return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}"
         if not write_capable:
             return _READ_ONLY_MATERIALIZE_GUIDANCE
         return (
-            _HEADLESS_MATERIALIZE_GUIDANCE
-            if not interactive
-            else (
-                "No data has been loaded yet. Call `run_materialization` to start "
-                "loading. This tool returns IMMEDIATELY with `status: started` — do "
-                "NOT call other data tools in the same turn. Acknowledge to the user "
-                "in ONE sentence and end your turn. The system will resume the "
-                "conversation automatically when materialization completes."
-            )
+            _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else _INTERACTIVE_MATERIALIZE_GUIDANCE
         )
+
+
+# No `pipeline=` arg: run_materialization's LLM-facing schema is empty (all params
+# injected server-side); naming an argument it can't accept confused the agent (02#6).
+_INTERACTIVE_MATERIALIZE_GUIDANCE = (
+    "No data has been loaded yet. Call `run_materialization` to start "
+    "loading. This tool returns IMMEDIATELY with `status: started` — do "
+    "NOT call other data tools in the same turn. Acknowledge to the user "
+    "in ONE sentence and end your turn. The system will resume the "
+    "conversation automatically when materialization completes."
+)
+
+_LOADED_REBUILD_GUIDANCE = (
+    "Data is loaded, but no semantic datasets are available yet. "
+    "Run materialization to rebuild the semantic catalog, then use "
+    "`list_datasets` and `semantic_query`."
+)
 
 
 # Only the thread that dispatched a load has a completion callback.
@@ -442,12 +454,15 @@ _READ_ONLY_LOADED_SQL_GUIDANCE = (
     "Data is loaded, but no semantic datasets are available yet. "
     "Use `list_tables` and `describe_table` to inspect the loaded tables, then "
     "read-only `query` SQL to analyze them. This user's workspace role is read-only; "
-    "a read-write workspace role is required to rebuild the semantic catalog."
+    "a read-write workspace role is required to rebuild the semantic catalog. If the "
+    "user asks for semantic datasets or a refresh, a workspace member with write "
+    "access can do it."
 )
 
 _READ_ONLY_MATERIALIZE_GUIDANCE = (
     "Data is not currently queryable, and this user's workspace role is read-only. "
-    "A read-write workspace role is required to load data or rebuild the semantic catalog."
+    "A read-write workspace role is required to load data or rebuild the semantic catalog, "
+    "so tell the user a workspace member with write access can refresh it."
 )
 
 _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
@@ -486,16 +501,7 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     if ts is None:
         if not interactive:
             return _HEADLESS_MATERIALIZE_GUIDANCE
-        # No `pipeline=` arg: run_materialization's LLM-facing schema is empty
-        # (all params injected server-side); naming an argument it can't accept
-        # confused the agent (finding 02#6).
-        return (
-            "No data has been loaded yet. Call `run_materialization` to start "
-            "loading. This tool returns IMMEDIATELY with `status: started` — do "
-            "NOT call other data tools in the same turn. Acknowledge to the user "
-            "in ONE sentence and end your turn. The system will resume the "
-            "conversation automatically when materialization completes."
-        )
+        return _INTERACTIVE_MATERIALIZE_GUIDANCE
 
     if ts.state == SchemaState.MATERIALIZING:
         if not interactive:
@@ -996,7 +1002,13 @@ async def build_agent_graph(
 
     def escalation_node(state: AgentState) -> dict[str, Any]:
         """Terminal node that emits a fixed escalation message and ends the turn."""
-        return {"messages": [AIMessage(content=ESCALATION_MESSAGE)]}
+        if not write_capable:
+            message = READ_ONLY_ESCALATION_MESSAGE
+        elif not interactive:
+            message = HEADLESS_ESCALATION_MESSAGE
+        else:
+            message = ESCALATION_MESSAGE
+        return {"messages": [AIMessage(content=message)]}
 
     graph = StateGraph(AgentState)
 
@@ -1163,10 +1175,10 @@ async def _build_stable_system_prompt(
             return value
 
     # Stable sections (cacheable prefix)
-    artifact_prompt = (
-        ARTIFACT_PROMPT_ADDITION if write_capable else ARTIFACT_READ_ONLY_PROMPT_ADDITION
-    )
-    stable_sections = [BASE_SYSTEM_PROMPT, artifact_prompt]
+    stable_sections = [
+        select_base_system_prompt(write_capable=write_capable, interactive=interactive),
+        ARTIFACT_PROMPT_ADDITION if write_capable else ARTIFACT_READ_ONLY_PROMPT_ADDITION,
+    ]
 
     if workspace.system_prompt:
         stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
@@ -1271,6 +1283,8 @@ currency, explain that a read-write workspace role is required.
 __all__ = [
     "ESCALATION_MESSAGE",
     "ESCALATION_TRIGGER_COUNT",
+    "HEADLESS_ESCALATION_MESSAGE",
+    "READ_ONLY_ESCALATION_MESSAGE",
     "_should_escalate",
     "build_agent_graph",
 ]
