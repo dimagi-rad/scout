@@ -1,21 +1,28 @@
 """The single source of truth for "can this user access this workspace?".
 
 Effective access = the user is a ``WorkspaceMembership`` of the workspace AND
-(the workspace has no tenants OR the user has at least one *live* — non-archived —
-``TenantMembership`` for one of the workspace's tenants). This unifies the
-add-member rule with every runtime gate: a member who loses all upstream tenant
-access loses the workspace (manage *and* query), and regains it automatically if
-access is restored upstream — no human-in-Scout reinstatement.
+(the workspace has no tenants OR the user can use EVERY one of its tenants with
+their own credential). All-of, not any-of (#380): a workspace exposes one merged
+view over all of its tenants, so a member covering only some of them would read
+the rest. A member who loses one tenant upstream therefore loses the workspace
+(manage *and* query) and regains it automatically once coverage is restored — no
+human-in-Scout reinstatement, and the membership itself is never deleted.
 
-Because ``TenantMembership.objects`` is live-only (archived rows are tombstones for
-revoked access), the tenant check here naturally ignores revoked access. Every
-workspace-scoped view/tool MUST resolve access through this module; a CI fitness
-test (tests/test_authorizer_is_sole_gate.py) fails the build on a bypass.
+"Can use" is local credential readiness from
+``apps.workspaces.services.credential_coverage`` rather than bare
+``TenantMembership`` presence: a live row whose credential cannot be resolved
+(legacy OCS rows with no team, a connection bound to another team, a sign-in that
+can no longer refresh) would otherwise pass the gate while every load of that
+tenant fails closed (#380, 2026-09-10 update). It is not upstream liveness;
+freshness is a separate check.
+
+Every workspace-scoped view/tool MUST resolve access through this module; a CI
+fitness test (tests/test_authorizer_is_sole_gate.py) fails the build on a bypass.
 
 Denial is not one thing. A user who was never a member (or whose workspace is gone)
-gets a generic denial; a member who merely lost all live tenant access gets a
-distinct, actionable one naming the lost project(s) — so callers can explain "your
-upstream access was removed" instead of a dead, unexplained 403. The
+gets a generic denial; a member who lacks one or more tenants gets a distinct,
+actionable one naming each missing source and its remedy — so callers can say
+"connect team Y" instead of a dead, unexplained 403. The
 ``(workspace, membership)`` tuple API is preserved; ``*_ex`` variants expose the
 reason, and ``access_denied_body`` builds the response payload from it.
 """
@@ -24,8 +31,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from django.conf import settings
+
 from apps.users.models import TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.services.credential_coverage import (
+    CoverageRecovery,
+    MissingTenant,
+    amember_coverage_gaps,
+    member_coverage_gaps,
+)
 
 NOT_MEMBER = "not_member"
 TENANT_ACCESS_LOST = "tenant_access_lost"
@@ -41,6 +56,12 @@ _GENERIC_DENIED = "Workspace not found or access denied."
 TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
 TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
 
+_PROVIDER_LABELS = {
+    "commcare": "CommCare HQ",
+    "commcare_connect": "CommCare Connect",
+    "ocs": "Open Chat Studio",
+}
+
 
 @dataclass(frozen=True)
 class WorkspaceAccess:
@@ -48,36 +69,71 @@ class WorkspaceAccess:
 
     ``workspace``/``membership`` are set iff access is granted. On denial they are
     ``None`` and ``denied_reason`` is one of ``NOT_MEMBER`` / ``TENANT_ACCESS_LOST`` /
-    ``INSUFFICIENT_ROLE``;
-    ``lost_tenant_names`` names the workspace's tenants the user no longer shares.
+    ``INSUFFICIENT_ROLE``; for ``TENANT_ACCESS_LOST``, ``missing_tenants`` lists
+    each workspace tenant the member cannot use, with its remedy.
     """
 
     workspace: object | None = None
     membership: object | None = None
     denied_reason: str | None = None
-    lost_tenant_names: tuple[str, ...] = ()
+    missing_tenants: tuple[MissingTenant, ...] = ()
 
     @property
     def granted(self) -> bool:
         return self.workspace is not None
+
+    @property
+    def lost_tenant_names(self) -> tuple[str, ...]:
+        return tuple(sorted({t.tenant_name for t in self.missing_tenants if t.tenant_name}))
+
+
+def remedy_text(missing: MissingTenant) -> str:
+    """One clause telling the member how to regain ``missing``."""
+    product = _PROVIDER_LABELS.get(missing.provider, "the source")
+    team = missing.team_name or missing.team_slug
+    if missing.recovery == CoverageRecovery.ACCESS_REMOVED:
+        return f"your {product} access was removed; ask its admin to restore it, then reconnect"
+    if missing.recovery == CoverageRecovery.CONNECT_TEAM and team:
+        return f"connect {product} team '{team}' in Connected Accounts"
+    if missing.recovery == CoverageRecovery.LEGACY_TEAM_UNKNOWN:
+        return f"reconnect {product}, choosing the team that owns it, in Connected Accounts"
+    if missing.recovery == CoverageRecovery.CONNECT_TEAM:
+        return f"connect the {product} team that owns it in Connected Accounts"
+    if missing.recovery == CoverageRecovery.RECONNECT:
+        return f"reconnect {product} in Connected Accounts"
+    return f"connect a {product} account that has access to it in Connected Accounts"
+
+
+def missing_tenants_payload(missing) -> list[dict]:
+    """Serialize missing tenants, name-ordered, with the remedy for each."""
+    ordered = sorted(missing, key=lambda t: (t.tenant_name, t.tenant_id))
+    return [t.as_dict() | {"remedy": remedy_text(t)} for t in ordered]
 
 
 def access_denied_body(result: WorkspaceAccess) -> dict:
     """Build the 403 response body for a denied access result.
 
     Preserves the generic ``{"error": ...}`` shape for backward compatibility and,
-    for lost upstream access, adds ``reason`` + ``lost_tenants`` and an actionable
-    message the frontend can surface verbatim.
+    for a member missing tenants, adds ``reason``, ``lost_tenants`` and the
+    structured ``missing_tenants`` plus an actionable message the frontend can
+    surface verbatim.
+
+    ``TENANT_ACCESS_LOST`` covers "never had" as well as "lost": for a member the
+    consequence is identical (content cleared, recovery via Connected Accounts),
+    and one member can be missing a tenant each way at once, so the distinction
+    lives per tenant in ``recovery`` rather than in a second reason code.
     """
-    if result.denied_reason == TENANT_ACCESS_LOST and result.lost_tenant_names:
-        projects = ", ".join(result.lost_tenant_names)
+    if result.denied_reason == TENANT_ACCESS_LOST and result.missing_tenants:
+        payload = missing_tenants_payload(result.missing_tenants)
+        needed = "; ".join(f"'{t['tenant_name']}': {t['remedy']}" for t in payload)
         return {
             "error": (
-                f"You no longer have access to: {projects}. "
-                "Access may have been removed upstream — reconnect or ask an admin."
+                "This workspace requires access to every one of its data sources. "
+                f"Still needed — {needed}. Access returns automatically once fixed."
             ),
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),
+            "missing_tenants": payload,
         }
     return {"error": _GENERIC_DENIED}
 
@@ -86,25 +142,8 @@ def _live_tenant_ids(workspace) -> list:
     return list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
 
 
-def _tenant_rows(workspace) -> list[tuple]:
-    return list(workspace.workspace_tenants.values_list("tenant_id", "tenant__canonical_name"))
-
-
-async def _atenant_rows(workspace) -> list[tuple]:
-    return [
-        row
-        async for row in workspace.workspace_tenants.values_list(
-            "tenant_id", "tenant__canonical_name"
-        )
-    ]
-
-
-def _lost_names(rows) -> tuple[str, ...]:
-    return tuple(sorted({name for _tid, name in rows if name}))
-
-
 def _shares_live_tenant(user, tenant_ids) -> bool:
-    # Zero-tenant workspace: nothing to gate on, WorkspaceMembership suffices.
+    # Pre-#380 any-of rule, consulted only while the rollout switch is off.
     if not tenant_ids:
         return True
     return TenantMembership.objects.filter(user=user, tenant_id__in=tenant_ids).exists()
@@ -116,44 +155,69 @@ async def _ashares_live_tenant(user, tenant_ids) -> bool:
     return await TenantMembership.objects.filter(user=user, tenant_id__in=tenant_ids).aexists()
 
 
-def covers_live_tenants(user, tenant_ids) -> bool:
-    """Whether the user has a live ``TenantMembership`` for EVERY id in ``tenant_ids``.
+def all_of_access_enforced() -> bool:
+    """Rollout switch for the read gate; see ``WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT``."""
+    return settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT
 
-    **Not the gate.** ``_shares_live_tenant`` above is still what decides access,
-    and it is still any-of; flipping it to covering-all is #380 and lands after
-    this. This predicate exists so the covering rule can be evaluated against
-    real membership data now.
 
-    Its purpose is to make the #156 → #380 dependency checkable: covering-all was
-    blocked because a user holding two OCS teams could only ever prove one, so the
-    rule would have denied a workspace spanning both with no way to self-remediate.
-    With multi-token OAuth that user holds a live membership for each tenant, and
-    this returns True — see
-    ``tests/test_ocs_multi_team_oauth.py::test_two_team_user_covers_an_all_of_workspace``.
+def missing_workspace_tenants(user, tenants) -> tuple[MissingTenant, ...]:
+    """The tenants among ``tenants`` that keep ``user`` out; empty means access.
+
+    With the rollout switch off, one live membership still satisfies the
+    workspace and the gaps are computed only to explain a denial.
     """
-    if not tenant_ids:
-        return True
-    wanted = set(tenant_ids)
-    covered = set(
-        TenantMembership.objects.filter(user=user, tenant_id__in=wanted).values_list(
-            "tenant_id", flat=True
+    tenants = list(tenants)
+    if not tenants:
+        return ()
+    if not all_of_access_enforced() and _shares_live_tenant(user, [t.pk for t in tenants]):
+        return ()
+    return tuple(member_coverage_gaps(user.pk, tenants).values())
+
+
+async def amissing_workspace_tenants(user, tenants) -> tuple[MissingTenant, ...]:
+    """Async twin of :func:`missing_workspace_tenants`."""
+    tenants = list(tenants)
+    if not tenants:
+        return ()
+    if not all_of_access_enforced() and await _ashares_live_tenant(user, [t.pk for t in tenants]):
+        return ()
+    return tuple((await amember_coverage_gaps(user.pk, tenants)).values())
+
+
+def missing_tenants_by_workspace(user, workspaces) -> dict:
+    """Bulk :func:`missing_workspace_tenants`, keyed by workspace id.
+
+    ``workspaces`` must have ``workspace_tenants__tenant`` prefetched. Readiness is
+    evaluated once over the union of tenants, so the list endpoint's
+    ``has_access`` agrees with the per-request gate without a query per row.
+    """
+    tenants_by_ws = {ws.id: [wt.tenant for wt in ws.workspace_tenants.all()] for ws in workspaces}
+    all_tenants = {t.pk: t for tenants in tenants_by_ws.values() for t in tenants}
+    if not all_tenants:
+        return dict.fromkeys(tenants_by_ws, ())
+    gaps = member_coverage_gaps(user.pk, all_tenants.values())
+    live = set()
+    if not all_of_access_enforced():
+        live = set(
+            TenantMembership.objects.filter(user=user, tenant_id__in=all_tenants).values_list(
+                "tenant_id", flat=True
+            )
         )
-    )
-    return wanted <= covered
+    result = {}
+    for ws_id, tenants in tenants_by_ws.items():
+        if live & {t.pk for t in tenants}:
+            result[ws_id] = ()
+        else:
+            result[ws_id] = tuple(gaps[str(t.pk)] for t in tenants if str(t.pk) in gaps)
+    return result
 
 
-async def acovers_live_tenants(user, tenant_ids) -> bool:
-    """Async twin of ``covers_live_tenants``. Not the gate — see that docstring."""
-    if not tenant_ids:
-        return True
-    wanted = set(tenant_ids)
-    covered = {
-        tid
-        async for tid in TenantMembership.objects.filter(
-            user=user, tenant_id__in=wanted
-        ).values_list("tenant_id", flat=True)
-    }
-    return wanted <= covered
+def _workspace_tenants(workspace) -> list:
+    return [wt.tenant for wt in workspace.workspace_tenants.select_related("tenant")]
+
+
+async def _aworkspace_tenants(workspace) -> list:
+    return [wt.tenant async for wt in workspace.workspace_tenants.select_related("tenant")]
 
 
 def _role_satisfies(role: str, minimum_role: str) -> bool:
@@ -172,11 +236,9 @@ def resolve_workspace_access_ex(
         )
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
-    rows = _tenant_rows(wm.workspace)
-    if not _shares_live_tenant(user, [tid for tid, _name in rows]):
-        return WorkspaceAccess(
-            denied_reason=TENANT_ACCESS_LOST, lost_tenant_names=_lost_names(rows)
-        )
+    missing = missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
+    if missing:
+        return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not _role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
@@ -192,11 +254,9 @@ async def aresolve_workspace_access_ex(
         )
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
-    rows = await _atenant_rows(wm.workspace)
-    if not await _ashares_live_tenant(user, [tid for tid, _name in rows]):
-        return WorkspaceAccess(
-            denied_reason=TENANT_ACCESS_LOST, lost_tenant_names=_lost_names(rows)
-        )
+    missing = await amissing_workspace_tenants(user, await _aworkspace_tenants(wm.workspace))
+    if missing:
+        return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not _role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)

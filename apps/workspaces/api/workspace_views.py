@@ -22,7 +22,12 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.workspaces.access import _live_tenant_ids, _shares_live_tenant
+from apps.workspaces.access import (
+    _live_tenant_ids,
+    _shares_live_tenant,
+    missing_tenants_by_workspace,
+    missing_tenants_payload,
+)
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
     MaterializationRun,
@@ -260,13 +265,11 @@ class WorkspaceListView(APIView):
         memberships = list(memberships)
         schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
 
-        # Bulk live-access check, one query for the whole list. A workspace is
-        # accessible iff it has no tenants OR the user shares a live tenant with
-        # it — the same rule apps/workspaces/access.py enforces per request. We
-        # surface it here (rather than filtering rows out) so the client can keep
-        # orphaned workspaces addressable by URL while gating them in the UI.
-        user_live_tenant_ids = set(
-            TenantMembership.objects.filter(user=request.user).values_list("tenant_id", flat=True)
+        # Surfaced per row (rather than filtering rows out) so the client can keep
+        # denied workspaces addressable by URL while gating them in the UI and
+        # telling the member which sources to connect.
+        missing_by_ws = missing_tenants_by_workspace(
+            request.user, [m.workspace for m in memberships]
         )
 
         results = []
@@ -279,8 +282,7 @@ class WorkspaceListView(APIView):
                 }
                 for wt in m.workspace.workspace_tenants.all()
             ]
-            ws_tenant_ids = [wt.tenant_id for wt in m.workspace.workspace_tenants.all()]
-            has_access = not ws_tenant_ids or bool(set(ws_tenant_ids) & user_live_tenant_ids)
+            missing = missing_by_ws[m.workspace.id]
             results.append(
                 {
                     "id": str(m.workspace.id),
@@ -289,7 +291,8 @@ class WorkspaceListView(APIView):
                     "is_auto_created": m.workspace.is_auto_created,
                     "role": m.role,
                     "tenants": tenants,
-                    "has_access": has_access,
+                    "has_access": not missing,
+                    "missing_tenants": missing_tenants_payload(missing),
                     "member_count": m.member_count,
                     "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),
                     "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),

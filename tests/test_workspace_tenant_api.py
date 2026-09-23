@@ -7,6 +7,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.tenant_access import usable_connection
 
 
 @pytest.fixture
@@ -24,7 +25,9 @@ def tenant2(db):
 @pytest.fixture
 def tenant_membership(db, user, tenant2):
     """Grant the test user access to tenant2 (used for add/remove tenant tests)."""
-    return TenantMembership.objects.create(user=user, tenant=tenant2)
+    return TenantMembership.objects.create(
+        user=user, tenant=tenant2, connection=usable_connection(user, tenant2.provider)
+    )
 
 
 def test_add_tenant_to_workspace(api_client, user, workspace, tenant2, tenant_membership):
@@ -107,9 +110,10 @@ def test_add_tenant_already_in_workspace_requires_membership(
         format="json",
     )
 
-    # User lacks TenantMembership for tenant2 — must be rejected even though it's already in workspace
-    assert resp.status_code == 400
-    assert "do not have access" in resp.data["error"]
+    # Under all-of access a member lacking tenant2 cannot reach the workspace at
+    # all, so the re-add is refused before it gets to the tenant check.
+    assert resp.status_code == 403
+    assert resp.data["reason"] == "tenant_access_lost"
 
 
 def test_list_workspace_tenants(api_client, user, workspace):

@@ -6,6 +6,11 @@ helpers attach a real encrypted API-key connection instead of bypassing the
 authorizer, so tests exercise the same readiness check production does.
 """
 
+from datetime import timedelta
+
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
+from django.utils import timezone
+
 from apps.users.adapters import encrypt_credential
 from apps.users.models import TenantConnection, TenantMembership
 
@@ -71,3 +76,46 @@ async def agrant_tenant_access(user, tenant) -> TenantMembership:
         connection=connection, archived_at=None
     )
     return await TenantMembership.objects.aget(user=user, tenant=tenant)
+
+
+def ocs_team_connection(user, team) -> TenantConnection:
+    """A genuine per-team OCS OAuth identity (#156): account, token and connection."""
+    app, _ = SocialApp.objects.get_or_create(
+        provider="ocs", name="OCS", defaults={"client_id": "cid", "secret": "sec"}
+    )
+    account = SocialAccount.objects.create(
+        user=user, provider="ocs", uid=f"{user.pk}#{team}", extra_data={"team": team}
+    )
+    SocialToken.objects.create(
+        account=account,
+        app=app,
+        token=f"tok-{team}",
+        token_secret=f"refresh-{team}",
+        expires_at=timezone.now() + timedelta(hours=1),
+    )
+    return TenantConnection.objects.create(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key=team,
+        scope_label=team.title(),
+        social_account=account,
+    )
+
+
+def grant_ocs_team_access(user, tenant, connection, *, team_slug=None) -> TenantMembership:
+    """Live membership on an OCS ``tenant`` through ``connection``.
+
+    ``team_slug`` defaults to the connection's team; pass ``""`` for a legacy row
+    with no team, or another slug for a chatbot owned by a different team. Like
+    :func:`grant_tenant_access`, an existing or archived row is rewritten.
+    """
+    slug = connection.scope_key if team_slug is None else team_slug
+    metadata = {"team_slug": slug, "team_name": slug.title()} if slug else {}
+    TenantMembership.all_objects.bulk_create(
+        [TenantMembership(user=user, tenant=tenant)], ignore_conflicts=True
+    )
+    TenantMembership.all_objects.filter(user=user, tenant=tenant).update(
+        connection=connection, provider_metadata=metadata, archived_at=None
+    )
+    return TenantMembership.objects.get(user=user, tenant=tenant)

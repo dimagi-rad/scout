@@ -2,8 +2,8 @@
 
 Thin adapters over the single authorizer in ``apps.workspaces.access``: they only
 translate its access result into each view layer's expected error shape. The
-access decision — WorkspaceMembership AND a live tenant — lives solely in
-``access.py``, which also builds the 403 body (generic vs. lost-upstream-access).
+access decision — WorkspaceMembership AND coverage of every tenant — lives solely in
+``access.py``, which also builds the 403 body (generic vs. missing sources).
 """
 
 from django.http import JsonResponse

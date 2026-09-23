@@ -283,6 +283,15 @@ REST_FRAMEWORK = {
 # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 DB_CREDENTIAL_KEY = env("DB_CREDENTIAL_KEY", default="")
 
+# Rollout switch for the all-of workspace read gate (#380), not a permanent mode.
+# Off keeps the pre-#380 any-of rule so merging does not take existing multi-source
+# workspaces dark before their members connect every team. Turn it on per
+# deployment only after `manage.py report_workspace_credential_coverage` shows the
+# remaining gaps are understood, then delete the switch and the any-of branch.
+WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = env.bool(
+    "WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT", default=False
+)
+
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-4-8")

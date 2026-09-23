@@ -95,12 +95,12 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
 async def _resolve_workspace_and_membership(user, workspace_id):
     """Resolve workspace access for a user.
 
-    Access (WorkspaceMembership AND a live tenant) is decided by the single
+    Access (WorkspaceMembership AND coverage of every tenant) is decided by the single
     authorizer; this only computes the tenant_membership / multi-tenant flags the
     chat callers need on top of that.
 
     Returns (workspace, tenant_membership, is_multi_tenant):
-    - (None, None, False): no access (not a member, or no live tenant)
+    - (None, None, False): no access (not a member, or a tenant not covered)
     - (workspace, None, True): multi-tenant workspace (access already verified)
     - (workspace, tm, False): single-tenant workspace with the live TenantMembership
     """
@@ -110,7 +110,7 @@ async def _resolve_workspace_and_membership(user, workspace_id):
 
     is_multi_tenant = await workspace.workspace_tenants.acount() > 1
     if is_multi_tenant:
-        # The authorizer already confirmed the user shares a live tenant of this
+        # The authorizer already confirmed the user covers every tenant of this
         # workspace, so multi-tenant access is no longer WorkspaceMembership-only.
         return workspace, None, True
 

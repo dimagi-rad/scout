@@ -53,3 +53,6 @@ CACHES = _build_caches(REDIS_URL)
 
 # Test-only value; must be a valid Fernet key
 DB_CREDENTIAL_KEY = "uHcVl3o7sAzBTV0ECblIGcB4imVnoutulGMF-dNsUoM="
+
+# The shipped rule; the any-of fallback exists only for the production rollout.
+WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True

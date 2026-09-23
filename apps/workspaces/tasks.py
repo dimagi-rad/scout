@@ -521,8 +521,9 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
     """Return ``None`` if ``user_id`` may load the workspace, else a denied summary.
 
     Every denial has one shape: ``status: "denied"``, a str ``error``, a registry
-    ``error_code`` saying why, and every workspace tenant as a not-run failure, so
-    the resume path records per-tenant codes the same way for either reason.
+    ``error_code`` saying why, and the affected tenants as not-run failures (every
+    tenant for a role denial, the ones the requester lacks for a coverage denial),
+    so the resume path records per-tenant codes the same way for either reason.
     """
     access = None
     if user_id:
@@ -547,7 +548,8 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         # unreachable-tenant guidance so the resume prompt and the run summary
         # give the same per-source remedy as the pre-gate no-membership path.
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
-        results = _unreachable_tenant_results(tenants)
+        missing = {t.tenant_id for t in access.missing_tenants}
+        results = _unreachable_tenant_results(t for t in tenants if str(t.pk) in missing)
         error = "No tenant memberships found"
     else:
         code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
@@ -625,9 +627,9 @@ async def materialize_workspace_core(
     # drop: it never entered tenant_results, so `all(...)` was vacuous over it
     # and the run reported success having loaded a subset of the workspace (#364).
     #
-    # Current access checks can admit partially reachable workspaces. Report
-    # that transitional state without borrowing a teammate's credentials; the
-    # ALL-of authorization rollout decided in #380 is outside this reporting fix.
+    # The all-of gate (#380) refuses a requester who lacks a tenant, so this is
+    # reached only while its rollout switch is off or when access is lost after
+    # the gate passed. Report it without borrowing a teammate's credentials.
     reachable = {tm.tenant_id for tm in memberships}
     unreachable_results = _unreachable_tenant_results(
         tenant for tenant_id, tenant in workspace_tenants.items() if tenant_id not in reachable
