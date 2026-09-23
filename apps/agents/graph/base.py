@@ -1089,7 +1089,9 @@ def _build_tools(
         # all canvas writes are delegated to the Canvas Manager subagent,
         # which read-only workspace members do not get at all.
         tools.append(create_canvas_read_tool(workspace, user, conversation_id))
-        if canvas_write:
+        # build_agent_graph already folds write_capable into canvas_write; checking
+        # both keeps a direct caller that forgets write_capable from failing open.
+        if canvas_write and write_capable:
             tools.append(
                 create_canvas_manager_tool(
                     workspace,
