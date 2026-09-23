@@ -1150,13 +1150,7 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
 
     manager = SchemaManager()
     try:
-        reconciliation = await _to_thread_fresh_db(manager.reconcile_view_publication, workspace)
-        if reconciliation.get("status") == "republished":
-            vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
-        elif reconciliation.get("status") == "republish_failed":
-            raise RuntimeError(reconciliation["error"])
-        else:
-            vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
+        vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
         # build_view_schema owns the row state (FAILED for a first build, ACTIVE
         # plus last_error when the rolled-back views still serve), so don't
@@ -1360,9 +1354,15 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                 raise ValueError(_recovery_requester_denied_message(access))
 
             try:
-                await _to_thread_fresh_db(
+                reconciliation = await _to_thread_fresh_db(
                     SchemaManager().reconcile_view_publication, recovery.workspace
                 )
+                if reconciliation.get("status") == "republish_failed":
+                    logger.warning(
+                        "Recovery %s: view publication diverges and could not be republished: %s",
+                        recovery_id,
+                        reconciliation.get("error"),
+                    )
             except Exception:
                 # A republish can fail for the very reason this recovery exists
                 # (e.g. no loaded source yet); the repair below must still run.

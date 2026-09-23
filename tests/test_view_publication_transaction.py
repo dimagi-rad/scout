@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import os
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
@@ -22,6 +23,7 @@ import psycopg.sql
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from apps.common.identifiers import readonly_role_name, view_name
 from apps.users.models import Tenant
@@ -54,8 +56,7 @@ pytestmark = [
 class _OwnedSchemas:
     """Physical schemas this test created, dropped (with their roles) on teardown."""
 
-    def __init__(self, conn):
-        self.conn = conn
+    def __init__(self):
         self.names: list[str] = []
 
     def register(self, name: str) -> str:
@@ -73,7 +74,7 @@ def managed():
 
 @pytest.fixture
 def owned(managed):
-    registry = _OwnedSchemas(managed)
+    registry = _OwnedSchemas()
     yield registry
     manager = SchemaManager()
     cursor = managed.cursor()
@@ -337,39 +338,70 @@ def test_reconcile_republishes_when_the_physical_schema_disappeared(owned, manag
 
 
 @pytest.mark.asyncio
-async def test_standalone_rebuild_reconciles_marker_with_tenant_lock(owned, managed):
-
+async def test_standalone_rebuild_holds_the_tenant_lock_through_grants(owned, managed):
     workspace, tenant, _old = await sync_to_async(_one_tenant_workspace)(owned, managed)
     manager = SchemaManager()
     vs = await sync_to_async(manager.build_view_schema)(workspace)
     await WorkspaceViewSchema.objects.filter(pk=vs.pk).aupdate(physical_build_token="lost")
     original = SchemaManager._create_readonly_role
-    reconciled = []
-    original_reconcile = SchemaManager.reconcile_view_publication
+    probes = []
 
     def grants(self, cursor, name):
+        # Record rather than assert here: the task's broad except would hide it.
         with try_tenant_data_lock(tenant.id) as held:
-            assert not held, "Standalone publication must hold T through managed grants"
+            probes.append(held)
         return original(self, cursor, name)
-
-    def reconcile(self, current):
-        result = original_reconcile(self, current)
-        reconciled.append(result)
-        return result
 
     with (
         patch.object(SchemaManager, "_create_readonly_role", grants),
-        patch.object(SchemaManager, "reconcile_view_publication", reconcile),
         patch.object(tasks, "_included_tenant_snapshot_state", AsyncMock(return_value="safe")),
         patch.object(tasks, "build_and_promote_cube_schema", return_value=MagicMock()),
     ):
         result = await tasks.rebuild_workspace_view_schema.func(str(workspace.id))
     assert result["status"] == "active"
-    assert reconciled == [{"status": "republished", "reason": "marker_mismatch"}]
+    assert probes == [False], "Standalone publication must hold T through managed grants"
     await vs.arefresh_from_db()
     assert vs.physical_build_token == await sync_to_async(manager.read_publication_marker)(
         vs.schema_name
     )
+
+
+def test_a_rebuild_keeps_an_active_row_out_of_the_inactivity_sweep(owned, managed):
+    """PROVISIONING used to exclude a rebuilding row from expire_inactive_schemas;
+    an ACTIVE row stays ACTIVE now, so the build must refresh its access time."""
+    workspace, _tenant, _ts = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    stale = timezone.now() - timedelta(days=30)
+    WorkspaceViewSchema.objects.filter(pk=vs.pk).update(last_accessed_at=stale)
+    seen_during_build = []
+    original = SchemaManager._create_readonly_role
+
+    def grants(self, cursor, name):
+        seen_during_build.append(
+            WorkspaceViewSchema.objects.values_list("last_accessed_at", flat=True).get(pk=vs.pk)
+        )
+        return original(self, cursor, name)
+
+    with patch.object(SchemaManager, "_create_readonly_role", grants):
+        manager.build_view_schema(workspace)
+
+    assert seen_during_build and seen_during_build[0] > stale + timedelta(days=29)
+
+
+def test_failed_first_publication_records_tenant_coverage(owned, managed):
+    workspace, tenant, _ts = _one_tenant_workspace(owned, managed)
+    with (
+        patch.object(
+            SchemaManager, "_create_readonly_role", side_effect=RuntimeError("grant boom")
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        SchemaManager().build_view_schema(workspace)
+
+    vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+    assert vs.state == SchemaState.FAILED
+    assert [e["tenant_id"] for e in vs.tenant_coverage["included_tenants"]] == [str(tenant.id)]
 
 
 def _drop_view_like_an_in_place_load(managed, tenant_schema):

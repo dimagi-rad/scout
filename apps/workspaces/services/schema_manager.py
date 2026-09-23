@@ -418,9 +418,13 @@ class SchemaManager:
         was_active = vs.state == SchemaState.ACTIVE
         vs.schema_name = view_schema_name
         entry_fields = ["schema_name"]
-        if not was_active:
-            # An ACTIVE row is still serving readable views; advertising
-            # PROVISIONING would make a working query layer look unavailable.
+        if was_active:
+            # An ACTIVE row is still serving readable views, so it stays ACTIVE;
+            # a fresh access time keeps expire_inactive_schemas (which PROVISIONING
+            # used to exclude) from tearing it down while this build runs.
+            vs.last_accessed_at = timezone.now()
+            entry_fields.append("last_accessed_at")
+        else:
             vs.state = SchemaState.PROVISIONING
             entry_fields.append("state")
         vs.save(update_fields=entry_fields)
@@ -450,18 +454,10 @@ class SchemaManager:
                     "Run a data refresh before building the view schema."
                 )
         except ValueError as exc:
-            # Nothing can be served: the sources these views read are gone or going,
-            # so they can never be valid again and must not keep a dependency-guarded
-            # tenant-schema retirement blocked. Dropping them is the one failure path
-            # that touches the physical layer.
-            self._drop_view_schema_physically(view_schema_name)
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
             vs.tenant_coverage = coverage
-            vs.physical_build_token = ""
-            vs.save(
-                update_fields=["state", "last_error", "tenant_coverage", "physical_build_token"]
-            )
+            vs.save(update_fields=["state", "last_error", "tenant_coverage"])
             raise
 
         build_token = uuid.uuid4().hex
@@ -602,7 +598,8 @@ class SchemaManager:
                 # (an in-place load's DROP ... CASCADE) already removed views the
                 # row still lists; rolling back cannot bring those back.
                 vs.state = SchemaState.FAILED
-                vs.save(update_fields=["state", "last_error"])
+                vs.tenant_coverage = coverage
+                vs.save(update_fields=["state", "last_error", "tenant_coverage"])
             raise
         finally:
             if not conn.closed:
@@ -663,33 +660,6 @@ class SchemaManager:
         except Exception:
             logger.exception("Rolling back the view publication for '%s' failed", view_schema_name)
 
-    def _drop_view_schema_physically(self, view_schema_name: str) -> None:
-        """Drop a view schema in its own short transaction.
-
-        Best-effort: the caller is already failing on a condition the operator has
-        to act on, and a managed-database outage must not replace that message.
-        """
-        try:
-            conn = get_managed_db_transaction()
-        except Exception:
-            logger.exception("Could not connect to drop view schema '%s'", view_schema_name)
-            return
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                    psycopg.sql.Identifier(view_schema_name)
-                )
-            )
-            cursor.close()
-            conn.commit()
-        except Exception:
-            logger.exception("Failed to drop view schema '%s'", view_schema_name)
-            self._rollback_publication(conn, view_schema_name)
-        finally:
-            if not conn.closed:
-                conn.close()
-
     @staticmethod
     def _missing_views(cursor, vs) -> list[str]:
         expected = set(((vs.view_sources or {}).get("views") or {}).keys())
@@ -716,6 +686,8 @@ class SchemaManager:
         try:
             cursor = conn.cursor()
             try:
+                if not self._schema_exists(cursor, vs.schema_name):
+                    return True
                 return bool(self._missing_views(cursor, vs))
             finally:
                 cursor.close()
