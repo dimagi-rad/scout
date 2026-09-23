@@ -46,9 +46,7 @@ export function writeErrorMessage(
   const serverMessage = Boolean(body?.error || body?.detail)
   // Only the generic denial is ambiguous; a specific server reason (lost
   // upstream access, thread ownership, ...) is more actionable than ours.
-  if (!canWrite && (!serverMessage || GENERIC_DENIAL.test(error.message))) {
-    return READ_ONLY_DENIAL
-  }
+  if (!canWrite && GENERIC_DENIAL.test(error.message)) return READ_ONLY_DENIAL
   // A non-JSON 403 (e.g. Django's CSRF failure page) carries no usable message;
   // the caller's "try again" is the right advice there.
   return serverMessage ? error.message : fallback
