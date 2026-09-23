@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from django.core.cache import cache
+
 from apps.users.models import TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 from apps.workspaces.services.access_freshness import (
@@ -38,10 +40,12 @@ from apps.workspaces.services.access_freshness import (
     UPSTREAM_ACCESS_LOST,
     VERIFICATION_IN_PROGRESS,
     VERIFICATION_UNAVAILABLE,
+    UpstreamAdmission,
     VerificationBudget,
     aadmit_upstream,
     acheck_freshness,
     admit_upstream,
+    averify_membership_history,
     check_freshness,
     final_denial_reason,
     freshness_enforced,
@@ -108,6 +112,7 @@ def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceA
 
 
 CONNECTED_ACCOUNTS_PATH = "/settings/connections"
+RETRY_COOLDOWN_SECONDS = 10
 
 _FRESHNESS_MESSAGES = {
     CREDENTIAL_MISSING: (
@@ -331,6 +336,47 @@ async def aresolve_workspace_access_ex(
         return _attribute_observed_denial(result, admission)
     final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
     return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
+
+
+async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
+    """Explicit member-initiated recheck, reachable while protected access is denied.
+
+    Only membership is required up front — a member whose tenant was archived by a
+    revocation still qualifies — and only the caller's own connections are checked.
+    The final decision is read back from the database rather than inferred from the
+    provider answer, so a concurrent change cannot be reported as restored access.
+    """
+    local = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
+    if local.denied_reason == NOT_MEMBER:
+        return local
+    try:
+        membership = await WorkspaceMembership.objects.select_related("workspace").aget(
+            workspace_id=workspace_id, user=user
+        )
+    except WorkspaceMembership.DoesNotExist:
+        return WorkspaceAccess(denied_reason=NOT_MEMBER)
+    tenant_ids = await _alive_tenant_ids(membership.workspace)
+    if not tenant_ids or not freshness_enforced():
+        return local
+    cooldown_key = f"access-verify-retry:{user.pk}:{workspace_id}"
+    # A lease stops simultaneous checks but not a stream of failing retries.
+    if await cache.aget(cooldown_key):
+        return _freshness_denied(VERIFICATION_UNAVAILABLE)
+    retry_reason = await averify_membership_history(
+        user.pk, tenant_ids, budget=VerificationBudget.INTERACTIVE
+    )
+    result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
+    if not result.granted:
+        if retry_reason in RETRYABLE_REASONS:
+            await cache.aset(cooldown_key, 1, RETRY_COOLDOWN_SECONDS)
+            return _freshness_denied(retry_reason)
+        return result
+    final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
+    if final.fresh:
+        return result
+    await cache.aset(cooldown_key, 1, RETRY_COOLDOWN_SECONDS)
+    admission = UpstreamAdmission(admitted=False, rechecked=True, reason=retry_reason)
+    return _freshness_denied(final_denial_reason(admission, final))
 
 
 def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
