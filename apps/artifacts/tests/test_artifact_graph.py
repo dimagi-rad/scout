@@ -11,7 +11,10 @@ from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactSemanticQuery, ArtifactType
 from apps.artifacts.services.graph_doc import GraphDocError, apply_ops, validate_doc
-from apps.artifacts.services.graph_manifest import sync_artifact_semantic_query_manifest
+from apps.artifacts.services.graph_manifest import (
+    semantic_query_summary,
+    sync_artifact_semantic_query_manifest,
+)
 from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.chat.models import Thread, ThreadArtifact
 from apps.users.models import Tenant, TenantMembership, User
@@ -676,6 +679,92 @@ async def test_semantic_query_dependency_api_paginates(
     assert payload["pagination"]["total_count"] == 1
     assert payload["pagination"]["has_more"] is False
     assert payload["semantic_queries"][0]["query_key"] == "q.visits_by_day"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_semantic_query_dependency_api_is_read_only_for_viewers(
+    workspace, member_user, member_client, invalid
+):
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=member_user).aupdate(
+        role=WorkspaceRole.READ
+    )
+    doc = graph_doc()
+    queries = doc["blocks"][1]["config"]["queries"]
+    # Mixed case diverges between Python and most DB collations, pinning DB ordering.
+    queries["Zeta"] = deepcopy(queries["visits_by_day"])
+    queries["alpha"] = deepcopy(queries["visits_by_day"])
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    original_queries = deepcopy(artifact.semantic_queries)
+    original_manifest = deepcopy(artifact.semantic_query_manifest)
+    rows = [row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact)]
+    original_rows = [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ]
+    if invalid:
+        # A drifted catalog: re-syncing would persist an empty semantic_queries.
+        for query in queries.values():
+            del query["time_dimension"]
+        await Artifact.objects.filter(pk=artifact.pk).aupdate(data={"story_doc": doc})
+
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/?limit=2"
+    response = await member_client.get(url)
+
+    assert response.status_code == 200
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_queries == original_queries
+    assert artifact.semantic_query_manifest == original_manifest
+    assert [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ] == original_rows
+    payload = response.json()
+    assert payload["pagination"] == {
+        "limit": 2,
+        "offset": 0,
+        "count": 2,
+        "total_count": 3,
+        "has_more": True,
+    }
+    returned = payload["semantic_queries"]
+    assert [r["query_key"] for r in returned] == [row.query_key for row in rows[:2]]
+    if invalid:
+        assert {r["validation_status"] for r in returned} == {"invalid"}
+        assert payload["manifest"]["unresolved_count"] > 0
+    else:
+        assert returned == [semantic_query_summary(row) for row in rows[:2]]
+        assert payload["manifest"]["entry_count"] == 3
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_semantic_query_dependency_api_does_not_create_cache(
+    workspace, member_user, member_client
+):
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Uncached",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": graph_doc()},
+    )
+
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/"
+    response = await member_client.get(url)
+
+    assert response.status_code == 200
+    assert response.json()["semantic_queries"][0]["query_key"] == "q.visits_by_day"
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_query_manifest == {}
+    assert artifact.semantic_queries == []
+    assert not await ArtifactSemanticQuery.objects.filter(artifact=artifact).aexists()
 
 
 @pytest.mark.django_db(transaction=True)

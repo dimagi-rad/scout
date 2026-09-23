@@ -17,7 +17,7 @@ from uuid import UUID
 
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -38,6 +38,8 @@ from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_works
 from .models import Artifact, ArtifactSemanticQuery, ArtifactType
 from .services.export import ArtifactExporter
 from .services.graph_manifest import (
+    build_artifact_semantic_query_manifest,
+    manifest_entry_summary,
     semantic_query_summary,
     sync_artifact_semantic_query_manifest,
 )
@@ -1132,15 +1134,21 @@ class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
-        if artifact.artifact_type == ArtifactType.STORY:
-            sync_artifact_semantic_query_manifest(artifact)
-
         limit = _bounded_int(request.GET.get("limit"), default=25, lower=1, upper=100)
         offset = _bounded_int(request.GET.get("offset"), default=0, lower=0, upper=100_000)
-        queryset = ArtifactSemanticQuery.objects.filter(artifact=artifact).order_by("query_key")
-        total_count = queryset.count()
-        records = list(queryset[offset : offset + limit])
-        manifest = artifact.semantic_query_manifest or {}
+        if artifact.artifact_type == ArtifactType.STORY:
+            # READ members can call this. Syncing here let any viewer rewrite shared
+            # live-query metadata, and for a drifted catalog persist an empty
+            # semantic_queries that cut off live data workspace-wide (see #515).
+            manifest = build_artifact_semantic_query_manifest(artifact)
+            entries = _sorted_by_db_collation(manifest["entries"])
+            total_count = len(entries)
+            records = [manifest_entry_summary(e) for e in entries[offset : offset + limit]]
+        else:
+            queryset = ArtifactSemanticQuery.objects.filter(artifact=artifact).order_by("query_key")
+            total_count = queryset.count()
+            records = [semantic_query_summary(r) for r in queryset[offset : offset + limit]]
+            manifest = artifact.semantic_query_manifest or {}
         return JsonResponse(
             {
                 "artifact": {
@@ -1149,7 +1157,7 @@ class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
                     "version": artifact.version,
                     "artifact_type": artifact.artifact_type,
                 },
-                "semantic_queries": [semantic_query_summary(record) for record in records],
+                "semantic_queries": records,
                 "pagination": {
                     "limit": limit,
                     "offset": offset,
@@ -1167,6 +1175,19 @@ class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
                 },
             }
         )
+
+
+def _sorted_by_db_collation(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order entries as ``order_by("query_key")`` would, which Python sorting doesn't match."""
+    if not entries:
+        return []
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT key FROM unnest(%s::text[]) AS key ORDER BY key",
+            [[entry["key"] for entry in entries]],
+        )
+        rank = {key: index for index, (key,) in enumerate(cursor.fetchall())}
+    return sorted(entries, key=lambda entry: rank[entry["key"]])
 
 
 def _bounded_int(value: Any, *, default: int, lower: int, upper: int) -> int:

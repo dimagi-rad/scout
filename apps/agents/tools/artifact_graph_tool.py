@@ -20,6 +20,7 @@ from apps.artifacts.services.graph_doc import (
 )
 from apps.artifacts.services.graph_manifest import (
     build_semantic_query_manifest,
+    manifest_entry_summary,
     sync_artifact_semantic_query_manifest,
 )
 from apps.artifacts.services.graph_runtime import check_graph_artifact
@@ -517,18 +518,7 @@ def _manifest_summary(manifest: dict[str, Any]) -> dict[str, Any]:
 def _derived_semantic_query_record(
     entry: dict[str, Any], persisted: ArtifactSemanticQuery | None
 ) -> dict[str, Any]:
-    record = {
-        "query_key": entry["key"],
-        "query_hash": entry["query_hash"],
-        "query_type": entry["query_type"],
-        "query_payload": entry["query"],
-        "members": entry["members"],
-        "datasets": entry["datasets"],
-        "dependencies": entry["dependencies"],
-        "block_locations": entry["block_locations"],
-        "validation_status": entry["validation_status"],
-        "unresolved_references": entry["unresolved_references"],
-    }
+    record = manifest_entry_summary(entry)
     # A derived or stale entry has no persisted identity/timestamps. Retain
     # existing metadata only when that row describes exactly this dependency.
     if persisted is not None and any(
