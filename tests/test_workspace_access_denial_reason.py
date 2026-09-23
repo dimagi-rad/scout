@@ -6,6 +6,7 @@ import uuid
 import pytest
 from django.contrib.auth import get_user_model
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import (
     NOT_MEMBER,
@@ -15,6 +16,7 @@ from apps.workspaces.access import (
     resolve_workspace_access_ex,
 )
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 
 User = get_user_model()
 
@@ -119,6 +121,8 @@ def test_member_without_live_tenant_gets_tenant_access_lost():
     assert result.lost_tenant_names == ("skelly",)
     body = access_denied_body(result)
     assert body["reason"] == TENANT_ACCESS_LOST
+    assert CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED] in body["error"]
+    assert "reconnect or" not in body["error"]
     assert body["lost_tenants"] == ["skelly"]
     assert "skelly" in body["error"]
 

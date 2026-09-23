@@ -24,8 +24,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 
 NOT_MEMBER = "not_member"
 TENANT_ACCESS_LOST = "tenant_access_lost"
@@ -74,7 +76,7 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
         return {
             "error": (
                 f"You no longer have access to: {projects}. "
-                "Access may have been removed upstream — reconnect or ask an admin."
+                f"{CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]}"
             ),
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),
