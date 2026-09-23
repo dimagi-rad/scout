@@ -508,3 +508,23 @@ def test_wrong_tenant_legacy_membership_still_blocks_retry(
     assert "operator" in response.data["error"].lower()
     assert legacy.state == SchemaState.PROVISIONING
     defer.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unexpected_membership_lookup_error_does_not_settle_candidate(
+    workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    with (
+        patch(
+            "apps.workspaces.services.refresh_requests.TenantMembership.objects.select_related"
+        ) as select_related,
+        pytest.raises(ValueError, match="driver bug"),
+    ):
+        select_related.return_value.get.side_effect = ValueError("driver bug")
+        claim_refresh_candidate(job_id=job_id, **args)
+
+    candidate.refresh_from_db()
+    assert candidate.state == SchemaState.PROVISIONING
+    assert candidate.refresh_claimed_at is None

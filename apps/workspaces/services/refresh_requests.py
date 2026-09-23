@@ -133,7 +133,7 @@ def claim_refresh_candidate(
                 user_id=schema.refresh_actor_user_id,
                 tenant_id=schema.tenant_id,
             )
-        except (TenantMembership.DoesNotExist, TypeError, ValueError, ValidationError):
+        except TenantMembership.DoesNotExist:
             return _settle_denied_candidate(schema)
 
         workspace_matches = WorkspaceTenant.objects.filter(
