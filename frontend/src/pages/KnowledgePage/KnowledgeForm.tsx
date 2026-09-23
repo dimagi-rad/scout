@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react"
 import { Loader2 } from "lucide-react"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
+import { READ_ONLY_HINT, writeErrorMessage } from "@/hooks/useWorkspaceRole"
 import {
   Dialog,
   DialogContent,
@@ -27,6 +28,7 @@ interface KnowledgeFormProps {
   onOpenChange: (open: boolean) => void
   item: KnowledgeItem | null
   onSave: (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => Promise<void>
+  readOnly?: boolean
 }
 
 interface FormState {
@@ -60,7 +62,13 @@ const categoryOptions = [
   { value: "other", label: "Other" },
 ]
 
-export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFormProps) {
+export function KnowledgeForm({
+  open,
+  onOpenChange,
+  item,
+  onSave,
+  readOnly = false,
+}: KnowledgeFormProps) {
   const isCurrentAccount = useIsCurrentAccount()
   const [form, setForm] = useState<FormState>(initialFormState)
   const [loading, setLoading] = useState(false)
@@ -128,7 +136,8 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
       onOpenChange(false)
     } catch (err) {
       if (!isCurrentAccount()) return
-      setError(err instanceof Error ? err.message : "Failed to save knowledge item")
+      const fallback = err instanceof Error ? err.message : "Failed to save knowledge item"
+      setError(writeErrorMessage(err, fallback, !readOnly))
     } finally {
       if (isCurrentAccount()) setLoading(false)
     }
@@ -140,9 +149,11 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Edit Learning</DialogTitle>
+            <DialogTitle>{readOnly ? "View Learning" : "Edit Learning"}</DialogTitle>
             <DialogDescription>
-              Edit the description, category, and tables for this learning.
+              {readOnly
+                ? READ_ONLY_HINT
+                : "Edit the description, category, and tables for this learning."}
             </DialogDescription>
           </DialogHeader>
 
@@ -153,7 +164,7 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
               </div>
             )}
 
-            <div className="space-y-4">
+            <fieldset disabled={readOnly} className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="description">Description</Label>
                 <Textarea
@@ -215,16 +226,18 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
                   </div>
                 </div>
               )}
-            </div>
+            </fieldset>
 
             <DialogFooter className="mt-6">
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
+                {readOnly ? "Close" : "Cancel"}
               </Button>
-              <Button type="submit" disabled={loading}>
-                {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Save Changes
-              </Button>
+              {!readOnly && (
+                <Button type="submit" disabled={loading}>
+                  {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Save Changes
+                </Button>
+              )}
             </DialogFooter>
           </form>
         </DialogContent>
@@ -237,12 +250,14 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {isEdit ? "Edit Entry" : "New Knowledge Entry"}
+            {readOnly ? "View Entry" : isEdit ? "Edit Entry" : "New Knowledge Entry"}
           </DialogTitle>
           <DialogDescription>
-            {isEdit
-              ? "Update the knowledge entry details"
-              : "Add a new entry to your knowledge base"}
+            {readOnly
+              ? READ_ONLY_HINT
+              : isEdit
+                ? "Update the knowledge entry details"
+                : "Add a new entry to your knowledge base"}
           </DialogDescription>
         </DialogHeader>
 
@@ -253,7 +268,7 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
             </div>
           )}
 
-          <div className="space-y-4">
+          <fieldset disabled={readOnly} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="title">Title</Label>
               <Input
@@ -293,7 +308,7 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
                 Comma-separated list of tags for categorization
               </p>
             </div>
-          </div>
+          </fieldset>
 
           <DialogFooter className="mt-6">
             <Button
@@ -301,12 +316,14 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              Cancel
+              {readOnly ? "Close" : "Cancel"}
             </Button>
-            <Button type="submit" disabled={loading}>
-              {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {isEdit ? "Save Changes" : "Create"}
-            </Button>
+            {!readOnly && (
+              <Button type="submit" disabled={loading}>
+                {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {isEdit ? "Save Changes" : "Create"}
+              </Button>
+            )}
           </DialogFooter>
         </form>
       </DialogContent>
