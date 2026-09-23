@@ -200,10 +200,20 @@ class TestWorkspaceAccessDenial:
 
         assert _workspace_access_denial(messages) == "Still needed: 'Bot B', reconnect."
 
-    def test_a_later_success_clears_it(self):
-        messages = [_ai_with_tool_call("a"), self._denied("a"), _ok_tool_message("b")]
+    def test_a_later_round_that_succeeds_clears_it(self):
+        messages = [
+            _ai_with_tool_call("a"),
+            self._denied("a"),
+            _ai_with_tool_call("b"),
+            _ok_tool_message("b"),
+        ]
 
         assert _workspace_access_denial(messages) is None
+
+    def test_a_successful_sibling_in_the_same_round_does_not_hide_it(self):
+        messages = [_ai_with_tool_call("a"), self._denied("a"), _ok_tool_message("b")]
+
+        assert _workspace_access_denial(messages) == "Still needed: 'Bot B', reconnect."
 
     def test_other_errors_do_not_count(self):
         messages = [_ai_with_tool_call("a"), _err_tool_message("AUTH_ACCESS_DENIED", "a")]

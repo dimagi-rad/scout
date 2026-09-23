@@ -194,14 +194,27 @@ def _tool_message_error_code(content: Any) -> str | None:
 
 
 def _workspace_access_denial(messages: list) -> str | None:
-    """The authorizer's message when the latest tool result denied workspace access.
+    """The authorizer's message when the latest tool round denied workspace access.
 
     The denial holds for every remaining tool call this turn, so the graph ends
-    the turn on it with the remedy instead of letting the agent retry.
+    the turn on it with the remedy instead of letting the agent retry. The whole
+    trailing run of tool results is one round (parallel calls), and a successful
+    sibling in that round must not hide the denial.
     """
-    last = next((m for m in reversed(messages) if isinstance(m, ToolMessage)), None)
-    error = _tool_message_error(last.content) if last is not None else None
-    if not error or error.get("code") != ErrorCode.WORKSPACE_ACCESS_DENIED:
+    batch = []
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            break
+        batch.append(message)
+    error = next(
+        (
+            e
+            for e in (_tool_message_error(m.content) for m in batch)
+            if e and e.get("code") == ErrorCode.WORKSPACE_ACCESS_DENIED
+        ),
+        None,
+    )
+    if error is None:
         return None
     message = error.get("message")
     return message if isinstance(message, str) and message else ACCESS_DENIED_MESSAGE
