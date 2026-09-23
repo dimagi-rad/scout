@@ -38,12 +38,12 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services import schema_manager as sm
-from apps.workspaces.services.data_operation import try_tenant_data_lock
 from apps.workspaces.services.schema_manager import (
     SchemaManager,
     SchemaStillReferenced,
     get_managed_db_connection,
 )
+from tests.tenant_lock_probe import try_tenant_data_lock
 
 pytestmark = [
     pytest.mark.django_db(transaction=True),
@@ -518,3 +518,97 @@ async def test_standalone_rebuild_reconciles_marker_with_tenant_lock(owned, mana
     assert vs.physical_build_token == await sync_to_async(manager.read_publication_marker)(
         vs.schema_name
     )
+
+
+def _drop_view_like_an_in_place_load(managed, tenant_schema):
+    """An in-place load's ``DROP TABLE raw_* CASCADE`` takes every view reading it."""
+    managed.execute(
+        psycopg.sql.SQL("DROP TABLE {}.raw_cases CASCADE").format(
+            psycopg.sql.Identifier(tenant_schema.schema_name)
+        )
+    )
+    managed.execute(
+        psycopg.sql.SQL("CREATE TABLE {}.raw_cases (value text)").format(
+            psycopg.sql.Identifier(tenant_schema.schema_name)
+        )
+    )
+
+
+def test_failed_rebuild_after_views_were_dropped_underneath_is_not_reported_serving(owned, managed):
+    """Rollback restores only what the build itself changed. If a load already
+    cascaded the views away, the row must not keep claiming a serving layer."""
+    workspace, _tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    _drop_view_like_an_in_place_load(managed, tenant_schema)
+
+    with (
+        patch.object(
+            SchemaManager, "_create_readonly_role", side_effect=RuntimeError("grant boom")
+        ),
+        pytest.raises(RuntimeError, match="grant boom"),
+    ):
+        manager.build_view_schema(workspace)
+
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.FAILED
+    assert "grant boom" in vs.last_error
+
+
+def test_reconcile_republishes_views_dropped_from_under_a_matching_marker(owned, managed):
+    workspace, tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    _drop_view_like_an_in_place_load(managed, tenant_schema)
+    assert manager.read_publication_marker(vs.schema_name) == vs.physical_build_token
+
+    assert manager.reconcile_view_publication(workspace) == {
+        "status": "republished",
+        "reason": "views_missing",
+    }
+    published_view = view_name(manager._view_prefix(tenant), "raw_cases")
+    assert published_view in _relations(managed, vs.schema_name)
+
+
+def test_publication_waits_for_a_locked_source_then_rolls_back_to_last_good(
+    owned, managed, monkeypatch
+):
+    """A load holding its raw table must not interleave with our DROP SCHEMA (the
+    two lock orders form a cycle); the publication waits, times out, and keeps v1."""
+    workspace, tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    published_view = view_name(manager._view_prefix(tenant), "raw_cases")
+    monkeypatch.setattr(sm, "_PUBLICATION_LOCK_TIMEOUT", "200ms")
+
+    loader = get_managed_db_connection()
+    try:
+        loader.autocommit = False
+        loader.execute(
+            psycopg.sql.SQL("LOCK TABLE {}.raw_cases IN ACCESS EXCLUSIVE MODE").format(
+                psycopg.sql.Identifier(tenant_schema.schema_name)
+            )
+        )
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            manager.build_view_schema(workspace)
+    finally:
+        loader.rollback()
+        loader.close()
+
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.ACTIVE
+    assert _read_through_role(vs.schema_name, published_view) == ["v1"]
+
+
+def test_retirement_refuses_a_schema_holding_a_non_relation_object(owned, managed):
+    _workspace, _tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    managed.execute(
+        psycopg.sql.SQL("CREATE TYPE {}.leftover AS (value text)").format(
+            psycopg.sql.Identifier(tenant_schema.schema_name)
+        )
+    )
+
+    with pytest.raises(SchemaStillReferenced, match="leftover"):
+        SchemaManager().retire_tenant_schema(tenant_schema)
+
+    assert _schema_exists(managed, tenant_schema.schema_name)

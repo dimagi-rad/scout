@@ -1359,9 +1359,16 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             if access is None or not access.granted:
                 raise ValueError(_recovery_requester_denied_message(access))
 
-            await _to_thread_fresh_db(
-                SchemaManager().reconcile_view_publication, recovery.workspace
-            )
+            try:
+                await _to_thread_fresh_db(
+                    SchemaManager().reconcile_view_publication, recovery.workspace
+                )
+            except Exception:
+                # A republish can fail for the very reason this recovery exists
+                # (e.g. no loaded source yet); the repair below must still run.
+                logger.exception(
+                    "Reconciling the view publication for recovery %s failed", recovery_id
+                )
             surface = await recovery_query_surface(recovery)
             action = surface.get("recovery_action")
             if action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
@@ -1528,6 +1535,8 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
 # rebuilds on its own W; retry until its views have moved, never drop under them.
 _RETIRE_RETRY_BASE_SECONDS = 300
 _RETIRE_RETRY_MAX_SECONDS = 3600
+# About a day at the capped interval; past that a human has to look.
+_RETIRE_MAX_ATTEMPTS = 30
 
 
 @task
@@ -1568,12 +1577,13 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
         except SchemaStillReferenced as exc:
             await _retry_retirement(schema, exc.dependents, attempt, str(exc))
             return
-        except psycopg.errors.LockNotAvailable as exc:
-            # A long-running reader held the relations past the retirement lock
-            # timeout; nothing was dropped, so simply try again later.
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
+            # A reader held the relations past the retirement lock timeout, or
+            # locked them in the opposite order; the transaction rolled back and
+            # nothing was dropped, so simply try again later.
             await _retry_retirement(schema, [], attempt, str(exc))
             return
-        except Exception:
+        except Exception as exc:
             superseded = (
                 await TenantSchema.objects.filter(
                     tenant_id=schema.tenant_id, state=SchemaState.ACTIVE
@@ -1583,11 +1593,12 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
             )
             if superseded:
                 # A newer ACTIVE schema serves this tenant: reverting would create
-                # a second ACTIVE row. Stay TEARDOWN and let the retry pick it up.
+                # a second ACTIVE row, and nothing else re-arms a TEARDOWN row.
                 logger.exception(
                     "teardown_schema: retiring superseded schema %s failed; retained", schema.id
                 )
-                raise
+                await _retry_retirement(schema, [], attempt, str(exc))
+                return
             # Nothing else serves this tenant and the physical schema still exists —
             # revert to ACTIVE rather than stranding readable data in TEARDOWN.
             schema.state = SchemaState.ACTIVE
@@ -1632,6 +1643,16 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
 
 async def _retry_retirement(schema, dependents: list[dict], attempt: int, reason: str) -> None:
     """Keep a still-referenced schema, move its readers, and try again later."""
+    if attempt + 1 >= _RETIRE_MAX_ATTEMPTS:
+        logger.error(
+            "teardown_schema: giving up retiring schema %s (%s) after %d attempts: %s — "
+            "left in TEARDOWN; find what still depends on it",
+            schema.id,
+            schema.schema_name,
+            attempt + 1,
+            reason,
+        )
+        return
     dependent_schemas = sorted({d["schema"] for d in dependents if d.get("schema")})
     logger.warning(
         "teardown_schema: schema %s (%s) still referenced (attempt %d): %s — retaining "

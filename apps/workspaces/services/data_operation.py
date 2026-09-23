@@ -228,22 +228,6 @@ async def tenant_data_lock(tenant_ids):
             _held_tenants.reset(token)
 
 
-@contextmanager
-def try_tenant_data_lock(tenant_id):
-    """Synchronously try the single tenant lock without waiting.
-
-    Yields True when held. Used by request handlers to reconcile a candidate that
-    can only still be PROVISIONING if its owning writer died (the owner holds ``T``
-    for the candidate's whole life), without ever blocking a request on a load.
-    """
-    key = tenant_lock_key(tenant_id)
-    with psycopg.connect(**_connection_params(), autocommit=True) as conn:
-        acquired = conn.execute(
-            "SELECT pg_try_advisory_lock(%s, %s)", (_TENANT_LOCK_NAMESPACE, key)
-        ).fetchone()[0]
-        yield bool(acquired)
-
-
 def serialized_workspace_data(function):
     @wraps(function)
     async def wrapped(workspace_id, *args, **kwargs):

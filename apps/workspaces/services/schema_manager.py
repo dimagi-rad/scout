@@ -56,6 +56,10 @@ _PUBLICATION_MARKER_VERSION = 1
 # fails the retirement visibly and it is retried with backoff.
 _RETIRE_LOCK_TIMEOUT = "30s"
 
+# The publication transaction holds W, T and the view lock; never let it sit
+# behind a long in-place load indefinitely. A timeout rolls back to last-good.
+_PUBLICATION_LOCK_TIMEOUT = "30s"
+
 _VIEW_BUILD_LOCK_NAMESPACE = 0x53435642
 _view_build_context = threading.local()
 _publication_context = threading.local()
@@ -436,11 +440,17 @@ class SchemaManager:
                 raise SchemaStillReferenced(schema_name, dependents)
 
             self._drop_relations_restrict(conn, cursor, schema_name, relations)
-            cursor.execute(
-                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} RESTRICT").format(
-                    psycopg.sql.Identifier(schema_name)
+            try:
+                cursor.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} RESTRICT").format(
+                        psycopg.sql.Identifier(schema_name)
+                    )
                 )
-            )
+            except psycopg.errors.DependentObjectsStillExist as exc:
+                # Something that is not a relation (a type, function, or a relation
+                # created after the listing) is still in the schema.
+                conn.rollback()
+                raise SchemaStillReferenced(schema_name, [], detail=str(exc)) from exc
             cursor.close()
             conn.commit()
         except Exception:
@@ -644,6 +654,11 @@ class SchemaManager:
         conn = get_managed_db_transaction()
         try:
             cursor = conn.cursor()
+            cursor.execute(
+                psycopg.sql.SQL("SET LOCAL lock_timeout = {}").format(
+                    psycopg.sql.Literal(_PUBLICATION_LOCK_TIMEOUT)
+                )
+            )
 
             if not re.match(r"^ws_[a-f0-9]{16}$", view_schema_name):
                 raise ValueError(f"Invalid view schema name: {view_schema_name!r}")
@@ -691,6 +706,18 @@ class SchemaManager:
                         "tenant_id": str(tenant_obj.id),
                         "source_table_name": table_name,
                     }
+
+            # Lock the sources before touching our own views. An in-place load
+            # holds its raw table exclusively and then cascades into every view
+            # schema reading it; taking the tables first (in one global order) keeps
+            # that from forming a cycle with our DROP SCHEMA below.
+            for schema_name, table_name in sorted({(v[1], v[2]) for v in planned_views}):
+                cursor.execute(
+                    psycopg.sql.SQL("LOCK TABLE {}.{} IN ACCESS SHARE MODE").format(
+                        psycopg.sql.Identifier(schema_name),
+                        psycopg.sql.Identifier(table_name),
+                    )
+                )
 
             # DROP + recreate (not CREATE OR REPLACE VIEW) so a rebuild after an
             # underlying column change never hits "cannot change name of view
@@ -752,11 +779,14 @@ class SchemaManager:
             # Persist the error text so the resume task, MCP get_schema_status, and
             # the status API can surface *why* the query layer is unavailable.
             vs.last_error = str(exc)[:500]
-            if was_active:
+            if was_active and not self._published_views_missing(vs):
                 # The restored views still serve, and coverage/provenance/token still
                 # describe them truthfully — only the error is new.
                 vs.save(update_fields=["last_error"])
             else:
+                # Either nothing served before, or something outside this build
+                # (an in-place load's DROP ... CASCADE) already removed views the
+                # row still lists; rolling back cannot bring those back.
                 vs.state = SchemaState.FAILED
                 vs.save(update_fields=["state", "last_error"])
             raise
@@ -846,6 +876,41 @@ class SchemaManager:
             if not conn.closed:
                 conn.close()
 
+    @staticmethod
+    def _missing_views(cursor, vs) -> list[str]:
+        expected = set(((vs.view_sources or {}).get("views") or {}).keys())
+        if not expected:
+            return []
+        cursor.execute(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = %s AND c.relkind = 'v'",
+            (vs.schema_name,),
+        )
+        return sorted(expected - {row[0] for row in cursor.fetchall()})
+
+    def _published_views_missing(self, vs) -> bool:
+        """True unless every view the row records is physically present.
+
+        An unverifiable answer counts as missing: claiming a serving layer we
+        cannot see is worse than reporting it unavailable.
+        """
+        try:
+            conn = get_managed_db_connection()
+        except Exception:
+            logger.exception("Could not verify published views for '%s'", vs.schema_name)
+            return True
+        try:
+            cursor = conn.cursor()
+            try:
+                return bool(self._missing_views(cursor, vs))
+            finally:
+                cursor.close()
+        except Exception:
+            logger.exception("Could not verify published views for '%s'", vs.schema_name)
+            return True
+        finally:
+            conn.close()
+
     def read_publication_marker(self, schema_name: str) -> str | None:
         """Return the build token committed on ``schema_name``, or None.
 
@@ -911,14 +976,22 @@ class SchemaManager:
             try:
                 exists = self._schema_exists(cursor, vs.schema_name)
                 marker = self._read_publication_marker(cursor, vs.schema_name) if exists else None
+                missing = self._missing_views(cursor, vs) if exists else []
             finally:
                 cursor.close()
         finally:
             conn.close()
 
-        if exists and (marker or "") == (vs.physical_build_token or ""):
+        marker_matches = (marker or "") == (vs.physical_build_token or "")
+        if exists and marker_matches and not missing:
             return {"status": "consistent"}
-        if not exists:
+        if exists and marker_matches:
+            # The marker survives a view being dropped from under it (an in-place
+            # load cascades into every schema reading its raw tables).
+            if vs.state != SchemaState.ACTIVE:
+                return {"status": "consistent"}
+            reason = "views_missing"
+        elif not exists:
             if vs.state != SchemaState.ACTIVE:
                 return {"status": "no_physical_schema"}
             reason = "physical_missing"

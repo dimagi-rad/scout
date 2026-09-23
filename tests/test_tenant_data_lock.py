@@ -18,6 +18,7 @@ from apps.workspaces.services.data_operation import (
     tenant_lock_keys,
     workspace_data_lock,
 )
+from tests.tenant_lock_probe import try_tenant_data_lock
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.django_db(transaction=True)]
 
@@ -223,12 +224,12 @@ async def test_cancelled_drained_thread_keeps_parent_tenant_ownership_until_stop
         await asyncio.sleep(0)
         task.cancel()
         assert not stopped.is_set()
-        with data_operation.try_tenant_data_lock(tenant) as held:
+        with try_tenant_data_lock(tenant) as held:
             assert not held
     finally:
         gate.set()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert stopped.is_set()
-    with data_operation.try_tenant_data_lock(tenant) as held:
+    with try_tenant_data_lock(tenant) as held:
         assert held

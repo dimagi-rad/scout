@@ -3,6 +3,7 @@
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg.errors
 import pytest
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -17,7 +18,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.tasks import expire_inactive_schemas, teardown_schema
+from apps.workspaces.tasks import _RETIRE_MAX_ATTEMPTS, expire_inactive_schemas, teardown_schema
 
 
 @pytest.fixture
@@ -583,3 +584,63 @@ async def test_teardown_preserves_view_that_excluded_the_source(active_schema, t
     await view.arefresh_from_db()
     assert view.state == SchemaState.ACTIVE
     assert view.last_error == ""
+
+
+# ---------------------------------------------------------------------------
+# teardown_schema: retirement retries
+# ---------------------------------------------------------------------------
+
+
+async def _superseded_teardown_schema(active_schema, tenant):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="ttl_test_schema_r", state=SchemaState.ACTIVE
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("connection dropped"),
+        psycopg.errors.DeadlockDetected("deadlock detected"),
+    ],
+)
+async def test_failed_retirement_of_a_superseded_schema_is_retried(active_schema, tenant, failure):
+    """Nothing else re-arms a TEARDOWN row, so an unclassified failure must
+    reschedule rather than strand the physical schema forever."""
+    await _superseded_teardown_schema(active_schema, tenant)
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = failure
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id), attempt=2)
+
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=3
+    )
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retirement_stops_retrying_after_the_attempt_cap(active_schema, tenant):
+    await _superseded_teardown_schema(active_schema, tenant)
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("still broken")
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id), attempt=_RETIRE_MAX_ATTEMPTS - 1)
+
+    retry.return_value.defer_async.assert_not_awaited()
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
