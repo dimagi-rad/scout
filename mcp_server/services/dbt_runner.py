@@ -17,16 +17,19 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import yaml
-from dbt.cli.main import dbtRunner
+from dbt.cli.main import dbtRunner, dbtRunnerResult
 
 logger = logging.getLogger(__name__)
 
 # Serialise all dbt invocations — dbtRunner is not thread-safe.
 _dbt_lock = threading.Lock()
 
-# dbt otherwise reports every invocation to dbt Labs, from hosts that process
-# customer data. An explicit CLI flag outranks any env var or profile setting.
-_NO_TELEMETRY = "--no-send-anonymous-usage-stats"
+
+def _invoke_dbt(cli_args: list[str]) -> dbtRunnerResult:
+    # dbt otherwise reports every invocation to dbt Labs, from hosts that process
+    # customer data. An explicit CLI flag outranks any env var or profile setting.
+    with _dbt_lock:
+        return dbtRunner().invoke([*cli_args, "--no-send-anonymous-usage-stats"])
 
 
 def generate_profiles_yml(
@@ -124,14 +127,11 @@ def run_dbt(
         profiles_dir,
         "--select",
         select_arg,
-        _NO_TELEMETRY,
     ]
 
     logger.info("Invoking dbt programmatically: %s", " ".join(cli_args))
 
-    with _dbt_lock:
-        dbt = dbtRunner()
-        res = dbt.invoke(cli_args)
+    res = _invoke_dbt(cli_args)
 
     if not res.success:
         # A node-level model failure sets res.success=False but leaves
@@ -191,22 +191,13 @@ def run_dbt_test(
     Test results are grouped by the model name they test (extracted from
     ``node.attached_node``), so the caller can look up results by model name.
     """
-    cli_args = [
-        "test",
-        "--project-dir",
-        dbt_project_dir,
-        "--profiles-dir",
-        profiles_dir,
-        _NO_TELEMETRY,
-    ]
+    cli_args = ["test", "--project-dir", dbt_project_dir, "--profiles-dir", profiles_dir]
     if models:
         cli_args.extend(["--select", " ".join(models)])
 
     logger.info("Invoking dbt test: %s", " ".join(cli_args))
 
-    with _dbt_lock:
-        dbt = dbtRunner()
-        res = dbt.invoke(cli_args)
+    res = _invoke_dbt(cli_args)
 
     # Parse even on failure: dbt sets success=False on test failures but still
     # populates res.result. Schema test nodes carry attached_node =
