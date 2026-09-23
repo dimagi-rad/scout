@@ -22,7 +22,9 @@ This starts five services:
 
 `docker-compose.override.yml` is automatically loaded locally and publishes
 MCP's port. Without that override, MCP is accessible only inside the Compose
-network. No Redis service is needed: Procrastinate uses PostgreSQL for jobs.
+network. Procrastinate uses PostgreSQL for jobs, not Redis. For multi-worker or
+multi-process production deployments, configure a shared Redis cache through
+[`REDIS_URL`](configuration.md#cache) so login lockouts and rate limits share state.
 
 ## Configuration
 

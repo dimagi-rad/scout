@@ -35,7 +35,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDIS_URL` | (empty) | Redis connection URL. If set, Redis is used for caching. Otherwise, local memory cache is used. |
+| `REDIS_URL` | (empty) | Shared Redis cache URL. Set this for multi-worker/multi-process deployments so login lockouts and rate limits share state. Without it, caches and limits are per-process and reset on restart. Background jobs use PostgreSQL, not Redis. |
 
 ### MCP Server
 

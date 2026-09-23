@@ -6,6 +6,7 @@ For environments where Docker is not available or not desired, you can run Scout
 
 - Python 3.12+
 - PostgreSQL 14+
+- Redis for shared caching/rate limits when running multiple API workers
 - A reachable Cube runtime and schema validator, built from Scout's `cube_config/`
 - Node.js 18+ or Bun
 - [uv](https://docs.astral.sh/uv/)
@@ -32,7 +33,12 @@ not a substitute. See the [Docker guide](docker.md) for the bundled services.
 
 Before starting Scout, verify both services' `/readyz` endpoints. Django's local
 missing-configuration warning is not a network health check. Redis is not
-required; the job queue uses PostgreSQL.
+required for background jobs; the job queue uses PostgreSQL.
+
+Set [`REDIS_URL`](configuration.md#cache) to a shared Redis service when running
+multiple API processes, including the four-worker command below. Without it,
+login lockouts and request rate limits use separate per-process memory caches,
+which multiplies their effective limits and resets them on process restart.
 
 ### Run migrations
 
