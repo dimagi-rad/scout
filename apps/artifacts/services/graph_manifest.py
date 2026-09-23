@@ -49,10 +49,14 @@ def build_semantic_query_manifest(doc: Any) -> dict[str, Any]:
     }
 
 
+def build_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]:
+    story_doc = (artifact.data or {}).get("story_doc") if isinstance(artifact.data, dict) else None
+    return build_semantic_query_manifest(story_doc or {})
+
+
 def sync_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]:
     """Regenerate and persist manifest rows for one artifact version."""
-    story_doc = (artifact.data or {}).get("story_doc") if isinstance(artifact.data, dict) else None
-    manifest = build_semantic_query_manifest(story_doc or {})
+    manifest = build_artifact_semantic_query_manifest(artifact)
     compatibility_queries = [
         {"name": entry["key"], **entry["query"]}
         for entry in manifest["entries"]
@@ -103,6 +107,22 @@ def semantic_query_summary(record: ArtifactSemanticQuery) -> dict[str, Any]:
         "dependencies": record.dependencies,
         "block_locations": record.block_locations,
         "unresolved_references": record.unresolved_references,
+    }
+
+
+def manifest_entry_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    """Same shape as ``semantic_query_summary`` for an entry that was never persisted."""
+    return {
+        "query_key": entry["key"],
+        "query_hash": entry["query_hash"],
+        "query_type": entry["query_type"],
+        "validation_status": entry["validation_status"],
+        "query_payload": entry["query"],
+        "members": entry["members"],
+        "datasets": entry["datasets"],
+        "dependencies": entry["dependencies"],
+        "block_locations": entry["block_locations"],
+        "unresolved_references": entry["unresolved_references"],
     }
 
 
