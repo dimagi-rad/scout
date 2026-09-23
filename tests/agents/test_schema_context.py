@@ -228,19 +228,23 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
         patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
     ):
         retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
-        stable, ready = await graph_base._build_system_prompt(workspace, user, interactive)
+        stable, ready = await graph_base._build_system_prompt(
+            workspace, user, interactive, write_capable=True
+        )
         run = await MaterializationRun.objects.acreate(
             tenant_schema=schema,
             pipeline="commcare_sync",
             state=MaterializationRun.RunState.LOADING,
         )
         stable_loading, loading = await graph_base._build_system_prompt(
-            workspace, user, interactive
+            workspace, user, interactive, write_capable=True
         )
         await MaterializationRun.objects.filter(pk=run.pk).aupdate(
             state=MaterializationRun.RunState.COMPLETED
         )
-        stable_done, done = await graph_base._build_system_prompt(workspace, user, interactive)
+        stable_done, done = await graph_base._build_system_prompt(
+            workspace, user, interactive, write_capable=True
+        )
 
     assert "Data is loaded and ready" in ready
     assert "in progress" in loading.lower()
@@ -647,7 +651,9 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
         ),
     ):
         retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
-        stable, degraded = await graph_base._build_system_prompt(workspace, user, interactive)
+        stable, degraded = await graph_base._build_system_prompt(
+            workspace, user, interactive, write_capable=True
+        )
         await WorkspaceViewSchema.objects.filter(pk=view.pk).aupdate(
             tenant_coverage={
                 "included_tenants": [{"tenant_id": str(tenant.id)}, {"tenant_id": str(missing.id)}],
@@ -655,7 +661,7 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
             }
         )
         stable_again, recovered = await graph_base._build_system_prompt(
-            workspace, user, interactive
+            workspace, user, interactive, write_capable=True
         )
     if coverage_kind == "malformed":
         assert "coverage is unknown" in degraded.lower()
