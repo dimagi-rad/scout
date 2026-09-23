@@ -49,17 +49,24 @@ def tenant_membership(db, user, tenant):
     Idempotent so it can coexist with the ``workspace`` fixture, which also gives the
     user a live TenantMembership for the same tenant.
     """
-    tm, _ = TenantMembership.objects.get_or_create(
-        user=user,
-        tenant=tenant,
-        defaults={"connection": usable_connection(user, tenant.provider)},
+    connection = usable_connection(user, tenant.provider)
+    tm, created = TenantMembership.objects.get_or_create(
+        user=user, tenant=tenant, defaults={"connection": connection}
     )
+    if not created and tm.connection_id is None:
+        tm.connection = connection
+        tm.save(update_fields=["connection"])
     return tm
 
 
 @pytest.fixture
 def connect_tenant_membership(db):
-    """Create a TenantMembership for a commcare_connect tenant."""
+    """Create a TenantMembership for a commcare_connect tenant.
+
+    Backed by an API-key connection for simplicity, which the product cannot
+    create for Connect (OAuth only); tests of Connect's OAuth readiness path
+    must build a real OAuth identity instead.
+    """
     User = get_user_model()
     connect_user = User.objects.create_user(
         email="connect@example.com",

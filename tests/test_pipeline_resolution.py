@@ -31,12 +31,15 @@ UNKNOWN_PROVIDER = "mystery_provider"
 
 
 @pytest.fixture
-def unresolvable_tenant_schema(db, tenant):
+def unresolvable_tenant_schema(db, workspace, tenant):
     """A tenant whose provider has no pipeline YAML, with a live schema."""
     tenant.provider = UNKNOWN_PROVIDER
     tenant.save(update_fields=["provider"])
     # Keep members' credentials usable: access requires a same-provider connection.
-    TenantConnection.objects.filter(memberships__tenant=tenant).update(provider=UNKNOWN_PROVIDER)
+    moved = TenantConnection.objects.filter(memberships__tenant=tenant).update(
+        provider=UNKNOWN_PROVIDER
+    )
+    assert moved, "the workspace fixture's member must have a connection to move"
     return TenantSchema.objects.create(
         tenant=tenant,
         schema_name="t_mystery",

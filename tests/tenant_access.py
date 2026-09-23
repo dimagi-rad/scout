@@ -10,28 +10,37 @@ from apps.users.adapters import encrypt_credential
 from apps.users.models import TenantConnection, TenantMembership
 
 
-def _connection_defaults():
-    return {"encrypted_credential": encrypt_credential("test-api-key")}
+def _connection_fields(user, provider) -> dict:
+    return {"user": user, "provider": provider, "credential_type": TenantConnection.API_KEY}
+
+
+def _new_connection_fields(user, provider) -> dict:
+    # The packed "user:key" shape providers expect, so a later verification call
+    # sees a well-formed credential rather than an indeterminate one.
+    return _connection_fields(user, provider) | {
+        "encrypted_credential": encrypt_credential("test-user:test-api-key")
+    }
+
+
+def _reusable(user, provider):
+    # A blank key is a placeholder the readiness gate rejects; never hand one back.
+    return TenantConnection.objects.filter(**_connection_fields(user, provider)).exclude(
+        encrypted_credential=""
+    )
 
 
 def usable_connection(user, provider) -> TenantConnection:
-    connection, _ = TenantConnection.objects.get_or_create(
-        user=user,
-        provider=provider,
-        credential_type=TenantConnection.API_KEY,
-        defaults=_connection_defaults(),
+    # Not get_or_create: several API-key connections per user and provider are a
+    # supported state, and get_or_create raises MultipleObjectsReturned on them.
+    return _reusable(user, provider).first() or TenantConnection.objects.create(
+        **_new_connection_fields(user, provider)
     )
-    return connection
 
 
 async def ausable_connection(user, provider) -> TenantConnection:
-    connection, _ = await TenantConnection.objects.aget_or_create(
-        user=user,
-        provider=provider,
-        credential_type=TenantConnection.API_KEY,
-        defaults=_connection_defaults(),
+    return await _reusable(user, provider).afirst() or await TenantConnection.objects.acreate(
+        **_new_connection_fields(user, provider)
     )
-    return connection
 
 
 def grant_tenant_access(user, tenant) -> TenantMembership:
