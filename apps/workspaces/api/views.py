@@ -3,10 +3,8 @@ API views for data dictionary and workspace schema management.
 """
 
 import logging
-from datetime import timedelta
 
 from django.db import transaction
-from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -26,17 +24,10 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     resolve_pipeline_config,
 )
-from apps.workspaces.services.refresh_requests import (
-    find_legacy_refresh_jobs,
-    reconcile_legacy_refresh_candidates,
-)
+from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
-from apps.workspaces.tasks import (
-    JOB_RETENTION_HOURS,
-    drop_failed_refresh_schema,
-    refresh_tenant_schema,
-)
+from apps.workspaces.tasks import refresh_tenant_schema, settle_finished_refresh_candidates
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -502,13 +493,7 @@ class RefreshSchemaView(APIView):
         legacy_jobs = find_legacy_refresh_jobs(tenant)
         with transaction.atomic():
             tenant = Tenant.objects.select_for_update().get(id=tenant.id)
-            legacy = reconcile_legacy_refresh_candidates(
-                tenant,
-                legacy_jobs,
-                pruned_before=timezone.now() - timedelta(hours=JOB_RETENTION_HOURS),
-            )
-            for settled_id in legacy.settled_schema_ids:
-                drop_failed_refresh_schema.defer(schema_id=str(settled_id))
+            legacy = settle_finished_refresh_candidates(tenant, legacy_jobs)
             if legacy.recovery_needed:
                 return Response(
                     {

@@ -1,7 +1,9 @@
 """Refresh requests are bound to one candidate, actor, workspace, and queue job."""
 
 import json
+import logging
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from types import SimpleNamespace
@@ -38,21 +40,58 @@ from apps.workspaces.services.refresh_requests import (
     reconcile_legacy_refresh_candidates,
     refresh_task_args,
 )
-from apps.workspaces.tasks import drop_failed_refresh_schema, refresh_tenant_schema
+from apps.workspaces.tasks import (
+    JOB_RETENTION_HOURS,
+    MATERIALIZATION_STALLED_HEARTBEAT_SECONDS,
+    drop_failed_refresh_schema,
+    reconcile_refresh_candidates,
+    refresh_tenant_schema,
+)
 
-JOB_RETENTION = timedelta(hours=24 * 7)
+JOB_RETENTION = timedelta(hours=JOB_RETENTION_HOURS)
+STALLED_AFTER = timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS)
 
 
 @pytest.fixture
-def refresh_job(db):
+def queue_worker(db):
     created = []
 
-    def make(args, *, status="doing", task_name=REFRESH_TASK_NAME):
+    def make(*, heartbeat_age):
         with connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO procrastinate_jobs (queue_name, task_name, status, args) "
-                "VALUES (%s, %s, %s::procrastinate_job_status, %s::jsonb) RETURNING id",
-                ["default", task_name, status, json.dumps(args)],
+                "INSERT INTO procrastinate_workers (last_heartbeat) VALUES (%s) RETURNING id",
+                [timezone.now() - heartbeat_age],
+            )
+            worker_id = cursor.fetchone()[0]
+        created.append(worker_id)
+        return worker_id
+
+    yield make
+
+    if created:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE procrastinate_jobs SET worker_id = NULL WHERE worker_id = ANY(%s)",
+                [created],
+            )
+            cursor.execute("DELETE FROM procrastinate_workers WHERE id = ANY(%s)", [created])
+
+
+@pytest.fixture
+def refresh_job(queue_worker):
+    created = []
+    live_worker = []
+
+    def make(args, *, status="doing", task_name=REFRESH_TASK_NAME):
+        # A started job always belongs to a worker; without one the reconciler
+        # correctly reads it as stalled.
+        if not live_worker:
+            live_worker.append(queue_worker(heartbeat_age=timedelta(0)))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO procrastinate_jobs (queue_name, task_name, status, args, worker_id) "
+                "VALUES (%s, %s, %s::procrastinate_job_status, %s::jsonb, %s) RETURNING id",
+                ["default", task_name, status, json.dumps(args), live_worker[0]],
             )
             job_id = cursor.fetchone()[0]
         created.append(job_id)
@@ -91,7 +130,7 @@ def _delete_job(job_id):
 def _bound_candidate(tenant, workspace, membership, refresh_job, *, state=SchemaState.PROVISIONING):
     candidate = TenantSchema.objects.create(
         tenant=tenant,
-        schema_name=f"owned_refresh_{TenantSchema.objects.count()}",
+        schema_name=f"owned_refresh_{uuid.uuid4().hex[:12]}",
         state=state,
         refresh_workspace_id=workspace.id,
         refresh_actor_user_id=membership.user_id,
@@ -109,12 +148,23 @@ def _bound_candidate(tenant, workspace, membership, refresh_job, *, state=Schema
     return candidate, args, job_id
 
 
-def _reconcile(tenant):
+def _reconcile(tenant, legacy_jobs=None):
+    now = timezone.now()
     return reconcile_legacy_refresh_candidates(
         tenant,
-        find_legacy_refresh_jobs(tenant),
-        pruned_before=timezone.now() - JOB_RETENTION,
+        legacy_jobs if legacy_jobs is not None else find_legacy_refresh_jobs(tenant),
+        pruned_before=now - JOB_RETENTION,
+        stalled_before=now - STALLED_AFTER,
     )
+
+
+def _run_on_worker(job_id, worker_id, *, status="doing"):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE procrastinate_jobs SET status = %s::procrastinate_job_status, worker_id = %s "
+            "WHERE id = %s",
+            [status, worker_id, job_id],
+        )
 
 
 def _age_past_retention(candidate):
@@ -307,7 +357,22 @@ def test_only_the_owning_job_can_activate_or_fail_a_claimed_candidate(
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("job_status", ["cancelled", "failed", "succeeded"])
+def test_owning_job_can_fail_its_claimed_candidate(
+    workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    assert claim_refresh_candidate(job_id=job_id, **args).status == "claimed"
+
+    failed = fail_claimed_refresh_candidate(candidate.id, job_id)
+
+    candidate.refresh_from_db()
+    assert failed is not None
+    assert failed.id == candidate.id
+    assert candidate.state == SchemaState.FAILED
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("job_status", ["aborted", "cancelled", "failed", "succeeded"])
 def test_terminal_bound_candidate_is_settled(
     workspace, tenant, tenant_membership, refresh_job, job_status
 ):
@@ -514,9 +579,7 @@ def test_locked_reconciliation_never_scans_queue_args(tenant, tenant_membership,
     legacy_jobs = find_legacy_refresh_jobs(tenant)
 
     with CaptureQueriesContext(connection) as queries:
-        result = reconcile_legacy_refresh_candidates(
-            tenant, legacy_jobs, pruned_before=timezone.now() - JOB_RETENTION
-        )
+        result = _reconcile(tenant, legacy_jobs)
 
     assert result.settled_schema_ids == (legacy.id,)
     assert not [
@@ -536,7 +599,7 @@ def manage_client(user):
 @pytest.fixture
 def queued_schema_drops():
     # procrastinate_jobs is unmanaged, so a real defer would outlive the test.
-    with patch("apps.workspaces.api.views.drop_failed_refresh_schema.defer") as drop:
+    with patch("apps.workspaces.tasks.drop_failed_refresh_schema.defer") as drop:
         yield drop
 
 
@@ -875,3 +938,96 @@ def test_concurrent_refresh_posts_create_one_bound_job(workspace, tenant, tenant
                 "DELETE FROM procrastinate_jobs WHERE task_name = %s AND args->>'workspace_id' = %s",
                 [REFRESH_TASK_NAME, str(workspace_id)],
             )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("heartbeat_age", "settled"),
+    [(None, True), (STALLED_AFTER + timedelta(minutes=1), True), (timedelta(0), False)],
+    ids=["worker-gone", "heartbeat-stale", "heartbeat-fresh"],
+)
+@pytest.mark.parametrize("claimed", [False, True])
+def test_bound_candidate_whose_worker_died_is_settled_and_reported(
+    workspace,
+    tenant,
+    tenant_membership,
+    refresh_job,
+    queue_worker,
+    caplog,
+    heartbeat_age,
+    settled,
+    claimed,
+):
+    # SIGKILL/OOM leaves the job "doing" forever; without this the tenant could
+    # never refresh again and nothing would say why.
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    if claimed:
+        assert claim_refresh_candidate(job_id=job_id, **args).status == "claimed"
+    worker_id = None if heartbeat_age is None else queue_worker(heartbeat_age=heartbeat_age)
+    _run_on_worker(job_id, worker_id)
+
+    with caplog.at_level(logging.INFO, logger="apps.workspaces.services.refresh_requests"):
+        result = _reconcile(tenant)
+
+    candidate.refresh_from_db()
+    assert result.recovery_needed is False
+    if settled:
+        assert result.settled_schema_ids == (candidate.id,)
+        assert candidate.state == SchemaState.FAILED
+        assert [r.levelno for r in caplog.records if str(candidate.id) in r.getMessage()] == [
+            logging.ERROR
+        ]
+    else:
+        assert result.settled_schema_ids == ()
+        assert candidate.state == SchemaState.PROVISIONING
+
+
+@pytest.mark.django_db(transaction=True)
+def test_legacy_candidate_whose_worker_died_is_settled(
+    tenant, tenant_membership, refresh_job, queue_worker
+):
+    legacy = TenantSchema.objects.create(
+        tenant=tenant, schema_name="legacy_dead_worker", state=SchemaState.PROVISIONING
+    )
+    job_id = refresh_job({"schema_id": str(legacy.id), "membership_id": str(tenant_membership.id)})
+    _run_on_worker(job_id, queue_worker(heartbeat_age=STALLED_AFTER + timedelta(minutes=1)))
+
+    result = _reconcile(tenant)
+
+    legacy.refresh_from_db()
+    assert result.settled_schema_ids == (legacy.id,)
+    assert legacy.state == SchemaState.FAILED
+
+
+@pytest.mark.django_db(transaction=True)
+def test_operator_recovery_names_the_candidate_and_reason(
+    workspace, tenant, tenant_membership, refresh_job, caplog
+):
+    candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    _set_job(job_id, args={"schema_id": str(candidate.id)})
+
+    with caplog.at_level(logging.WARNING, logger="apps.workspaces.services.refresh_requests"):
+        assert _reconcile(tenant).recovery_needed is True
+
+    [record] = [r for r in caplog.records if str(candidate.id) in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert "does not match the recorded request" in record.getMessage()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_periodic_sweep_settles_dead_refresh_without_a_retry(
+    manage_client, workspace, tenant, tenant_membership, refresh_job, queue_worker
+):
+    candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    _run_on_worker(job_id, None)
+
+    with patch("apps.workspaces.tasks.drop_failed_refresh_schema.defer") as drop:
+        result = async_to_sync(reconcile_refresh_candidates.func)()
+
+    candidate.refresh_from_db()
+    assert result == {"settled": 1, "recovery_needed": 0}
+    assert candidate.state == SchemaState.FAILED
+    drop.assert_called_once_with(schema_id=str(candidate.id))
+    status_response = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
+    assert status_response.data["state"] == SchemaState.FAILED
+    assert status_response.data["error"]

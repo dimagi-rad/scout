@@ -12,7 +12,7 @@ from typing import NamedTuple
 import sentry_sdk
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import close_old_connections
+from django.db import close_old_connections, transaction
 from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
@@ -31,7 +31,7 @@ from apps.semantic.services.cube_schema import (
     record_cube_schema_build_failure,
 )
 from apps.transformations.models import TransformationRunStatus
-from apps.users.models import TenantMembership, User
+from apps.users.models import Tenant, TenantMembership, User
 from apps.users.services.credential_resolver import (
     CredentialResolutionError,
     aresolve_credential,
@@ -69,9 +69,12 @@ from apps.workspaces.services.query_state import (
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
     DENIED_WORKSPACE_UNLINKED,
+    LegacyRefreshReconciliation,
     activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
+    find_legacy_refresh_jobs,
+    reconcile_legacy_refresh_candidates,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import parse_coverage
@@ -1145,6 +1148,60 @@ async def _drop_failed_refresh_schema(schema_id) -> None:
 async def drop_failed_refresh_schema(schema_id: str) -> None:
     """Drop the physical schema of a refresh candidate settled as FAILED."""
     await _drop_failed_refresh_schema(schema_id)
+
+
+def settle_finished_refresh_candidates(tenant, legacy_jobs: dict) -> LegacyRefreshReconciliation:
+    """Reconcile a tenant's refresh candidates and queue a drop for each one settled.
+
+    Call inside a transaction so each settle commits together with its queued drop.
+    """
+    now = timezone.now()
+    result = reconcile_legacy_refresh_candidates(
+        tenant,
+        legacy_jobs,
+        pruned_before=now - timedelta(hours=JOB_RETENTION_HOURS),
+        stalled_before=now - timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS),
+    )
+    for settled_id in result.settled_schema_ids:
+        drop_failed_refresh_schema.defer(schema_id=str(settled_id))
+    return result
+
+
+def _reconcile_tenant_refreshes(tenant_id) -> LegacyRefreshReconciliation:
+    tenant = Tenant.objects.get(id=tenant_id)
+    legacy_jobs = find_legacy_refresh_jobs(tenant)
+    with transaction.atomic():
+        return settle_finished_refresh_candidates(tenant, legacy_jobs)
+
+
+@app.periodic(cron="*/15 * * * *")
+@task
+async def reconcile_refresh_candidates(timestamp: int = 0) -> dict:
+    """Settle refresh candidates whose queue job finished or whose worker died.
+
+    A refresh worker killed mid-run leaves its job "doing" and its candidate
+    PROVISIONING, which blocks every later refresh and keeps the status endpoint
+    reporting "provisioning". The refresh endpoint also reconciles on each POST;
+    this sweep makes the dead refresh visible (FAILED, logged at error) without
+    anyone having to retry first.
+    """
+    tenant_ids = [
+        tenant_id
+        async for tenant_id in TenantSchema.objects.filter(state=SchemaState.PROVISIONING)
+        .values_list("tenant_id", flat=True)
+        .distinct()
+    ]
+    settled = 0
+    recovery_needed = 0
+    for tenant_id in tenant_ids:
+        try:
+            result = await _to_thread_fresh_db(_reconcile_tenant_refreshes, tenant_id)
+        except Exception:
+            logger.exception("reconcile_refresh_candidates: tenant %s failed", tenant_id)
+            continue
+        settled += len(result.settled_schema_ids)
+        recovery_needed += result.recovery_needed
+    return {"settled": settled, "recovery_needed": recovery_needed}
 
 
 async def _drain_cancelled_refresh_cleanup(schema, job_id: int) -> None:
