@@ -326,7 +326,14 @@ def _ensure_before_deadline(deadline, clock) -> None:
 def _preflight_token(token, *, deadline=None, clock=time.monotonic) -> _TokenPreflight:
     with transaction.atomic(), preserve_transaction_timeouts():
         _configure_transaction_deadline(deadline, clock)
-        account = SocialAccount.objects.get(pk=token.account_id)
+        try:
+            account = SocialAccount.objects.get(pk=token.account_id)
+        except SocialAccount.DoesNotExist as exc:
+            # Callers handle only TokenRefreshError; a raw DoesNotExist from the
+            # disconnect race would surface as a 500 instead of a reconnect prompt.
+            raise TokenRefreshError(
+                "OAuth account no longer exists; reconnect this account."
+            ) from exc
         _configure_transaction_deadline(deadline, clock)
         connection_fences = tuple(
             _ConnectionFence(
