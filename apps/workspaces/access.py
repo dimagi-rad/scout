@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from django.conf import settings
 
-from apps.users.models import TenantMembership
+from apps.users.models import PROVIDER_CHOICES, TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 from apps.workspaces.services.credential_coverage import (
     CoverageRecovery,
@@ -56,11 +56,7 @@ _GENERIC_DENIED = "Workspace not found or access denied."
 TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
 TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
 
-_PROVIDER_LABELS = {
-    "commcare": "CommCare HQ",
-    "commcare_connect": "CommCare Connect",
-    "ocs": "Open Chat Studio",
-}
+_PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 
 
 @dataclass(frozen=True)
@@ -126,11 +122,13 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
     if result.denied_reason == TENANT_ACCESS_LOST and result.missing_tenants:
         payload = missing_tenants_payload(result.missing_tenants)
         needed = "; ".join(f"'{t['tenant_name']}': {t['remedy']}" for t in payload)
+        rule = (
+            "This workspace requires access to every one of its data sources. Still needed"
+            if all_of_access_enforced()
+            else "You need access to at least one of this workspace's data sources. Options"
+        )
         return {
-            "error": (
-                "This workspace requires access to every one of its data sources. "
-                f"Still needed — {needed}. Access returns automatically once fixed."
-            ),
+            "error": f"{rule} — {needed}. Access returns automatically once fixed.",
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),
             "missing_tenants": payload,
@@ -143,7 +141,8 @@ def _live_tenant_ids(workspace) -> list:
 
 
 def _shares_live_tenant(user, tenant_ids) -> bool:
-    # Pre-#380 any-of rule, consulted only while the rollout switch is off.
+    # Pre-#380 any-of rule: the read gate's fallback while the rollout switch is off.
+    # Member admission still uses it until #561 moves admission to all-of too.
     if not tenant_ids:
         return True
     return TenantMembership.objects.filter(user=user, tenant_id__in=tenant_ids).exists()

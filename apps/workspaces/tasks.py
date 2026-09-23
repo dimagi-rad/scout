@@ -550,7 +550,9 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         missing = {t.tenant_id for t in access.missing_tenants}
         results = _unreachable_tenant_results(t for t in tenants if str(t.pk) in missing)
-        error = "No tenant memberships found"
+        error = "The requesting user can't use every data source of this workspace: " + (
+            ", ".join(access.lost_tenant_names) or "one or more sources"
+        )
     else:
         code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
         results = [_preflight_failure(tenant, _ROLE_DENIED_MESSAGE, code) for tenant in tenants]

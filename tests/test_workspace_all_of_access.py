@@ -344,6 +344,20 @@ def test_list_readiness_is_bulk_not_per_workspace(
 
 
 @pytest.mark.django_db
+def test_denial_wording_follows_the_rule_in_force(settings, user, two_sources):
+    t1, t2 = two_sources
+    ws = _workspace(user, t1, t2)
+    _join(ws, user)
+
+    assert (
+        "every one of its data sources"
+        in access_denied_body(resolve_workspace_access_ex(user, ws.id))["error"]
+    )
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    assert "at least one" in access_denied_body(resolve_workspace_access_ex(user, ws.id))["error"]
+
+
+@pytest.mark.django_db
 class TestRemediationWithoutCoverage:
     """A member who lost a source for good must still be able to fix it in Scout:
     remove the source, leave, or delete the workspace — none of which reads data."""
