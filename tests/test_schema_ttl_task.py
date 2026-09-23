@@ -3,6 +3,7 @@
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg.errors
 import pytest
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -17,7 +18,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.tasks import expire_inactive_schemas, teardown_schema
+from apps.workspaces.tasks import _RETIRE_MAX_ATTEMPTS, expire_inactive_schemas, teardown_schema
 
 
 @pytest.fixture
@@ -121,7 +122,7 @@ async def test_teardown_schema_marks_expired_on_success(active_schema):
     await active_schema.asave(update_fields=["state"])
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         from apps.workspaces.tasks import teardown_schema
 
         await teardown_schema(schema_id=str(active_schema.id))
@@ -193,7 +194,7 @@ async def test_teardown_schema_marks_runs_stale_on_success(active_schema):
     )
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         from apps.workspaces.tasks import teardown_schema
 
         await teardown_schema(schema_id=str(active_schema.id))
@@ -214,7 +215,7 @@ async def test_teardown_schema_rolls_back_to_active_on_failure(active_schema):
     await active_schema.asave(update_fields=["state"])
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.side_effect = RuntimeError("DB error")
+        MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("DB error")
         from apps.workspaces.tasks import teardown_schema
 
         with pytest.raises(RuntimeError):
@@ -251,7 +252,7 @@ async def test_teardown_schema_leaves_runs_terminal_when_drop_fails(active_schem
     )
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.side_effect = RuntimeError("DB error")
+        MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("DB error")
         from apps.workspaces.tasks import teardown_schema
 
         with pytest.raises(RuntimeError):
@@ -297,7 +298,7 @@ async def test_expire_then_failed_teardown_keeps_data_visible(active_schema):
 
     # Step 2: the DROP fails transiently. The schema reverts to ACTIVE.
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.side_effect = RuntimeError("lock conflict")
+        MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("lock conflict")
         with pytest.raises(RuntimeError):
             await teardown_schema(schema_id=str(active_schema.id))
 
@@ -352,7 +353,7 @@ async def test_teardown_schema_fails_dependent_multitenant_view_schemas(
     )
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
     await active_schema.arefresh_from_db()
@@ -389,7 +390,7 @@ async def test_teardown_schema_does_not_clobber_non_active_view_schema(active_sc
     )
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
     await vs_b.arefresh_from_db()
@@ -439,7 +440,7 @@ async def test_teardown_schema_rebuilds_dependent_views_when_surviving_active_sc
             new_callable=AsyncMock,
         ) as mock_rebuild,
     ):
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(old_schema.id))
 
     await vs_b.arefresh_from_db()
@@ -473,7 +474,7 @@ async def test_teardown_schema_aborts_when_row_resurrected_to_active(active_sche
         await teardown_schema(schema_id=str(active_schema.id))
 
     # The drop never happened — the manager was never asked to teardown.
-    MockManager.return_value.teardown.assert_not_called()
+    MockManager.return_value.retire_tenant_schema.assert_not_called()
 
     await active_schema.arefresh_from_db()
     # The resurrected schema is untouched.
@@ -495,7 +496,7 @@ async def test_teardown_schema_aborts_does_not_stale_runs(active_schema):
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         await teardown_schema(schema_id=str(active_schema.id))
 
-    MockManager.return_value.teardown.assert_not_called()
+    MockManager.return_value.retire_tenant_schema.assert_not_called()
 
     await completed_run.arefresh_from_db()
     assert completed_run.state == MaterializationRun.RunState.COMPLETED
@@ -510,10 +511,10 @@ async def test_teardown_schema_still_drops_when_state_is_teardown(active_schema)
     await active_schema.asave(update_fields=["state"])
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
-    MockManager.return_value.teardown.assert_called_once()
+    MockManager.return_value.retire_tenant_schema.assert_called_once()
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.EXPIRED
 
@@ -583,3 +584,63 @@ async def test_teardown_preserves_view_that_excluded_the_source(active_schema, t
     await view.arefresh_from_db()
     assert view.state == SchemaState.ACTIVE
     assert view.last_error == ""
+
+
+# ---------------------------------------------------------------------------
+# teardown_schema: retirement retries
+# ---------------------------------------------------------------------------
+
+
+async def _superseded_teardown_schema(active_schema, tenant):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="ttl_test_schema_r", state=SchemaState.ACTIVE
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("connection dropped"),
+        psycopg.errors.DeadlockDetected("deadlock detected"),
+    ],
+)
+async def test_failed_retirement_of_a_superseded_schema_is_retried(active_schema, tenant, failure):
+    """Nothing else re-arms a TEARDOWN row, so an unclassified failure must
+    reschedule rather than strand the physical schema forever."""
+    await _superseded_teardown_schema(active_schema, tenant)
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = failure
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id), attempt=2)
+
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=3
+    )
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retirement_stops_retrying_after_the_attempt_cap(active_schema, tenant):
+    await _superseded_teardown_schema(active_schema, tenant)
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("still broken")
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id), attempt=_RETIRE_MAX_ATTEMPTS - 1)
+
+    retry.return_value.defer_async.assert_not_awaited()
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN

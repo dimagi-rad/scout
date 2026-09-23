@@ -1,7 +1,7 @@
-"""Real managed-PostgreSQL proof of D2's publication invariants.
+"""Real managed-PostgreSQL proof of D2's publication and retirement invariants.
 
-Nothing here mocks DDL: the views, grants, roles and commit marker are
-exercised against the managed database configured by
+Nothing here mocks DDL: the views, grants, roles, commit marker and dependency
+guards are exercised against the managed database configured by
 ``MANAGED_DATABASE_URL``, and every read that claims "still readable" is done
 through the workspace's read-only role with ``SET ROLE``.
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
+import time
 import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,7 +27,7 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from apps.common.identifiers import readonly_role_name, view_name
+from apps.common.identifiers import dbt_role_name, readonly_role_name, view_name
 from apps.users.models import Tenant
 from apps.workspaces import tasks
 from apps.workspaces.models import (
@@ -40,6 +42,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services import schema_manager as sm
 from apps.workspaces.services.schema_manager import (
     SchemaManager,
+    SchemaStillReferenced,
     get_managed_db_connection,
 )
 from tests.tenant_lock_probe import try_tenant_data_lock
@@ -189,6 +192,14 @@ def _schema_exists(conn, schema_name: str) -> bool:
     return found
 
 
+def _role_exists(conn, role_name: str) -> bool:
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
+    found = cursor.fetchone() is not None
+    cursor.close()
+    return found
+
+
 def test_publication_commits_views_grants_and_marker(owned, managed):
     workspace, tenant, _ts = _one_tenant_workspace(owned, managed)
     manager = SchemaManager()
@@ -318,6 +329,21 @@ def test_unreadable_marker_is_reported_as_no_evidence(owned, managed):
     assert manager.read_publication_marker(schema_name) is None
 
 
+def test_retiring_an_already_absent_schema_is_a_no_op(owned, managed):
+    _workspace, tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    managed.execute(
+        psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(
+            psycopg.sql.Identifier(tenant_schema.schema_name)
+        )
+    )
+
+    SchemaManager().retire_tenant_schema(tenant_schema)
+
+    assert not _schema_exists(managed, tenant_schema.schema_name)
+    assert not _role_exists(managed, readonly_role_name(tenant_schema.schema_name))
+    assert tenant.schemas.filter(pk=tenant_schema.pk).exists()
+
+
 def test_reconcile_republishes_when_the_physical_schema_disappeared(owned, managed):
     workspace, tenant, _ts = _one_tenant_workspace(owned, managed)
     manager = SchemaManager()
@@ -335,6 +361,128 @@ def test_reconcile_republishes_when_the_physical_schema_disappeared(owned, manag
     published_view = view_name(manager._view_prefix(tenant), "raw_cases")
     assert vs.physical_build_token == manager.read_publication_marker(vs.schema_name)
     assert _read_through_role(vs.schema_name, published_view) == ["v1"]
+
+
+def test_retirement_refuses_while_a_sibling_view_still_reads_the_schema(owned, managed):
+    workspace, tenant, tenant_schema = _one_tenant_workspace(owned, managed, staging_view=True)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    prefix = manager._view_prefix(tenant)
+    sibling_views = {view_name(prefix, "raw_cases"), view_name(prefix, "stg_cases")}
+
+    dependents = manager.external_dependents(tenant_schema.schema_name)
+    assert {dep["schema"] for dep in dependents} == {vs.schema_name}
+    assert {dep["name"] for dep in dependents} == sibling_views
+    assert {dep["relkind"] for dep in dependents} == {"v"}
+
+    with pytest.raises(SchemaStillReferenced) as blocked:
+        manager.retire_tenant_schema(tenant_schema)
+
+    assert {dep["name"] for dep in blocked.value.dependents} == sibling_views
+    assert _relations(managed, tenant_schema.schema_name) == {"raw_cases", "stg_cases"}
+    assert _read_through_role(vs.schema_name, view_name(prefix, "raw_cases")) == ["v1"]
+
+    manager.teardown_view_schema(vs)
+    manager.retire_tenant_schema(tenant_schema)
+
+    assert not _schema_exists(managed, tenant_schema.schema_name)
+    assert not _role_exists(managed, readonly_role_name(tenant_schema.schema_name))
+    assert not _role_exists(managed, dbt_role_name(tenant_schema.schema_name))
+
+
+def test_concurrent_view_creation_cannot_slip_past_the_retirement_locks(owned, managed):
+    workspace, tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    manager.build_view_schema(workspace)
+    other_schema = owned.register(f"d2other_{_suffix()}")
+    managed.execute(
+        psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(other_schema))
+    )
+
+    locks_held = threading.Event()
+    outcome: dict[str, object] = {}
+    unpatched_dependents = SchemaManager._external_dependents
+
+    def gated_dependents(self, cursor, schema_name):
+        locks_held.set()
+        time.sleep(1.5)
+        return unpatched_dependents(self, cursor, schema_name)
+
+    def create_view_concurrently():
+        assert locks_held.wait(10)
+        conn = get_managed_db_connection()
+        started = time.monotonic()
+        try:
+            conn.execute("SET lock_timeout = '20s'")
+            conn.execute(
+                psycopg.sql.SQL("CREATE VIEW {}.v AS SELECT * FROM {}.raw_cases").format(
+                    psycopg.sql.Identifier(other_schema),
+                    psycopg.sql.Identifier(tenant_schema.schema_name),
+                )
+            )
+            outcome["status"] = "created"
+        except psycopg.errors.LockNotAvailable:
+            outcome["status"] = "lock_timeout"
+        finally:
+            outcome["waited"] = time.monotonic() - started
+            conn.close()
+
+    creator = threading.Thread(target=create_view_concurrently)
+    creator.start()
+    try:
+        with (
+            patch.object(SchemaManager, "_external_dependents", gated_dependents),
+            pytest.raises(SchemaStillReferenced),
+        ):
+            manager.retire_tenant_schema(tenant_schema)
+    finally:
+        locks_held.set()
+        creator.join(30)
+
+    assert outcome["status"] in {"created", "lock_timeout"}
+    if outcome["status"] == "created":
+        # It could only proceed once retirement rolled back and released the locks.
+        assert outcome["waited"] > 0.5
+    assert _schema_exists(managed, tenant_schema.schema_name)
+    assert "raw_cases" in _relations(managed, tenant_schema.schema_name)
+    assert _read_through_role(
+        SchemaManager()._view_schema_name(workspace.id),
+        view_name(manager._view_prefix(tenant), "raw_cases"),
+    ) == ["v1"]
+
+
+def test_source_plan_cannot_publish_empty_after_selected_schema_retires(owned, managed):
+
+    workspace, tenant, old = _one_tenant_workspace(owned, managed)
+    newer_name = owned.register("dqr_" + _suffix())
+    _seed_tenant_schema(managed, newer_name, sentinel="v2")
+    manager = SchemaManager()
+    original = sm.get_managed_db_transaction
+    fired = False
+
+    def retire_between_control_plan_and_managed_discovery():
+        nonlocal fired
+        if not fired:
+            fired = True
+            with try_tenant_data_lock(tenant.id) as held:
+                if held:
+                    TenantSchema.objects.filter(pk=old.pk).update(state=SchemaState.TEARDOWN)
+                    TenantSchema.objects.create(
+                        tenant=tenant, schema_name=newer_name, state=SchemaState.ACTIVE
+                    )
+                    manager.retire_tenant_schema(old)
+        return original()
+
+    with patch.object(
+        sm,
+        "get_managed_db_transaction",
+        side_effect=retire_between_control_plan_and_managed_discovery,
+    ):
+        published = manager.build_view_schema(workspace)
+    assert published.state == SchemaState.ACTIVE
+    assert published.view_sources["views"]
+    published_view = view_name(manager._view_prefix(tenant), "raw_cases")
+    assert _read_through_role(published.schema_name, published_view) == ["v1"]
 
 
 @pytest.mark.asyncio
@@ -482,6 +630,20 @@ def test_publication_waits_for_a_locked_source_then_rolls_back_to_last_good(
     vs.refresh_from_db()
     assert vs.state == SchemaState.ACTIVE
     assert _read_through_role(vs.schema_name, published_view) == ["v1"]
+
+
+def test_retirement_refuses_a_schema_holding_a_non_relation_object(owned, managed):
+    _workspace, _tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    managed.execute(
+        psycopg.sql.SQL("CREATE TYPE {}.leftover AS (value text)").format(
+            psycopg.sql.Identifier(tenant_schema.schema_name)
+        )
+    )
+
+    with pytest.raises(SchemaStillReferenced, match="leftover"):
+        SchemaManager().retire_tenant_schema(tenant_schema)
+
+    assert _schema_exists(managed, tenant_schema.schema_name)
 
 
 def test_reconcile_reports_a_failed_republish_instead_of_raising(owned, managed):
