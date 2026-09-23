@@ -5,6 +5,7 @@ Django test settings for Scout data agent platform.
 import hashlib
 
 from .base import *
+from .base import _build_caches
 
 DEBUG = False
 
@@ -43,6 +44,12 @@ DATABASES = {
 }
 
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+
+# Never the developer's Redis from .env: concurrent runs shared rate-limit and
+# cache keys through it and failed each other's cache tests, and every run wrote
+# into the dev cache.
+REDIS_URL = ""
+CACHES = _build_caches(REDIS_URL)
 
 # Test-only value; must be a valid Fernet key
 DB_CREDENTIAL_KEY = "uHcVl3o7sAzBTV0ECblIGcB4imVnoutulGMF-dNsUoM="
