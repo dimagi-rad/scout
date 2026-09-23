@@ -25,6 +25,7 @@ from uuid import UUID
 
 from asgiref.sync import async_to_sync
 from django.conf import settings
+from django.db import transaction
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
@@ -201,6 +202,11 @@ def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> Upstre
     check = check_freshness(user_id, tenant_ids)
     results = None
     if check.stale and not check.unbound:
+        if transaction.get_connection().in_atomic_block:
+            # The verification's ORM work would run as savepoints of the caller's
+            # transaction: its row locks held across provider I/O, and the lease and
+            # proofs invisible to other verifiers until commit. Recheck outside.
+            return UpstreamAdmission(admitted=False, reason=VERIFICATION_IN_PROGRESS)
         results = async_to_sync(_averify_stale)(user_id, check.stale, budget)
     return _admission_from(check, results)
 
