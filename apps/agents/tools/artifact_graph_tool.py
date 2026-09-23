@@ -453,7 +453,13 @@ async def _write_result(
         "diagnostics": diagnostics,
         "manifest": _manifest_summary(artifact.semantic_query_manifest or {}),
         "runtime": runtime,
-        "runtime_validation": "not_required_metadata_only" if metadata_only else "performed",
+        "runtime_validation": (
+            "not_required_metadata_only"
+            if metadata_only
+            else "performed"
+            if runtime is not None
+            else "skipped"
+        ),
         "render_url": f"/api/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}/data/",
     }
 

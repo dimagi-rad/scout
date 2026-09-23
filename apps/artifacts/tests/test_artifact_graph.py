@@ -353,7 +353,7 @@ async def test_metadata_edit_does_not_query_unavailable_data(
         result = await graph_tools["artifact_write"].ainvoke(edit)
 
     check.assert_not_awaited()
-    assert result["status"] in {"updated", "replaced"}
+    assert result["status"] == ("updated" if action == "apply" else "replaced")
     assert result["runtime"] is None  # Do not claim a fresh successful data check.
     assert result["runtime_validation"] == "not_required_metadata_only"
     latest = await Artifact.objects.aget(id=result["artifact"]["id"])
