@@ -38,7 +38,6 @@ from apps.users.services.credential_resolver import (
 )
 from apps.workspaces.access import (
     TENANT_ACCESS_LOST,
-    TOOL_WRITE_DENIED_MESSAGE,
     WorkspaceAccess,
     aresolve_workspace_access_ex,
 )
@@ -433,14 +432,20 @@ def _unreachable_tenant_results(tenants: Iterable) -> list[dict]:
 
 
 def _no_reachable_tenants_result(
-    unreachable_results: list[dict], error: str = "No tenant memberships found"
+    tenant_results: list[dict], error: str = "No tenant memberships found"
 ) -> dict:
     return {
         "error": error,
-        "tenants": unreachable_results,
+        "tenants": tenant_results,
         "all_succeeded": False,
-        "guidance": _credential_guidance(_summary_failures(unreachable_results)),
+        "guidance": _credential_guidance(_summary_failures(tenant_results)),
     }
+
+
+_ROLE_DENIED_MESSAGE = (
+    "The requesting user no longer has a read-write or manage workspace role. "
+    "Ask a workspace member with write access to retry."
+)
 
 
 async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict | None:
@@ -477,11 +482,9 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         error = "No tenant memberships found"
     else:
         code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
-        results = [
-            _preflight_failure(tenant, TOOL_WRITE_DENIED_MESSAGE, code) for tenant in tenants
-        ]
+        results = [_preflight_failure(tenant, _ROLE_DENIED_MESSAGE, code) for tenant in tenants]
         _set_tenant_display_names(results)
-        error = TOOL_WRITE_DENIED_MESSAGE
+        error = _ROLE_DENIED_MESSAGE
     return {
         "status": "denied",
         "error_code": str(code),
@@ -1416,17 +1419,14 @@ def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
             "Connections; if their access was removed in the provider, an admin there "
             "must restore it."
         )
-    return (
-        "The requesting user no longer has a read-write or manage workspace role. "
-        "Ask a workspace member with write access to retry."
-    )
+    return _ROLE_DENIED_MESSAGE
 
 
 def _workspace_recovery_error(result: dict, surface: dict) -> str:
     """Select the most useful persisted error for an artifact recovery card."""
     if result.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
         # A role denial is not a source failure; don't label it as one.
-        return str(result["error"])[:1000]
+        return str(result.get("error") or _ROLE_DENIED_MESSAGE)[:1000]
     # A failed source commonly causes a downstream Cube *skip*, not a Cube
     # failure. Show the source remedy first; never infer auth advice by parsing
     # human/provider error text, or conflate missing credentials with a 403.
