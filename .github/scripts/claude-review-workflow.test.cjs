@@ -269,6 +269,10 @@ test("newer pending between verification publication and checkpoint write fences
     /pending/,
   );
   assert.notEqual(h.outputs.claude_verified, "true");
+  assert.equal(
+    h.warnings.at(-1),
+    "Claude checkpoint publication stopped during checkpoint update (CheckpointFenceError).",
+  );
 });
 
 test("noncanonical OCR marker cannot silently claim checkpoint persistence", async () => {
@@ -603,8 +607,8 @@ test("a transient read error anywhere in verification is retried and the review 
     ["comments", 1, apiError(502), "the comments fetch after RequestError, HTTP 502", 2000],
     ["comments", 2, apiError(502), "the receipt comments fetch after RequestError, HTTP 502", 2000],
     ["pr", 2, apiError(502), "the PR recheck after RequestError, HTTP 502", 2000],
-    ["comments", 3, apiError(502), "the comments fetch after RequestError, HTTP 502", 2000],
-    ["comments", 4, apiError(502), "the comments fetch after RequestError, HTTP 502", 2000],
+    ["comments", 3, apiError(502), "the checkpoint comments fetch after RequestError, HTTP 502", 2000],
+    ["comments", 4, apiError(502), "the checkpoint persistence fetch after RequestError, HTTP 502", 2000],
   ]) {
     const label = `${method}#${skip} ${error.status ?? error.code}`;
     const h = await prepared();
@@ -650,7 +654,7 @@ test("a persistent failure after the verified receipt names the checkpoint stage
   assert.equal(thrownCount(), 3);
   assert.equal(
     h.warnings.at(-1),
-    "Claude receipt publication stopped during checkpoint pr recheck (RequestError, HTTP 502).",
+    "Claude checkpoint publication stopped during checkpoint pr recheck (RequestError, HTTP 502).",
   );
   assert.deepEqual(h.failures, ["Claude review receipt or checkpoint could not be published safely."]);
   assert.match(receiptBody(h), /Claude review: blocked/);
@@ -663,6 +667,7 @@ test("permanent errors and long rate-limit waits are not retried", async () => {
     [apiError(404), "RequestError, HTTP 404"],
     [apiError(403, {}, "PRIVATE Resource not accessible"), "RequestError, HTTP 403"],
     [apiError(429, { "retry-after": "120" }), "RequestError, HTTP 429"],
+    [networkError("ERR_INVALID_URL"), "Error"],
     [new Error("PRIVATE bug"), "Error"],
   ]) {
     const h = await prepared();
