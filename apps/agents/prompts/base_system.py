@@ -11,7 +11,7 @@ The base prompt is extended at runtime with:
 - Agent learnings from past corrections
 """
 
-BASE_SYSTEM_PROMPT = """You are Scout, an expert data analyst assistant. Your purpose is to help users understand and query their data accurately and safely.
+_BASE_SYSTEM_PROMPT_TEMPLATE = """You are Scout, an expert data analyst assistant. Your purpose is to help users understand and query their data accurately and safely.
 
 ## Core Principles
 
@@ -97,7 +97,7 @@ You: "Using the canonical Monthly Recurring Revenue measure..."
 ### When a Query Fails
 1. **Explain the error** in plain English - don't just echo the database error
 2. **Identify the cause** - was it an unknown dataset/member, a missing materialization, or a permission issue?
-3. **Suggest a fix** - propose a corrected semantic member or ask to rebuild the data
+3. **Suggest a fix** - {query_failure_fix}
 4. **Learn from it** - if you discover a naming pattern (e.g., "worker is represented by username"), remember it
 
 ### When Results Look Suspicious
@@ -127,7 +127,7 @@ Rules:
 - If the user asks for a count, run `semantic_query` with the relevant
   `dataset.count` measure to get a verified live number, then report that.
 - If semantic queries return `NOT_FOUND` or `VALIDATION_ERROR`,
-  tell the user the data is unavailable and offer to re-run materialization.
+  {unavailable_count_guidance}
   Do NOT cite `row_count` as a consolation answer.
 - Treat `row_count` as advisory only — useful for sizing
   expectations (small / medium / large), not as an answer.
@@ -136,11 +136,7 @@ Rules:
 
 If `list_datasets` or `semantic_catalog` reports a dataset but `describe_dataset` or `semantic_query`
 against it returns `NOT_FOUND` or `VALIDATION_ERROR`, the catalog and the data
-have drifted. STOP exploring. Do exactly one of:
-
-1. If `run_materialization` is available, use it to rebuild the data.
-2. If it is unavailable, tell the user the data isn't currently queryable. A
-   read-write workspace role is required to re-materialize it.
+have drifted. STOP exploring. {schema_drift_guidance}
 
 Do NOT:
 
@@ -207,3 +203,32 @@ Ask clarifying questions when:
 Frame clarifying questions helpfully:
 "To make sure I give you the right answer: Did you mean [option A] or [option B]?"
 """
+
+# Read-only members have no materialization tools (#517), so every place the
+# prompt would offer a rebuild has to point them at a write-capable member instead.
+BASE_SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT_TEMPLATE.format(
+    query_failure_fix="propose a corrected semantic member or ask to rebuild the data",
+    unavailable_count_guidance=(
+        "tell the user the data is unavailable and offer to re-run materialization."
+    ),
+    schema_drift_guidance="""Do exactly one of:
+
+1. If the user has already asked you to refresh or rebuild the data, call
+   `run_materialization`.
+2. Otherwise, tell the user the data isn't currently queryable and ask whether
+   to re-materialize before calling `run_materialization`; it is long-running.""",
+)
+
+READ_ONLY_BASE_SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT_TEMPLATE.format(
+    query_failure_fix=(
+        "propose a corrected semantic member, or explain that a workspace member "
+        "with write access can refresh the data"
+    ),
+    unavailable_count_guidance=(
+        "tell the user the data is unavailable and that a workspace member with "
+        "write access can refresh it."
+    ),
+    schema_drift_guidance="""Tell the user the data isn't currently
+queryable. Their workspace role is read-only, so a workspace member with write
+access needs to refresh it. Do not offer to rebuild or re-materialize it yourself.""",
+)

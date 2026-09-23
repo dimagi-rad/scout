@@ -6,6 +6,8 @@ import pytest
 from langchain_core.tools import StructuredTool
 
 from apps.agents.graph.base import (
+    ESCALATION_MESSAGE,
+    READ_ONLY_ESCALATION_MESSAGE,
     _build_system_prompt,
     _build_tools,
     _fetch_semantic_model_context,
@@ -172,3 +174,67 @@ async def test_graph_resolves_live_role_for_bound_tools_and_prompt(
     assert ("canvas_manager" in names) is (writer and interactive)
     assert prompt.call_args.kwargs["write_capable"] is writer
     assert prompt.call_args.kwargs["canvas_write"] is (writer and interactive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("writer", [False, True])
+async def test_escalation_message_matches_role(workspace, read_user, write_user, writer):
+    with patch("apps.agents.graph.base.ChatAnthropic"):
+        graph = await build_agent_graph(workspace, write_user if writer else read_user)
+
+    escalate = graph.builder.nodes["escalate"].runnable
+    message = escalate.invoke({"messages": []})["messages"][0].content
+
+    assert message == (ESCALATION_MESSAGE if writer else READ_ONLY_ESCALATION_MESSAGE)
+    assert ("run materialization" in message) is writer
+    if not writer:
+        assert "workspace member with write access" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("writer", [False, True])
+async def test_static_prompt_rebuild_offers_match_role(workspace, read_user, write_user, writer):
+    _system_prompt_cache.clear()
+    stable, _ = await _build_system_prompt(
+        workspace,
+        write_user if writer else read_user,
+        interactive=True,
+        canvas_write=False,
+        write_capable=writer,
+    )
+
+    assert ("offer to re-run materialization" in stable) is writer
+    assert ("ask to rebuild the data" in stable) is writer
+    assert ("ask whether\n   to re-materialize" in stable) is writer
+    assert ("run_materialization" in stable) is writer
+    assert ("workspace member with write access" in stable) is not writer
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("loading", [False, True])
+async def test_read_unloaded_guidance_points_to_write_member(workspace, tenant, multi, loading):
+    state = SchemaState.MATERIALIZING if loading else SchemaState.FAILED
+    if multi:
+        other = await Tenant.objects.acreate(
+            provider="commcare", external_id="other", canonical_name="Other"
+        )
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=workspace, schema_name="view", state=state
+        )
+    else:
+        await TenantSchema.objects.acreate(tenant=tenant, schema_name="data", state=state)
+
+    context = await _fetch_semantic_model_context(workspace, interactive=True, write_capable=False)
+
+    assert "run_materialization" not in context
+    if loading:
+        assert "already in progress" in context
+        assert "workspace role is read-only" in context
+    else:
+        assert "not currently queryable" in context
+        assert "workspace member with write access" in context

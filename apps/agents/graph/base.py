@@ -28,7 +28,10 @@ from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
 )
-from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
+from apps.agents.prompts.base_system import (
+    BASE_SYSTEM_PROMPT,
+    READ_ONLY_BASE_SYSTEM_PROMPT,
+)
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
@@ -193,6 +196,12 @@ ESCALATION_MESSAGE = (
     "I've encountered repeated schema errors — the tables I expected to "
     "find aren't queryable. The data may need to be re-materialized. "
     "Would you like me to run materialization?"
+)
+
+READ_ONLY_ESCALATION_MESSAGE = (
+    "I've encountered repeated schema errors — the tables I expected to "
+    "find aren't queryable. The data may need to be refreshed, which a "
+    "workspace member with write access can do."
 )
 
 
@@ -442,12 +451,14 @@ _READ_ONLY_LOADED_SQL_GUIDANCE = (
     "Data is loaded, but no semantic datasets are available yet. "
     "Use `list_tables` and `describe_table` to inspect the loaded tables, then "
     "read-only `query` SQL to analyze them. This user's workspace role is read-only; "
-    "a read-write workspace role is required to rebuild the semantic catalog."
+    "a read-write workspace role is required to rebuild the semantic catalog, so tell "
+    "the user a workspace member with write access can refresh it."
 )
 
 _READ_ONLY_MATERIALIZE_GUIDANCE = (
     "Data is not currently queryable, and this user's workspace role is read-only. "
-    "A read-write workspace role is required to load data or rebuild the semantic catalog."
+    "A read-write workspace role is required to load data or rebuild the semantic catalog, "
+    "so tell the user a workspace member with write access can refresh it."
 )
 
 _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
@@ -996,7 +1007,8 @@ async def build_agent_graph(
 
     def escalation_node(state: AgentState) -> dict[str, Any]:
         """Terminal node that emits a fixed escalation message and ends the turn."""
-        return {"messages": [AIMessage(content=ESCALATION_MESSAGE)]}
+        message = ESCALATION_MESSAGE if write_capable else READ_ONLY_ESCALATION_MESSAGE
+        return {"messages": [AIMessage(content=message)]}
 
     graph = StateGraph(AgentState)
 
@@ -1163,10 +1175,10 @@ async def _build_stable_system_prompt(
             return value
 
     # Stable sections (cacheable prefix)
-    artifact_prompt = (
-        ARTIFACT_PROMPT_ADDITION if write_capable else ARTIFACT_READ_ONLY_PROMPT_ADDITION
-    )
-    stable_sections = [BASE_SYSTEM_PROMPT, artifact_prompt]
+    if write_capable:
+        stable_sections = [BASE_SYSTEM_PROMPT, ARTIFACT_PROMPT_ADDITION]
+    else:
+        stable_sections = [READ_ONLY_BASE_SYSTEM_PROMPT, ARTIFACT_READ_ONLY_PROMPT_ADDITION]
 
     if workspace.system_prompt:
         stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
@@ -1271,6 +1283,7 @@ currency, explain that a read-write workspace role is required.
 __all__ = [
     "ESCALATION_MESSAGE",
     "ESCALATION_TRIGGER_COUNT",
+    "READ_ONLY_ESCALATION_MESSAGE",
     "_should_escalate",
     "build_agent_graph",
 ]
