@@ -349,13 +349,16 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     local = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
     if local.denied_reason == NOT_MEMBER:
         return local
-    try:
-        membership = await WorkspaceMembership.objects.select_related("workspace").aget(
-            workspace_id=workspace_id, user=user
-        )
-    except WorkspaceMembership.DoesNotExist:
-        return WorkspaceAccess(denied_reason=NOT_MEMBER)
-    tenant_ids = await _alive_tenant_ids(membership.workspace)
+    workspace = local.workspace
+    if workspace is None:
+        try:
+            membership = await WorkspaceMembership.objects.select_related("workspace").aget(
+                workspace_id=workspace_id, user=user
+            )
+        except WorkspaceMembership.DoesNotExist:
+            return WorkspaceAccess(denied_reason=NOT_MEMBER)
+        workspace = membership.workspace
+    tenant_ids = await _alive_tenant_ids(workspace)
     if not tenant_ids or not freshness_enforced():
         return local
     cooldown_key = f"access-verify-retry:{user.pk}:{workspace_id}"

@@ -247,15 +247,20 @@ async def averify_membership_history(
         row
         async for row in TenantMembership.all_objects.filter(
             user_id=user_id, tenant_id__in=list(tenant_ids), connection__isnull=False
-        ).values_list("tenant_id", "connection_id")
+        ).values_list("tenant_id", "connection_id", "archived_at")
     ]
-    grouped, _unbound = _group_by_connection(rows)
+    grouped, _unbound = _group_by_connection((tenant, conn) for tenant, conn, _at in rows)
     if not grouped:
         return CREDENTIAL_MISSING
-    results = await _averify_stale(
-        user_id, {connection_id: frozenset(ids) for connection_id, ids in grouped.items()}, budget
-    )
-    return most_severe(filter(None, (denial_reason(result) for result in results)))
+    live_connections = {conn for _tenant, conn, archived_at in rows if archived_at is None}
+    stale = {connection_id: frozenset(ids) for connection_id, ids in grouped.items()}
+    results = dict(zip(stale, await _averify_stale(user_id, stale, budget), strict=True))
+    # A dead tombstone connection must not mask a transient failure on the credential
+    # that still backs live access, or the user loses the retryable state.
+    live_reasons = [denial_reason(results[conn]) for conn in results if conn in live_connections]
+    if any(live_reasons):
+        return most_severe(filter(None, live_reasons))
+    return most_severe(filter(None, (denial_reason(result) for result in results.values())))
 
 
 def final_denial_reason(admission: UpstreamAdmission, final: FreshnessCheck) -> str:
