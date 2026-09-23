@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { evaluateClaudeReview } = require('./claude-review-gate.cjs');
+const { evaluateClaudeReview, describeDenials } = require('./claude-review-gate.cjs');
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40);
 const RECEIPT = { nonce: 'c'.repeat(64), repository: 'owner/repo', pr: 42, run: '123', attempt: '1', head: HEAD, base: BASE };
 const marker = receipt => `<!-- scout-claude-artifact:v1 ${JSON.stringify(receipt)} -->`;
@@ -38,12 +38,18 @@ test('lookalike bot, other app, duplicate markers and malformed comments block',
   for (const value of [null, {}, [null], [{ body: marker(RECEIPT) }]]) blocked(input({ issueComments: value }));
   for (const value of [null, {}, [''], [null]]) blocked(input({ baselineIssueCommentIds: value }));
 });
+// Denials stay fatal even on a complete, receipted review (PR #487): PR498 reported
+// 0 findings after 25 denials, so a refused reviewer's clean verdict is not evidence.
 test('SDK permission denials are blocking and only safe tool names are returned', () => {
-  const denials = [{ tool_name: 'Bash', tool_input: 'SECRET' }, { tool_name: 'unsafe\nSECRET' }];
+  const denials = [{ tool_name: 'Bash', tool_input: { command: 'cat SECRET' } }, { tool_name: 'unsafe\nSECRET' }];
   const value = input(); value.sdkMessages[0].permission_denials = denials;
   const result = blocked(value);
   assert.deepEqual(result.deniedTools, ['Bash', 'unknown']);
   assert.equal(result.denialCount, 2); assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+  assert.equal(result.outcome, undefined);
+  assert.match(result.reason, /run log lists the denied calls/);
+  value.sdkMessages[0].permission_denials = denials.slice(0, 1);
+  assert.equal(blocked(value).denialCount, 1);
 });
 test('missing, malformed or unsuccessful SDK data blocks', () => {
   for (const sdkMessages of [undefined, null, {}, [], [{ type: 'assistant' }], [{ type: 'result', subtype: 'error', is_error: true }]]) blocked(input({ sdkMessages }));
@@ -78,4 +84,35 @@ test('quoting the generic marker prefix is not a second receipt artifact', () =>
   const c = comment();
   c.body = 'The generic prefix `<!-- scout-claude-artifact:` is validated.\n' + c.body;
   assert.equal(evaluateClaudeReview(input({ issueComments: [c] })).passed, true);
+});
+
+test('denial diagnostics name each call with truncated, printable input', () => {
+  const long = `git grep foo | head ${'x'.repeat(300)}`;
+  const lines = describeDenials([{ type: 'result', permission_denials: [
+    { tool_name: 'Bash', tool_input: { command: 'git grep -n foo\n::error::injected\u001b[31m' } },
+    { tool_name: 'Read', tool_input: { file_path: '/tmp/x.json' } },
+    { tool_name: 'Bash', tool_input: { command: long } },
+    { tool_name: 'bad\nname', tool_input: 'not an object' },
+  ] }]);
+  assert.equal(lines.length, 4);
+  assert.equal(lines[0], 'Denied tool call 1: Bash command="git grep -n foo?::error::injected?[31m"');
+  assert.equal(lines[1], 'Denied tool call 2: Read file_path="/tmp/x.json"');
+  assert.equal(lines[2], `Denied tool call 3: Bash command=${JSON.stringify(`${long.slice(0, 200)}...`)}`);
+  assert.equal(lines[3], 'Denied tool call 4: unknown');
+  for (const line of lines) assert.match(line, /^[\x20-\x7e]+$/);
+});
+test('denial diagnostics tolerate missing or malformed execution data', () => {
+  for (const value of [undefined, null, {}, [], [{ type: 'result' }], [{ type: 'result', permission_denials: 'x' }]]) {
+    assert.deepEqual(describeDenials(value), []);
+  }
+  assert.deepEqual(describeDenials([{ type: 'result', permission_denials: [null] }]), ['Denied tool call 1: unknown']);
+});
+test('denial diagnostics are capped so the annotation limit cannot hide the count', () => {
+  const denial = { tool_name: 'Bash', tool_input: { command: 'x' } };
+  const lines = describeDenials([{ type: 'result', permission_denials: Array(13).fill(denial) }]);
+  assert.equal(lines.length, 10);
+  assert.equal(lines[8], 'Denied tool call 9: Bash command="x"');
+  assert.equal(lines[9], '...and 4 more denied tool call(s).');
+  assert.equal(describeDenials([{ type: 'result', permission_denials: Array(10).fill(denial) }]).at(-1),
+    'Denied tool call 10: Bash command="x"');
 });
