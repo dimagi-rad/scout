@@ -57,9 +57,9 @@ Configuration lives in `.github/workflows/ocr.yml`:
 - 45-minute job timeout, including the Claude follow-up.
 - Claude follow-up uses Opus 5 with a $10 CLI budget.
 
-The OCR token limit stops further dispatch after it is exceeded; in-flight work can overshoot. It is not a hard dollar spending limit. Configure an Anthropic workspace spending limit for a billing ceiling. Both review stages consume API quota; low/medium-only PRs still receive both reviews.
+The OCR token limit stops further dispatch after it is exceeded; in-flight work can overshoot. It is not a hard dollar spending limit. Configure an Anthropic workspace spending limit for a billing ceiling. Both review stages consume API quota; low/medium-only PRs still receive both reviews. The limit gates whether each file group may start rather than capping spend; see [How the token budget works](#how-the-token-budget-works-size-prs-by-file-groups-not-lines).
 
-The release and provider settings are explicit to make upgrades reviewable. When upgrading OCR, verify its output contract and run:
+The release and provider settings are explicit to make upgrades reviewable. When upgrading OCR, verify its output contract, re-check where `dispatchSubtasks` applies the token budget (see [How the token budget works](#how-the-token-budget-works-size-prs-by-file-groups-not-lines)) and update that section if it moved, and run:
 
 ```sh
 node --test .github/scripts/ocr-*.test.cjs .github/scripts/claude-review-*.test.cjs
@@ -83,3 +83,12 @@ An authorized collaborator can request a one-run token budget with `@ocr budget=
 The pinned CLI already bundles small change sets without an LLM grouping call. Narrowing follow-up reviews makes that path more useful and reduces repeated context. Larger change sets use its semantic grouping model. If that model returns malformed JSON, OCR falls back to per-file tasks; Scout reports that fallback in the gate summary because it can inflate token usage.
 
 Version 1.12.2 exposes no action input or CLI configuration for changing that fallback or grouping thresholds. Fixing the large-review fallback requires an upstream change, rather than an undocumented local override. Checkpointing does not resume a partially completed first review: a complete accepted baseline is required. Cached input is included in the reported token budget, so high token counts do not all represent newly generated text or full-price input.
+
+### How the token budget works (size PRs by file groups, not lines)
+
+OCR splits a PR into **file groups** of up to 10 related files (tiny change sets become one group, and an oversized group is split per file). Each group gets its own agentic review. The budget only decides whether a group may *start*. In OCR 1.12.2 (`dispatchSubtasks` in `internal/agent/agent.go`), each group is checked before it waits for one of the `review_concurrency` slots, and the check compares tokens used so far plus an estimate of that group's **diff size**. The estimate does not include the review loop, which costs far more. As a result:
+
+- The first `review_concurrency + 1` groups (**3** with our setting of 2) pass the check before any review spend is recorded, so **they always run in full, however many tokens they burn**.
+- Group 4 and later are checked only once a slot frees up, against real usage. If the budget is already spent they are skipped (`token budget reached … skipping group` in the log). Those files count as uncovered, so the gate blocks the review as incomplete.
+
+So a PR that OCR splits into three or fewer groups passes the budget regardless of size. A PR with many unrelated areas can hit the limit even when every file is small. Keep PRs to a few cohesive areas. If a legitimately wide PR is blocked on budget, split it or re-run with `@ocr budget=N`. There is no action input to cap the group count or move the check after the slot is acquired. Lowering `review_concurrency` only shrinks the always-run count and slows every review, so it is left at 2.
