@@ -59,20 +59,26 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
     }
 
 
+def _needs_materialization_retry_check(job: ThreadJob) -> bool:
+    if job.state not in {ThreadJob.State.FAILED, ThreadJob.State.CANCELLED}:
+        return False
+    if job.failure_phase == ThreadJob.FailurePhase.RESUME:
+        return False
+    # Historical jobs cannot distinguish a failed follow-up from failed loading.
+    # Preserve Retry for those ambiguous resumed jobs rather than infer from prose.
+    return bool(job.failure_phase) or job.started_at is None
+
+
 def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
     """Serialize a terminal ThreadJob for the ``recent_terminations`` payload.
 
-    Retry is offered only when no recorded failure requires user/admin action.
+    Retry stays available if it can recover any source or a failed follow-up.
     Completed jobs still clear stale failure cards in the frontend.
     """
-    failures = summary_failures(
-        [
-            *job.materialization_preflight_failures,
-            *run_results,
-        ]
-    )
     retry_available = job.state in {ThreadJob.State.FAILED, ThreadJob.State.CANCELLED}
-    retry_available = retry_available and not any(f.code in REQUIRES_REMEDIATION for f in failures)
+    if _needs_materialization_retry_check(job):
+        failures = summary_failures([*job.materialization_preflight_failures, *run_results])
+        retry_available = not failures or any(f.code not in REQUIRES_REMEDIATION for f in failures)
     return {
         "thread_job_id": str(job.id),
         "thread_id": str(job.thread_id),
@@ -160,7 +166,11 @@ async def active_jobs_view(request, workspace_id):
     ]
     results_by_job: dict[int, list[dict]] = {}
     async for run in MaterializationRun.objects.filter(
-        procrastinate_job_id__in=[job.procrastinate_job_id for job in terminated_jobs],
+        procrastinate_job_id__in=[
+            job.procrastinate_job_id
+            for job in terminated_jobs
+            if _needs_materialization_retry_check(job)
+        ],
     ).only("procrastinate_job_id", "result"):
         if isinstance(run.result, dict):
             results_by_job.setdefault(run.procrastinate_job_id, []).append(run.result)

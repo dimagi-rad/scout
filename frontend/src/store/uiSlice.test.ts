@@ -59,8 +59,11 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
   it("surfaces the server message when upstream tenant access was lost", async () => {
     const message =
-      "You no longer have access to: skelly. " +
-      "Access may have been removed upstream — reconnect or ask an admin."
+      "You no longer have access to skelly: " +
+      "access was removed upstream or this resource is restricted — reconnecting " +
+      "alone does not change upstream permissions. " +
+      "Ask an admin on the affected provider to restore access, or remove that " +
+      "data source from the workspace."
     vi.spyOn(api, "get").mockRejectedValue(
       new ApiError(403, message, {
         error: message,

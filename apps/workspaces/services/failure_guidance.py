@@ -6,6 +6,7 @@ from typing import NamedTuple
 from apps.common.error_codes import ErrorCode
 
 # Loaders describe failures; only presentation consumers add this advice.
+# These are fragments: each consumer prefixes them with the affected source names.
 CREDENTIAL_GUIDANCE: dict[str, str] = {
     ErrorCode.AUTH_CREDENTIAL_MISSING: (
         "no usable sign-in is available — open Connected Accounts and connect or "
@@ -63,16 +64,24 @@ def summary_failures(tenant_summaries: Iterable[dict]) -> list[SourceFailure]:
     """Collect tenant-level and per-source failures, including preflight refusals."""
     failures: list[SourceFailure] = []
     for tenant in tenant_summaries:
-        if tenant.get("error_code"):
+        if not isinstance(tenant, dict):
+            continue
+        if tenant.get("error_code") or tenant.get("error"):
             failures.append(
                 SourceFailure(
                     name=str(tenant.get("display_name") or tenant.get("tenant") or "unknown"),
                     error=str(tenant.get("error") or ""),
-                    code=str(tenant["error_code"]),
+                    code=str(tenant.get("error_code") or ErrorCode.INTERNAL_ERROR),
                 )
             )
         for name, src in (tenant.get("sources") or {}).items():
             if not isinstance(src, dict):
+                continue
+            if src.get("state") == "completed" or not (
+                src.get("error")
+                or src.get("error_code")
+                or src.get("state") in {"failed", "cancelled"}
+            ):
                 continue
             failures.append(
                 SourceFailure(

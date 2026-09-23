@@ -1559,6 +1559,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
                 "Materialization completed but the follow-up response was "
                 "interrupted (likely a server restart). Please retry."
@@ -1586,6 +1587,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
             error_summary=summary,
         )
         if not updated:
@@ -1617,6 +1619,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
                 "Background queue unavailable; the materialization could "
                 "not be resumed. Please retry."
@@ -1789,6 +1792,7 @@ async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) 
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
             error_summary=summary,
         )
         if updated:
@@ -2506,6 +2510,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
         )
         return {"status": "agent_timeout"}
     except Exception:
@@ -2524,6 +2529,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=("The agent failed to respond after materialization. Please retry."),
         )
         return {"status": "agent_failed"}
@@ -2646,6 +2652,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         state=terminal,
         completed_at=timezone.now(),
         error_summary=error_summary,
+        failure_phase=ThreadJob.FailurePhase.MATERIALIZATION
+        if terminal == ThreadJob.State.FAILED
+        else "",
     )
     if not updated:
         actual_state = (

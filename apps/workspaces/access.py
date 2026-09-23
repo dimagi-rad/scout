@@ -75,8 +75,8 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
         projects = ", ".join(result.lost_tenant_names)
         return {
             "error": (
-                f"You no longer have access to: {projects}. "
-                f"{CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]}"
+                f"You no longer have access to {projects}: "
+                + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
             ),
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),

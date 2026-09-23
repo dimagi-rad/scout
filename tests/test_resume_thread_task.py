@@ -966,6 +966,7 @@ async def test_ainvoke_timeout_marks_failed_and_persists_message():
     assert result["status"] == "agent_timeout"
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
+    assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
     assert tj.completed_at is not None
 
     # aupdate_state was called with a single AIMessage carrying the timeout copy
@@ -1005,6 +1006,7 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
     assert result["status"] == "agent_failed"
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
+    assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
 
     mock_agent.aupdate_state.assert_awaited()
     msg = mock_agent.aupdate_state.await_args.args[1]["messages"][0]
@@ -1128,6 +1130,7 @@ async def test_resume_agent_failure_sets_error_summary():
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert "agent failed to respond" in tj.error_summary.lower()
+    assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
     assert "retry" in tj.error_summary.lower()
 
 
