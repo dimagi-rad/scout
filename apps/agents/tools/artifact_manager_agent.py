@@ -820,8 +820,18 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
             summary["data_requirements"] = validate_data_requirements(
                 parsed_final.get("data_requirements")
             )
-        except ValidationError:
+        except ValidationError as exc:
             summary["status"] = "error"
+            summary["requirement_errors"] = [
+                {
+                    "path": "/".join(str(part) for part in error["loc"])[:200],
+                    "code": error["type"],
+                    "message": error["msg"][:250],
+                }
+                for error in exc.errors(
+                    include_input=False, include_context=False, include_url=False
+                )[:4]
+            ]
             summary["message"] = (
                 "Artifact Manager returned an invalid data-model proposal. "
                 "Retry with complete, bounded structured data_requirements; no model change is authorized."

@@ -1,6 +1,6 @@
 """Bounded, provider-neutral proposals; never authorization to change a model."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
@@ -22,5 +22,5 @@ class DataRequirement(BaseModel):
 DATA_REQUIREMENTS = TypeAdapter(Annotated[list[DataRequirement], Field(min_length=1, max_length=8)])
 
 
-def validate_data_requirements(value: object) -> list[dict]:
+def validate_data_requirements(value: object) -> list[dict[str, Any]]:
     return [item.model_dump() for item in DATA_REQUIREMENTS.validate_python(value)]

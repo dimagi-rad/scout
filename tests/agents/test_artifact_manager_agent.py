@@ -170,6 +170,8 @@ def test_artifact_manager_rejects_invalid_data_model_handoff(requirements):
     assert summary["status"] == "error"
     assert "data_requirements" not in summary
     assert "no model change is authorized" in summary["message"]
+    assert 1 <= len(summary["requirement_errors"]) <= 4
+    assert all(set(error) == {"path", "code", "message"} for error in summary["requirement_errors"])
 
 
 @pytest.mark.asyncio
