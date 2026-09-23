@@ -35,8 +35,7 @@ const {NativeInstance} = require('@cubejs-backend/native');
     dimensions: [`${cube.name}.topic`],
     measures: [`${cube.name}.count`, `${cube.name}.filtered`, `${cube.name}.ratio`], timezone: 'UTC'
   }).buildSqlAndParams()[0]);
-  process.stdout.write(JSON.stringify(queries));
-  process.exit(0);
+  process.stdout.write(JSON.stringify(queries), () => process.exit(0));
 })().catch(error => { console.error(error); process.exit(1); });
 """
 

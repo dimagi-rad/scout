@@ -17,7 +17,16 @@ logger = logging.getLogger(__name__)
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     """Return a Cube-compatible schema document derived from a semantic model."""
     all_datasets = list(model.datasets.prefetch_related("fields"))
-    datasets = [dataset for dataset in all_datasets if dataset.is_visible]
+    datasets = [
+        dataset
+        for dataset in all_datasets
+        if dataset.is_visible
+        and (
+            dataset.source_kind != dataset.SourceKind.CUSTOM
+            or dataset.metadata.get("cube_sql")
+            or dataset.metadata.get("sql")
+        )
+    ]
     visible_ids = {dataset.id for dataset in datasets}
     known_references = {dataset.name for dataset in all_datasets} | {
         f"{dataset.name}.{field.name}" for dataset in all_datasets for field in dataset.fields.all()
@@ -33,6 +42,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         "to_dataset",
     )
     joins_by_dataset: dict[str, list[dict[str, Any]]] = {}
+    join_references = references | {"CUBE"}
     for relationship in relationships:
         if (
             relationship.from_dataset_id not in visible_ids
@@ -45,9 +55,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         if not relationship.from_dataset.primary_key:
             continue
         try:
-            join_sql = embed_cube_sql(
-                relationship.join_expression, references=references | {"CUBE"}
-            )
+            join_sql = embed_cube_sql(relationship.join_expression, references=join_references)
         except CubeSQLReferenceError as exc:
             if exc.reference not in known_references:
                 raise

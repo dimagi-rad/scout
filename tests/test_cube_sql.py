@@ -2,8 +2,15 @@
 
 import pytest
 
-from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel, SemanticRelationship
+from apps.semantic.models import (
+    CubeSchema,
+    SemanticDataset,
+    SemanticField,
+    SemanticModel,
+    SemanticRelationship,
+)
 from apps.semantic.services.cube import generate_cube_schema
+from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
 from apps.semantic.services.cube_sql import embed_cube_sql
 from apps.semantic.services.custom_datasets import compile_custom_dataset_sql
 
@@ -89,6 +96,7 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
 
     cubes = {cube["name"]: cube for cube in generate_cube_schema(model)["cubes"]}
     assert "{form,topic}" in compiled  # The PostgreSQL probe still receives plain SQL.
+    custom.refresh_from_db()
     assert custom.metadata["cube_sql"] == compiled
     assert r"'\u007bform,topic\u007d'" in cubes["topics"]["sql"]
     assert r'"raw\u007bvisits\u007d"' in cubes["raw_visits"]["sql"]
@@ -104,7 +112,14 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
         r"{raw_visits.topic} = {topics.topic} /* \u007bunknown\u007d */"
     )
     custom.fields.update(is_visible=False)
-    assert "joins" not in generate_cube_schema(model)["cubes"][0]
+    cubes = {cube["name"]: cube for cube in generate_cube_schema(model)["cubes"]}
+    assert "joins" not in cubes["raw_visits"]
+    custom.fields.update(is_visible=True)
+    custom.metadata = {}
+    custom.save(update_fields=["metadata"])
+    cubes = {cube["name"]: cube for cube in generate_cube_schema(model)["cubes"]}
+    assert set(cubes) == {"raw_visits"}
+    assert "joins" not in cubes["raw_visits"]
     custom.is_visible = False
     custom.save(update_fields=["is_visible"])
     schema = generate_cube_schema(model)
@@ -113,3 +128,55 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
     raw.is_visible = False
     raw.save(update_fields=["is_visible"])
     assert generate_cube_schema(model)["cubes"] == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("broken_part", ["measure", "filter", "join", "malformed_sql"])
+def test_invalid_sql_is_a_typed_build_failure_and_preserves_active_schema(workspace, broken_part):
+    model = SemanticModel.objects.create(
+        workspace=workspace, name="Last known good", status="active"
+    )
+    dataset = SemanticDataset.objects.create(
+        workspace=workspace,
+        semantic_model=model,
+        name="visits",
+        table_name="raw_visits",
+        primary_key="id",
+    )
+    metadata = {"cube_sql": "{missing}"}
+    if broken_part == "filter":
+        metadata = {"filters": [{"sql": "{missing} = 1"}]}
+    elif broken_part == "malformed_sql":
+        metadata = {"cube_sql": "'unterminated"}
+    elif broken_part == "join":
+        metadata = {}
+        SemanticRelationship.objects.create(
+            workspace=workspace,
+            name="stale_join",
+            from_dataset=dataset,
+            to_dataset=dataset,
+            relationship_type="many_to_one",
+            join_expression="{visits.deleted} = {visits.id}",
+        )
+    SemanticField.objects.create(
+        dataset=dataset, name="count", field_type="measure", measure_type="count", metadata=metadata
+    )
+    active = CubeSchema.objects.create(
+        workspace=workspace,
+        semantic_model=model,
+        filename="previous.yaml",
+        content="old",
+        content_hash="previous",
+        status=CubeSchema.Status.ACTIVE,
+    )
+
+    with pytest.raises(CubeSchemaBuildError, match="Could not generate Cube schema"):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    active.refresh_from_db()
+    model.refresh_from_db()
+    assert active.status == CubeSchema.Status.ACTIVE
+    assert active.content == "old"
+    assert model.status == SemanticModel.Status.ACTIVE
+    assert model.metadata["last_build"]["ok"] is False
+    assert model.diagnostics
