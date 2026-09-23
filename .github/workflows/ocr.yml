@@ -96,8 +96,6 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-      # Mirrors @ocr re-runs onto the PR head as a `review` check run.
-      checks: write
     # Authorization precedes this group: unrelated or unauthorized comments cannot cancel reviews.
     concurrency:
       group: ocr-review-${{ needs.prepare.outputs.number }}
@@ -111,15 +109,6 @@ jobs:
           ref: ${{ github.workflow_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Mark the PR review check in progress
-        id: review_check
-        if: github.event_name == 'issue_comment'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        with:
-          script: |
-            const { startReviewCheck } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-workflow.cjs`);
-            await startReviewCheck({ github, context, core, fs: require('node:fs'), env: process.env });
-
       - name: Select accepted review checkpoint
         id: baseline
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -251,13 +240,29 @@ jobs:
             const { finishClaude } = require(`${process.env.RUNNER_TEMP}/scout-ocr-policy/ocr-workflow.cjs`);
             await finishClaude({ github, context, core, fs: require('node:fs'), env: process.env });
 
+  review-check:
+    # issue_comment runs attach their own checks to the default branch, so the PR
+    # would keep a stale `review` result. Only this separate job may write checks, so
+    # the OCR and Claude steps in `review` never get it.
+    needs: [prepare, review]
+    if: ${{ always() && github.event_name == 'issue_comment' && needs.prepare.outputs.authorized == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout trusted workflow policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
       - name: Record the re-run result on the PR review check
-        if: ${{ always() && steps.review_check.outputs.check_run_id != '' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
-          CHECK_RUN_ID: ${{ steps.review_check.outputs.check_run_id }}
-          JOB_STATUS: ${{ job.status }}
+          REVIEW_HEAD: ${{ needs.prepare.outputs.head }}
+          REVIEW_RESULT: ${{ needs.review.result }}
         with:
           script: |
-            const { finishReviewCheck } = require(`${process.env.RUNNER_TEMP}/scout-ocr-policy/ocr-workflow.cjs`);
-            await finishReviewCheck({ github, context, core, env: process.env });
+            const { recordReviewCheck } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-workflow.cjs`);
+            await recordReviewCheck({ github, context, core, env: process.env });
