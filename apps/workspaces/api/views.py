@@ -24,7 +24,10 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     resolve_pipeline_config,
 )
-from apps.workspaces.services.refresh_requests import reconcile_legacy_refresh_candidates
+from apps.workspaces.services.refresh_requests import (
+    find_legacy_refresh_jobs,
+    reconcile_legacy_refresh_candidates,
+)
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from apps.workspaces.tasks import drop_failed_refresh_schema, refresh_tenant_schema
@@ -490,9 +493,10 @@ class RefreshSchemaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        legacy_jobs = find_legacy_refresh_jobs(tenant)
         with transaction.atomic():
             tenant = Tenant.objects.select_for_update().get(id=tenant.id)
-            legacy = reconcile_legacy_refresh_candidates(tenant)
+            legacy = reconcile_legacy_refresh_candidates(tenant, legacy_jobs)
             for settled_id in legacy.settled_schema_ids:
                 drop_failed_refresh_schema.defer(schema_id=str(settled_id))
             if legacy.recovery_needed:

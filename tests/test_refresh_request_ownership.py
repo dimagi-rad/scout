@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from asgiref.sync import async_to_sync
 from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 from rest_framework.test import APIClient
@@ -28,6 +29,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.refresh_requests import (
     REFRESH_TASK_NAME,
     claim_refresh_candidate,
+    find_legacy_refresh_jobs,
     reconcile_legacy_refresh_candidates,
     refresh_task_args,
 )
@@ -601,7 +603,8 @@ def test_initial_provision_row_is_not_treated_as_unverifiable_refresh(
         state=SchemaState.PROVISIONING,
     )
 
-    assert reconcile_legacy_refresh_candidates(tenant).recovery_needed is False
+    legacy_jobs = find_legacy_refresh_jobs(tenant)
+    assert reconcile_legacy_refresh_candidates(tenant, legacy_jobs).recovery_needed is False
     with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
         response = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
 
@@ -739,3 +742,35 @@ def test_lost_activation_drops_the_loaded_schema_only_if_it_was_failed(
     assert [call.args[0].id for call in teardown.call_args_list] == (
         [candidate.id] if dropped else []
     )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_legacy_job_search_runs_before_the_tenant_lock(
+    manage_client, workspace, tenant, tenant_membership, refresh_job
+):
+    # procrastinate_jobs.args has no index for a schema_id lookup; scanning it while
+    # holding the tenant lock would serialize every refresh behind a table scan.
+    legacy = TenantSchema.objects.create(
+        tenant=tenant, schema_name="legacy_lock_order", state=SchemaState.PROVISIONING
+    )
+    refresh_job(
+        {"schema_id": str(legacy.id), "membership_id": str(tenant_membership.id)},
+        status="failed",
+    )
+
+    with (
+        CaptureQueriesContext(connection) as queries,
+        patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer,
+    ):
+        defer.return_value = MagicMock(id=987658)
+        response = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert response.status_code == 202
+    sql = [query["sql"] for query in queries.captured_queries]
+    searches = [i for i, q in enumerate(sql) if "procrastinate_jobs" in q and "'schema_id'" in q]
+    tenant_lock = next(
+        i for i, q in enumerate(sql) if 'FROM "users_tenant"' in q and "FOR UPDATE" in q
+    )
+    assert searches
+    assert max(searches) < tenant_lock
+    assert all("FOR UPDATE" not in sql[i] for i in searches)
