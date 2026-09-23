@@ -8,7 +8,17 @@ export interface WorkspaceListTenant {
   provider: string
 }
 
-export type SchemaStatus = "available" | "provisioning" | "unavailable" | "failed"
+export interface MissingTenant {
+  tenant_id: string
+  tenant_name: string
+  provider: string
+  recovery: "connect_source" | "access_removed" | "reconnect" | "connect_team" | "legacy_team_unknown"
+  team_slug: string
+  team_name: string
+  remedy: string
+}
+
+export type SchemaStatus ="available" | "provisioning" | "unavailable" | "failed"
 
 // Workspace list item — lighter shape returned by GET /api/workspaces/
 export interface WorkspaceListItem {
@@ -19,9 +29,11 @@ export interface WorkspaceListItem {
   role: "read" | "read_write" | "manage"
   tenants: WorkspaceListTenant[]
   // Live upstream access. The server returns every membership (so orphaned
-  // workspaces stay addressable by URL) and flags the ones the user has lost
-  // tenant access to. Absent on older cached payloads — treat missing as true.
+  // workspaces stay addressable by URL) and flags the ones the user cannot use
+  // every source of. Absent on older cached payloads — treat missing as true.
   has_access?: boolean
+  // The sources keeping the user out, each with a server-written remedy.
+  missing_tenants?: MissingTenant[]
   member_count: number
   // Recorded tenant/view schema state; does not certify semantic query readiness.
   schema_status: SchemaStatus
