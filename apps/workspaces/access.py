@@ -90,6 +90,23 @@ def _freshness_denied(reason: str | None) -> WorkspaceAccess:
     return WorkspaceAccess(denied_reason=reason or VERIFICATION_UNAVAILABLE)
 
 
+def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceAccess:
+    """Name the upstream cause when this very recheck is what archived the coverage.
+
+    A generic lost-coverage denial reads as "not connected"; a revocation or dead
+    sign-in just observed upstream needs its own remedy (ask a provider admin, or
+    reconnect), so keep the lost tenant names and report the observed reason.
+    """
+    if result.denied_reason == TENANT_ACCESS_LOST and admission.reason in (
+        UPSTREAM_ACCESS_LOST,
+        CREDENTIAL_EXPIRED,
+    ):
+        return WorkspaceAccess(
+            denied_reason=admission.reason, lost_tenant_names=result.lost_tenant_names
+        )
+    return result
+
+
 CONNECTED_ACCOUNTS_PATH = "/settings/connections"
 
 _FRESHNESS_MESSAGES = {
@@ -132,12 +149,15 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
             "lost_tenants": list(result.lost_tenant_names),
         }
     if result.denied_reason in _FRESHNESS_MESSAGES:
-        return {
+        body = {
             "error": _FRESHNESS_MESSAGES[result.denied_reason],
             "reason": result.denied_reason,
             "retryable": result.retryable,
             "recovery_url": CONNECTED_ACCOUNTS_PATH,
         }
+        if result.lost_tenant_names:
+            body["lost_tenants"] = list(result.lost_tenant_names)
+        return body
     return {"error": _GENERIC_DENIED}
 
 
@@ -285,7 +305,7 @@ def resolve_workspace_access_ex(
         return result if admission.admitted else _freshness_denied(admission.reason)
     result = _resolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
     if not result.granted:
-        return result
+        return _attribute_observed_denial(result, admission)
     final = check_freshness(user.pk, _live_tenant_ids(result.workspace))
     return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
 
@@ -308,7 +328,7 @@ async def aresolve_workspace_access_ex(
         return result if admission.admitted else _freshness_denied(admission.reason)
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
     if not result.granted:
-        return result
+        return _attribute_observed_denial(result, admission)
     final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
     return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
 
