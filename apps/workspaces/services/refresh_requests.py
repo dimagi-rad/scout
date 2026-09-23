@@ -14,8 +14,9 @@ from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant, TenantMembership
-from apps.workspaces.access import workspace_write_allowed
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant
+from apps.workspaces.access import resolve_workspace_access_ex
+from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceRole, WorkspaceTenant
+from apps.workspaces.services.access_freshness import FRESHNESS_DENIAL_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,14 @@ def claim_refresh_candidate(
             tenant_id=schema.tenant_id,
         ).exists():
             return _settle_denied_candidate(schema, DENIED_WORKSPACE_UNLINKED)
-        if not workspace_write_allowed(membership.user, schema.refresh_workspace_id):
+        # Database-only here: inside this transaction a stale proof is a retryable
+        # denial, never a provider call. The worker rechecks upstream before claiming.
+        access = resolve_workspace_access_ex(
+            membership.user, schema.refresh_workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+        if not access.granted:
+            if access.denied_reason in FRESHNESS_DENIAL_REASONS:
+                return _settle_denied_candidate(schema, access.denied_reason)
             return _settle_denied_candidate(schema, DENIED_ROLE_REQUIRED)
 
         schema.refresh_claimed_at = timezone.now()

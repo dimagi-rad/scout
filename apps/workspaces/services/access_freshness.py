@@ -68,6 +68,16 @@ FRESHNESS_DENIAL_REASONS = (
 )
 RETRYABLE_REASONS = frozenset({VERIFICATION_UNAVAILABLE, VERIFICATION_IN_PROGRESS})
 
+# Registry codes for surfaces that report per-source failures (worker summaries,
+# MCP envelopes); reuse the codes whose remedies already exist.
+FRESHNESS_ERROR_CODES: dict[str, ErrorCode] = {
+    CREDENTIAL_MISSING: ErrorCode.AUTH_CREDENTIAL_MISSING,
+    CREDENTIAL_EXPIRED: ErrorCode.AUTH_TOKEN_EXPIRED,
+    UPSTREAM_ACCESS_LOST: ErrorCode.AUTH_ACCESS_DENIED,
+    VERIFICATION_UNAVAILABLE: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
+    VERIFICATION_IN_PROGRESS: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
+}
+
 
 def freshness_enforced() -> bool:
     return bool(getattr(settings, "UPSTREAM_ACCESS_FRESHNESS_ENFORCED", False))

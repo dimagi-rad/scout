@@ -43,6 +43,7 @@ from apps.users.services.credential_resolver import (
 from apps.workspaces.access import (
     TENANT_ACCESS_LOST,
     WorkspaceAccess,
+    access_denied_body,
     aresolve_workspace_access_ex,
 )
 from apps.workspaces.models import (
@@ -57,7 +58,10 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.access_freshness import VerificationBudget
+from apps.workspaces.services.access_freshness import (
+    FRESHNESS_ERROR_CODES,
+    VerificationBudget,
+)
 from apps.workspaces.services.data_operation import (
     DataLockTimeout,
     run_data_thread,
@@ -345,6 +349,20 @@ async def refresh_tenant_schema(
             ),
             "retry_required": True,
         }
+
+    # Recheck upstream here, outside any transaction, so the claim's database-only
+    # decision sees fresh proofs; the claim still makes and records the decision.
+    try:
+        actor = await User.objects.filter(id=actor_user_id).afirst()
+        if actor is not None:
+            await aresolve_workspace_access_ex(
+                actor,
+                workspace_id,
+                minimum_role=WorkspaceRole.READ_WRITE,
+                verification=VerificationBudget.BACKGROUND,
+            )
+    except (TypeError, ValueError, ValidationError):
+        pass  # Malformed ids: the claim below rejects the job against its recorded request.
 
     claim = await _to_thread_fresh_db(
         claim_refresh_candidate,
@@ -1132,7 +1150,10 @@ def _run_pipeline_with_progress(
 
 
 def _refresh_denial_result(reason: str) -> dict:
-    if reason == DENIED_MEMBERSHIP_MISSING:
+    if reason in FRESHNESS_ERROR_CODES:
+        error_code = FRESHNESS_ERROR_CODES[reason]
+        error = access_denied_body(WorkspaceAccess(denied_reason=reason))["error"]
+    elif reason == DENIED_MEMBERSHIP_MISSING:
         error_code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         error = "The requesting user no longer has access to this tenant, so nothing was run."
     elif reason == DENIED_WORKSPACE_UNLINKED:
