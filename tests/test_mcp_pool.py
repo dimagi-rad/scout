@@ -98,13 +98,12 @@ async def test_failed_close_does_not_strand_the_pool_in_the_cache():
     return a dead pool and raise ``PoolClosed`` for the life of the process.
     """
     dying = _fake_pool()
-    dying.close = AsyncMock(side_effect=asyncio.CancelledError())
+    dying.close = AsyncMock(side_effect=RuntimeError("boom"))
 
     with patch.object(pool_mod, "AsyncConnectionPool", return_value=dying):
         await pool_mod.get_pool(_base_params("t_alpha"))
 
-    with pytest.raises(asyncio.CancelledError):
-        await pool_mod.close_all_pools()
+    await pool_mod.close_all_pools()
 
     assert pool_mod._pools == {}
 
@@ -128,6 +127,43 @@ async def test_get_pool_replaces_a_pool_that_reports_itself_closed():
         assert await pool_mod.get_pool(_base_params("t_alpha")) is fresh
     assert PoolCls.call_count == 1
     stale.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_all_pools_propagates_a_real_cancellation():
+    """Swallowing the pool's own worker-cancellation must not swallow ours."""
+    closing = asyncio.Event()
+
+    async def slow_close():
+        closing.set()
+        await asyncio.sleep(10)
+
+    pool = _fake_pool()
+    pool.close = AsyncMock(side_effect=slow_close)
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=pool):
+        await pool_mod.get_pool(_base_params("t_alpha"))
+
+    task = asyncio.create_task(pool_mod.close_all_pools())
+    await closing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pool_mod._pools == {}
+
+
+@pytest.mark.asyncio
+async def test_a_pool_whose_workers_were_cancelled_still_closes_quietly():
+    """Loop teardown cancels the pool's workers before our shutdown hook runs,
+    so ``pool.close()`` raises CancelledError that is not ours to propagate."""
+    pool = _fake_pool()
+    pool.close = AsyncMock(side_effect=asyncio.CancelledError())
+    with patch.object(pool_mod, "AsyncConnectionPool", return_value=pool):
+        await pool_mod.get_pool(_base_params("t_alpha"))
+
+    await pool_mod.close_all_pools()
+
+    pool.close.assert_awaited_once()
+    assert pool_mod._pools == {}
 
 
 @pytest.mark.asyncio
