@@ -317,5 +317,7 @@ describe("Canvas for read-only members", () => {
     await screen.findByText("A draft")
     expect(screen.queryByTestId("canvas-commit-button")).not.toBeInTheDocument()
     expect(screen.getByTestId("canvas-readonly-hint")).toHaveTextContent("Read-only access")
+    expect(screen.queryByTestId("canvas-revert-shared_dataset")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("canvas-remove-shared_dataset")).not.toBeInTheDocument()
   })
 })

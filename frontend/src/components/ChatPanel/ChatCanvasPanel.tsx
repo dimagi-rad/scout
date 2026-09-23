@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useParams } from "react-router-dom"
 import {
@@ -48,6 +48,10 @@ interface ChatCanvasPanelProps {
 }
 
 type LoadStatus = "idle" | "loading" | "loaded" | "error"
+
+// A read member downgraded after drafting still has entries on their canvas;
+// every per-entry action posts to the write-gated apply endpoint.
+const CanvasCanWriteContext = createContext(true)
 
 export function ChatCanvasPanel({ workspaceId, threadId, className }: ChatCanvasPanelProps) {
   const params = useParams<{ threadId?: string }>()
@@ -212,6 +216,7 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
   }
 
   return (
+    <CanvasCanWriteContext.Provider value={canWrite}>
     <PanelShell className={className}>
       <div className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
         <p className="truncate text-xs text-muted-foreground" data-testid="canvas-pending-count">
@@ -302,6 +307,7 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
         </div>
       )}
     </PanelShell>
+    </CanvasCanWriteContext.Provider>
   )
 }
 
@@ -528,6 +534,8 @@ function EntryActions({
   onOps: (ops: CanvasOp[]) => Promise<boolean>
   showRevert: boolean
 }) {
+  const canWrite = useContext(CanvasCanWriteContext)
+  if (!canWrite) return null
   const objectRef = `${entry.object_type}/${entry.object_uuid}`
   return (
     <div className="flex shrink-0 items-center gap-1">
