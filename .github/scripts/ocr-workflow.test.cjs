@@ -309,6 +309,26 @@ test('@ocr re-run results are recorded as a terminal review check on the PR head
   }
 });
 
+test('a transient check API failure is retried once, and a second failure surfaces', async () => {
+  const h = checkHarness('issue_comment', { REVIEW_RESULT: 'success' });
+  let calls = 0;
+  const delays = [];
+  h.github.rest.checks.create = async args => {
+    calls += 1;
+    if (calls === 1) throw new Error('502');
+    h.checks.push(args);
+    return { data: { id: 99 } };
+  };
+  await recordReviewCheck({ ...h, delay: async ms => { delays.push(ms); } });
+  assert.equal(calls, 2);
+  assert.equal(h.checks.length, 1);
+  assert.deepEqual(delays, [5000]);
+
+  const down = checkHarness('issue_comment', { REVIEW_RESULT: 'failure' });
+  down.github.rest.checks.create = async () => { throw new Error('502'); };
+  await assert.rejects(recordReviewCheck({ ...down, delay: async () => {} }), /502/);
+});
+
 test('pull_request_target, cancelled, skipped and malformed runs record no review check', async () => {
   for (const [event, overrides] of [['pull_request_target', { REVIEW_RESULT: 'failure' }],
     ['issue_comment', { REVIEW_RESULT: 'cancelled' }], ['issue_comment', { REVIEW_RESULT: 'skipped' }],
@@ -324,7 +344,9 @@ test('pull_request_target, cancelled, skipped and malformed runs record no revie
 
 test('only the separate issue_comment job can write checks', () => {
   const workflow = require('node:fs').readFileSync(path.join(__dirname, '../workflows/ocr.yml'), 'utf8');
-  const job = workflow.slice(workflow.indexOf('\n  review-check:\n') + 1);
+  const start = workflow.indexOf('\n  review-check:\n');
+  assert.notEqual(start, -1);
+  const job = workflow.slice(start + 1).split(/\n  [a-z_-]+:\n/)[0];
   assert.match(job, /needs: \[prepare, review\]/);
   assert.match(job, /if: \$\{\{ always\(\) && github\.event_name == 'issue_comment' && needs\.prepare\.outputs\.authorized == 'true' \}\}/);
   assert.match(job, /\n    permissions:\n      contents: read\n      checks: write\n/);

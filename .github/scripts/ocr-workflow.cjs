@@ -36,7 +36,9 @@ async function currentPR(github, context, env) {
 // One terminal check, never an in-progress one that a failed update could strand.
 const REVIEW_CHECK = 'review';
 
-async function recordReviewCheck({ github, context, core, env }) {
+const defaultDelay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function recordReviewCheck({ github, context, core, env, delay }) {
   const conclusion = { success: 'success', failure: 'failure' }[env.REVIEW_RESULT];
   if (context.eventName !== 'issue_comment' || !conclusion) {
     core.info(`No PR review check recorded for ${context.eventName} result ${env.REVIEW_RESULT}.`);
@@ -44,14 +46,23 @@ async function recordReviewCheck({ github, context, core, env }) {
   }
   if (!/^[a-f0-9]{40}$/.test(env.REVIEW_HEAD || '')) throw new Error('Invalid review head.');
   const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${context.runId}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
-  await github.rest.checks.create({
+  const check = {
     ...context.repo, name: REVIEW_CHECK, head_sha: env.REVIEW_HEAD, status: 'completed', conclusion,
     external_id: String(context.runId), details_url: runUrl,
     output: {
       title: conclusion === 'success' ? 'Review re-run passed' : 'Review re-run failed',
       summary: `Result of the \`@ocr\` re-run for \`${env.REVIEW_HEAD}\`. See the PR comments for the gate and review. [Workflow run](${runUrl})`,
     },
-  });
+  };
+  // A failure here is invisible from the PR (this job's own check sits on the
+  // default branch), so retry once to ride out a transient API error.
+  try {
+    await github.rest.checks.create(check);
+  } catch (error) {
+    core.warning(`Retrying the PR review check after: ${error.message}`);
+    await (delay || defaultDelay)(5000);
+    await github.rest.checks.create(check);
+  }
   core.info(`PR review check recorded as ${conclusion}.`);
 }
 
