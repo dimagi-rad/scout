@@ -3,8 +3,10 @@
 The read gate (``apps.workspaces.access``) denies a member who cannot use one of
 the workspace's tenants; these checks refuse the membership or source change that
 would create that state in the first place. They are strictly all-of regardless
-of the read gate's rollout switch: refusing to create a new gap takes nothing that
-works today away from anyone.
+of the read gate's rollout switch, so while the switch is off a partially covering
+user is no longer admitted (they get an awaiting-access invite instead of any-of
+access). That is deliberate: every gap admitted now is a member the flip takes
+dark later (ACCESS-CONTRACT §3).
 
 Final checks and mutations run under a lock on the workspace row, shared by every
 mutation here, so a concurrent member add and source add cannot each pass against
@@ -95,13 +97,15 @@ def admit_covered_member(workspace, user, *, role, invited_by):
     """
     with transaction.atomic():
         _lock(workspace)
-        missing = missing_for_user(user, workspace)
-        if missing:
-            return None, False, missing
+        # Existing members first: one who has since lost a source already has the
+        # denial and its remedy, and must not also be sent an invite to rejoin.
         # authz-exempt: admission of the TARGET, not an access decision for a requester.
         existing = WorkspaceMembership.objects.filter(workspace=workspace, user=user).first()
         if existing is not None:
             return existing, False, ()
+        missing = missing_for_user(user, workspace)
+        if missing:
+            return None, False, missing
         membership = WorkspaceMembership.objects.create(
             workspace=workspace, user=user, role=role, invited_by=invited_by
         )

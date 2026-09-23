@@ -208,6 +208,17 @@ class TestDirectAdd:
         assert resp.status_code == 201
         assert resp.json()["result"] == "member"
 
+    def test_existing_member_who_lost_a_source_gets_409_not_an_invite(self, client, user, t1, t2):
+        ws = _workspace(user, t1, t2)
+        member = _member(ws, "member@example.com", t1)
+        client.force_login(user)
+
+        with patch(REFRESH, side_effect=_no_refresh):
+            resp = self._add(client, ws, member.email)
+
+        assert resp.status_code == 409
+        assert not WorkspaceInvite.objects.filter(workspace=ws, email=member.email).exists()
+
     def test_zero_tenant_workspace_admits_directly(self, client, user):
         ws = _workspace(user)
         target = User.objects.create_user(email="empty@example.com", password="pass")
