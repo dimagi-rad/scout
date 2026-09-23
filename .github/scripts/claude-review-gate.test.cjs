@@ -108,3 +108,11 @@ test('denial tool inputs never appear in the gate reason', () => {
   assert.doesNotMatch(JSON.stringify(result), /SECRET/);
   assert.match(result.reason, /run log lists the denied calls/);
 });
+
+test('one denial blocks even a complete review with a valid receipt (PR #487 policy)', () => {
+  const value = input();
+  value.sdkMessages[0].permission_denials = [{ tool_name: 'Bash', tool_input: { command: 'git show HEAD:x | head' } }];
+  const result = blocked(value);
+  assert.equal(result.denialCount, 1);
+  assert.equal(result.outcome, undefined);
+});
