@@ -22,8 +22,12 @@ from mcp_server.services import pool as pool_mod
 @pytest.fixture(autouse=True)
 def _clear_pools():
     pool_mod._pools.clear()
+    pool_mod._opening = 0
     yield
+    # Each test's loop has closed by now; release its pools the way the module does.
+    pool_mod.release_pools_of_finished_loops()
     pool_mod._pools.clear()
+    pool_mod._opening = 0
 
 
 def _fake_pool():
@@ -271,3 +275,18 @@ async def test_callers_queued_on_one_loop_share_the_slot_wait_budget(monkeypatch
 
     assert all(isinstance(r, pool_mod.PoolTimeout) for r in results)
     assert time.monotonic() - started < 0.3 * 2
+
+
+@pytest.mark.asyncio
+async def test_a_failing_cleanup_never_masks_why_the_open_failed():
+    broken = _fake_pool()
+    broken.open = AsyncMock(side_effect=pool_mod.PoolTimeout("server unreachable"))
+    broken.close = AsyncMock(side_effect=RuntimeError("close failed too"))
+
+    with (
+        patch.object(pool_mod, "AsyncConnectionPool", return_value=broken),
+        pytest.raises(pool_mod.PoolTimeout, match="server unreachable"),
+    ):
+        await pool_mod.get_pool(_base_params("t_alpha"))
+
+    assert pool_mod._opening == 0

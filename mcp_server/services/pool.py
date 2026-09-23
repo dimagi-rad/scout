@@ -147,7 +147,8 @@ async def _get_or_open_pool(key: _PoolKey, params: dict[str, Any], deadline: flo
             return entry.pool
         # Never hand back a closed pool: that is what turned one failed
         # teardown into PoolClosed for the rest of the process.
-        await entry.lifetime.aclose()
+        if _claim(key, entry):
+            await entry.lifetime.aclose()
 
     await _reserve_slot(deadline)
     try:
@@ -163,7 +164,8 @@ async def _get_or_open_pool(key: _PoolKey, params: dict[str, Any], deadline: flo
         await anext(lifetime)
     except BaseException:
         _release_slot()
-        await _close_pool(pool)
+        with contextlib.suppress(Exception):
+            await _close_pool(pool)
         raise
     _commit_slot(key, _Entry(pool=pool, loop=key[1], lifetime=lifetime))
     logger.info("Opened managed-DB connection pool (max_size=%d)", _POOL_MAX_SIZE)
@@ -186,7 +188,9 @@ async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
     try:
         await pool.open(wait=True, timeout=10)
     except BaseException:
-        await pool.close()
+        # Never let cleanup replace the reason the open failed.
+        with contextlib.suppress(Exception):
+            await _close_pool(pool)
         raise
     return pool
 
@@ -209,9 +213,7 @@ async def _reserve_slot(deadline: float) -> None:
                 len(_pools),
                 idle_loops,
             )
-            raise PoolTimeout(
-                f"all {_MAX_POOLS} managed-DB pool slots are held by other event loops"
-            )
+            raise PoolTimeout(f"all {_MAX_POOLS} managed-DB pool slots are in use")
         await asyncio.sleep(_SLOT_POLL_SECONDS)
 
 
@@ -226,6 +228,15 @@ def _commit_slot(key: _PoolKey, entry: _Entry) -> None:
     with _state_lock:
         _opening -= 1
         _pools[key] = entry
+
+
+def _claim(key: _PoolKey, entry: _Entry) -> bool:
+    """Remove ``entry`` if it is still cached; only the claimant may finalise it."""
+    with _state_lock:
+        if _pools.get(key) is entry:
+            del _pools[key]
+            return True
+        return False
 
 
 def _forget(key: _PoolKey, pool: AsyncConnectionPool) -> None:
@@ -257,7 +268,13 @@ async def _close_on_loop_shutdown(
 
 def _idle_connections(pool: AsyncConnectionPool) -> list:
     # psycopg_pool exposes no public view of its idle deque; see _close_pool.
-    return list(getattr(pool, "_pool", ()))
+    idle = getattr(pool, "_pool", None)
+    if idle is None:
+        # A psycopg_pool upgrade renamed it: cleanup would silently fall back
+        # to garbage collection, so say so.
+        logger.warning("Cannot see %r's idle connections; they will close on GC", pool.name)
+        return []
+    return list(idle)
 
 
 async def _close_pool(pool: AsyncConnectionPool) -> None:
@@ -316,6 +333,9 @@ def release_pools_of_finished_loops() -> None:
             closer.send(None)
         except StopIteration:
             pass
+        except Exception:
+            # Already claimed: one bad entry must not strand the rest.
+            logger.exception("Failed to release managed-DB pool %r", entry.pool.name)
         else:
             closer.close()
 
@@ -325,12 +345,13 @@ async def close_all_pools() -> None:
 
     Pools owned by *other live* loops are left alone: closing them from here is
     exactly the cross-loop operation this module exists to avoid, and their own
-    loop closes them at shutdown. Used in tests and on shutdown.
+    loop closes them at shutdown.
     """
     loop = asyncio.get_running_loop()
     release_pools_of_finished_loops()
     with _state_lock:
-        mine = [entry for (_, owner), entry in _pools.items() if owner is loop]
+        # Claim under the lock, as the sweep does, so nothing drives these twice.
+        mine = [_pools.pop(key) for key in list(_pools) if key[1] is loop]
 
     # Isolate per-pool failures, or the first raising close would strand every
     # pool behind it — already evicted, so unreachable and leaked for the process.

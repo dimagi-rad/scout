@@ -145,6 +145,7 @@ def test_two_live_loops_keep_their_own_pools():
         assert not t.is_alive()
 
     assert errors == []
+    # Exact on purpose: each live loop keeps its own entry; thrashing showed up as 1.
     assert cached_while_both_live == [2]
     assert len({id(p) for p in seen["a"]}) == 1
     assert len({id(p) for p in seen["b"]}) == 1
