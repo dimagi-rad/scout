@@ -275,12 +275,7 @@ def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> b
     with transaction.atomic():
         try:
             current, request = _current_snapshot(actor_user_id, connection_id, lock=False)
-        except (
-            User.DoesNotExist,
-            TenantConnection.DoesNotExist,
-            SocialToken.DoesNotExist,
-            ValueError,
-        ):
+        except (TenantConnection.DoesNotExist, ValueError):
             return False
         history = _owned_history(actor_user_id, current, requested)
         return _history_is_fresh(current, request, requested, history, now=now)

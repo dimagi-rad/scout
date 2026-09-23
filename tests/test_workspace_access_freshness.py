@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from django.db import transaction
 from django.test import Client
 from django.utils import timezone
 
@@ -26,6 +27,7 @@ from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_MISSING,
     UPSTREAM_ACCESS_LOST,
+    VERIFICATION_IN_PROGRESS,
     VERIFICATION_UNAVAILABLE,
     VerificationBudget,
 )
@@ -300,4 +302,17 @@ def test_revocation_already_on_record_stays_a_coverage_loss(
     result = resolve_workspace_access_ex(user, workspace.id)
 
     assert result.denied_reason == TENANT_ACCESS_LOST
+    assert upstream_provider.requests == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_no_provider_call_inside_a_callers_transaction(user, workspace, tenant, upstream_provider):
+    make_proof_stale(user, tenant)
+    upstream_provider.domains = [tenant.external_id]
+
+    with transaction.atomic():
+        result = resolve_workspace_access_ex(user, workspace.id)
+
+    assert result.denied_reason == VERIFICATION_IN_PROGRESS
+    assert result.retryable
     assert upstream_provider.requests == []
