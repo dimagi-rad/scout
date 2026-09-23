@@ -20,11 +20,20 @@ _LEGACY_ARG_KEYS = frozenset({"schema_id", "membership_id"})
 _CONTEXT_ARG_KEYS = frozenset({"schema_id", "membership_id", "actor_user_id", "workspace_id"})
 
 
+# "rejected" means the queued job is not the request its candidate records, so the
+# job must not act at all; "denied" means the exact request was proven but its actor
+# no longer has authority, and ``reason`` says which authority was lost.
+DENIED_ROLE_REQUIRED = "role_required"
+DENIED_MEMBERSHIP_MISSING = "membership_missing"
+DENIED_WORKSPACE_UNLINKED = "workspace_unlinked"
+
+
 @dataclass(frozen=True)
 class RefreshClaim:
     status: str
     schema: TenantSchema | None = None
     membership: TenantMembership | None = None
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,10 +73,10 @@ def _parsed_user_id(value) -> int | None:
     return parsed if str(parsed) == str(value) else None
 
 
-def _settle_denied_candidate(schema: TenantSchema) -> RefreshClaim:
+def _settle_denied_candidate(schema: TenantSchema, reason: str) -> RefreshClaim:
     schema.state = SchemaState.FAILED
     schema.save(update_fields=["state"])
-    return RefreshClaim(status="denied")
+    return RefreshClaim(status="denied", reason=reason)
 
 
 def claim_refresh_candidate(
@@ -86,12 +95,12 @@ def claim_refresh_candidate(
     """
     parsed_schema_id = _parsed_uuid(schema_id)
     if parsed_schema_id is None:
-        return RefreshClaim(status="denied")
+        return RefreshClaim(status="rejected")
     tenant_id = (
         TenantSchema.objects.filter(id=parsed_schema_id).values_list("tenant_id", flat=True).first()
     )
     if tenant_id is None:
-        return RefreshClaim(status="denied")
+        return RefreshClaim(status="rejected")
 
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
@@ -103,7 +112,7 @@ def claim_refresh_candidate(
             )
             job = ProcrastinateJob.objects.select_for_update().get(id=job_id)
         except (TenantSchema.DoesNotExist, ProcrastinateJob.DoesNotExist):
-            return RefreshClaim(status="denied")
+            return RefreshClaim(status="rejected")
 
         expected_args = refresh_task_args(schema)
         supplied_args = {
@@ -120,7 +129,7 @@ def claim_refresh_candidate(
             or job.args != expected_args
             or job.status != "doing"
         ):
-            return RefreshClaim(status="denied")
+            return RefreshClaim(status="rejected")
 
         if schema.state != SchemaState.PROVISIONING or schema.refresh_claimed_at is not None:
             return RefreshClaim(status="ignored")
@@ -134,16 +143,15 @@ def claim_refresh_candidate(
                 tenant_id=schema.tenant_id,
             )
         except TenantMembership.DoesNotExist:
-            return _settle_denied_candidate(schema)
+            return _settle_denied_candidate(schema, DENIED_MEMBERSHIP_MISSING)
 
-        workspace_matches = WorkspaceTenant.objects.filter(
+        if not WorkspaceTenant.objects.filter(
             workspace_id=schema.refresh_workspace_id,
             tenant_id=schema.tenant_id,
-        ).exists()
-        if not workspace_matches or not workspace_write_allowed(
-            membership.user, schema.refresh_workspace_id
-        ):
-            return _settle_denied_candidate(schema)
+        ).exists():
+            return _settle_denied_candidate(schema, DENIED_WORKSPACE_UNLINKED)
+        if not workspace_write_allowed(membership.user, schema.refresh_workspace_id):
+            return _settle_denied_candidate(schema, DENIED_ROLE_REQUIRED)
 
         schema.refresh_claimed_at = timezone.now()
         schema.save(update_fields=["refresh_claimed_at"])

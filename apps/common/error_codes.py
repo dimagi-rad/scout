@@ -65,6 +65,11 @@ class ErrorCode(StrEnum):
     # provider admin. Retrying as the same user cannot succeed.
     WORKSPACE_ROLE_INSUFFICIENT = "WORKSPACE_ROLE_INSUFFICIENT"
 
+    # A queued refresh job does not match the request its candidate schema records
+    # (stale, duplicated, or foreign job). Nothing ran; this is not an authorization
+    # failure, so it must not be reported as a missing role.
+    REFRESH_REQUEST_MISMATCH = "REFRESH_REQUEST_MISMATCH"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.

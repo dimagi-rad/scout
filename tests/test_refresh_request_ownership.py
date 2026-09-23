@@ -13,6 +13,7 @@ from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 from rest_framework.test import APIClient
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
     SchemaState,
@@ -20,6 +21,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
+    WorkspaceTenant,
 )
 from apps.workspaces.services.refresh_requests import (
     REFRESH_TASK_NAME,
@@ -145,7 +147,9 @@ def test_mismatched_refresh_binding_is_a_noop(
         )
 
     candidate.refresh_from_db()
-    assert result["status"] == "denied"
+    assert result["status"] == "rejected"
+    assert result["error_code"] == ErrorCode.REFRESH_REQUEST_MISMATCH
+    assert "role" not in result["error"].lower()
     assert candidate.state == SchemaState.PROVISIONING
     create.assert_not_called()
 
@@ -173,6 +177,8 @@ def test_owned_request_losing_role_settles_only_its_candidate(
     candidate.refresh_from_db()
     serving.refresh_from_db()
     assert result["status"] == "denied"
+    assert result["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
+    assert "role" in result["error"].lower()
     assert result["retry_required"] is True
     assert candidate.state == SchemaState.FAILED
     assert serving.state == SchemaState.ACTIVE
@@ -528,3 +534,44 @@ def test_unexpected_membership_lookup_error_does_not_settle_candidate(
     candidate.refresh_from_db()
     assert candidate.state == SchemaState.PROVISIONING
     assert candidate.refresh_claimed_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_owned_request_whose_membership_vanished_reports_lost_tenant_access(
+    workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    TenantMembership.objects.filter(id=tenant_membership.id).delete()
+
+    with patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create:
+        result = async_to_sync(refresh_tenant_schema.func)(
+            context=SimpleNamespace(job=SimpleNamespace(id=job_id)), **args
+        )
+
+    candidate.refresh_from_db()
+    assert result["status"] == "denied"
+    assert result["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert "role" not in result["error"].lower()
+    assert candidate.state == SchemaState.FAILED
+    create.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_owned_request_for_unlinked_tenant_reports_unlinked_workspace(
+    workspace, tenant, tenant_membership, refresh_job
+):
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+    WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).delete()
+
+    with patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create:
+        result = async_to_sync(refresh_tenant_schema.func)(
+            context=SimpleNamespace(job=SimpleNamespace(id=job_id)), **args
+        )
+
+    candidate.refresh_from_db()
+    assert result["status"] == "denied"
+    assert result["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert "no longer part of" in result["error"]
+    assert "role" not in result["error"].lower()
+    assert candidate.state == SchemaState.FAILED
+    create.assert_not_called()

@@ -67,6 +67,8 @@ from apps.workspaces.services.query_state import (
     semantic_layer_state as _semantic_layer_state,
 )
 from apps.workspaces.services.refresh_requests import (
+    DENIED_MEMBERSHIP_MISSING,
+    DENIED_WORKSPACE_UNLINKED,
     activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
@@ -324,8 +326,8 @@ async def refresh_tenant_schema(
     """
     if not actor_user_id or not workspace_id:
         return {
-            "status": "denied",
-            "error_code": "FORBIDDEN",
+            "status": "rejected",
+            "error_code": ErrorCode.REFRESH_REQUEST_MISMATCH,
             "error": (
                 "This queued refresh is missing acting-user/workspace authorization context. "
                 "Retry the refresh from the workspace."
@@ -343,13 +345,18 @@ async def refresh_tenant_schema(
     )
     if claim.status == "ignored":
         return {"status": "ignored"}
-    if claim.status != "claimed":
+    if claim.status == "rejected":
         return {
-            "status": "denied",
-            "error_code": "FORBIDDEN",
-            "error": "Read-write or manage role required to refresh this workspace.",
+            "status": "rejected",
+            "error_code": ErrorCode.REFRESH_REQUEST_MISMATCH,
+            "error": (
+                "This queued job does not match the refresh request recorded for this "
+                "workspace, so nothing was run. Retry the refresh from the workspace."
+            ),
             "retry_required": True,
         }
+    if claim.status != "claimed":
+        return _refresh_denial_result(claim.reason)
 
     new_schema = claim.schema
     membership = claim.membership
@@ -1092,6 +1099,19 @@ def _run_pipeline_with_progress(
         progress_updater=updater,
         procrastinate_job_id=job_id,
     )
+
+
+def _refresh_denial_result(reason: str) -> dict:
+    if reason == DENIED_MEMBERSHIP_MISSING:
+        error_code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        error = "The requesting user no longer has access to this tenant, so nothing was run."
+    elif reason == DENIED_WORKSPACE_UNLINKED:
+        error_code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        error = "This tenant is no longer part of the requesting workspace, so nothing was run."
+    else:
+        error_code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
+        error = "Read-write or manage role required to refresh this workspace."
+    return {"status": "denied", "error_code": error_code, "error": error, "retry_required": True}
 
 
 async def _drop_claimed_refresh_schema_and_fail(schema, job_id: int) -> None:

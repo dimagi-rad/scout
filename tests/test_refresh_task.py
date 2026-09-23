@@ -9,6 +9,7 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.db import DatabaseError, connection, transaction
 
+from apps.common.error_codes import ErrorCode
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, User
 from apps.workspaces.models import (
@@ -143,7 +144,8 @@ async def test_refresh_task_denies_legacy_job_without_actor_context(
             membership_id=str(tenant_membership_obj.id),
         )
 
-    assert result["status"] == "denied"
+    assert result["status"] == "rejected"
+    assert result["error_code"] == ErrorCode.REFRESH_REQUEST_MISMATCH
     assert result["retry_required"] is True
     assert "retry" in result["error"].lower()
     await provisioning_schema.arefresh_from_db()
@@ -197,7 +199,7 @@ async def test_refresh_denial_never_demotes_a_serving_schema(
             workspace_id=str(workspace.id),
         )
 
-    assert result["status"] == "denied"
+    assert result["status"] == "rejected"
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.ACTIVE
     pipeline.assert_not_called()
@@ -220,7 +222,8 @@ async def test_refresh_task_rejects_schema_outside_authorized_workspace(
             workspace_id=str(other.id),
         )
 
-    assert result["status"] == "denied"
+    assert result["status"] == "rejected"
+    assert result["error_code"] == ErrorCode.REFRESH_REQUEST_MISMATCH
     assert "workspace" in result["error"].lower()
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.PROVISIONING
@@ -575,7 +578,9 @@ async def test_refresh_task_returns_error_for_unknown_schema(tenant_membership_o
         membership_id=str(tenant_membership_obj.id),
         **await _refresh_auth_kwargs(tenant_membership_obj),
     )
-    assert "error" in result
+    assert result["status"] == "rejected"
+    assert result["error_code"] == ErrorCode.REFRESH_REQUEST_MISMATCH
+    assert "role" not in result["error"].lower()
 
 
 @pytest.mark.asyncio
