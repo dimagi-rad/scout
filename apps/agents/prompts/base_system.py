@@ -211,8 +211,8 @@ PLACEHOLDERS = frozenset(
 
 
 def _render(**values: str) -> str:
-    # str.format would turn any literal brace added to the prompt into an import error,
-    # so the placeholder set is declared and checked in both directions instead.
+    # str.format would turn any literal brace added to the prompt into an import error.
+    # A new template placeholder must also be added to PLACEHOLDERS.
     if set(values) != PLACEHOLDERS:
         raise ValueError(f"base system prompt needs exactly {sorted(PLACEHOLDERS)}")
     prompt = _BASE_SYSTEM_PROMPT_TEMPLATE
@@ -238,8 +238,10 @@ BASE_SYSTEM_PROMPT = _render(
 2. Otherwise, tell the user the data isn't currently queryable and ask whether
    to re-materialize before calling `run_materialization`.
 
-`run_materialization` returns immediately with `status: started`; acknowledge
-that in one sentence and end your turn.""",
+When you call it, it returns immediately with `status: started`: acknowledge that
+in one sentence and end your turn, and the system will resume the conversation
+when loading completes. If it returns `already_in_progress`, relay its message
+instead of promising a follow-up.""",
 )
 
 # Headless (recipe) runs have no user to answer an ask-first question and no
