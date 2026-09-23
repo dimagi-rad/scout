@@ -70,13 +70,18 @@ async def test_headless_materialization_tool_preserves_post_wait_authorization_d
         },
     }
 
+    called = False
+
     async def _denied_after_wait(*_args):
+        nonlocal called
+        called = True
         return denied
 
     monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _denied_after_wait)
 
     result = await create_materialization_tool(workspace, user).ainvoke({})
 
+    assert called, "the tool short-circuited before the blocking run"
     assert result == denied
 
 
