@@ -195,7 +195,6 @@ def missing_tenants_by_workspace(user, workspaces) -> dict:
     all_tenants = {t.pk: t for tenants in tenants_by_ws.values() for t in tenants}
     if not all_tenants:
         return dict.fromkeys(tenants_by_ws, ())
-    gaps = member_coverage_gaps(user.pk, all_tenants.values())
     live = set()
     if not all_of_access_enforced():
         live = set(
@@ -203,13 +202,18 @@ def missing_tenants_by_workspace(user, workspaces) -> dict:
                 "tenant_id", flat=True
             )
         )
-    result = {}
-    for ws_id, tenants in tenants_by_ws.items():
-        if live & {t.pk for t in tenants}:
-            result[ws_id] = ()
-        else:
-            result[ws_id] = tuple(gaps[str(t.pk)] for t in tenants if str(t.pk) in gaps)
-    return result
+    # Any-of already grants these, so readiness is only worth computing for the rest.
+    granted = {ws_id for ws_id, tenants in tenants_by_ws.items() if live & {t.pk for t in tenants}}
+    unresolved = {
+        t.pk: t for ws_id, tenants in tenants_by_ws.items() if ws_id not in granted for t in tenants
+    }
+    gaps = member_coverage_gaps(user.pk, unresolved.values()) if unresolved else {}
+    return {
+        ws_id: ()
+        if ws_id in granted
+        else tuple(gaps[str(t.pk)] for t in tenants if str(t.pk) in gaps)
+        for ws_id, tenants in tenants_by_ws.items()
+    }
 
 
 def _workspace_tenants(workspace) -> list:

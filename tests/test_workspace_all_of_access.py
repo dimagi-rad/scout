@@ -221,6 +221,7 @@ def _list_entry(client, ws):
 @pytest.mark.django_db
 def test_list_has_access_agrees_with_the_gate(client, user, partial_member, two_sources):
     client.force_login(user)
+    _list_entry(client, partial_member)  # warm session/auth queries out of the bound below
     zero = _workspace(user, name="Empty")
     _join(zero, user)
 
@@ -317,6 +318,29 @@ async def test_partial_member_is_denied_by_user_scoped_mcp_tools():
 
     assert result["success"] is False
     assert result["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.django_db
+def test_list_readiness_is_bulk_not_per_workspace(
+    client, user, two_sources, django_assert_max_num_queries
+):
+    """``has_access`` for many workspaces costs the same query count as for one."""
+    client.force_login(user)
+    t1, t2 = two_sources
+    grant_tenant_access(user, t1)
+    ws = _workspace(user, t1, t2)
+    _join(ws, user)
+    client.get("/api/workspaces/")
+    with django_assert_max_num_queries(20) as one:
+        client.get("/api/workspaces/")
+    for n in range(5):
+        extra = _workspace(user, _tenant(f"x{n}", f"Extra {n}"), t2, name=f"W{n}")
+        _join(extra, user)
+
+    with django_assert_max_num_queries(len(one.captured_queries)):
+        resp = client.get("/api/workspaces/")
+
+    assert all(entry["has_access"] is False for entry in resp.json())
 
 
 @pytest.mark.django_db
