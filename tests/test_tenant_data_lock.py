@@ -23,21 +23,20 @@ from tests.tenant_lock_probe import try_tenant_data_lock
 pytestmark = [pytest.mark.asyncio, pytest.mark.django_db(transaction=True)]
 
 
-def _held_tenant_locks(conn):
+def _held_tenant_locks(conn, keys):
+    """(objid, pid) of granted tenant locks on ``keys`` in this database."""
     rows = conn.execute(
-        "SELECT objid FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND granted",
-        (_TENANT_LOCK_NAMESPACE & 0xFFFFFFFF,),
+        "SELECT l.objid, l.pid FROM pg_locks l JOIN pg_database d ON d.oid = l.database "
+        "WHERE l.locktype = 'advisory' AND l.classid = %s AND l.granted "
+        "AND d.datname = current_database() AND l.objid = ANY(%s)",
+        (_TENANT_LOCK_NAMESPACE & 0xFFFFFFFF, [key & 0xFFFFFFFF for key in keys]),
     ).fetchall()
-    return sorted(row[0] for row in rows)
+    return sorted(rows)
 
 
 @pytest.fixture
 def probe():
-    from django.db import connections
-
-    params = connections["default"].get_connection_params()
-    params.pop("cursor_factory", None)
-    conn = psycopg.connect(**params, autocommit=True)
+    conn = psycopg.connect(**data_operation._connection_params(), autocommit=True)
     yield conn
     conn.close()
 
@@ -67,13 +66,28 @@ async def test_reversed_order_requests_do_not_deadlock():
 async def test_forced_key_collision_acquires_one_physical_lock(probe):
     a, b = uuid.uuid4(), uuid.uuid4()
     shared = tenant_lock_key(a)
-    with patch.object(data_operation, "tenant_lock_key", return_value=shared):
+    other = tenant_lock_key(b)
+    acquired = []
+    real_acquire = data_operation._acquire
+
+    async def record(conn, namespace, key):
+        acquired.append(key)
+        await real_acquire(conn, namespace, key)
+
+    with (
+        patch.object(data_operation, "tenant_lock_key", return_value=shared),
+        patch.object(data_operation, "_acquire", record),
+    ):
         assert tenant_lock_keys([a, b]) == (shared,)
         async with tenant_data_lock([b, a]):
-            assert _held_tenant_locks(probe).count(shared & 0xFFFFFFFF) == 1
+            # pg_locks refcounts repeated grants in one row, so count the calls.
+            assert acquired == [shared]
+            assert [objid for objid, _pid in _held_tenant_locks(probe, [shared, other])] == [
+                shared & 0xFFFFFFFF
+            ]
         # Reverse order with colliding keys cannot deadlock either.
         async with asyncio.timeout(5), tenant_data_lock([a, b]):
-            assert _held_tenant_locks(probe).count(shared & 0xFFFFFFFF) == 1
+            assert acquired == [shared, shared]
 
 
 async def test_same_task_reuses_held_subset_but_rejects_expansion():
@@ -192,11 +206,13 @@ async def test_child_drained_thread_does_not_borrow_parent_tenant_lock():
         with data_operation.sync_tenant_data_lock([tenant]):
             loop.call_soon_threadsafe(entered.set)
 
-    async with tenant_data_lock([tenant]):
-        child = asyncio.create_task(data_operation.run_data_thread(child_thread))
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(entered.wait(), 0.1)
-    await asyncio.wait_for(child, 5)
+    # A regression must fail fast, not hold the drained thread for 30 minutes.
+    with patch.object(data_operation, "_LOCK_TIMEOUT", "5s"):
+        async with tenant_data_lock([tenant]):
+            child = asyncio.create_task(data_operation.run_data_thread(child_thread))
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(entered.wait(), 0.1)
+        await asyncio.wait_for(child, 10)
     assert entered.is_set()
 
 
@@ -241,3 +257,44 @@ async def test_workspace_lock_cannot_be_taken_while_holding_tenant_locks():
         with pytest.raises(LockOrderError):
             async with workspace_data_lock(uuid.uuid4()):
                 pass
+
+
+async def test_a_bare_thread_cannot_wait_on_its_own_tasks_tenant_lock():
+    """asyncio.to_thread copies the context but not ownership: it must be refused
+    at once rather than wait out _LOCK_TIMEOUT on its own task's lock."""
+    tenant = uuid.uuid4()
+
+    def nested():
+        with data_operation.sync_tenant_data_lock([tenant]):
+            pass
+
+    async with tenant_data_lock([tenant]):
+        with pytest.raises(LockOrderError, match="run_data_thread"):
+            await asyncio.wait_for(asyncio.to_thread(nested), 5)
+
+
+async def test_child_task_of_a_tenant_holder_cannot_take_a_workspace_lock():
+    async def child():
+        async with workspace_data_lock(uuid.uuid4()):
+            pass
+
+    async with tenant_data_lock([uuid.uuid4()]):
+        with pytest.raises(LockOrderError):
+            await asyncio.create_task(child())
+
+
+async def test_a_statement_timeout_while_waiting_is_a_lock_timeout(probe):
+    tenant = uuid.uuid4()
+    key = tenant_lock_key(tenant)
+    probe.execute("SELECT pg_advisory_lock(%s, %s)", (_TENANT_LOCK_NAMESPACE, key))
+    params = data_operation._connection_params()
+    params["options"] = "-c statement_timeout=200ms"
+    try:
+        with (
+            patch.object(data_operation, "_connection_params", return_value=params),
+            pytest.raises(DataLockTimeout),
+        ):
+            async with tenant_data_lock([tenant]):
+                pass
+    finally:
+        probe.execute("SELECT pg_advisory_unlock(%s, %s)", (_TENANT_LOCK_NAMESPACE, key))

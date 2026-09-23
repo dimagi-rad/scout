@@ -4,6 +4,11 @@ Lock order for user-triggered tenant writers (D1): request intent is captured
 before any wait, then workspace ``W`` → sorted tenant ``T*`` → own view build →
 Cube. Standalone refresh and retirement hold ``T`` only and never take another
 workspace's ``W`` while holding it; sibling rebuilds are deferred tasks.
+
+A ``T`` region must not fan out into work that takes ``W``: child tasks inherit
+the held-tenant context, and ``W`` is refused whenever it shows tenant keys.
+Threads that may enter a lock region must be started with ``run_data_thread``,
+which is what lets them reuse their task's locks.
 """
 
 import asyncio
@@ -27,6 +32,14 @@ _data_thread_owner = ContextVar("scout_data_thread_owner", default=None)
 
 class DataLockTimeout(Exception):
     """A data lock was not granted within ``_LOCK_TIMEOUT``; never continue silently."""
+
+
+_EXPAND_TENANTS = "Cannot expand held tenant locks; collect every tenant before acquiring"
+_WORKSPACE_AFTER_TENANT = "Cannot acquire a workspace lock while tenant locks are held"
+_UNBRIDGED_THREAD = (
+    "A thread entered its task's data-lock region without run_data_thread; it would wait "
+    "on locks its own task holds"
+)
 
 
 class LockOrderError(RuntimeError):
@@ -103,19 +116,35 @@ def _sync_lock_owner():
     return threading.current_thread()
 
 
+def _refuse_unbridged_thread(owner, inherited_owner, inherited) -> None:
+    # A bare asyncio.to_thread copies the task's context but not its ownership,
+    # so it would open a second session and wait out _LOCK_TIMEOUT on a lock
+    # its own task holds. That is always a bug, never a concurrent writer.
+    if (
+        inherited
+        and isinstance(inherited_owner, asyncio.Task)
+        and isinstance(owner, threading.Thread)
+    ):
+        raise LockOrderError(_UNBRIDGED_THREAD)
+
+
 @contextmanager
 def sync_workspace_data_lock(workspace_id):
     """Reuse only the originating task's drained thread, otherwise acquire W."""
     key = str(workspace_id)
     owner = _sync_lock_owner()
     inherited_owner, inherited = _held_workspaces.get()
+    _refuse_unbridged_thread(owner, inherited_owner, inherited)
     held = inherited if inherited_owner is owner else frozenset()
     if key in held:
         yield
         return
     tenant_owner, tenant_keys = _held_tenants.get()
-    if tenant_owner is owner and tenant_keys:
-        raise LockOrderError("Cannot acquire a workspace lock while holding tenant locks")
+    _refuse_unbridged_thread(owner, tenant_owner, tenant_keys)
+    if tenant_keys:
+        raise LockOrderError(_WORKSPACE_AFTER_TENANT)
+    # Nested W is single-workspace by construction: every caller locks the one
+    # workspace it is working on, so no ordering rule is needed across W keys.
     with psycopg.connect(**_connection_params(), autocommit=True) as conn:
         conn.execute(f"SET lock_timeout = '{_LOCK_TIMEOUT}'")
         _sync_acquire(conn, _LOCK_NAMESPACE, _lock_key(key))
@@ -126,13 +155,20 @@ def sync_workspace_data_lock(workspace_id):
             _held_workspaces.reset(token)
 
 
+# statement_timeout (57014) can arrive from DATABASE_URL options or a role
+# default; either deadline means the lock was not granted.
+_LOCK_DEADLINE_ERRORS = (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled)
+
+
+def _lock_timeout(namespace: int, key: int) -> DataLockTimeout:
+    return DataLockTimeout(f"Timed out waiting for data lock {namespace:#x}/{key}")
+
+
 def _sync_acquire(conn, namespace, key):
     try:
         conn.execute("SELECT pg_advisory_lock(%s, %s)", (namespace, key))
-    except psycopg.errors.LockNotAvailable as exc:
-        raise DataLockTimeout(
-            f"Timed out after {_LOCK_TIMEOUT} waiting for data lock {namespace:#x}/{key}"
-        ) from exc
+    except _LOCK_DEADLINE_ERRORS as exc:
+        raise _lock_timeout(namespace, key) from exc
 
 
 @contextmanager
@@ -141,12 +177,13 @@ def sync_tenant_data_lock(tenant_ids):
     keys = tenant_lock_keys(tenant_ids)
     owner = _sync_lock_owner()
     inherited_owner, inherited = _held_tenants.get()
+    _refuse_unbridged_thread(owner, inherited_owner, inherited)
     held = inherited if inherited_owner is owner else frozenset()
     if held:
         if set(keys) <= held:
             yield
             return
-        raise LockOrderError("Cannot expand held tenant locks; collect every tenant first")
+        raise LockOrderError(_EXPAND_TENANTS)
     if not keys:
         yield
         return
@@ -164,10 +201,8 @@ def sync_tenant_data_lock(tenant_ids):
 async def _acquire(conn, namespace: int, key: int) -> None:
     try:
         await conn.execute("SELECT pg_advisory_lock(%s, %s)", (namespace, key))
-    except psycopg.errors.LockNotAvailable as exc:
-        raise DataLockTimeout(
-            f"Timed out after {_LOCK_TIMEOUT} waiting for data lock {namespace:#x}/{key}"
-        ) from exc
+    except _LOCK_DEADLINE_ERRORS as exc:
+        raise _lock_timeout(namespace, key) from exc
 
 
 @asynccontextmanager
@@ -179,9 +214,11 @@ async def workspace_data_lock(workspace_id):
     if key in held:
         yield
         return
-    tenant_owner, tenant_keys = _held_tenants.get()
-    if tenant_owner is task and tenant_keys:
-        raise LockOrderError("Cannot acquire a workspace lock while holding tenant locks")
+    _tenant_owner, tenant_keys = _held_tenants.get()
+    if tenant_keys:
+        # Includes child tasks of a T holder: they inherit the context, and a
+        # W they took would wait on the parent's order from a third session.
+        raise LockOrderError(_WORKSPACE_AFTER_TENANT)
     lock_key = _lock_key(key)
     # A dedicated session keeps the lock across awaits and thread-based pipeline
     # work. Closing it also releases the lock if a worker is cancelled or dies.
@@ -212,9 +249,7 @@ async def tenant_data_lock(tenant_ids):
         if set(keys) <= held:
             yield
             return
-        raise LockOrderError(
-            "Cannot expand held tenant locks; collect every tenant before acquiring."
-        )
+        raise LockOrderError(_EXPAND_TENANTS)
     if not keys:
         yield
         return
