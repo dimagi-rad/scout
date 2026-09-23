@@ -101,7 +101,9 @@ ignore = [
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
-addopts = "-v --tb=short -m 'not smoke'"
+# --ds, not just the ini key above: pytest-django lets an exported
+# DJANGO_SETTINGS_MODULE beat the ini, and sourcing .env exports development.
+addopts = "-v --tb=short -m 'not smoke' --ds=config.settings.test"
 markers = [
     "smoke: end-to-end smoke tests requiring live credentials (run with: pytest -m smoke)",
 ]
