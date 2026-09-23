@@ -66,6 +66,9 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         # Dedupe-aware: waits for any in-progress materialization on this
         # workspace's tenants rather than starting a parallel run.
         summary = await materialize_workspace_blocking(workspace_id, user_id, job_id)
+        if summary.get("status") == "denied":
+            return summary
+
         tenants = summary.get("tenants", [])
         loaded = sum(1 for t in tenants if t.get("success"))
         view_schema = summary.get("view_schema")

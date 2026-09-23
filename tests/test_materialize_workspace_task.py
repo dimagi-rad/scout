@@ -1,6 +1,7 @@
 """Tests for the procrastinate-backed materialize_workspace task and the
 ``/api/workspaces/<id>/materialization/cancel/`` endpoint."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,6 +27,125 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_core_denies_read_role_before_loading(workspace, read_user):
+    pipeline = AsyncMock()
+    with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
+        result = await workspaces_tasks.materialize_workspace_core(
+            str(workspace.id), str(read_user.id)
+        )
+
+    assert result["status"] == "denied"
+    assert result["error"]["code"] == "FORBIDDEN"
+    pipeline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_core_rechecks_after_workspace_lock_wait(workspace, write_user):
+    pipeline = AsyncMock()
+    publish = MagicMock()
+    rebuild_views = AsyncMock()
+
+    @asynccontextmanager
+    async def downgrade_during_lock(_workspace_id):
+        await WorkspaceMembership.objects.filter(workspace=workspace, user=write_user).aupdate(
+            role=WorkspaceRole.READ
+        )
+        yield
+
+    with (
+        patch("apps.workspaces.tasks.workspace_data_lock", downgrade_during_lock),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema", publish),
+        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", rebuild_views),
+    ):
+        result = await workspaces_tasks.materialize_workspace_core(
+            str(workspace.id), str(write_user.id)
+        )
+
+    assert result["status"] == "denied"
+    pipeline.assert_not_awaited()
+    publish.assert_not_called()
+    rebuild_views.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_blocking_materialization_rechecks_after_tenant_wait(workspace, write_user):
+    pipeline = AsyncMock()
+    publish = MagicMock()
+    rebuild_views = AsyncMock()
+
+    async def wait_then_downgrade(_workspace_id):
+        await WorkspaceMembership.objects.filter(workspace=workspace, user=write_user).aupdate(
+            role=WorkspaceRole.READ
+        )
+
+    with (
+        patch(
+            "apps.workspaces.tasks._await_in_progress_materializations",
+            new=wait_then_downgrade,
+        ),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema", publish),
+        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", rebuild_views),
+    ):
+        result = await workspaces_tasks.materialize_workspace_blocking(
+            str(workspace.id), str(write_user.id)
+        )
+
+    assert result["status"] == "denied"
+    pipeline.assert_not_awaited()
+    publish.assert_not_called()
+    rebuild_views.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_queued_materialization_downgrade_reaches_resume_as_authorization_failure(
+    workspace, user, tenant_membership_obj, context_with_job_id
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    thread_job = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=context_with_job_id.job.id,
+        tool_call_id="queued-role-loss",
+    )
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=user).aupdate(
+        role=WorkspaceRole.READ
+    )
+
+    with patch(
+        "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
+        new=AsyncMock(),
+    ):
+        result = await materialize_workspace(context_with_job_id, str(workspace.id), str(user.id))
+
+    assert result["status"] == "denied"
+    await thread_job.arefresh_from_db()
+    assert thread_job.materialization_preflight_failures
+    assert all(
+        failure["error_code"] == "FORBIDDEN"
+        for failure in thread_job.materialization_preflight_failures
+    )
+
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        resumed = await workspaces_tasks.resume_thread_after_materialization.func(
+            None, str(thread_job.id)
+        )
+
+    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    await thread_job.arefresh_from_db()
+    assert resumed["terminal_state"] == ThreadJob.State.FAILED
+    assert thread_job.state == ThreadJob.State.FAILED
+    assert "read-write or manage" in body.lower()
+    assert "read-write or manage" in thread_job.error_summary.lower()
 
 
 def _mock_pipeline(provider="commcare", name="commcare_sync"):
@@ -118,7 +238,7 @@ def context_with_job_id():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_dispatches_per_tenant(
-    workspace, tenant_membership_obj, context_with_job_id
+    workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """The task resolves memberships and runs the pipeline once per tenant."""
     captured = {"calls": 0}
@@ -136,7 +256,7 @@ async def test_materialize_workspace_dispatches_per_tenant(
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     assert captured["calls"] == 1
@@ -147,7 +267,7 @@ async def test_materialize_workspace_dispatches_per_tenant(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_records_failure(
-    workspace, tenant_membership_obj, context_with_job_id
+    workspace, tenant_membership_obj, context_with_job_id, user
 ):
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
@@ -161,7 +281,7 @@ async def test_materialize_workspace_records_failure(
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     assert result["all_succeeded"] is False
@@ -172,7 +292,7 @@ async def test_materialize_workspace_records_failure(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_surfaces_team_mismatch_distinctly(
-    workspace, tenant_membership_obj, context_with_job_id
+    workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """A team-mismatch credential failure must surface a distinct, actionable
     re-authorize message — NOT the generic "No usable credential could be resolved" — so a
@@ -189,7 +309,7 @@ async def test_materialize_workspace_surfaces_team_mismatch_distinctly(
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     assert result["all_succeeded"] is False
@@ -215,7 +335,7 @@ def multi_tenant_workspace(db, workspace, user):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_rebuilds_view_schema_when_multi_tenant_succeeds(
-    multi_tenant_workspace, tenant_membership_obj, context_with_job_id
+    multi_tenant_workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """After all tenants materialize, the workspace view schema is rebuilt
     so the agent's next list_tables call sees the namespaced views."""
@@ -235,7 +355,7 @@ async def test_materialize_workspace_rebuilds_view_schema_when_multi_tenant_succ
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(multi_tenant_workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     assert result["all_succeeded"] is True
@@ -245,7 +365,7 @@ async def test_materialize_workspace_rebuilds_view_schema_when_multi_tenant_succ
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_skips_view_rebuild_for_single_tenant(
-    workspace, tenant_membership_obj, context_with_job_id
+    workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """Single-tenant workspaces don't use a view schema, so we must not
     attempt to build one (build_view_schema would raise for tenant_count==1)."""
@@ -265,7 +385,7 @@ async def test_materialize_workspace_skips_view_rebuild_for_single_tenant(
         await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     mock_manager.build_view_schema.assert_not_called()
@@ -274,7 +394,7 @@ async def test_materialize_workspace_skips_view_rebuild_for_single_tenant(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_reconciles_view_schema_when_any_tenant_failed(
-    multi_tenant_workspace, tenant_membership_obj, context_with_job_id
+    multi_tenant_workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """arch #255, 03#1: when even one tenant pipeline fails, the tenant DROP
     already cascade-dropped the workspace's own namespaced views, so the view
@@ -298,7 +418,7 @@ async def test_materialize_workspace_reconciles_view_schema_when_any_tenant_fail
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(multi_tenant_workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     assert result["all_succeeded"] is False
@@ -308,7 +428,7 @@ async def test_materialize_workspace_reconciles_view_schema_when_any_tenant_fail
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
-    multi_tenant_workspace, tenant_membership_obj, context_with_job_id
+    multi_tenant_workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """If build_view_schema raises (e.g. DB write failure), the materialize
     task must still defer the resume task so the user is not left with a
@@ -332,7 +452,7 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(multi_tenant_workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     # The task returns successfully (tenants succeeded), the view rebuild
@@ -347,7 +467,7 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_breaks_on_cancel(
-    workspace, tenant_membership_obj, context_with_job_id
+    workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """When the pipeline raises MaterializationCancelled, processing stops."""
     with (
@@ -362,7 +482,7 @@ async def test_materialize_workspace_breaks_on_cancel(
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     assert result["all_succeeded"] is False
@@ -372,7 +492,7 @@ async def test_materialize_workspace_breaks_on_cancel(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_core_runs_without_deferring_resume(
-    workspace, tenant_membership_obj
+    workspace, tenant_membership_obj, user
 ):
     """materialize_workspace_core does the tenant loop + view rebuild but does
     NOT defer any chat-resume task — headless callers (recipes) invoke it
@@ -389,7 +509,7 @@ async def test_materialize_workspace_core_runs_without_deferring_resume(
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
         result = await workspaces_tasks.materialize_workspace_core(
-            str(workspace.id), user_id="", job_id=None
+            str(workspace.id), user_id=str(user.id), job_id=None
         )
 
     assert result["all_succeeded"] is True
@@ -400,7 +520,7 @@ async def test_materialize_workspace_core_runs_without_deferring_resume(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_blocking_runs_immediately_when_idle(
-    workspace, tenant, tenant_membership_obj, monkeypatch
+    workspace, tenant, tenant_membership_obj, monkeypatch, user
 ):
     """With no in-progress materialization, the headless blocking entrypoint
     runs the core immediately without waiting."""
@@ -418,7 +538,7 @@ async def test_materialize_workspace_blocking_runs_immediately_when_idle(
     monkeypatch.setattr(workspaces_tasks, "materialize_workspace_core", fake_core)
     monkeypatch.setattr("apps.workspaces.tasks.asyncio.sleep", fake_sleep)
 
-    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id))
+    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id), str(user.id))
 
     assert slept["n"] == 0  # nothing in progress → no waiting
     assert core["n"] == 1
@@ -428,7 +548,7 @@ async def test_materialize_workspace_blocking_runs_immediately_when_idle(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_blocking_waits_out_in_progress_run(
-    workspace, tenant, tenant_membership_obj, monkeypatch
+    workspace, tenant, tenant_membership_obj, monkeypatch, user
 ):
     """If a materialization is already ACTIVE for one of the workspace's
     tenants, the blocking entrypoint WAITS for it to clear before starting its
@@ -461,7 +581,7 @@ async def test_materialize_workspace_blocking_waits_out_in_progress_run(
     monkeypatch.setattr(workspaces_tasks, "materialize_workspace_core", fake_core)
     monkeypatch.setattr("apps.workspaces.tasks.asyncio.sleep", fake_sleep)
 
-    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id))
+    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id), str(user.id))
 
     assert slept["n"] >= 1  # it waited for the in-progress run
     assert core["n"] == 1  # then ran its own
@@ -641,6 +761,9 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
         name="bare-no-memberships",
         created_by=user,
     )
+    await WorkspaceMembership.objects.acreate(
+        workspace=bare_ws, user=user, role=WorkspaceRole.MANAGE
+    )
     # Create a ThreadJob bound to context_with_job_id.job.id so the resume
     # finally-block can locate it.
     thread = await Thread.objects.acreate(workspace=bare_ws, user=user)
@@ -656,7 +779,7 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(bare_ws.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     # Early-return error envelope returned to the worker. all_succeeded is now
@@ -698,10 +821,11 @@ async def test_materialize_workspace_defers_resume_on_workspace_not_found(
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id="00000000-0000-0000-0000-000000000000",
-            user_id="",
+            user_id=str(user.id),
         )
 
-    assert result == {"error": "Workspace not found"}
+    assert result["status"] == "denied"
+    assert result["error"]["code"] == "FORBIDDEN"
     resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
 
 
@@ -786,7 +910,7 @@ async def test_materialize_workspace_chains_resume_task(
         await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     resume_mock.defer_async.assert_awaited_once()
@@ -1129,7 +1253,7 @@ async def test_materialize_workspace_defers_rebuild_for_sibling_view_schemas(
         await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     mock_rebuild.assert_awaited_once_with(workspace_id=str(sibling_b.id))
@@ -1163,7 +1287,7 @@ async def test_materialize_workspace_dedupes_sibling_rebuild(
         await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     assert mock_rebuild.await_count == 1
@@ -1173,7 +1297,7 @@ async def test_materialize_workspace_dedupes_sibling_rebuild(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
-    workspace, tenant_membership_obj, context_with_job_id
+    workspace, tenant_membership_obj, context_with_job_id, user
 ):
     """Regression: with no qualifying sibling (no other multi-tenant workspace
     sharing the tenant + view schema), no rebuild is deferred."""
@@ -1191,7 +1315,7 @@ async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
         await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
-            user_id="",
+            user_id=str(user.id),
         )
 
     mock_rebuild.assert_not_awaited()
@@ -1323,18 +1447,61 @@ async def test_fully_reachable_workspace_still_reports_success(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_no_memberships_at_all_names_the_tenants_it_could_not_load(workspace, tenant, user):
-    """The early return gave ``"tenants": []``, so the caller could not tell which
-    sources were missing — or that anything was missing at all."""
+async def test_no_tenant_membership_denies_before_loading(workspace, tenant, user):
+    """A stale workspace row cannot authorize loading after tenant access is removed,
+    and the denial names the tenant with reconnect guidance rather than a role error."""
     await TenantMembership.objects.filter(user=user, tenant=tenant).adelete()
+    pipeline = AsyncMock()
 
-    result, mock_cube = await _materialize_as(user, workspace)
+    with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
+        result, mock_cube = await _materialize_as(user, workspace)
 
     assert result["all_succeeded"] is False
     assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
     assert result["tenants"][0]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
     assert result["guidance"]
+    pipeline.assert_not_awaited()
     mock_cube.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
+    workspace, tenant, user, context_with_job_id
+):
+    assert (
+        await WorkspaceMembership.objects.aget(workspace=workspace, user=user)
+    ).role == WorkspaceRole.MANAGE
+    await TenantMembership.objects.filter(user=user, tenant=tenant).adelete()
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    thread_job = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=context_with_job_id.job.id,
+        tool_call_id="manager-lost-tenant",
+    )
+
+    with patch(
+        "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
+        new=AsyncMock(),
+    ):
+        result = await materialize_workspace(context_with_job_id, str(workspace.id), str(user.id))
+
+    assert "status" not in result
+    await thread_job.arefresh_from_db()
+    assert [f["error_code"] for f in thread_job.materialization_preflight_failures] == [
+        ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    ]
+
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        await workspaces_tasks.resume_thread_after_materialization.func(None, str(thread_job.id))
+
+    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    await thread_job.arefresh_from_db()
+    assert "Settings → Connections" in body
+    assert "read-write or manage" not in body.lower()
+    assert "read-write or manage" not in thread_job.error_summary.lower()
 
 
 @pytest.mark.asyncio
@@ -1644,33 +1811,19 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_later_failed_attempt_cannot_promote_an_included_tenant(
-    multi_tenant_workspace, tenant, tenant_membership_obj, user, admin_user
+async def test_missing_actor_cannot_borrow_other_memberships(
+    multi_tenant_workspace, tenant_membership_obj
 ):
-    await TenantMembership.objects.acreate(user=admin_user, tenant=tenant)
-    calls = 0
+    pipeline = AsyncMock()
+    with (
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+    ):
+        result = await workspaces_tasks.materialize_workspace_core(
+            str(multi_tenant_workspace.id), user_id=""
+        )
 
-    def pipeline(membership, *_args):
-        nonlocal calls
-        if membership.tenant_id == tenant.id:
-            calls += 1
-            if calls == 2:
-                raise RuntimeError("second refresh failed after the first succeeded")
-        return {"status": "completed"}
-
-    coverage = {
-        "included_tenants": [
-            {"tenant_id": str(t.id)} async for t in multi_tenant_workspace.tenants.all()
-        ],
-        "excluded_tenants": [],
-    }
-    result, cube = await _materialize_as(
-        MagicMock(id=""),
-        multi_tenant_workspace,
-        pipeline_side_effect=pipeline,
-        view_schema_coverage=coverage,
-    )
-    assert calls == 2
-    assert result["all_succeeded"] is False
+    pipeline.assert_not_awaited()
+    assert result["status"] == "denied"
+    assert result["error"]["code"] == "FORBIDDEN"
     cube.assert_not_called()
-    assert result["cube_schema"]["ok"] is False
