@@ -108,9 +108,11 @@ test('denial diagnostics tolerate missing or malformed execution data', () => {
   assert.deepEqual(describeDenials([{ type: 'result', permission_denials: [null] }]), ['Denied tool call 1: unknown']);
 });
 test('denial diagnostics are capped so the annotation limit cannot hide the count', () => {
-  const denials = Array.from({ length: 13 }, () => ({ tool_name: 'Bash', tool_input: { command: 'x' } }));
-  const lines = describeDenials([{ type: 'result', permission_denials: denials }]);
-  assert.equal(lines.length, 11);
-  assert.equal(lines[9], 'Denied tool call 10: Bash command="x"');
-  assert.equal(lines[10], '...and 3 more denied tool call(s).');
+  const denial = { tool_name: 'Bash', tool_input: { command: 'x' } };
+  const lines = describeDenials([{ type: 'result', permission_denials: Array(13).fill(denial) }]);
+  assert.equal(lines.length, 10);
+  assert.equal(lines[8], 'Denied tool call 9: Bash command="x"');
+  assert.equal(lines[9], '...and 4 more denied tool call(s).');
+  assert.equal(describeDenials([{ type: 'result', permission_denials: Array(10).fill(denial) }]).at(-1),
+    'Denied tool call 10: Bash command="x"');
 });

@@ -60,14 +60,15 @@ function describeDenials(sdkMessages) {
   const result = finalResult(sdkMessages);
   if (!result || !Array.isArray(result.permission_denials)) return [];
   const denials = result.permission_denials;
-  const lines = denials.slice(0, DENIAL_LIST_LIMIT).map((denial, index) => {
+  const shown = denials.length > DENIAL_LIST_LIMIT ? DENIAL_LIST_LIMIT - 1 : denials.length;
+  const lines = denials.slice(0, shown).map((denial, index) => {
     const [tool] = safeToolNames([denial]);
     const toolInput = isObject(denial) && isObject(denial.tool_input) ? denial.tool_input : {};
     const field = ['command', 'file_path', 'path', 'pattern'].find(key => typeof toolInput[key] === 'string');
     const detail = field ? ` ${field}=${JSON.stringify(sanitizeDenialInput(toolInput[field]))}` : '';
     return `Denied tool call ${index + 1}: ${tool}${detail}`;
   });
-  if (denials.length > DENIAL_LIST_LIMIT) lines.push(`...and ${denials.length - DENIAL_LIST_LIMIT} more denied tool call(s).`);
+  if (shown < denials.length) lines.push(`...and ${denials.length - shown} more denied tool call(s).`);
   return lines;
 }
 
