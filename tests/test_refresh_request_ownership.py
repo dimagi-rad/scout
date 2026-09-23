@@ -693,7 +693,9 @@ def test_denied_refresh_reports_which_authority_was_lost(
 
 
 def _stub_registry(tenant):
-    pipeline = MagicMock(provider=tenant.provider, name="refresh_pipeline")
+    pipeline = MagicMock(provider=tenant.provider)
+    # ``name`` is a Mock constructor argument, so it must be set afterwards.
+    pipeline.name = "refresh_pipeline"
     registry = MagicMock()
     registry.list.return_value = [pipeline]
     registry.get.return_value = pipeline
@@ -876,8 +878,10 @@ def test_legacy_job_search_runs_before_the_tenant_lock(
     sql = [query["sql"] for query in queries.captured_queries]
     searches = [i for i, q in enumerate(sql) if "procrastinate_jobs" in q and "'schema_id'" in q]
     tenant_lock = next(
-        i for i, q in enumerate(sql) if 'FROM "users_tenant"' in q and "FOR UPDATE" in q
+        (i for i, q in enumerate(sql) if 'FROM "users_tenant"' in q and "FOR UPDATE" in q),
+        None,
     )
+    assert tenant_lock is not None, "refresh view no longer takes the tenant row lock"
     assert searches
     assert max(searches) < tenant_lock
     assert all("FOR UPDATE" not in sql[i] for i in searches)
