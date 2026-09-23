@@ -40,6 +40,11 @@ class TenantSchema(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     last_accessed_at = models.DateTimeField(null=True, blank=True)
+    refresh_job_id = models.BigIntegerField(null=True, blank=True, unique=True)
+    refresh_workspace_id = models.UUIDField(null=True, blank=True)
+    refresh_actor_user_id = models.BigIntegerField(null=True, blank=True)
+    refresh_membership_id = models.UUIDField(null=True, blank=True)
+    refresh_claimed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-last_accessed_at"]
