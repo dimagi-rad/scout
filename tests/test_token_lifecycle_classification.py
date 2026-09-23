@@ -121,6 +121,7 @@ class TestSyncRefreshLogLevels:
 
         assert "surprise-leaky-value" not in caplog.text
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings, "expected a WARNING record"
         assert "other" in warnings[0].getMessage()
 
     @pytest.mark.parametrize("status", [400, 401, 403, 429])

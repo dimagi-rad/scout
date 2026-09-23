@@ -171,13 +171,22 @@ class TestTokenRefresh:
             refresh_token="new_refresh_token",
             expires_at=timezone.now() + timedelta(hours=1),
         )
+        before = timezone.now()
         with patch(
             "apps.users.services.token_refresh._apersist_refresh_response",
             new_callable=AsyncMock,
             return_value=TokenRefreshResult(TokenRefreshStatus.APPLIED, persisted),
-        ):
+        ) as persist:
             result = await refresh_oauth_token(social_token, token_url)
 
+        # Persistence is stubbed, so pin what it was handed: the provider response,
+        # not the canned snapshot below, is what must reach the database.
+        persist.assert_awaited_once()
+        refreshed = persist.await_args.args[1]
+        assert refreshed.access_token == "new_access_token"
+        assert refreshed.refresh_token == "new_refresh_token"
+        assert before + timedelta(seconds=3600) <= refreshed.expires_at
+        assert refreshed.expires_at <= timezone.now() + timedelta(seconds=3600)
         assert result == "new_access_token"
         assert social_token.token == "new_access_token"
         assert social_token.token_secret == "new_refresh_token"
@@ -226,6 +235,10 @@ class TestTokenRefresh:
         assert all(r.levelno == logging.WARNING for r in records)
         assert not any(r.levelno >= logging.ERROR for r in records)
         assert not any(r.exc_info for r in records)
+        # The OAuth error code is a fixed enum and the only signal separating a dead
+        # grant from our own misconfiguration, so it must be named; the secret and
+        # the body must not.
+        assert "invalid_grant" in caplog.text
         assert "dead_refresh_token" not in caplog.text
         assert "leaked-body-marker" not in caplog.text
 

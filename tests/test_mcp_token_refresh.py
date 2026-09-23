@@ -140,7 +140,7 @@ class TestCredentialResolverTokenRefresh:
 
 class TestSyncTokenRefresh:
     @pytest.fixture(autouse=True)
-    def _mock_connection_health_storage(self, mocker):
+    def _isolate_persistence_for_http_unit_tests(self, mocker):
         preflight = mocker.patch("apps.users.services.token_refresh._preflight_token").return_value
         preflight.refresh_token = "old-refresh"
         preflight.expires_at = None
@@ -180,10 +180,19 @@ class TestSyncTokenRefresh:
             patch(
                 "apps.users.services.token_refresh._persist_refresh_response",
                 return_value=TokenRefreshResult(TokenRefreshStatus.APPLIED, persisted),
-            ),
+            ) as persist,
         ):
+            before = timezone.now()
             new = refresh_oauth_token_sync(social_token, "https://token/")
 
+        # Persistence is stubbed, so pin what it was handed: the provider response,
+        # not the canned snapshot above, is what must reach the database.
+        persist.assert_called_once()
+        refreshed = persist.call_args.args[1]
+        assert refreshed.access_token == "brand-new"
+        assert refreshed.refresh_token == "rotated-refresh"
+        assert before + timedelta(seconds=900) <= refreshed.expires_at
+        assert refreshed.expires_at <= timezone.now() + timedelta(seconds=900)
         assert new == "brand-new"
         assert social_token.token == "brand-new"
         assert social_token.token_secret == "rotated-refresh"
