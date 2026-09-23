@@ -1379,11 +1379,12 @@ async def test_partially_covering_requester_is_refused_before_loading(
     loader, so #364's partial load cannot start; only the missing tenant is named."""
     other = await _add_second_tenant(workspace)
 
-    with patch("apps.workspaces.tasks._run_pipeline_with_progress") as pipeline:
-        result, cube = await _materialize_as(user, workspace)
+    result, cube = await _materialize_as(
+        user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
+    )
 
-    pipeline.assert_not_called()
     cube.assert_not_called()
+    assert result["status"] == "denied"
     assert result["all_succeeded"] is False
     assert [(r["tenant"], r["error_code"]) for r in result["tenants"]] == [
         (other.external_id, ErrorCode.WORKSPACE_TENANT_UNREACHABLE)

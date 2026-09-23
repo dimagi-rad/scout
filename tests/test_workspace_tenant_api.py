@@ -96,10 +96,10 @@ def test_cannot_remove_last_tenant_from_workspace(api_client, user, workspace, t
     assert "last" in resp.data["error"].lower()
 
 
-def test_add_tenant_already_in_workspace_requires_membership(
+def test_add_tenant_refused_when_member_lacks_a_workspace_tenant(
     api_client, user, workspace, tenant, tenant2
 ):
-    """Idempotent re-add must still verify the user holds TenantMembership for that tenant."""
+    """A member lacking one of the workspace's tenants cannot manage its sources at all."""
     # tenant2 is already in workspace via ORM, but user has NO TenantMembership for tenant2
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
 
