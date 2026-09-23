@@ -158,7 +158,20 @@ test('oversized review text is truncated below GitHub\'s comment limit', () => {
   assert.ok(emoji.length <= COMMENT_LIMIT);
   assert.doesNotMatch(emoji, /[\ud800-\udbff](?![\udc00-\udfff])/);
   assert.equal(renderReviewComment('z'.repeat(1000), RECEIPT), `${'z'.repeat(1000)}\n\n${marker(RECEIPT)}`);
-  const fenced = renderReviewComment(`intro\n\`\`\`\n${'w'.repeat(COMMENT_LIMIT)}\n\`\`\``, RECEIPT);
-  assert.ok(fenced.startsWith("intro\n```\n```\n\n_The workflow truncated"));
-  assert.ok(fenced.length <= COMMENT_LIMIT);
+});
+test('truncation keeps a long final line and closes the severed fence', () => {
+  const note = "\n\n_The workflow truncated";
+  const longLine = renderReviewComment(`intro\n\`\`\`\n${'w'.repeat(COMMENT_LIMIT)}\n\`\`\``, RECEIPT);
+  assert.ok(longLine.length <= COMMENT_LIMIT);
+  assert.ok(longLine.length > COMMENT_LIMIT - 5000, 'a single long line must not discard the review');
+  assert.match(longLine, new RegExp(`w\\n\`\`\`${note}`));
+  const shortTail = renderReviewComment(`${'line\n'.repeat(20000)}`, RECEIPT);
+  assert.match(shortTail, new RegExp(`line${note}`));
+  for (const [open, close] of [['````', '````'], ['~~~', '~~~']]) {
+    const body = renderReviewComment(`${open}md\n\`\`\`\n${'v\n'.repeat(COMMENT_LIMIT)}`, RECEIPT);
+    assert.ok(body.includes(`v\n${close}${note}`), `closes ${open}`);
+    assert.ok(body.length <= COMMENT_LIMIT);
+  }
+  const closed = renderReviewComment(`\`\`\`\ncode\n\`\`\`\n${'u\n'.repeat(COMMENT_LIMIT)}`, RECEIPT);
+  assert.match(closed, new RegExp(`u${note}`));
 });
