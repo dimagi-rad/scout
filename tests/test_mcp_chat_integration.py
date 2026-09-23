@@ -367,7 +367,7 @@ class TestAgentGraphAssembly:
         mock_mcp_tool = MagicMock()
         mock_mcp_tool.name = "semantic_query"
 
-        tools = _build_tools(workspace, user, [mock_mcp_tool])
+        tools = _build_tools(workspace, user, [mock_mcp_tool], write_capable=True)
         tool_names = [t.name for t in tools]
 
         # MCP tool should be first
@@ -382,7 +382,7 @@ class TestAgentGraphAssembly:
         """With empty MCP tools, only local tools should be present."""
         from apps.agents.graph.base import _build_tools
 
-        tools = _build_tools(workspace, user, [])
+        tools = _build_tools(workspace, user, [], write_capable=True)
         tool_names = [t.name for t in tools]
 
         # Only local tools
@@ -405,7 +405,7 @@ class TestAgentGraphAssembly:
             t.name = name
             mcp_tools.append(t)
 
-        tools = _build_tools(workspace, user, mcp_tools)
+        tools = _build_tools(workspace, user, mcp_tools, write_capable=True)
         tool_names = [t.name for t in tools]
 
         for name in ["semantic_query", "query", "list_tables", "describe_table", "get_metadata"]:

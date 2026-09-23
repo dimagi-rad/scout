@@ -24,7 +24,10 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from apps.agents.graph.state import AgentState, prune_messages
-from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
+from apps.agents.prompts.artifact_prompt import (
+    ARTIFACT_PROMPT_ADDITION,
+    ARTIFACT_READ_ONLY_PROMPT_ADDITION,
+)
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
@@ -32,6 +35,7 @@ from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
+from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
@@ -86,6 +90,7 @@ MCP_TOOL_NAMES = frozenset(
 )
 
 LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
+ARTIFACT_READ_TOOL_NAMES = frozenset({"artifact_graph_overview", "get_artifact_semantic_queries"})
 
 # MCP tools the server advertises but that must NEVER be exposed to the agent.
 #
@@ -102,6 +107,7 @@ LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 # therefore filtered out before tools are bound to the LLM. The MCP server still
 # defines the tool so operator/HTTP callers are unaffected.
 AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
+AGENT_WRITE_MCP_TOOLS = frozenset({"run_materialization", "cancel_materialization"})
 
 # Context params the graph injects into every MCP tool call server-side. They
 # are hidden from the LLM-facing tool schema (so the model never sets them) and
@@ -870,6 +876,7 @@ async def build_agent_graph(
         interactive=interactive,
         job_id=job_id,
         canvas_write=canvas_write,
+        write_capable=write_capable,
     )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
@@ -1038,6 +1045,7 @@ def _build_tools(
     interactive: bool = True,
     job_id: int | None = None,
     canvas_write: bool = False,
+    write_capable: bool = False,
 ) -> list:
     """Build the tool list: MCP data tools plus local artifact/recipe/learning
     tools, and a blocking materialization tool in headless mode.
@@ -1050,6 +1058,8 @@ def _build_tools(
     # blocking materialize tool, which runs the pipeline inline and returns when
     # data is ready.
     excluded = set(AGENT_EXCLUDED_MCP_TOOLS)
+    if not write_capable:
+        excluded.update(AGENT_WRITE_MCP_TOOLS)
     if not interactive:
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
@@ -1057,15 +1067,22 @@ def _build_tools(
     from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
     from apps.agents.tools.canvas_tool import create_canvas_read_tool
 
-    tools.append(create_save_learning_tool(workspace, user))
-    tools.append(
-        create_artifact_manager_tool(
-            workspace,
-            user,
-            mcp_tools or [],
-            conversation_id=conversation_id,
+    if write_capable:
+        tools.append(create_save_learning_tool(workspace, user))
+        tools.append(
+            create_artifact_manager_tool(
+                workspace,
+                user,
+                mcp_tools or [],
+                conversation_id=conversation_id,
+            )
         )
-    )
+    else:
+        tools.extend(
+            item
+            for item in create_artifact_graph_tools(workspace, user, conversation_id)
+            if item.name in ARTIFACT_READ_TOOL_NAMES
+        )
     if interactive and conversation_id:
         # The canvas is thread-bound; headless (recipe) runs have no thread.
         # The parent keeps a read-only canvas_read for cheap draft questions;
@@ -1081,8 +1098,9 @@ def _build_tools(
                     conversation_id=conversation_id,
                 )
             )
-    tools.append(create_recipe_tool(workspace, user))
-    if not interactive:
+    if write_capable:
+        tools.append(create_recipe_tool(workspace, user))
+    if not interactive and write_capable:
         tools.append(create_materialization_tool(workspace, user, job_id))
     return tools
 
@@ -1145,7 +1163,10 @@ async def _build_stable_system_prompt(
             return value
 
     # Stable sections (cacheable prefix)
-    stable_sections = [BASE_SYSTEM_PROMPT, ARTIFACT_PROMPT_ADDITION]
+    artifact_prompt = (
+        ARTIFACT_PROMPT_ADDITION if write_capable else ARTIFACT_READ_ONLY_PROMPT_ADDITION
+    )
+    stable_sections = [BASE_SYSTEM_PROMPT, artifact_prompt]
 
     if workspace.system_prompt:
         stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
