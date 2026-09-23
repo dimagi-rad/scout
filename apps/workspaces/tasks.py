@@ -365,7 +365,17 @@ async def refresh_tenant_schema(
     new_schema = claim.schema
     membership = claim.membership
     if new_schema is None or membership is None:
-        return _refresh_denial_result("")
+        logger.error(
+            "refresh_tenant_schema: claim for schema %s, job %s returned no schema or membership",
+            schema_id,
+            context.job.id,
+        )
+        return {
+            "status": "rejected",
+            "error_code": ErrorCode.INTERNAL_ERROR,
+            "error": "The refresh could not be started. Retry the refresh from the workspace.",
+            "retry_required": True,
+        }
 
     manager = SchemaManager()
     try:
@@ -1128,6 +1138,12 @@ async def _drop_claimed_refresh_schema_and_fail(schema, job_id: int) -> None:
     """Fail and drop only a candidate still owned by this refresh job."""
     claimed = await _to_thread_fresh_db(fail_claimed_refresh_candidate, schema.id, job_id)
     if claimed is None:
+        # Someone else settled this claimed candidate (e.g. the reconciler after a
+        # false stall); its queued drop may have run before this job's last write.
+        try:
+            await _drop_failed_refresh_schema(schema.id)
+        except Exception:
+            logger.exception("Failed to drop settled refresh schema '%s'", schema.schema_name)
         return
     manager = SchemaManager()
     try:

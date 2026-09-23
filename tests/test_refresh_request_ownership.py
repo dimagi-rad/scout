@@ -33,6 +33,8 @@ from apps.workspaces.services.refresh_requests import (
     DENIED_ROLE_REQUIRED,
     DENIED_WORKSPACE_UNLINKED,
     REFRESH_TASK_NAME,
+    UNSCANNED_GRACE,
+    RefreshClaim,
     activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
@@ -693,7 +695,9 @@ def test_denied_refresh_reports_which_authority_was_lost(
 
 
 def _stub_registry(tenant):
-    pipeline = MagicMock(provider=tenant.provider, name="refresh_pipeline")
+    pipeline = MagicMock(provider=tenant.provider)
+    # ``name`` is a Mock constructor argument, so it must be set afterwards.
+    pipeline.name = "refresh_pipeline"
     registry = MagicMock()
     registry.list.return_value = [pipeline]
     registry.get.return_value = pipeline
@@ -876,8 +880,10 @@ def test_legacy_job_search_runs_before_the_tenant_lock(
     sql = [query["sql"] for query in queries.captured_queries]
     searches = [i for i, q in enumerate(sql) if "procrastinate_jobs" in q and "'schema_id'" in q]
     tenant_lock = next(
-        i for i, q in enumerate(sql) if 'FROM "users_tenant"' in q and "FOR UPDATE" in q
+        (i for i, q in enumerate(sql) if 'FROM "users_tenant"' in q and "FOR UPDATE" in q),
+        None,
     )
+    assert tenant_lock is not None, "refresh view no longer takes the tenant row lock"
     assert searches
     assert max(searches) < tenant_lock
     assert all("FOR UPDATE" not in sql[i] for i in searches)
@@ -1110,3 +1116,100 @@ def test_real_enqueue_is_claimed_and_published_by_the_worker(
                 "DELETE FROM procrastinate_jobs WHERE task_name = %s AND args->>'workspace_id' = %s",
                 [REFRESH_TASK_NAME, str(workspace.id)],
             )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure", ["create_schema", "pipeline"])
+def test_failure_cleanup_drops_schema_the_reconciler_already_failed(
+    workspace, tenant, tenant_membership, refresh_job, failure
+):
+    # A false stall lets the reconciler settle the candidate, and its queued drop may
+    # run before this still-live job's last write recreates the schema. The job must
+    # then drop it itself, as the activation path already does.
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    def settle_then_fail(*_args, **_kwargs):
+        TenantSchema.objects.filter(id=candidate.id).update(state=SchemaState.FAILED)
+        raise RuntimeError("late failure")
+
+    with (
+        patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
+        patch(
+            "apps.workspaces.tasks.SchemaManager.create_physical_schema",
+            side_effect=settle_then_fail if failure == "create_schema" else None,
+        ),
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            return_value={"type": "api_key", "value": "token"},
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
+        patch("apps.workspaces.tasks.run_pipeline", side_effect=settle_then_fail),
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+    ):
+        _run_refresh(job_id, args)
+
+    candidate.refresh_from_db()
+    assert candidate.state == SchemaState.FAILED
+    assert [call.args[0].id for call in teardown.call_args_list] == [candidate.id]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_without_schema_is_not_reported_as_a_role_failure(
+    workspace, tenant, tenant_membership, refresh_job, caplog
+):
+    _candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    with (
+        patch(
+            "apps.workspaces.tasks.claim_refresh_candidate",
+            return_value=RefreshClaim(status="claimed"),
+        ),
+        caplog.at_level(logging.ERROR, logger="apps.workspaces.tasks"),
+    ):
+        result = _run_refresh(job_id, args)
+
+    assert result["error_code"] != ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
+    assert "role" not in result["error"].lower()
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_legacy_materializing_row_does_not_block_refresh(
+    manage_client, workspace, tenant, tenant_membership
+):
+    # Nothing persists MATERIALIZING and no reconciler clears it, so a leftover row
+    # in that state must not answer "in progress" forever.
+    TenantSchema.objects.create(
+        tenant=tenant, schema_name="legacy_materializing", state=SchemaState.MATERIALIZING
+    )
+
+    response, defer = _post_refresh(manage_client, workspace)
+
+    assert response.status_code == 202
+    defer.assert_called_once()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("inserted_before_scan", "recovery_needed"),
+    [(timedelta(seconds=30), False), (UNSCANNED_GRACE + timedelta(minutes=1), True)],
+    ids=["commit-lagging-insert", "long-unseen"],
+)
+def test_unbound_candidate_inserted_before_scan_but_committed_after_stays_in_flight(
+    tenant, inserted_before_scan, recovery_needed
+):
+    # created_at is stamped at INSERT; an old-code refresh can insert before the scan
+    # and commit after it, so a fresh candidate the scan could not see stays in flight.
+    legacy_jobs = find_legacy_refresh_jobs(tenant)
+    late = TenantSchema.objects.create(
+        tenant=tenant, schema_name="unbound_commit_lag", state=SchemaState.PROVISIONING
+    )
+    TenantSchema.objects.filter(id=late.id).update(
+        created_at=legacy_jobs.scanned_at - inserted_before_scan
+    )
+
+    result = _reconcile(tenant, legacy_jobs)
+
+    late.refresh_from_db()
+    assert result.recovery_needed is recovery_needed
+    assert late.state == SchemaState.PROVISIONING

@@ -507,10 +507,7 @@ class RefreshSchemaView(APIView):
                 )
             if (
                 TenantSchema.objects.select_for_update()
-                .filter(
-                    tenant=tenant,
-                    state__in=[SchemaState.PROVISIONING, SchemaState.MATERIALIZING],
-                )
+                .filter(tenant=tenant, state=SchemaState.PROVISIONING)
                 .exists()
             ):
                 return Response(

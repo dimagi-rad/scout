@@ -129,7 +129,7 @@ def _rebind_refresh(schema, membership, workspace):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_refresh_task_denies_legacy_job_without_actor_context(
+async def test_refresh_task_rejects_legacy_job_without_actor_context(
     provisioning_schema, tenant_membership_obj
 ):
     pipeline = MagicMock()
@@ -180,11 +180,14 @@ async def test_refresh_task_denies_read_actor_before_schema_load(
 async def test_refresh_denial_never_demotes_a_serving_schema(
     workspace, provisioning_schema, tenant_membership_obj, read_user
 ):
-    provisioning_schema.state = SchemaState.ACTIVE
-    await provisioning_schema.asave(update_fields=["state"])
     read_membership = await tenant_membership_obj.__class__.objects.aget(
         user=read_user, tenant=provisioning_schema.tenant
     )
+    # Bind the job to the read-only actor so the claim passes its binding check and
+    # only the candidate's ACTIVE state stands between the denial and a settle.
+    await _rebind_refresh(provisioning_schema, read_membership, workspace)
+    provisioning_schema.state = SchemaState.ACTIVE
+    await provisioning_schema.asave(update_fields=["state"])
 
     with patch("apps.workspaces.tasks.run_pipeline") as pipeline:
         result = await refresh_tenant_schema(
@@ -195,7 +198,7 @@ async def test_refresh_denial_never_demotes_a_serving_schema(
             workspace_id=str(workspace.id),
         )
 
-    assert result["status"] == "rejected"
+    assert result == {"status": "ignored"}
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.ACTIVE
     pipeline.assert_not_called()
