@@ -42,11 +42,16 @@ def _recovery_url(artifact):
 
 
 async def _partial_publication(setup):
-    """Expire the required source and really publish only the other tenant."""
+    """Expire the required source and really publish only the other tenant.
+
+    Retirement refuses while this workspace's own views still read the schema,
+    so the views move first (the rebuild excludes a TEARDOWN source) and the
+    physical drop follows — the order production converges on through retries.
+    """
     await TenantSchema.objects.filter(pk=setup.schemas[0].pk).aupdate(state=SchemaState.TEARDOWN)
-    await teardown_schema.func(str(setup.schemas[0].id))
     result = await rebuild_workspace_view_schema.func(str(setup.workspace.id))
     assert result["cube_schema"]["ok"] is True
+    await teardown_schema.func(str(setup.schemas[0].id))
     await setup.view.arefresh_from_db()
     await setup.dataset.arefresh_from_db()
     assert setup.dataset.table_name not in setup.view.view_sources["views"]
@@ -55,6 +60,12 @@ async def _partial_publication(setup):
 
 
 async def _fail_view_build(setup):
+    # A failed rebuild of an ACTIVE row keeps its last-good views serving (D2), so
+    # reach FAILED the way production does: a membership change marks the row
+    # PROVISIONING before the rebuild, and that rebuild fails.
+    await WorkspaceViewSchema.objects.filter(pk=setup.view.pk).aupdate(
+        state=SchemaState.PROVISIONING
+    )
     with patch.object(
         SchemaManager, "_create_readonly_role", side_effect=RuntimeError("Synthetic DDL failure")
     ):
@@ -305,11 +316,12 @@ async def test_older_ready_surface_cannot_hide_current_explicit_missing_view(
     full_surface = await workspace_query_surface(setup.workspace)
     assert full_surface["queryable"] is True
     await TenantSchema.objects.filter(pk=setup.schemas[0].pk).aupdate(state=SchemaState.TEARDOWN)
-    await teardown_schema.func(str(setup.schemas[0].id))
     # Physical publication precedes the catalog/Cube phase. The old model is
     # still readable while the source is restored before its new view is built.
+    # Retirement only drops the schema once these views no longer read it.
     partial_view = await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
     assert setup.dataset.table_name not in partial_view.view_sources["views"]
+    await teardown_schema.func(str(setup.schemas[0].id))
     if source_restored:
         restored = await sync_to_async(SchemaManager().provision)(setup.tenants[0])
         await sync_to_async(_create_table)(setup.dsn, restored.schema_name, count=3)
