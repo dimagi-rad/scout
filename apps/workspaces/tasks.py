@@ -53,6 +53,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.access_freshness import VerificationBudget
 from apps.workspaces.services.data_operation import (
     run_data_thread,
     serialized_workspace_data,
@@ -532,7 +533,10 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
             user = None
         if user is not None:
             access = await aresolve_workspace_access_ex(
-                user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+                user,
+                workspace_id,
+                minimum_role=WorkspaceRole.READ_WRITE,
+                verification=VerificationBudget.BACKGROUND,
             )
             if access.granted:
                 return None
@@ -1522,6 +1526,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                     requester,
                     recovery.workspace_id,
                     minimum_role=WorkspaceRole.READ_WRITE,
+                    verification=VerificationBudget.BACKGROUND,
                 )
                 if requester is not None
                 else None
