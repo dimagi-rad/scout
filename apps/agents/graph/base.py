@@ -37,7 +37,7 @@ from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
-from apps.workspaces.access import aresolve_workspace_access
+from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -225,6 +225,7 @@ def _system_prompt_cache_key(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
+    write_capable: bool = True,
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
@@ -244,7 +245,8 @@ def _system_prompt_cache_key(
     user_id = getattr(user, "id", "anon")
     mode = "i" if interactive else "h"
     canvas_mode = "cw" if canvas_write else "cr"
-    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}"
+    tool_mode = "rw" if write_capable else "ro"
+    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}:{tool_mode}"
 
 
 async def _semantic_catalog_context(workspace) -> str:
@@ -259,7 +261,9 @@ async def _semantic_catalog_context(workspace) -> str:
     )
 
 
-async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
+async def _fetch_semantic_model_context(
+    workspace, interactive: bool = True, write_capable: bool = True
+) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
     active_runs = MaterializationRun.objects.filter(
@@ -316,6 +320,8 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                         "Do not promise an automatic follow-up based on this status.\n\n"
                         f"{ready_context}"
                     )
+        if not write_capable:
+            return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
         return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
@@ -331,6 +337,8 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
             ).afirst()
             if ts is None:
+                if not write_capable:
+                    return _READ_ONLY_MATERIALIZE_GUIDANCE
                 return (
                     _HEADLESS_MATERIALIZE_GUIDANCE
                     if not interactive
@@ -343,11 +351,15 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                     )
                 )
             if ts.state == SchemaState.MATERIALIZING:
+                if not write_capable:
+                    return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
                     else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
+            if not write_capable:
+                return _READ_ONLY_LOADED_SQL_GUIDANCE
             return (
                 "Data is loaded, but no semantic datasets are available yet. "
                 "Run materialization to rebuild the semantic catalog, then use "
@@ -356,16 +368,27 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
         if tenant_count > 1:
             vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
             if vs is not None and vs.state == SchemaState.MATERIALIZING:
+                if not write_capable:
+                    return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
                     else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
+            if not write_capable:
+                guidance = (
+                    _READ_ONLY_LOADED_SQL_GUIDANCE
+                    if vs is not None and vs.state == SchemaState.ACTIVE
+                    else _READ_ONLY_MATERIALIZE_GUIDANCE
+                )
+                return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}"
             return (
                 f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
                 "No semantic datasets are available yet. Call `run_materialization` "
                 "to load workspace data and rebuild the semantic catalog."
             )
+        if not write_capable:
+            return _READ_ONLY_MATERIALIZE_GUIDANCE
         return (
             _HEADLESS_MATERIALIZE_GUIDANCE
             if not interactive
@@ -407,6 +430,24 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
     "`run_materialization` to ensure fresh data — it WAITS for the in-progress "
     "load to finish (it does not start a parallel one) and returns when the data "
     "is ready. Then continue with the requested analysis in the same run."
+)
+
+_READ_ONLY_LOADED_SQL_GUIDANCE = (
+    "Data is loaded, but no semantic datasets are available yet. "
+    "Use `list_tables` and `describe_table` to inspect the loaded tables, then "
+    "read-only `query` SQL to analyze them. This user's workspace role is read-only; "
+    "a read-write workspace role is required to rebuild the semantic catalog."
+)
+
+_READ_ONLY_MATERIALIZE_GUIDANCE = (
+    "Data is not currently queryable, and this user's workspace role is read-only. "
+    "A read-write workspace role is required to load data or rebuild the semantic catalog."
+)
+
+_READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
+    "A data load is already in progress for this workspace. This user's workspace "
+    "role is read-only, so they cannot start or wait through another load. Report that "
+    "the data is still loading and suggest checking back later."
 )
 
 
@@ -812,17 +853,13 @@ async def build_agent_graph(
     """
     logger.info("Building agent graph for workspace %s (interactive=%s)", workspace.id, interactive)
 
-    # Same policy as the canvas REST endpoints: only members above the read
-    # role can stage/commit canvas changes, so read-only members never get the
-    # canvas_manager tool (the tool closures re-check as the hard boundary).
-    canvas_membership = None
-    if interactive and conversation_id and user is not None:
-        _authorized_workspace, canvas_membership = await aresolve_workspace_access(
-            user, workspace.id
+    write_access = None
+    if user is not None and getattr(user, "is_authenticated", False):
+        write_access = await aresolve_workspace_access_ex(
+            user, workspace.id, minimum_role=WorkspaceRole.READ_WRITE
         )
-    canvas_write = bool(
-        canvas_membership is not None and canvas_membership.role != WorkspaceRole.READ
-    )
+    write_capable = bool(write_access is not None and write_access.granted)
+    canvas_write = bool(interactive and conversation_id and write_capable)
 
     # --- Build tools ---
     tools = _build_tools(
@@ -859,6 +896,7 @@ async def build_agent_graph(
         user,
         interactive=interactive,
         canvas_write=canvas_write,
+        write_capable=write_capable,
     )
     logger.debug(
         "System prompt assembled: %d stable + %d volatile chars for workspace %s",
@@ -1054,6 +1092,7 @@ async def _build_system_prompt(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
+    write_capable: bool = True,
 ) -> tuple[str, str]:
     """Assemble the workspace system prompt as a (stable, volatile) split.
 
@@ -1068,11 +1107,13 @@ async def _build_system_prompt(
     """
     has_tenants = await workspace.tenants.aexists()
     stable = await _build_stable_system_prompt(
-        workspace, user, has_tenants, interactive, canvas_write
+        workspace, user, has_tenants, interactive, canvas_write, write_capable
     )
     volatile = ""
     if has_tenants:
-        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
+        semantic_context = await _fetch_semantic_model_context(
+            workspace, interactive, write_capable
+        )
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
         if await workspace.tenants.acount() > 1:
             coverage = (
@@ -1094,10 +1135,9 @@ async def _build_stable_system_prompt(
     has_tenants: bool,
     interactive: bool,
     canvas_write: bool,
+    write_capable: bool,
 ) -> str:
-    cache_key = (
-        f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write)}:{has_tenants}"
-    )
+    cache_key = f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write, write_capable)}:{has_tenants}"
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
