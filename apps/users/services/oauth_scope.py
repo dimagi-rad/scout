@@ -47,6 +47,7 @@ def memberships_on_provider(memberships, provider, *fields):
 
 
 async def amemberships_on_provider(memberships, provider, *fields):
+    """Async twin of :func:`memberships_on_provider`; same contract and invariant."""
     columns, keep, project = _provider_rows(provider, fields)
     return [project(row) async for row in memberships.values_list(*columns) if keep(row)]
 

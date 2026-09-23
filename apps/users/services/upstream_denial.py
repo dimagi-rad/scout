@@ -89,7 +89,9 @@ def record_validated_upstream_denial(connection, *, code, tenant_id=None, now=No
         archived_at__isnull=True,
     )
     # Verification claims alias tenants (commcare-custom on commcare), so an
-    # exact provider match here would leave a denied alias tenant live.
+    # exact provider match here would leave a denied alias tenant live. The id set
+    # is read eagerly (canonicalization is in Python); callers hold the User row
+    # lock, which every membership writer on an existing connection also takes.
     memberships = connection_memberships.filter(
         tenant_id__in=memberships_on_provider(
             connection_memberships, connection.provider, "tenant_id"

@@ -100,3 +100,8 @@ async def test_amemberships_on_provider_matches_sync(user):
     memberships = TenantMembership.all_objects.filter(connection=connection)
 
     assert await amemberships_on_provider(memberships, "commcare", "tenant_id") == [alias.id]
+    assert await amemberships_on_provider(memberships, "commcare", "tenant_id", "archived_at") == [
+        (alias.id, None)
+    ]
+    with pytest.raises(ValueError, match="at least one field is required"):
+        await amemberships_on_provider(memberships, "commcare")
