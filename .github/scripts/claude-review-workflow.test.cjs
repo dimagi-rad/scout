@@ -495,6 +495,32 @@ test("model-written markers cannot forge receipts or state", async () => {
   assert.equal(readState(h.comments).claudeHead, HEAD);
 });
 
+test("a comment listing that lags the post still verifies the created comment", async () => {
+  const h = await prepared();
+  const listing = h.github.paginate;
+  h.github.paginate = async (method) =>
+    (await listing(method)).filter((c) => !c.body?.includes("scout-claude-artifact"));
+  await finishClaude(h);
+  assert.deepEqual(h.failures, []);
+  assert.equal(h.outputs.claude_verified, "true");
+});
+
+test("a created comment missing from the listing still needs a trusted receipt", async () => {
+  for (const patch of [
+    { user: { login: "attacker", type: "Bot" } },
+    { body: "no receipt" },
+  ]) {
+    const h = await prepared();
+    h.github.rest.issues.createComment = async (p) => ({
+      data: { id: 999, user: { login: "github-actions[bot]", type: "Bot" }, body: p.body, ...patch },
+    });
+    await finishClaude(h);
+    assert.ok(h.failures.length);
+    assert.notEqual(h.outputs.claude_verified, "true");
+    assert.match(h.summary, /no new trusted artifact/);
+  }
+});
+
 test("an oversized review is truncated to fit GitHub's comment limit", async () => {
   const h = await prepared();
   patchResult(h, { review_comment: "x".repeat(70000) });

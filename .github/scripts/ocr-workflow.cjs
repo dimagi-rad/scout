@@ -255,10 +255,15 @@ async function finishClaude({ github, context, core, fs, env }) {
       // The workflow posts so the model needs no shell write: markdown in a
       // gh pr comment argument trips the Bash permission checker (run 35856432255).
       // The gate re-reads the PR and comments and verifies the artifact as before.
-      await github.rest.issues.createComment({ ...context.repo, issue_number: Number(env.PR_NUMBER),
-        body: renderReviewComment(structuredResult.review_comment, receipt) });
+      const { data: posted } = await github.rest.issues.createComment({ ...context.repo,
+        issue_number: Number(env.PR_NUMBER), body: renderReviewComment(structuredResult.review_comment, receipt) });
       const { data: latestPr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
       comments = await commentsFor(github, context, env.PR_NUMBER);
+      // The listing can lag the write. The create response is GitHub's own record
+      // of the comment, and it still has to pass the full artifact check.
+      if (posted?.id && !comments.some(comment => String(comment.id) === String(posted.id))) {
+        comments = [...comments, posted];
+      }
       decision = evaluateClaudeReview({ ...review,
         currentPr: { state: latestPr.state, head: latestPr.head.sha, base: latestPr.base.sha },
         baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments });
