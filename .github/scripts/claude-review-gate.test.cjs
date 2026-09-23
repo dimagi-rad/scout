@@ -172,6 +172,9 @@ test('truncation keeps a long final line and closes the severed fence', () => {
     assert.ok(body.includes(`v\n${close}${note}`), `closes ${open}`);
     assert.ok(body.length <= COMMENT_LIMIT);
   }
-  const closed = renderReviewComment(`\`\`\`\ncode\n\`\`\`\n${'u\n'.repeat(COMMENT_LIMIT)}`, RECEIPT);
-  assert.match(closed, new RegExp(`u${note}`));
+  for (const prefix of ['```\ncode\n```\n', '```a`b\n', `${'`'.repeat(2000)}\n`]) {
+    const unfenced = renderReviewComment(`${prefix}${'u\n'.repeat(COMMENT_LIMIT)}`, RECEIPT);
+    assert.match(unfenced, new RegExp(`u${note}`), JSON.stringify(prefix.slice(0, 12)));
+    assert.ok(unfenced.length <= COMMENT_LIMIT);
+  }
 });

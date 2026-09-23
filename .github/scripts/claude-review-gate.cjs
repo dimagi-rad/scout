@@ -138,7 +138,10 @@ function unclosedFence(text) {
   for (const line of text.split('\n')) {
     const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (!fence) continue;
-    if (!open) open = fence[1];
+    if (!open) {
+      // A backtick info string containing a backtick makes the line a paragraph.
+      if (fence[1][0] !== '`' || !fence[2].includes('`')) open = fence[1];
+    }
     else if (fence[1][0] === open[0] && fence[1].length >= open.length && !fence[2].trim()) open = null;
   }
   return open;
