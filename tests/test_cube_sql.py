@@ -31,6 +31,11 @@ def test_only_unquoted_explicit_references_are_interpolated():
     )
 
 
+def test_template_delimiters_and_existing_unicode_escape_are_inert_in_default_ci():
+    assert embed_cube_sql("'`${CUBE}`'") == r"'\u0060\u0024\u007bCUBE\u007d\u0060'"
+    assert embed_cube_sql(r"'\u007b'") == r"'\\u007b'"
+
+
 @pytest.mark.parametrize("value", ["{unknown}", "{CUBE.constructor}", "{CUBE", "{count()}", "1}"])
 def test_unknown_unquoted_references_fail_closed(value):
     with pytest.raises(ValueError, match="Cube SQL reference"):
@@ -67,7 +72,7 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
         field_type="measure",
         measure_type="number",
         metadata={
-            "cube_sql": "{count}::numeric / NULLIF({raw_visits.count}, 0)",
+            "cube_sql": "{CUBE.count}::numeric / NULLIF({raw_visits.count}, 0)",
             "filters": [{"sql": "{CUBE}.\"topic\" = '{count}' /* {unknown} */"}],
         },
     )
@@ -104,7 +109,7 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
     dimensions = {field["name"]: field for field in cubes["raw_visits"]["dimensions"]}
     assert dimensions["topic"]["sql"] == r'{CUBE}."topic\u007bcount\u007d"'
     ratio = next(field for field in cubes["raw_visits"]["measures"] if field["name"] == "ratio")
-    assert ratio["sql"] == "{count}::numeric / NULLIF({raw_visits.count}, 0)"
+    assert ratio["sql"] == "{CUBE.count}::numeric / NULLIF({raw_visits.count}, 0)"
     assert ratio["filters"][0]["sql"] == (
         r"""{CUBE}."topic" = '\u007bcount\u007d' /* \u007bunknown\u007d */"""
     )
@@ -120,8 +125,9 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
     cubes = {cube["name"]: cube for cube in generate_cube_schema(model)["cubes"]}
     assert set(cubes) == {"raw_visits"}
     assert "joins" not in cubes["raw_visits"]
+    custom.metadata = {"cube_sql": compiled}
     custom.is_visible = False
-    custom.save(update_fields=["is_visible"])
+    custom.save(update_fields=["metadata", "is_visible"])
     schema = generate_cube_schema(model)
     assert len(schema["cubes"]) == 1
     assert "joins" not in schema["cubes"][0]

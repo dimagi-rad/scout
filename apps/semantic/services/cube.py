@@ -82,7 +82,9 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             if field.field_type
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
-        measure_references = references | {f.name for f in fields} | {"CUBE"}
+        measure_references = (
+            references | {f.name for f in fields} | {f"CUBE.{f.name}" for f in fields} | {"CUBE"}
+        )
         measures = [
             _cube_measure(field, references=measure_references)
             for field in fields
