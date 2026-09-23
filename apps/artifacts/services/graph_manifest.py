@@ -16,6 +16,7 @@ from .graph_doc import (
     expected_result_keys,
     normalize_doc,
     query_diagnostics,
+    story_doc_from_artifact_data,
     validate_doc,
 )
 
@@ -50,8 +51,7 @@ def build_semantic_query_manifest(doc: Any) -> dict[str, Any]:
 
 
 def build_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]:
-    story_doc = (artifact.data or {}).get("story_doc") if isinstance(artifact.data, dict) else None
-    return build_semantic_query_manifest(story_doc or {})
+    return build_semantic_query_manifest(story_doc_from_artifact_data(artifact.data))
 
 
 def sync_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]:
