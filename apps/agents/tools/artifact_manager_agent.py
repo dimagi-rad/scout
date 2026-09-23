@@ -21,9 +21,10 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from apps.agents.graph.state import AgentState
+from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     emit_subagent_event,
@@ -74,7 +75,8 @@ class ArtifactManagerInput(BaseModel):
     subagent_event_queue: Any | None = None
 
 
-ARTIFACT_MANAGER_SYSTEM_PROMPT = """
+ARTIFACT_MANAGER_SYSTEM_PROMPT = (
+    """
 You are Scout's Artifact Manager subagent. Your only job is to create, inspect,
 repair, and validate semantic story artifacts. Be concise and deterministic.
 
@@ -190,21 +192,27 @@ For `action="apply"`, `ops` supports only these exact shapes:
 Batch related ops into one atomic apply call. Prefer targeted `set` and
 `add_block` ops for revisions so existing blocks remain intact.
 
-If the requested analysis needs a missing derived field (for example, topic
-labels inferred from OCS message content), return `status: "needs_data_model"`
-and `data_requirements`: a short list naming the missing field, discovered
-source dataset/columns, and required grain or classification decision. The
-parent can inspect raw text and, with explicit user approval, delegate the
-model change to `canvas_manager` before returning here. Do not claim raw text
-analysis is impossible, invent topic labels, write SQL, save a placeholder
-dashboard, or keep retrying missing semantic member names. Existing schema or
-query execution errors must follow the typed outcome above, not invent a replacement data model.
+If discovery confirms a missing analytical capability, return
+`status: "needs_data_model"` and structured `data_requirements` matching the
+schema below. Choose dimension, measure, dataset, or relationship from the
+actual data types, row grain, keys, and supported operations, not the provider
+name. Use exact discovered source_datasets/source_members; describe the need,
+grain, and unresolved decisions. Do not invent member names, require a new
+dataset for every field, infer join keys, or save a placeholder artifact.
+Requirements are proposals, never authorization. The parent must verify them
+and obtain explicit user approval before delegating to `canvas_manager`.
+Existing schema or query execution errors must follow the typed outcome above,
+not invent a replacement data model. Keep raw-data inspection and SQL outside
+this subagent.
 
 Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,
 `runtime_summary`, and `message`. Include `data_requirements` only when the
-parent must prepare missing derived fields.
+parent must prepare missing analytical capabilities.
 """
+    + "\nData requirements JSON Schema:\n"
+    + json.dumps(DATA_REQUIREMENTS.json_schema())
+)
 
 
 def create_artifact_manager_tool(
@@ -807,12 +815,17 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         if artifact_result.get("status") == "error":
             summary["status"] = "error"
             summary["message"] = "Artifact was not published. Follow the typed runtime failures."
-    if status == "needs_data_model" and isinstance(parsed_final, dict):
-        requirements = parsed_final.get("data_requirements")
-        if isinstance(requirements, list):
-            summary["data_requirements"] = [
-                item[:500] for item in requirements if isinstance(item, str) and item.strip()
-            ][:8]
+    if summary["status"] == "needs_data_model" and isinstance(parsed_final, dict):
+        try:
+            summary["data_requirements"] = validate_data_requirements(
+                parsed_final.get("data_requirements")
+            )
+        except ValidationError:
+            summary["status"] = "error"
+            summary["message"] = (
+                "Artifact Manager returned an invalid data-model proposal. "
+                "Retry with complete, bounded structured data_requirements; no model change is authorized."
+            )
     return summary
 
 

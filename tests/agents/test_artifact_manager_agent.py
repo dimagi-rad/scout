@@ -116,14 +116,22 @@ def test_artifact_manager_summary_is_compact():
     }
 
 
+def _topic_requirement():
+    return {
+        "kind": "dataset",
+        "need": "Reviewed topics with unmatched messages kept unclassified",
+        "source_datasets": ["raw_messages"],
+        "source_members": ["raw_messages.content", "raw_messages.message_id"],
+        "grain": "One message per tenant and reviewed snapshot",
+        "decisions": ["User must approve classification method and coverage"],
+    }
+
+
 def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact():
     response = {
         "status": "needs_data_model",
         "message": "Topic labels must be saved before this chart can query them.",
-        "data_requirements": [
-            "Derive topic from raw_messages.content using user-approved classification rules.",
-            "Keep message_id as the row key and created_at for date filters.",
-        ],
+        "data_requirements": [_topic_requirement()],
     }
     message = AIMessage(content=json.dumps(response))
 
@@ -136,15 +144,32 @@ def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact
     assert summary["runtime_summary"] == ""
 
 
-def test_artifact_manager_bounds_data_model_handoff():
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        None,
+        [],
+        ["create a dataset"],
+        [{}],
+        [_topic_requirement()] * 9,
+        [{**_topic_requirement(), "need": "x" * 501}],
+        [{**_topic_requirement(), "grain": "  "}],
+        [{**_topic_requirement(), "source_datasets": []}],
+        [{**_topic_requirement(), "kind": "materialize"}],
+        [{**_topic_requirement(), "user_approved": True}],
+    ],
+)
+def test_artifact_manager_rejects_invalid_data_model_handoff(requirements):
     response = {
         "status": "needs_data_model",
-        "data_requirements": [None, {}, "  ", *["x" * 1000] * 12],
+        "data_requirements": requirements,
     }
 
     summary = _summarize_result([], json.dumps(response))
 
-    assert summary["data_requirements"] == ["x" * 500] * 8
+    assert summary["status"] == "error"
+    assert "data_requirements" not in summary
+    assert "no model change is authorized" in summary["message"]
 
 
 @pytest.mark.asyncio
@@ -152,7 +177,7 @@ async def test_artifact_manager_tool_preserves_data_preparation_handoff(monkeypa
     final = {
         "status": "needs_data_model",
         "message": "A reviewed topic field is needed.",
-        "data_requirements": ["Create message_topics at message grain after user approval."],
+        "data_requirements": [_topic_requirement()],
     }
 
     class FakeGraph:

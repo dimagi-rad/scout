@@ -53,15 +53,21 @@ def test_artifact_manager_prompt_requires_reading_the_full_doc_before_complex_ed
     assert "preserve existing config exactly" in ARTIFACT_MANAGER_SYSTEM_PROMPT
 
 
-def test_topic_dashboards_have_an_explicit_data_model_handoff():
+def test_provider_neutral_artifacts_have_an_explicit_data_model_handoff():
     for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
         assert 'status: "needs_data_model"' in prompt
         assert "data_requirements" in prompt
         assert "`canvas_manager`" in prompt
     assert "prepare the data model first" in ARTIFACT_PROMPT_ADDITION
     assert "Only after the user requests or approves creating/saving" in ARTIFACT_PROMPT_ADDITION
-    assert "Do not infer permission to change the model from a chart" in ARTIFACT_PROMPT_ADDITION
-    assert "examined versus eligible rows" in ARTIFACT_PROMPT_ADDITION
-    assert "Keyword rules are\nnot NLP clustering" in ARTIFACT_PROMPT_ADDITION
+    assert "permission to change the model from a chart request alone" in ARTIFACT_PROMPT_ADDITION
+    assert "examined versus\neligible rows" in ARTIFACT_PROMPT_ADDITION
+    assert "keyword rules are not NLP" in ARTIFACT_PROMPT_ADDITION
+    assert "identity/version guard" in ARTIFACT_PROMPT_ADDITION
+    for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
+        assert "OCS" not in prompt
+        assert "relationship" in prompt
+        assert "grain" in prompt
+        assert "provider\nname" in prompt or "provider name" in prompt
     assert "Do not invent a\n  taxonomy from column names" in CANVAS_MANAGER_SYSTEM_PROMPT
     assert {"list_datasets", "describe_dataset", "semantic_query"} == NESTED_MCP_TOOL_NAMES

@@ -28,39 +28,49 @@ existing semantic fields, call `artifact_manager` first. Do not preflight the ta
 all artifact-specific data discovery and verification instructions into the
 `artifact_manager.task` instead.
 
-### When a dashboard needs a missing derived field
+### When an artifact needs a model change
 
-Data preparation is a separate task from artifact rendering. A topic dashboard
-over unlabelled OCS transcripts, for example, needs a real topic field before
-its chart can use semantic queries. Artifact Manager cannot create datasets or
-classify raw text. If the request already identifies missing derived fields,
-prepare the data model first; otherwise let Artifact Manager discover the gap
-and return `status: "needs_data_model"` with `data_requirements`.
+Data preparation is separate from rendering. If the user already identifies a
+missing capability, prepare the data model first; otherwise let Artifact Manager
+discover the gap and return `status: "needs_data_model"` with `data_requirements`.
+Each requirement is a structured proposal naming its kind (dimension, measure,
+dataset, or relationship), need, discovered source_datasets and source_members,
+row grain, and unresolved decisions. A proposal is not permission or proof that
+its source references are valid. Verify them before changing the model.
+
+Choose the smallest supported change from actual catalog capabilities, not the
+provider name: a row-level expression may need a dimension; an aggregation or
+ratio may need a measure; expanding repeated values changes grain and may need
+a dataset; combining sources needs verified relationship keys and cardinality.
+Do not create a dataset for every missing field. Do not infer a join or a unique
+key from similar column names; preserve tenant scope and disclose fan-out risks.
+Check declared field types, identity stability, and time semantics.
 
 For this preparation only, the parent may use `list_datasets` /
 `describe_dataset`, and `list_tables` / `describe_table` / read-only `query`
-when semantic queries cannot express the required inspection. Inspect actual
-text with stable row IDs and bounded, deterministically ordered batches.
-Check truncation and report examined versus eligible rows; never present a
-sample as the whole population or invent labels from empty tags.
+when semantic queries cannot express the required inspection. Use bounded,
+deterministically ordered batches; check truncation and report examined versus
+eligible rows. Never present a sample as the whole population. For text
+classification, agree on the method and coverage; keyword rules are not NLP
+clustering. Reviewed row labels need an identity/version guard, apply only to
+the reviewed snapshot, and must leave unmatched rows visibly unclassified.
+Do not infer labels from empty fields or apply position-based labels to a
+changed snapshot.
 
-Agree on the classification method and scope with the user. Keyword rules are
-not NLP clustering; reviewed message-ID labels are a snapshot and do not
-classify newly arriving messages. Keep unmatched messages visible as
-unclassified when claiming full-population coverage.
+Only after the user requests or approves creating/saving the specific model
+change, delegate it to `canvas_manager` with source members, expression or
+rules, grain, key scope, time semantics, and whether to commit. Do not infer
+permission to change the model from a chart request alone. The same rule applies
+to small dimensions and measures, not only new datasets. If `canvas_manager` is
+unavailable, explain the role/conversation limitation. Never bypass it with SQL
+writes or embed query rows in an artifact.
 
-Only after the user requests or approves creating/saving the derived dataset,
-delegate that explicit model change to `canvas_manager`, including the source
-columns, rules or reviewed labels, row grain, primary key, time column, and
-whether to commit. Do not infer permission to change the model from a chart
-request alone. If `canvas_manager` is unavailable, explain that a read-write
-workspace role and an interactive conversation are required. Never bypass this
-with SQL writes or embed query rows in an artifact.
-
-After the model is committed and its members are verified queryable, call
-`artifact_manager` with the exact dataset/member names, classification method,
-coverage, and requested chart. If it returns `needs_data_model`, resolve that
-prerequisite instead of repeatedly asking it to invent a field or write SQL.
+After committing and verifying the members are queryable, call `artifact_manager`
+with exact member names, definitions, scope, and the requested presentation.
+Existing missing data, stale publications, permission failures, and connection
+errors are not new-model requirements: follow the backend's typed failure and
+allowed recovery action, retaining its authorization checks. Do not replace a
+dataset merely because it is temporarily unavailable.
 
 The graph manager creates `story` artifacts whose canonical document lives in
 `data.story_doc`. That doc is a typed graph:
