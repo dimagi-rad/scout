@@ -1337,18 +1337,18 @@ async def _add_second_tenant(workspace, *, external_id="teammate-domain", provid
     return other
 
 
-async def _materialize_as(user, workspace, *, pipeline_side_effect=None, view_schema_coverage=None):
+async def _materialize_as(
+    user, workspace, *, pipeline=None, pipeline_side_effect=None, view_schema_coverage=None
+):
     """Run the core as `user`, with the pipeline and both schema builds mocked."""
+    if pipeline is None:
+        pipeline = MagicMock(return_value={"status": "completed"}, side_effect=pipeline_side_effect)
     schema_manager = MagicMock()
     schema_manager.build_view_schema.return_value.tenant_coverage = view_schema_coverage or {}
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
-        patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
-            return_value={"status": "completed"},
-            side_effect=pipeline_side_effect,
-        ),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
         patch("apps.workspaces.tasks.SchemaManager", return_value=schema_manager),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema") as mock_cube,
     ):
@@ -1451,15 +1451,16 @@ async def test_no_tenant_membership_denies_before_loading(workspace, tenant, use
     """A stale workspace row cannot authorize loading after tenant access is removed,
     and the denial names the tenant with reconnect guidance rather than a role error."""
     await TenantMembership.objects.filter(user=user, tenant=tenant).adelete()
-    pipeline = AsyncMock()
+    pipeline = MagicMock()
 
-    with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
-        result, mock_cube = await _materialize_as(user, workspace)
+    result, mock_cube = await _materialize_as(user, workspace, pipeline=pipeline)
+
+    assert result["status"] == "denied"
     assert result["all_succeeded"] is False
     assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
     assert result["tenants"][0]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
     assert result["guidance"]
-    pipeline.assert_not_awaited()
+    pipeline.assert_not_called()
     mock_cube.assert_not_called()
 
 
