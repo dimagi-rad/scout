@@ -1128,6 +1128,12 @@ async def _drop_claimed_refresh_schema_and_fail(schema, job_id: int) -> None:
     """Fail and drop only a candidate still owned by this refresh job."""
     claimed = await _to_thread_fresh_db(fail_claimed_refresh_candidate, schema.id, job_id)
     if claimed is None:
+        # Someone else settled this claimed candidate (e.g. the reconciler after a
+        # false stall); its queued drop may have run before this job's last write.
+        try:
+            await _drop_failed_refresh_schema(schema.id)
+        except Exception:
+            logger.exception("Failed to drop settled refresh schema '%s'", schema.schema_name)
         return
     manager = SchemaManager()
     try:

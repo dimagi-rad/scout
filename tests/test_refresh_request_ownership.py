@@ -1114,3 +1114,38 @@ def test_real_enqueue_is_claimed_and_published_by_the_worker(
                 "DELETE FROM procrastinate_jobs WHERE task_name = %s AND args->>'workspace_id' = %s",
                 [REFRESH_TASK_NAME, str(workspace.id)],
             )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure", ["create_schema", "pipeline"])
+def test_failure_cleanup_drops_schema_the_reconciler_already_failed(
+    workspace, tenant, tenant_membership, refresh_job, failure
+):
+    # A false stall lets the reconciler settle the candidate, and its queued drop may
+    # run before this still-live job's last write recreates the schema. The job must
+    # then drop it itself, as the activation path already does.
+    candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    def settle_then_fail(*_args, **_kwargs):
+        TenantSchema.objects.filter(id=candidate.id).update(state=SchemaState.FAILED)
+        raise RuntimeError("late failure")
+
+    with (
+        patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
+        patch(
+            "apps.workspaces.tasks.SchemaManager.create_physical_schema",
+            side_effect=settle_then_fail if failure == "create_schema" else None,
+        ),
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            return_value={"type": "api_key", "value": "token"},
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
+        patch("apps.workspaces.tasks.run_pipeline", side_effect=settle_then_fail),
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+    ):
+        _run_refresh(job_id, args)
+
+    candidate.refresh_from_db()
+    assert candidate.state == SchemaState.FAILED
+    assert [call.args[0].id for call in teardown.call_args_list] == [candidate.id]
