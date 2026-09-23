@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import yaml
 
 from apps.semantic.models import SemanticField, SemanticModel, SemanticRelationship
-from apps.semantic.services.cube_sql import embed_cube_sql
+from apps.semantic.services.cube_sql import CubeSQLReferenceError, embed_cube_sql
 from apps.semantic.services.field_sql import compile_dimension_sql, dataset_column_names
+
+logger = logging.getLogger(__name__)
 
 
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     """Return a Cube-compatible schema document derived from a semantic model."""
-    datasets = list(model.datasets.filter(is_visible=True).prefetch_related("fields"))
+    all_datasets = list(model.datasets.prefetch_related("fields"))
+    datasets = [dataset for dataset in all_datasets if dataset.is_visible]
+    visible_ids = {dataset.id for dataset in datasets}
+    known_references = {dataset.name for dataset in all_datasets} | {
+        f"{dataset.name}.{field.name}" for dataset in all_datasets for field in dataset.fields.all()
+    }
     references = {dataset.name for dataset in datasets} | {
         f"{dataset.name}.{field.name}"
         for dataset in datasets
@@ -26,18 +34,34 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     )
     joins_by_dataset: dict[str, list[dict[str, Any]]] = {}
     for relationship in relationships:
+        if (
+            relationship.from_dataset_id not in visible_ids
+            or relationship.to_dataset_id not in visible_ids
+        ):
+            continue
         # Cube refuses to compile a cube that defines a join but no primary
         # key; skipping the join keeps the rest of the schema buildable while
         # the relationship stays visible in the catalog.
         if not relationship.from_dataset.primary_key:
             continue
+        try:
+            join_sql = embed_cube_sql(
+                relationship.join_expression, references=references | {"CUBE"}
+            )
+        except CubeSQLReferenceError as exc:
+            if exc.reference not in known_references:
+                raise
+            logger.warning(
+                "Skipping relationship %s referencing hidden member %s",
+                relationship.id,
+                exc.reference,
+            )
+            continue
         joins_by_dataset.setdefault(relationship.from_dataset.name, []).append(
             {
                 "name": relationship.to_dataset.name,
                 "relationship": relationship.relationship_type,
-                "sql": embed_cube_sql(
-                    relationship.join_expression, references=references | {"CUBE"}
-                ),
+                "sql": join_sql,
             }
         )
 
@@ -50,8 +74,9 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             if field.field_type
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
+        measure_references = references | {f.name for f in fields} | {"CUBE"}
         measures = [
-            _cube_measure(field, references=references | {f.name for f in fields} | {"CUBE"})
+            _cube_measure(field, references=measure_references)
             for field in fields
             if field.field_type == SemanticField.FieldType.MEASURE
         ]

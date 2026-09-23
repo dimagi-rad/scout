@@ -47,7 +47,7 @@ def test_custom_sql_literals_are_unchanged_by_cube_compilation():
     if not container:
         pytest.skip("Set SCOUT_CUBE_COMPILER_CONTAINER to a running local Cube container.")
     docker = shutil.which("docker")
-    assert docker
+    assert docker, "The real Cube compiler smoke test requires Docker."
     cases = [
         "SELECT 'Account update' AS topic FROM raw_messages",
         "SELECT '{missing_label}' AS topic FROM raw_messages",
@@ -57,6 +57,7 @@ def test_custom_sql_literals_are_unchanged_by_cube_compilation():
         'SELECT "column{CUBE}" AS topic FROM "table{count}"',
         "SELECT 'line\nbreak\t{CUBE}' AS topic FROM raw_visits -- {unknown}\n",
         r"SELECT '\u007b' AS topic FROM raw_messages",
+        "SELECT '` + 1 + ` ${CUBE}' AS topic FROM raw_messages -- `template`\n",
     ]
     result = subprocess.run(  # noqa: S603
         [docker, "exec", "-i", container, "node", "-e", _COMPILE],

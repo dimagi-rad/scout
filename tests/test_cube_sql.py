@@ -30,6 +30,13 @@ def test_unknown_unquoted_references_fail_closed(value):
         embed_cube_sql(value, references={"CUBE", "count"})
 
 
+def test_invalid_sql_text_and_unterminated_empty_reference_are_domain_errors():
+    with pytest.raises(ValueError, match="Invalid SQL text"):
+        embed_cube_sql("'{unclosed}", references={"CUBE"})
+    with pytest.raises(ValueError, match="Unterminated Cube SQL reference"):
+        embed_cube_sql("{", references={""})
+
+
 @pytest.mark.django_db
 def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(workspace):
     model = SemanticModel.objects.create(workspace=workspace, name="Embedding contract")
@@ -96,3 +103,13 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
     assert cubes["raw_visits"]["joins"][0]["sql"] == (
         r"{raw_visits.topic} = {topics.topic} /* \u007bunknown\u007d */"
     )
+    custom.fields.update(is_visible=False)
+    assert "joins" not in generate_cube_schema(model)["cubes"][0]
+    custom.is_visible = False
+    custom.save(update_fields=["is_visible"])
+    schema = generate_cube_schema(model)
+    assert len(schema["cubes"]) == 1
+    assert "joins" not in schema["cubes"][0]
+    raw.is_visible = False
+    raw.save(update_fields=["is_visible"])
+    assert generate_cube_schema(model)["cubes"] == []

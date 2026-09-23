@@ -3,7 +3,14 @@
 from collections.abc import Collection
 
 from sqlglot.dialects.postgres import Postgres
+from sqlglot.errors import TokenError
 from sqlglot.tokens import TokenType
+
+
+class CubeSQLReferenceError(ValueError):
+    def __init__(self, reference: str):
+        self.reference = reference
+        super().__init__(f"Unknown Cube SQL reference: {{{reference}}}")
 
 
 def embed_cube_sql(sql: str, *, references: Collection[str] = ()) -> str:
@@ -15,7 +22,10 @@ def embed_cube_sql(sql: str, *, references: Collection[str] = ()) -> str:
     """
     if not references:
         return _escape_text(sql)
-    tokens = Postgres().tokenize(sql)
+    try:
+        tokens = Postgres().tokenize(sql)
+    except TokenError as exc:
+        raise ValueError("Invalid SQL text at the Cube embedding boundary.") from exc
     parts: list[str] = []
     position = 0
     index = 0
@@ -25,9 +35,11 @@ def embed_cube_sql(sql: str, *, references: Collection[str] = ()) -> str:
             end = index + 1
             while end < len(tokens) and tokens[end].token_type != TokenType.R_BRACE:
                 end += 1
-            reference = sql[token.end + 1 : tokens[end].start].strip() if end < len(tokens) else ""
+            if end >= len(tokens):
+                raise ValueError("Unterminated Cube SQL reference: missing closing brace.")
+            reference = sql[token.end + 1 : tokens[end].start].strip()
             if reference not in references:
-                raise ValueError(f"Unknown Cube SQL reference: {{{reference}}}")
+                raise CubeSQLReferenceError(reference)
             parts.extend((_escape_text(sql[position : token.start]), "{" + reference + "}"))
             position = tokens[end].end + 1
             index = end
@@ -41,6 +53,8 @@ def embed_cube_sql(sql: str, *, references: Collection[str] = ()) -> str:
 def _escape_text(value: str) -> str:
     return (
         value.replace("\\", "\\\\")
+        .replace("`", "\\u0060")
+        .replace("$", "\\u0024")
         .replace("\n", "\\n")
         .replace("\r", "\\r")
         .replace("\t", "\\t")
