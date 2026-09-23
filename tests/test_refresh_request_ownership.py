@@ -33,6 +33,7 @@ from apps.workspaces.services.refresh_requests import (
     DENIED_ROLE_REQUIRED,
     DENIED_WORKSPACE_UNLINKED,
     REFRESH_TASK_NAME,
+    RefreshClaim,
     activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
@@ -1149,3 +1150,23 @@ def test_failure_cleanup_drops_schema_the_reconciler_already_failed(
     candidate.refresh_from_db()
     assert candidate.state == SchemaState.FAILED
     assert [call.args[0].id for call in teardown.call_args_list] == [candidate.id]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_without_schema_is_not_reported_as_a_role_failure(
+    workspace, tenant, tenant_membership, refresh_job, caplog
+):
+    _candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
+
+    with (
+        patch(
+            "apps.workspaces.tasks.claim_refresh_candidate",
+            return_value=RefreshClaim(status="claimed"),
+        ),
+        caplog.at_level(logging.ERROR, logger="apps.workspaces.tasks"),
+    ):
+        result = _run_refresh(job_id, args)
+
+    assert result["error_code"] != ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
+    assert "role" not in result["error"].lower()
+    assert any(r.levelno == logging.ERROR for r in caplog.records)

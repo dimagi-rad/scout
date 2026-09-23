@@ -365,7 +365,17 @@ async def refresh_tenant_schema(
     new_schema = claim.schema
     membership = claim.membership
     if new_schema is None or membership is None:
-        return _refresh_denial_result("")
+        logger.error(
+            "refresh_tenant_schema: claim for schema %s, job %s returned no schema or membership",
+            schema_id,
+            context.job.id,
+        )
+        return {
+            "status": "rejected",
+            "error_code": ErrorCode.INTERNAL_ERROR,
+            "error": "The refresh could not be started. Retry the refresh from the workspace.",
+            "retry_required": True,
+        }
 
     manager = SchemaManager()
     try:
