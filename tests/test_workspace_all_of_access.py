@@ -245,7 +245,7 @@ def test_list_has_access_agrees_with_the_gate(client, user, partial_member, two_
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/workspaces/{ws}/",
+        "/api/workspaces/{ws}/knowledge/",
         "/api/workspaces/{ws}/knowledge/export/",
         "/api/workspaces/{ws}/artifacts/{artifact}/data/",
         "/api/workspaces/{ws}/artifacts/{artifact}/export/html/",
@@ -410,8 +410,18 @@ class TestRemediationWithoutCoverage:
 
         assert resp.status_code == 204
 
+    def test_can_reach_the_page_that_offers_the_fixes(self, client, manager, partial_member):
+        client.force_login(manager)
+
+        assert client.get(f"/api/workspaces/{partial_member.id}/").status_code == 200
+        members = client.get(f"/api/workspaces/{partial_member.id}/members/").json()["members"]
+        assert str(manager.id) in {m["user_id"] for m in members}
+
     def test_still_cannot_read_workspace_content(self, client, manager, partial_member):
         client.force_login(manager)
 
-        assert client.get(f"/api/workspaces/{partial_member.id}/").status_code == 403
-        assert client.get(f"/api/workspaces/{partial_member.id}/members/").status_code == 403
+        assert client.get(f"/api/workspaces/{partial_member.id}/knowledge/").status_code == 403
+        assert client.get(f"/api/workspaces/{partial_member.id}/artifacts/").status_code == 403
+        assert (
+            client.get(f"/api/workspaces/{partial_member.id}/knowledge/export/").status_code == 403
+        )

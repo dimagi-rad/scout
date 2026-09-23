@@ -121,7 +121,11 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
     """
     if result.denied_reason == TENANT_ACCESS_LOST and result.missing_tenants:
         payload = missing_tenants_payload(result.missing_tenants)
-        needed = "; ".join(f"'{t['tenant_name']}': {t['remedy']}" for t in payload)
+        needed = "; ".join(
+            f"'{t['tenant_name'] or _PROVIDER_LABELS.get(t['provider'], 'a source')}': "
+            f"{t['remedy']}"
+            for t in payload
+        )
         rule = (
             "This workspace requires access to every one of its data sources. Still needed"
             if all_of_access_enforced()

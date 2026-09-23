@@ -374,7 +374,11 @@ class WorkspaceDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        # Metadata only, and the page that offers remove-source/leave/delete loads
+        # it first, so it must stay reachable without coverage.
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
 
@@ -506,7 +510,10 @@ class WorkspaceMemberListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        # The only source of the membership id that leaving needs.
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
 
@@ -674,16 +681,16 @@ class WorkspaceMemberDetailView(APIView):
 
         # Allow self-removal; managers can remove others
         is_self = target.user_id == request.user.id
-        if not is_self:
-            # Only leaving is exempt from coverage; acting on others still needs it.
-            _workspace, membership, err = resolve_workspace(request, workspace_id)
-            if err:
-                return err
         if not is_self and membership.role != WorkspaceRole.MANAGE:
             return Response(
                 {"error": "Only managers can remove other members."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if not is_self:
+            # Only leaving is exempt from coverage; acting on others still needs it.
+            _workspace, _membership, err = resolve_workspace(request, workspace_id)
+            if err:
+                return err
 
         # Prevent removing the last manager
         if _is_last_manager(workspace, target):
