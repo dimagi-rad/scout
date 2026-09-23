@@ -18,7 +18,7 @@ export interface MissingTenant {
   remedy: string
 }
 
-export type SchemaStatus ="available" | "provisioning" | "unavailable" | "failed"
+export type SchemaStatus = "available" | "provisioning" | "unavailable" | "failed"
 
 // Workspace list item — lighter shape returned by GET /api/workspaces/
 export interface WorkspaceListItem {
@@ -28,11 +28,14 @@ export interface WorkspaceListItem {
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
   tenants: WorkspaceListTenant[]
-  // Live upstream access. The server returns every membership (so orphaned
-  // workspaces stay addressable by URL) and flags the ones the user cannot use
-  // every source of. Absent on older cached payloads — treat missing as true.
+  // Live upstream access, by whatever rule the server enforces. The server
+  // returns every membership (so orphaned workspaces stay addressable by URL)
+  // and flags the inaccessible ones. Absent on older cached payloads — treat
+  // missing as true.
   has_access?: boolean
-  // The sources keeping the user out, each with a server-written remedy.
+  // The sources keeping the user out, each with a server-written remedy. Shape
+  // of MissingTenant.as_dict() plus "remedy" (apps/workspaces/access.py, #551);
+  // absent until that ships.
   missing_tenants?: MissingTenant[]
   member_count: number
   // Recorded tenant/view schema state; does not certify semantic query readiness.

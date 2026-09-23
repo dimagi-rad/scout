@@ -33,7 +33,6 @@ export function LostAccessModal() {
   const active = domains.find((d) => d.id === activeDomainId)
   const accessible = useMemo(() => domains.filter(workspaceHasAccess), [domains])
 
-  const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
   // Connected Accounts is where the user fixes this, so the gate must not cover it.
   const onRecoveryPage = location.pathname.replace(/\/+$/, "").endsWith(CONNECTIONS_PATH)
 
@@ -103,7 +102,7 @@ export function LostAccessModal() {
 
         <button
           data-testid="lost-access-connections"
-          onClick={() => navigate(`${pathPrefix}${CONNECTIONS_PATH}`)}
+          onClick={() => navigate(CONNECTIONS_PATH)}
           className="mt-3 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
         >
           Open Connected Accounts

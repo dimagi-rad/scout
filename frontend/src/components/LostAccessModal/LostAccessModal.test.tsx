@@ -140,7 +140,7 @@ describe("LostAccessModal with missing sources", () => {
     expect(navigate).toHaveBeenCalledWith("/settings/connections")
   })
 
-  it.each(["/settings/connections", "/settings/connections/", "/embed/settings/connections"])(
+  it.each(["/settings/connections", "/settings/connections/"])(
     "does not cover Connected Accounts (%s), where the user fixes it",
     (path) => {
       render(
