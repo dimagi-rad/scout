@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
+import type { TenantMembership } from "@/store/domainSlice"
+import { useAppStore } from "@/store/store"
 import type { ArtifactDetail } from "@/components/ArtifactGraph"
 import { ArtifactCanvas } from "./ArtifactCanvas"
 
@@ -109,6 +111,42 @@ describe("ArtifactDataRecovery", () => {
     expect(screen.getByText("40%")).toBeInTheDocument()
     expect(screen.getByText("400 rows loaded")).toBeInTheDocument()
     expect(screen.queryByTestId("artifact-graph-renderer")).not.toBeInTheDocument()
+  })
+
+  it("disables restore with an explanation for read-only members", async () => {
+    useAppStore.setState({
+      domains: [{ id: WORKSPACE_ID, role: "read" } as TenantMembership],
+    })
+    vi.spyOn(api, "get").mockResolvedValue({
+      status: "needs_materialization",
+      recovery_action: "materialization",
+      physical_status: "expired",
+      semantic_status: "blocked",
+      message: "The data behind this artifact is no longer available.",
+      can_retry: true,
+      recovery: null,
+    })
+    const post = vi.spyOn(api, "post")
+
+    try {
+      render(
+        <ArtifactCanvas
+          artifactId={ARTIFACT_ID}
+          workspaceId={WORKSPACE_ID}
+          artifact={artifact}
+          isLoading={false}
+          error={null}
+        />,
+      )
+
+      expect(await screen.findByTestId("artifact-data-recover")).toBeDisabled()
+      expect(screen.getByTestId("artifact-data-recover-readonly-hint")).toHaveTextContent(
+        "Read-only access",
+      )
+      expect(post).not.toHaveBeenCalled()
+    } finally {
+      useAppStore.setState({ domains: [] })
+    }
   })
 
   it("keeps failed recovery retryable", async () => {

@@ -31,6 +31,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import { writeErrorMessage } from "@/hooks/useWorkspaceRole"
 import type { ArtifactSummary, ArtifactType } from "@/store/artifactSlice"
 
 const typeBadgeStyles: Record<ArtifactType, string> = {
@@ -54,9 +55,16 @@ export interface ArtifactCardProps {
   onOpen: () => void
   onUpdate: (data: { title?: string; description?: string }) => Promise<void>
   onDelete: () => void | Promise<void>
+  canWrite?: boolean
 }
 
-export function ArtifactCard({ artifact, onOpen, onUpdate, onDelete }: ArtifactCardProps) {
+export function ArtifactCard({
+  artifact,
+  onOpen,
+  onUpdate,
+  onDelete,
+  canWrite = true,
+}: ArtifactCardProps) {
   const [editOpen, setEditOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [title, setTitle] = useState(artifact.title)
@@ -97,8 +105,8 @@ export function ArtifactCard({ artifact, onOpen, onUpdate, onDelete }: ArtifactC
     try {
       await onUpdate({ title: trimmedTitle, description: trimmedDescription })
       setEditOpen(false)
-    } catch {
-      setEditError("Couldn’t save these changes. Try again.")
+    } catch (error) {
+      setEditError(writeErrorMessage(error, "Couldn’t save these changes. Try again.", canWrite))
     } finally {
       setIsSaving(false)
     }
@@ -110,8 +118,8 @@ export function ArtifactCard({ artifact, onOpen, onUpdate, onDelete }: ArtifactC
     try {
       await onDelete()
       setDeleteOpen(false)
-    } catch {
-      setDeleteError("Couldn’t delete this artifact. Try again.")
+    } catch (error) {
+      setDeleteError(writeErrorMessage(error, "Couldn’t delete this artifact. Try again.", canWrite))
     } finally {
       setIsDeleting(false)
     }
@@ -123,38 +131,43 @@ export function ArtifactCard({ artifact, onOpen, onUpdate, onDelete }: ArtifactC
         className="group relative flex h-full min-h-[15rem] min-w-0 flex-col overflow-hidden shadow-sm transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-md"
         data-testid={`artifact-card-${artifact.id}`}
       >
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="absolute right-4 top-4 z-20 text-muted-foreground hover:text-foreground"
-              aria-label={`Actions for ${artifact.title}`}
-              data-testid={`artifact-actions-${artifact.id}`}
-            >
-              <Ellipsis aria-hidden="true" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-44">
-            <DropdownMenuItem onSelect={() => setEditOpen(true)}>
-              <Pencil aria-hidden="true" />
-              Edit details
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              variant="destructive"
-              onSelect={() => {
-                setDeleteError(null)
-                setDeleteOpen(true)
-              }}
-              data-testid={`artifact-delete-${artifact.id}`}
-            >
-              <Trash2 aria-hidden="true" />
-              Delete artifact
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {canWrite && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="absolute right-4 top-4 z-20 text-muted-foreground hover:text-foreground"
+                aria-label={`Actions for ${artifact.title}`}
+                data-testid={`artifact-actions-${artifact.id}`}
+              >
+                <Ellipsis aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem
+                onSelect={() => setEditOpen(true)}
+                data-testid={`artifact-edit-${artifact.id}`}
+              >
+                <Pencil aria-hidden="true" />
+                Edit details
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => {
+                  setDeleteError(null)
+                  setDeleteOpen(true)
+                }}
+                data-testid={`artifact-delete-${artifact.id}`}
+              >
+                <Trash2 aria-hidden="true" />
+                Delete artifact
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         <button
           type="button"
