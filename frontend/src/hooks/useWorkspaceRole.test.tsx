@@ -41,7 +41,9 @@ describe("useWorkspaceRole", () => {
 })
 
 describe("writeErrorMessage", () => {
-  const generic = new ApiError(403, "Workspace not found or access denied.")
+  const generic = new ApiError(403, "Workspace not found or access denied.", {
+    error: "Workspace not found or access denied.",
+  })
 
   it("explains the generic 403 as read-only when the user is a read member", () => {
     expect(writeErrorMessage(generic, "Try again.", false)).toBe(READ_ONLY_DENIAL)
@@ -54,6 +56,21 @@ describe("writeErrorMessage", () => {
 
   it("surfaces other 403 messages verbatim for writers", () => {
     expect(writeErrorMessage(generic, "Try again.", true)).toBe(generic.message)
+  })
+
+  it("keeps lost-upstream-access copy even for read members", () => {
+    const lost = new ApiError(403, "You no longer have access to: Alpha.", {
+      error: "You no longer have access to: Alpha.",
+      reason: "tenant_access_lost",
+      lost_tenants: ["Alpha"],
+    })
+    expect(writeErrorMessage(lost, "Try again.", false)).toBe(lost.message)
+  })
+
+  it("keeps the fallback for a 403 without a JSON message such as a CSRF failure", () => {
+    expect(writeErrorMessage(new ApiError(403, "Forbidden"), "Try again.", true)).toBe(
+      "Try again.",
+    )
   })
 
   it("keeps the fallback for non-permission failures", () => {
