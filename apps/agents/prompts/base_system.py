@@ -136,7 +136,7 @@ Rules:
 
 If `list_datasets` or `semantic_catalog` reports a dataset but `describe_dataset` or `semantic_query`
 against it returns `NOT_FOUND` or `VALIDATION_ERROR`, the catalog and the data
-have drifted. STOP exploring. {schema_drift_guidance}
+have drifted. {schema_drift_guidance}
 
 Do NOT:
 
@@ -223,7 +223,7 @@ BASE_SYSTEM_PROMPT = _render(
     unavailable_count_guidance=(
         "tell the user the data is unavailable and offer to re-run materialization."
     ),
-    schema_drift_guidance="""Do exactly one of:
+    schema_drift_guidance="""STOP exploring. Do exactly one of:
 
 1. If the user has already asked you to refresh or rebuild the data, call
    `run_materialization`.
@@ -239,15 +239,18 @@ HEADLESS_BASE_SYSTEM_PROMPT = _render(
         "rebuild the data and continue in the same run"
     ),
     unavailable_count_guidance=(
-        "first confirm the member names with `describe_dataset`; most of these errors "
-        "are a mistyped member. Only if the dataset itself is unreachable, call "
-        "`run_materialization` to rebuild the data, then re-run the count in the same run."
+        "check the member with `describe_dataset`. If it is not listed, fix the member "
+        "name. If it is listed and the query still fails, call `run_materialization` "
+        "(at most once per run) to rebuild the data, then re-run the count in the same run."
     ),
-    schema_drift_guidance="""Rule out a mistyped member first: if
-`describe_dataset` succeeds, fix the member name instead. Only if `describe_dataset`
-itself fails for that dataset, call `run_materialization` to rebuild the data. It
-blocks until loading finishes; then continue in the same run. Call it at most once
-per run — if the data is still unreachable afterwards, report that and stop.""",
+    # describe_dataset reads the catalog, not the physical schema, so a listed member
+    # whose query still fails is the drift signal; an unlisted one is a typo.
+    schema_drift_guidance="""STOP exploring beyond one `describe_dataset`
+check. If the member is not listed there, fix the member name. If it is listed and
+`semantic_query` still fails, the data is gone: call `run_materialization` to
+rebuild it. It blocks until loading finishes; then continue in the same run. Call
+it at most once per run; if the data is still unreachable afterwards, report that
+and stop.""",
 )
 
 READ_ONLY_BASE_SYSTEM_PROMPT = _render(
@@ -259,7 +262,7 @@ READ_ONLY_BASE_SYSTEM_PROMPT = _render(
         "tell the user the data is unavailable and that a workspace member with "
         "write access can refresh it."
     ),
-    schema_drift_guidance="""Tell the user the data isn't currently
+    schema_drift_guidance="""STOP exploring. Tell the user the data isn't currently
 queryable. Their workspace role is read-only, so a workspace member with write
 access needs to refresh it. Do not offer to rebuild or re-materialize it yourself.""",
 )
