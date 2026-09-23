@@ -22,12 +22,21 @@ class QueryReadiness:
     def __init__(self, workspace, queries):
         self.subject = SimpleNamespace(workspace=workspace, semantic_queries=queries, id=None)
         self._surface = None
+        self._inspected = False
         self._lock = asyncio.Lock()
 
     async def surface(self):
         async with self._lock:
-            if self._surface is None:
-                self._surface = await artifact_query_surface(self.subject)
+            if not self._inspected:
+                try:
+                    self._surface = await artifact_query_surface(self.subject)
+                except Exception:
+                    logger.warning(
+                        "Unable to inspect query readiness for workspace %s",
+                        self.subject.workspace.id,
+                        exc_info=True,
+                    )
+                self._inspected = True
             return self._surface
 
 
@@ -43,6 +52,8 @@ async def query_readiness_error(workspace, query, code, message, *, category, re
         logger.warning(
             "Unable to inspect query readiness for workspace %s", workspace.id, exc_info=True
         )
+        return query_error(code, message, category=category)
+    if surface is None:
         return query_error(code, message, category=category)
     if surface.get("status") == "model_drift":
         return query_error(code, message, category="missing_model_dependency")
