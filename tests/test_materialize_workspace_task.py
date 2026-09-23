@@ -39,7 +39,7 @@ async def test_materialize_core_denies_read_role_before_loading(workspace, read_
         )
 
     assert result["status"] == "denied"
-    assert result["error"]["code"] == "FORBIDDEN"
+    assert result["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
     pipeline.assert_not_awaited()
 
 
@@ -130,7 +130,7 @@ async def test_queued_materialization_downgrade_reaches_resume_as_authorization_
     await thread_job.arefresh_from_db()
     assert thread_job.materialization_preflight_failures
     assert all(
-        failure["error_code"] == "FORBIDDEN"
+        failure["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
         for failure in thread_job.materialization_preflight_failures
     )
 
@@ -825,7 +825,7 @@ async def test_materialize_workspace_defers_resume_on_workspace_not_found(
         )
 
     assert result["status"] == "denied"
-    assert result["error"]["code"] == "FORBIDDEN"
+    assert result["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
     resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
 
 
@@ -1455,7 +1455,6 @@ async def test_no_tenant_membership_denies_before_loading(workspace, tenant, use
 
     with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
         result, mock_cube = await _materialize_as(user, workspace)
-
     assert result["all_succeeded"] is False
     assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
     assert result["tenants"][0]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
@@ -1487,7 +1486,8 @@ async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
     ):
         result = await materialize_workspace(context_with_job_id, str(workspace.id), str(user.id))
 
-    assert "status" not in result
+    assert result["status"] == "denied"
+    assert result["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
     await thread_job.arefresh_from_db()
     assert [f["error_code"] for f in thread_job.materialization_preflight_failures] == [
         ErrorCode.WORKSPACE_TENANT_UNREACHABLE
@@ -1825,5 +1825,5 @@ async def test_missing_actor_cannot_borrow_other_memberships(
 
     pipeline.assert_not_awaited()
     assert result["status"] == "denied"
-    assert result["error"]["code"] == "FORBIDDEN"
+    assert result["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
     cube.assert_not_called()

@@ -38,9 +38,9 @@ from apps.users.services.credential_resolver import (
 )
 from apps.workspaces.access import (
     TENANT_ACCESS_LOST,
+    TOOL_WRITE_DENIED_MESSAGE,
     WorkspaceAccess,
     aresolve_workspace_access_ex,
-    tool_write_denied,
 )
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
@@ -432,9 +432,11 @@ def _unreachable_tenant_results(tenants: Iterable) -> list[dict]:
     return results
 
 
-def _no_reachable_tenants_result(unreachable_results: list[dict]) -> dict:
+def _no_reachable_tenants_result(
+    unreachable_results: list[dict], error: str = "No tenant memberships found"
+) -> dict:
     return {
-        "error": "No tenant memberships found",
+        "error": error,
         "tenants": unreachable_results,
         "all_succeeded": False,
         "guidance": _credential_guidance(_summary_failures(unreachable_results)),
@@ -442,30 +444,49 @@ def _no_reachable_tenants_result(unreachable_results: list[dict]) -> dict:
 
 
 async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict | None:
-    if not user_id:
-        return tool_write_denied()
-    try:
-        user = await User.objects.filter(id=user_id).afirst()
-    except (TypeError, ValueError, ValidationError):
-        user = None
-    if user is None:
-        return tool_write_denied()
-    access = await aresolve_workspace_access_ex(
-        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
-    )
-    if access.granted:
-        return None
-    if access.denied_reason == TENANT_ACCESS_LOST:
-        # Even a MANAGE member cannot fix this by changing roles; report the
-        # per-tenant unreachable guidance this path gave before the role gate.
-        tenants = [
-            wt.tenant
-            async for wt in WorkspaceTenant.objects.filter(
-                workspace_id=workspace_id
-            ).select_related("tenant")
+    """Return ``None`` if ``user_id`` may load the workspace, else a denied summary.
+
+    Every denial has one shape: ``status: "denied"``, a str ``error``, a registry
+    ``error_code`` saying why, and every workspace tenant as a not-run failure, so
+    the resume path records per-tenant codes the same way for either reason.
+    """
+    access = None
+    if user_id:
+        try:
+            user = await User.objects.filter(id=user_id).afirst()
+        except (TypeError, ValueError, ValidationError):
+            user = None
+        if user is not None:
+            access = await aresolve_workspace_access_ex(
+                user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+            )
+            if access.granted:
+                return None
+    tenants = [
+        wt.tenant
+        async for wt in WorkspaceTenant.objects.filter(workspace_id=workspace_id).select_related(
+            "tenant"
+        )
+    ]
+    if access is not None and access.denied_reason == TENANT_ACCESS_LOST:
+        # Even a MANAGE member cannot fix this by changing roles. Reuse the
+        # unreachable-tenant guidance so the resume prompt and the run summary
+        # give the same per-source remedy as the pre-gate no-membership path.
+        code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        results = _unreachable_tenant_results(tenants)
+        error = "No tenant memberships found"
+    else:
+        code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
+        results = [
+            _preflight_failure(tenant, TOOL_WRITE_DENIED_MESSAGE, code) for tenant in tenants
         ]
-        return _no_reachable_tenants_result(_unreachable_tenant_results(tenants))
-    return tool_write_denied()
+        _set_tenant_display_names(results)
+        error = TOOL_WRITE_DENIED_MESSAGE
+    return {
+        "status": "denied",
+        "error_code": str(code),
+        **_no_reachable_tenants_result(results, error),
+    }
 
 
 def serialized_workspace_materialization(function):
@@ -854,32 +875,16 @@ async def materialize_workspace(
     preflight_failures = None
     try:
         result = await materialize_workspace_core(workspace_id, user_id, job_id)
-        if result.get("status") == "denied":
-            error = result.get("error") or {}
-            message = str(error.get("message") or result.get("message") or "Access denied")
-            error_code = str(error.get("code") or "FORBIDDEN")
-            preflight_failures = [
-                {
-                    "tenant_id": str(tenant_id),
-                    "provider": provider,
-                    "error": message[:1000],
-                    "error_code": error_code,
-                }
-                async for tenant_id, provider in WorkspaceTenant.objects.filter(
-                    workspace_id=workspace_id
-                ).values_list("tenant_id", "tenant__provider")
-            ]
-        else:
-            preflight_failures = [
-                {
-                    "tenant_id": entry["tenant_id"],
-                    "provider": entry["provider"],
-                    "error": str(entry["error"])[:1000],
-                    "error_code": str(entry.get("error_code") or ""),
-                }
-                for entry in result.get("tenants", [])
-                if entry.get("state") == TENANT_NOT_RUN
-            ]
+        preflight_failures = [
+            {
+                "tenant_id": entry["tenant_id"],
+                "provider": entry["provider"],
+                "error": str(entry["error"])[:1000],
+                "error_code": str(entry.get("error_code") or ""),
+            }
+            for entry in result.get("tenants", [])
+            if entry.get("state") == TENANT_NOT_RUN
+        ]
         return result
     finally:
         await _defer_resume_for_job(job_id, preflight_failures)
@@ -1415,6 +1420,9 @@ def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
 
 def _workspace_recovery_error(result: dict, surface: dict) -> str:
     """Select the most useful persisted error for an artifact recovery card."""
+    if result.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
+        # A role denial is not a source failure; don't label it as one.
+        return str(result["error"])[:1000]
     # A failed source commonly causes a downstream Cube *skip*, not a Cube
     # failure. Show the source remedy first; never infer auth advice by parsing
     # human/provider error text, or conflate missing credentials with a 403.
@@ -1445,10 +1453,7 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
             + " ".join(f"{', '.join(labels)}: {error}" for error, labels in source_errors.items())
         )[:1000]
     if result.get("error"):
-        error = result["error"]
-        if isinstance(error, dict):
-            return str(error.get("message") or "Workspace data recovery failed.")[:1000]
-        return str(error)[:1000]
+        return str(result["error"])[:1000]
     cube_result = result.get("cube_schema") or {}
     cube_error = cube_result.get("error") or cube_result.get("reason")
     if cube_error:
