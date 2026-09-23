@@ -20,6 +20,7 @@ import {
 import { ApiError } from "@/api/client"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { READ_ONLY_HINT, useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { cn } from "@/lib/utils"
 import {
   applyCanvasOps,
@@ -72,6 +73,7 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
   const [projection, setProjection] = useState<CanvasProjection | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const { canWrite } = useWorkspaceRole(workspaceId)
   const mounted = useRef(false)
   const requestSequence = useRef(0)
   const readInFlight = useRef<number | null>(null)
@@ -228,19 +230,28 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
           >
             <RefreshCw className={cn("h-3.5 w-3.5", status === "loading" && "animate-spin")} />
           </Button>
-          <Button
-            size="xs"
-            onClick={() => void handleCommit()}
-            disabled={busy || !projection?.can_commit}
-            data-testid="canvas-commit-button"
-          >
-            {busy ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Save className="h-3.5 w-3.5" />
-            )}
-            Save all
-          </Button>
+          {canWrite ? (
+            <Button
+              size="xs"
+              onClick={() => void handleCommit()}
+              disabled={busy || !projection?.can_commit}
+              data-testid="canvas-commit-button"
+            >
+              {busy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5" />
+              )}
+              Save all
+            </Button>
+          ) : (
+            <span
+              className="text-xs text-muted-foreground"
+              data-testid="canvas-readonly-hint"
+            >
+              {READ_ONLY_HINT}
+            </span>
+          )}
         </div>
       </div>
 
