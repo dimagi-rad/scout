@@ -59,6 +59,12 @@ class ErrorCode(StrEnum):
     # and another user's credential must not be substituted.
     WORKSPACE_TENANT_UNREACHABLE = "WORKSPACE_TENANT_UNREACHABLE"
 
+    # The actor is not a read-write or manage member of the workspace (never was,
+    # was removed, or was downgraded while a job waited). A Scout role problem,
+    # not an upstream one: must not share AUTH_ACCESS_DENIED, whose remedy is a
+    # provider admin. Retrying as the same user cannot succeed.
+    WORKSPACE_ROLE_INSUFFICIENT = "WORKSPACE_ROLE_INSUFFICIENT"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.
