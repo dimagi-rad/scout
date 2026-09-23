@@ -239,14 +239,17 @@ HEADLESS_BASE_SYSTEM_PROMPT = _render(
         "rebuild the data and continue in the same run"
     ),
     unavailable_count_guidance=(
-        "check the member with `describe_dataset`. If it is not listed, fix the member "
-        "name. If it is listed and the query still fails, call `run_materialization` "
-        "(at most once per run) to rebuild the data, then re-run the count in the same run."
+        "run `describe_dataset` on the member's dataset. If it succeeds but the field "
+        "is not listed, fix the member name. If `describe_dataset` itself fails, or the "
+        "field is listed and the query still fails, call `run_materialization` (at most "
+        "once per run) to rebuild the data, then re-run the count in the same run."
     ),
-    # describe_dataset reads the catalog, not the physical schema, so a listed member
-    # whose query still fails is the drift signal; an unlisted one is a typo.
+    # describe_dataset reads the catalog, not the physical schema: a field missing from a
+    # listed dataset is a typo, while a failing describe or a listed field whose query
+    # still fails means the catalog or the data is gone.
     schema_drift_guidance="""STOP exploring beyond one `describe_dataset`
-check. If the member is not listed there, fix the member name. If it is listed and
+check on the member's dataset. If it succeeds but the field is not listed, fix the
+member name. If `describe_dataset` itself fails, or the field is listed and
 `semantic_query` still fails, the data is gone: call `run_materialization` to
 rebuild it. It blocks until loading finishes; then continue in the same run. Call
 it at most once per run; if the data is still unreachable afterwards, report that

@@ -242,13 +242,13 @@ async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, wri
     assert "continue in the same run" in drift
     assert "ask whether" not in drift
     # No user gate headless: a typo must not reload, but real drift must still rebuild.
-    assert "If the member is not listed there, fix the member name" in drift
-    assert "If it is listed and `semantic_query` still fails" in drift
-    assert "at most once per run" in drift
     count_rule = " ".join(
         stable.split("## Metadata vs. Verified Counts", 1)[1].split("## When", 1)[0].split()
     )
-    assert "If it is listed and the query still fails" in count_rule
+    for rule in (drift, count_rule):
+        assert "If it succeeds but the field is not listed, fix the member name" in rule
+        assert "If `describe_dataset` itself fails, or the field is listed" in rule
+        assert "at most once per run" in rule
     assert "re-run the count in the same run" in count_rule
     assert "offer to re-run materialization" not in stable
     assert "ask to rebuild the data" not in stable
