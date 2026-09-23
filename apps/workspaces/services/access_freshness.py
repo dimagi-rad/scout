@@ -257,10 +257,16 @@ async def averify_membership_history(
     results = dict(zip(stale, await _averify_stale(user_id, stale, budget), strict=True))
     # A dead tombstone connection must not mask a transient failure on the credential
     # that still backs live access, or the user loses the retryable state.
-    live_reasons = [denial_reason(results[conn]) for conn in results if conn in live_connections]
-    if any(live_reasons):
-        return most_severe(filter(None, live_reasons))
-    return most_severe(filter(None, (denial_reason(result) for result in results.values())))
+    live = [conn for conn in results if conn in live_connections]
+    if live:
+        return most_severe(filter(None, (denial_reason(results[conn]) for conn in live)))
+    # Nothing live: any one connection can restore any-of access, so a retryable
+    # outcome anywhere must not be masked by a terminal one elsewhere.
+    reasons = [reason for reason in map(denial_reason, results.values()) if reason]
+    if len(reasons) < len(results):
+        return None  # a connection verified; the caller re-reads what it restored
+    retryable = [reason for reason in reasons if reason in RETRYABLE_REASONS]
+    return most_severe(retryable or reasons)
 
 
 def final_denial_reason(admission: UpstreamAdmission, final: FreshnessCheck) -> str:

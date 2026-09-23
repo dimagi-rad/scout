@@ -134,7 +134,8 @@ def test_terminal_denials_are_throttled_too(user, workspace, tenant, upstream_pr
     second = _retry(user, workspace)
 
     assert first.status_code == 403
-    assert second.status_code == 403
+    assert second.json()["reason"] == first.json()["reason"] == "upstream_access_lost"
+    assert second.json()["retryable"] is False
     assert len(upstream_provider.requests) == 1
 
 

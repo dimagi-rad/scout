@@ -113,6 +113,7 @@ def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceA
 
 CONNECTED_ACCOUNTS_PATH = "/settings/connections"
 RETRY_COOLDOWN_SECONDS = 10
+_RETRY_PENDING = "pending"
 
 _FRESHNESS_MESSAGES = {
     CREDENTIAL_MISSING: (
@@ -361,18 +362,19 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     tenant_ids = await _alive_tenant_ids(workspace)
     if not tenant_ids or not freshness_enforced():
         return local
-    cooldown_key = f"access-verify-retry:{user.pk}:{workspace_id}"
-    # A lease stops simultaneous checks but not a stream of failing retries; a
-    # history with a revoked tombstone can never short-circuit as fresh, so every
-    # unthrottled retry would be a real provider round-trip.
-    if await cache.aget(cooldown_key):
-        if (
-            local.granted
-            and (await acheck_freshness(user.pk, await _alive_tenant_ids(local.workspace))).fresh
-        ):
+    # Keyed on the user: the protected resource is their connections, which any of
+    # their workspaces could otherwise re-trigger. A tombstoned history can never
+    # short-circuit as fresh, so without this every retry is a provider round-trip.
+    cooldown_key = f"access-verify-retry:{user.pk}"
+    if not await cache.aadd(cooldown_key, _RETRY_PENDING, RETRY_COOLDOWN_SECONDS):
+        if local.granted and (await acheck_freshness(user.pk, tenant_ids)).fresh:
             return local
-        return _freshness_denied(VERIFICATION_UNAVAILABLE)
-    await cache.aset(cooldown_key, 1, RETRY_COOLDOWN_SECONDS)
+        replayed = await cache.aget(cooldown_key)
+        if replayed and replayed != _RETRY_PENDING and local.denied_reason != NOT_MEMBER:
+            return WorkspaceAccess(
+                denied_reason=replayed, lost_tenant_names=local.lost_tenant_names
+            )
+        return _freshness_denied(VERIFICATION_IN_PROGRESS)
     retry_reason = await averify_membership_history(
         user.pk, tenant_ids, budget=VerificationBudget.INTERACTIVE
     )
@@ -380,12 +382,19 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
     if not result.granted:
         if retry_reason in RETRYABLE_REASONS:
-            return _freshness_denied(retry_reason)
-        return _attribute_observed_denial(result, admission)
-    final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
-    if final.fresh:
-        return result
-    return _freshness_denied(final_denial_reason(admission, final))
+            result = _freshness_denied(retry_reason)
+        else:
+            result = _attribute_observed_denial(result, admission)
+    else:
+        final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
+        if not final.fresh:
+            result = _freshness_denied(final_denial_reason(admission, final))
+    # Re-arm after the check: a slow provider can outlast the first window.
+    if result.granted:
+        await cache.adelete(cooldown_key)
+    else:
+        await cache.aset(cooldown_key, result.denied_reason, RETRY_COOLDOWN_SECONDS)
+    return result
 
 
 def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
