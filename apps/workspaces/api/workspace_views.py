@@ -466,7 +466,9 @@ class WorkspaceDetailView(APIView):
         )
 
     def delete(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
         if membership.role != WorkspaceRole.MANAGE:
@@ -660,7 +662,9 @@ class WorkspaceMemberDetailView(APIView):
         return Response({"id": str(target.id), "role": target.role})
 
     def delete(self, request, workspace_id, membership_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
 
@@ -791,7 +795,9 @@ class WorkspaceTenantView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
 
@@ -856,7 +862,9 @@ class WorkspaceTenantView(APIView):
     def delete(self, request, workspace_id, wt_id):
         from apps.workspaces.services.workspace_service import remove_workspace_tenant
 
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
         if membership.role != WorkspaceRole.MANAGE:

@@ -18,12 +18,24 @@ from apps.workspaces.access import (
 from apps.workspaces.models import WorkspaceRole
 
 
-def resolve_workspace_drf(request, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
+def resolve_workspace_drf(
+    request,
+    workspace_id,
+    *,
+    minimum_role: str = WorkspaceRole.READ,
+    require_coverage: bool = True,
+):
     """Resolve Workspace from workspace_id URL path parameter (DRF views).
 
     Returns (workspace, membership, None) on success or (None, None, Response(403)) on error.
+    ``require_coverage`` is for remediation actions only; see ``resolve_workspace_access_ex``.
     """
-    result = resolve_workspace_access_ex(request.user, workspace_id, minimum_role=minimum_role)
+    result = resolve_workspace_access_ex(
+        request.user,
+        workspace_id,
+        minimum_role=minimum_role,
+        require_coverage=require_coverage,
+    )
     if not result.granted:
         return None, None, Response(access_denied_body(result), status=status.HTTP_403_FORBIDDEN)
     return result.workspace, result.membership, None

@@ -227,16 +227,30 @@ def _role_satisfies(role: str, minimum_role: str) -> bool:
 
 
 def resolve_workspace_access_ex(
-    user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
+    user,
+    workspace_id,
+    *,
+    minimum_role: str = WorkspaceRole.READ,
+    require_coverage: bool = True,
 ) -> WorkspaceAccess:
-    """Resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
+    """Resolve access, exposing the denial reason (see ``WorkspaceAccess``).
+
+    ``require_coverage=False`` is only for the few remediation actions that read
+    no tenant data (remove a source, leave, delete the workspace, list its
+    sources). Without it a member who lost a source for good could never get out
+    of the state, since the fix itself would be refused (ACCESS-CONTRACT §5).
+    """
     try:
         wm = WorkspaceMembership.objects.select_related("workspace").get(
             workspace_id=workspace_id, user=user
         )
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
-    missing = missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
+    missing = (
+        missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
+        if require_coverage
+        else ()
+    )
     if missing:
         return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not _role_satisfies(wm.role, minimum_role):

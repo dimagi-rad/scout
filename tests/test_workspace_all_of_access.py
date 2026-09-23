@@ -317,3 +317,53 @@ async def test_partial_member_is_denied_by_user_scoped_mcp_tools():
 
     assert result["success"] is False
     assert result["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.django_db
+class TestRemediationWithoutCoverage:
+    """A member who lost a source for good must still be able to fix it in Scout:
+    remove the source, leave, or delete the workspace — none of which reads data."""
+
+    @pytest.fixture
+    def manager(self, user, partial_member):
+        WorkspaceMembership.objects.filter(workspace=partial_member, user=user).update(
+            role=WorkspaceRole.MANAGE
+        )
+        return user
+
+    def test_can_list_and_remove_the_missing_source_and_regain_access(
+        self, client, manager, partial_member, two_sources
+    ):
+        client.force_login(manager)
+        sources = client.get(f"/api/workspaces/{partial_member.id}/tenants/").json()
+        missing = next(s for s in sources if s["tenant_id"] == str(two_sources[1].id))
+
+        resp = client.delete(f"/api/workspaces/{partial_member.id}/tenants/{missing['id']}/")
+
+        assert resp.status_code == 204
+        assert resolve_workspace_access_ex(manager, partial_member.id).granted
+
+    def test_can_leave(self, client, manager, partial_member, other_user, two_sources):
+        _join(partial_member, other_user, role=WorkspaceRole.MANAGE)
+        mine = WorkspaceMembership.objects.get(workspace=partial_member, user=manager)
+        client.force_login(manager)
+
+        resp = client.delete(f"/api/workspaces/{partial_member.id}/members/{mine.id}/")
+
+        assert resp.status_code == 204
+
+    def test_can_delete_the_workspace(self, client, manager, partial_member, two_sources):
+        # Deletion separately refuses to drop a user's last workspace for a source.
+        spare = _workspace(manager, *two_sources, name="Spare")
+        _join(spare, manager, role=WorkspaceRole.MANAGE)
+        client.force_login(manager)
+
+        resp = client.delete(f"/api/workspaces/{partial_member.id}/")
+
+        assert resp.status_code == 204
+
+    def test_still_cannot_read_workspace_content(self, client, manager, partial_member):
+        client.force_login(manager)
+
+        assert client.get(f"/api/workspaces/{partial_member.id}/").status_code == 403
+        assert client.get(f"/api/workspaces/{partial_member.id}/members/").status_code == 403
