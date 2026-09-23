@@ -75,6 +75,11 @@ class ErrorCode(StrEnum):
     # reconciles it. Retrying does not help.
     REFRESH_RECOVERY_REQUIRED = "REFRESH_RECOVERY_REQUIRED"
 
+    # Upstream access could not be re-verified within the job's budget (provider
+    # outage, timeout, or another verification still running). Memberships are
+    # untouched; retrying later can succeed without any user action.
+    ACCESS_VERIFICATION_UNAVAILABLE = "ACCESS_VERIFICATION_UNAVAILABLE"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.

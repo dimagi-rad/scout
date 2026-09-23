@@ -39,6 +39,7 @@ from apps.users.services.credential_resolver import (
 from apps.workspaces.access import (
     TENANT_ACCESS_LOST,
     WorkspaceAccess,
+    access_denied_body,
     aresolve_workspace_access_ex,
 )
 from apps.workspaces.models import (
@@ -53,7 +54,11 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.access_freshness import VerificationBudget
+from apps.workspaces.services.access_freshness import (
+    FRESHNESS_ERROR_CODES,
+    VerificationBudget,
+    arecheck_tenant_access,
+)
 from apps.workspaces.services.data_operation import (
     run_data_thread,
     serialized_workspace_data,
@@ -146,6 +151,10 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
         "alone does not change upstream permissions. "
         "Ask an admin on the affected provider to restore access, or remove that "
         "data source from the workspace."
+    ),
+    ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE: (
+        "Scout could not confirm your access with the provider just now. Nothing "
+        "was removed — retry shortly."
     ),
     ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
         "in this workspace but not connected to your account, so this run did not "
@@ -378,6 +387,17 @@ async def refresh_tenant_schema(
             "retry_required": True,
         }
 
+    denial_reason = await arecheck_tenant_access(
+        membership.user_id, membership.tenant_id, budget=VerificationBudget.BACKGROUND
+    )
+    if denial_reason is not None:
+        new_schema.state = SchemaState.FAILED
+        await new_schema.asave(update_fields=["state"])
+        return {
+            "error": "Upstream access could not be confirmed",
+            "error_code": str(FRESHNESS_ERROR_CODES[denial_reason]),
+        }
+
     manager = SchemaManager()
     try:
         await run_data_thread(manager.create_physical_schema, new_schema)
@@ -553,6 +573,11 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         results = _unreachable_tenant_results(tenants)
         error = "No tenant memberships found"
+    elif access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
+        code = FRESHNESS_ERROR_CODES[access.denied_reason]
+        error = access_denied_body(access)["error"]
+        results = [_preflight_failure(tenant, error, code) for tenant in tenants]
+        _set_tenant_display_names(results)
     else:
         code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
         results = [_preflight_failure(tenant, _ROLE_DENIED_MESSAGE, code) for tenant in tenants]
@@ -651,7 +676,31 @@ async def materialize_workspace_core(
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
 
-    for tm in memberships:
+    for index, tm in enumerate(memberships):
+        # The wrapper checked before the first tenant. A long load can outlive a
+        # five-minute proof, so each later tenant re-checks before protected work.
+        if index:
+            denial = await _materialization_write_denial(workspace_id, user_id)
+            if denial is not None:
+                pending = memberships[index:]
+                attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
+                tenant_results.extend(
+                    _preflight_failure(later.tenant, denial["error"], denial["error_code"])
+                    for later in pending
+                )
+                break
+            # The workspace can stay accessible through another tenant after this
+            # recheck archived this one, so the membership itself must still be live.
+            if not await TenantMembership.objects.filter(id=tm.id).aexists():
+                attempted_tenant_ids.add(str(tm.tenant_id))
+                tenant_results.append(
+                    _preflight_failure(
+                        tm.tenant,
+                        "Access to this source was removed upstream during the run.",
+                        ErrorCode.AUTH_ACCESS_DENIED,
+                    )
+                )
+                continue
         attempted_tenant_ids.add(str(tm.tenant_id))
         tenant_id = tm.tenant.external_id
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
@@ -1601,6 +1650,8 @@ def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
             "Connections; if their access was removed in the provider, an admin there "
             "must restore it."
         )
+    if access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
+        return f"The requesting user's access could not be confirmed: {access_denied_body(access)['error']}"
     return _ROLE_DENIED_MESSAGE
 
 

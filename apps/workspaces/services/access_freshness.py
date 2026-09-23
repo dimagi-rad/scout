@@ -68,6 +68,16 @@ FRESHNESS_DENIAL_REASONS = (
 )
 RETRYABLE_REASONS = frozenset({VERIFICATION_UNAVAILABLE, VERIFICATION_IN_PROGRESS})
 
+# Registry codes for surfaces that report per-source failures (worker summaries,
+# MCP envelopes); reuse the codes whose remedies already exist.
+FRESHNESS_ERROR_CODES: dict[str, ErrorCode] = {
+    CREDENTIAL_MISSING: ErrorCode.AUTH_CREDENTIAL_MISSING,
+    CREDENTIAL_EXPIRED: ErrorCode.AUTH_TOKEN_EXPIRED,
+    UPSTREAM_ACCESS_LOST: ErrorCode.AUTH_ACCESS_DENIED,
+    VERIFICATION_UNAVAILABLE: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
+    VERIFICATION_IN_PROGRESS: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
+}
+
 
 def freshness_enforced() -> bool:
     return bool(getattr(settings, "UPSTREAM_ACCESS_FRESHNESS_ENFORCED", False))
@@ -226,3 +236,26 @@ def final_denial_reason(admission: UpstreamAdmission, final: FreshnessCheck) -> 
     # Upstream answered yet a proof is still missing: a concurrent rotation,
     # denial or composition change landed in between, so another attempt can pass.
     return admission.reason or VERIFICATION_IN_PROGRESS
+
+
+async def arecheck_tenant_access(user_id, tenant_id, *, budget: VerificationBudget) -> str | None:
+    """Freshness admission for work scoped to one tenant membership rather than a workspace.
+
+    Returns ``None`` to proceed, else a public denial reason. After a recheck the
+    membership is read again, because an authoritative denial archives it.
+    """
+    if not freshness_enforced():
+        return None
+    live = TenantMembership.objects.filter(user_id=user_id, tenant_id=tenant_id)
+    # Admission only reads live rows, so with none it would find nothing stale and admit.
+    if not await live.aexists():
+        return UPSTREAM_ACCESS_LOST
+    admission = await aadmit_upstream(user_id, [tenant_id], budget=budget)
+    if admission.admitted and not admission.rechecked:
+        return None
+    if not admission.rechecked:
+        return admission.reason
+    if not await live.aexists():
+        return admission.reason or UPSTREAM_ACCESS_LOST
+    final = await acheck_freshness(user_id, [tenant_id])
+    return None if final.fresh else final_denial_reason(admission, final)
