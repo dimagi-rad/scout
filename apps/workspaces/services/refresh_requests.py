@@ -217,28 +217,41 @@ def _unbound_candidates(tenant):
     ).exclude(schema_name=tenant_schema_name(tenant.provider, tenant.external_id))
 
 
-def find_legacy_refresh_jobs(tenant) -> dict[uuid.UUID, tuple[int, ...]]:
+@dataclass(frozen=True)
+class LegacyRefreshJobs:
+    """Queue jobs of unbound candidates, found before the tenant lock."""
+
+    scanned_at: datetime
+    job_ids: dict[uuid.UUID, tuple[int, ...]]
+
+
+def find_legacy_refresh_jobs(tenant) -> LegacyRefreshJobs:
     """Find the queue jobs of unbound (pre-binding) candidates, before any lock.
 
-    procrastinate_jobs.args has no index for a schema_id lookup, so this scan must
-    not run under the tenant lock. Candidates created since binding shipped always
-    carry refresh_job_id, so the unbound set and their job ids cannot grow between
-    this scan and the locked reconciliation. At most two ids are kept per
+    procrastinate_jobs.args has no index for a schema_id lookup, so this single
+    scan must not run under the tenant lock. At most two ids are kept per
     candidate, which is enough to tell "exactly one" from "ambiguous".
     """
-    return {
-        candidate_id: tuple(
+    scanned_at = timezone.now()
+    candidate_ids = [str(cid) for cid in _unbound_candidates(tenant).values_list("id", flat=True)]
+    job_ids: dict[uuid.UUID, tuple[int, ...]] = {uuid.UUID(cid): () for cid in candidate_ids}
+    if candidate_ids:
+        for job_id, schema_id in (
             ProcrastinateJob.objects.filter(
-                task_name=REFRESH_TASK_NAME, args__schema_id=str(candidate_id)
-            ).values_list("id", flat=True)[:2]
-        )
-        for candidate_id in _unbound_candidates(tenant).values_list("id", flat=True)
-    }
+                task_name=REFRESH_TASK_NAME, args__schema_id__in=candidate_ids
+            )
+            .order_by("id")
+            .values_list("id", "args__schema_id")
+        ):
+            key = _parsed_uuid(schema_id)
+            if key in job_ids and len(job_ids[key]) < 2:
+                job_ids[key] = (*job_ids[key], job_id)
+    return LegacyRefreshJobs(scanned_at=scanned_at, job_ids=job_ids)
 
 
 def reconcile_legacy_refresh_candidates(
     tenant,
-    legacy_jobs: dict[uuid.UUID, tuple[int, ...]],
+    legacy_jobs: LegacyRefreshJobs,
     *,
     pruned_before: datetime,
     stalled_before: datetime,
@@ -270,7 +283,7 @@ def reconcile_legacy_refresh_candidates(
                 outcome, reason = _bound_candidate_outcome(candidate, pruned_before, stalled_before)
             else:
                 outcome, reason = _legacy_candidate_outcome(
-                    candidate, legacy_jobs.get(candidate.id), pruned_before, stalled_before
+                    candidate, legacy_jobs, pruned_before, stalled_before
                 )
             if outcome == _SETTLE:
                 candidate.state = SchemaState.FAILED
@@ -341,11 +354,16 @@ def _bound_candidate_outcome(
 
 def _legacy_candidate_outcome(
     candidate: TenantSchema,
-    job_ids: tuple[int, ...] | None,
+    legacy_jobs: LegacyRefreshJobs,
     pruned_before: datetime,
     stalled_before: datetime,
 ) -> tuple[str, str]:
+    job_ids = legacy_jobs.job_ids.get(candidate.id)
     if job_ids is None:
+        if candidate.created_at >= legacy_jobs.scanned_at:
+            # Committed after the pre-lock scan, so its queue evidence was simply
+            # not looked for yet; the next reconciliation will see it.
+            return _KEEP, "created after the queue scan"
         return _RECOVER, "was not visible to the queue scan"
     jobs = list(
         ProcrastinateJob.objects.select_for_update(of=("self",))

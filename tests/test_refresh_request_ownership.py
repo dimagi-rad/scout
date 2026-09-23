@@ -1015,6 +1015,43 @@ def test_operator_recovery_names_the_candidate_and_reason(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_unbound_candidate_created_after_the_scan_stays_in_flight(tenant):
+    legacy_jobs = find_legacy_refresh_jobs(tenant)
+    newer = TenantSchema.objects.create(
+        tenant=tenant, schema_name="unbound_after_scan", state=SchemaState.PROVISIONING
+    )
+
+    result = _reconcile(tenant, legacy_jobs)
+
+    newer.refresh_from_db()
+    assert (result.recovery_needed, result.settled_schema_ids) == (False, ())
+    assert newer.state == SchemaState.PROVISIONING
+
+
+@pytest.mark.django_db(transaction=True)
+def test_one_queue_scan_serves_every_unbound_candidate(tenant, tenant_membership, refresh_job):
+    first, second = (
+        TenantSchema.objects.create(
+            tenant=tenant, schema_name=f"legacy_batch_{i}", state=SchemaState.PROVISIONING
+        )
+        for i in range(2)
+    )
+    for candidate in (first, second, second):
+        refresh_job(
+            {"schema_id": str(candidate.id), "membership_id": str(tenant_membership.id)},
+            status="failed",
+        )
+
+    with CaptureQueriesContext(connection) as queries:
+        legacy_jobs = find_legacy_refresh_jobs(tenant)
+
+    scans = [q for q in queries.captured_queries if "procrastinate_jobs" in q["sql"]]
+    assert len(scans) == 1
+    assert len(legacy_jobs.job_ids[first.id]) == 1
+    assert len(legacy_jobs.job_ids[second.id]) == 2
+
+
+@pytest.mark.django_db(transaction=True)
 def test_periodic_sweep_settles_dead_refresh_without_a_retry(
     manage_client, workspace, tenant, tenant_membership, refresh_job, queue_worker
 ):

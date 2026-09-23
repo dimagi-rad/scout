@@ -69,6 +69,7 @@ from apps.workspaces.services.query_state import (
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
     DENIED_WORKSPACE_UNLINKED,
+    LegacyRefreshJobs,
     LegacyRefreshReconciliation,
     activate_claimed_refresh_candidate,
     claim_refresh_candidate,
@@ -1150,7 +1151,9 @@ async def drop_failed_refresh_schema(schema_id: str) -> None:
     await _drop_failed_refresh_schema(schema_id)
 
 
-def settle_finished_refresh_candidates(tenant, legacy_jobs: dict) -> LegacyRefreshReconciliation:
+def settle_finished_refresh_candidates(
+    tenant, legacy_jobs: LegacyRefreshJobs
+) -> LegacyRefreshReconciliation:
     """Reconcile a tenant's refresh candidates and queue a drop for each one settled.
 
     Call inside a transaction so each settle commits together with its queued drop.
