@@ -2,6 +2,8 @@ import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
+import { ApiError } from "@/api/client"
+import { READ_ONLY_DENIAL } from "@/hooks/useWorkspaceRole"
 import { ArtifactCard } from "./ArtifactCard"
 import type { ArtifactSummary } from "@/store/artifactSlice"
 
@@ -75,5 +77,25 @@ describe("ArtifactCard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete artifact" }))
 
     expect(onDelete).toHaveBeenCalledOnce()
+  })
+
+  it("hides edit and delete actions from read-only members", () => {
+    renderCard({ canWrite: false })
+
+    expect(screen.queryByTestId("artifact-actions-artifact-1")).not.toBeInTheDocument()
+    expect(screen.getByTestId("artifact-open-artifact-1")).toBeInTheDocument()
+  })
+
+  it("explains a role denial instead of asking the user to retry", async () => {
+    const onDelete = vi.fn().mockRejectedValue(
+      new ApiError(403, "Read-write or manage role required for this operation."),
+    )
+    renderCard({ onDelete })
+
+    await userEvent.click(screen.getByTestId("artifact-actions-artifact-1"))
+    await userEvent.click(screen.getByTestId("artifact-delete-artifact-1"))
+    await userEvent.click(screen.getByTestId("artifact-confirm-delete-artifact-1"))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(READ_ONLY_DENIAL)
   })
 })
