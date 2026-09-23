@@ -107,6 +107,7 @@ async def test_expired_data_and_missing_member_are_distinct(workspace):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_status", ["error", "checked"])
 @pytest.mark.parametrize(
     "code,category,retryable,action",
     [
@@ -117,7 +118,7 @@ async def test_expired_data_and_missing_member_are_distinct(workspace):
     ],
 )
 async def test_graph_and_parent_preserve_failure_classification(
-    monkeypatch, code, category, retryable, action
+    monkeypatch, code, category, retryable, action, tool_status
 ):
     monkeypatch.setattr(graph_runtime.Workspace.objects, "aget", AsyncMock(return_value=object()))
     error = {
@@ -151,7 +152,7 @@ async def test_graph_and_parent_preserve_failure_classification(
     )
     runtime = await graph_runtime.check_graph_artifact(artifact)
     assert runtime["queries"][0]["failure"] == error
-    result = {"status": "error", "runtime": runtime}
+    result = {"status": tool_status, "runtime": runtime}
     messages = [
         ToolMessage(name="artifact_write", tool_call_id="write", content=json.dumps(result))
     ]
@@ -170,6 +171,68 @@ async def test_invalid_document_never_runs_queries(monkeypatch):
     result = await graph_runtime.check_graph_artifact(artifact)
     execute.assert_not_awaited()
     assert result["failures"][0]["category"] == "invalid_document"
+    assert result["failures"][0]["message"] == result["summary"]
+    assert result["failures"][0]["query_key"] is None
+    assert result["manifest"]["entry_count"] == 0
+
+
+@pytest.mark.parametrize("failures", [None, {}, "failure", 42])
+def test_failed_check_never_claims_success_with_malformed_failure_details(failures):
+    result = {"status": "checked", "runtime": {"success": False, "failures": failures}}
+    summary = _summarize_result(
+        [ToolMessage(name="artifact_write", tool_call_id="check", content=json.dumps(result))],
+        json.dumps({"status": "done", "message": "Incorrect success claim"}),
+    )
+    assert summary["status"] == "error"
+    assert "runtime_failures" not in summary
+
+
+def test_missing_error_detail_uses_a_readable_failure_message():
+    assert graph_runtime._query_failure(None)["message"] == "Semantic query failed"
+
+
+@pytest.mark.parametrize("claimed_status", ["done", "needs_data_model"])
+def test_static_artifact_failure_cannot_be_overridden_by_model_output(claimed_status):
+    result = {
+        "status": "error",
+        "message": "Graph doc has validation errors.",
+        "diagnostics": [{"severity": "error", "code": "invalid_document"}],
+    }
+    summary = _summarize_result(
+        [ToolMessage(name="artifact_write", tool_call_id="write", content=json.dumps(result))],
+        json.dumps({"status": claimed_status, "message": "Claim", "data_requirements": ["Claim"]}),
+    )
+    assert summary["status"] == "error"
+    assert summary["message"] == result["message"]
+    assert summary["diagnostics"] == result["diagnostics"]
+    assert "data_requirements" not in summary
+
+
+@pytest.mark.asyncio
+async def test_failed_readiness_inspection_is_cached_and_logged_once(monkeypatch, caplog):
+    inspect = AsyncMock(side_effect=RuntimeError("Unavailable"))
+    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    workspace = SimpleNamespace(id="workspace")
+    readiness = query_outcomes.QueryReadiness(workspace, [{}])
+    results = await asyncio.gather(
+        *[
+            query_outcomes.query_readiness_error(
+                workspace,
+                {},
+                "VALIDATION_ERROR",
+                "Original",
+                category="invalid_query",
+                readiness=readiness,
+            )
+            for _ in range(3)
+        ]
+    )
+    inspect.assert_awaited_once()
+    assert (
+        sum("Unable to inspect query readiness" in record.message for record in caplog.records) == 1
+    )
+    assert all(result["error"]["category"] == "invalid_query" for result in results)
+    assert all(result["error"]["recovery_action"] is None for result in results)
 
 
 @pytest.mark.asyncio

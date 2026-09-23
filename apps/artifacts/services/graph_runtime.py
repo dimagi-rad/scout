@@ -27,6 +27,11 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     )
     diagnostics = validate_doc(doc)
     manifest = build_semantic_query_manifest(doc)
+    manifest_summary = {
+        "schema_version": manifest.get("schema_version"),
+        "entry_count": len(manifest.get("entries", [])),
+        "unresolved_count": len(manifest.get("unresolved", [])),
+    }
     entries = manifest.get("entries", [])[:MAX_CHECK_QUERIES]
     query_results = []
     actual_keys: dict[str, list[str]] = {}
@@ -34,10 +39,13 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
         return {
             "success": False,
             "diagnostics": diagnostics,
+            "manifest": manifest_summary,
             "queries": [],
             "key_warnings": [],
             "failures": [
                 {
+                    "query_key": None,
+                    "message": "Document validation failed; no queries executed.",
                     "category": "invalid_document",
                     "code": "VALIDATION_ERROR",
                     "retryable": False,
@@ -54,13 +62,13 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
         result = await run_semantic_query(workspace, query, user_id=user_id, readiness=readiness)
         if not result.get("success", True) or result.get("error"):
             error = result.get("error")
-            message = error.get("message") if isinstance(error, dict) else str(error)
+            failure = _query_failure(error)
             query_results.append(
                 {
                     "query_key": entry["key"],
                     "status": "error",
-                    "error": message or "Semantic query failed",
-                    "failure": _query_failure(error),
+                    "error": failure["message"],
+                    "failure": failure,
                     "semantic_query": query,
                 }
             )
@@ -80,15 +88,9 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     key_warnings = _key_contract_warnings(manifest.get("entries", []), actual_keys)
     ok_count = sum(1 for item in query_results if item["status"] == "ok")
     return {
-        "success": not diagnostics_have_errors(diagnostics)
-        and not key_warnings
-        and ok_count == len(query_results),
+        "success": not key_warnings and ok_count == len(query_results),
         "diagnostics": diagnostics,
-        "manifest": {
-            "schema_version": manifest.get("schema_version"),
-            "entry_count": len(manifest.get("entries", [])),
-            "unresolved_count": len(manifest.get("unresolved", [])),
-        },
+        "manifest": manifest_summary,
         "queries": query_results,
         "failures": [
             {"query_key": query["query_key"], **query["failure"]}
@@ -112,7 +114,8 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
 
 
 def _query_failure(error):
-    error = error if isinstance(error, dict) else {"message": str(error)}
+    if not isinstance(error, dict):
+        error = {"message": str(error)} if error else {}
     code = str(error.get("code") or "UNKNOWN")
     permission_required = code in {
         "AUTH_ACCESS_DENIED",

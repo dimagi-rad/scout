@@ -812,11 +812,20 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         "runtime_summary": _runtime_summary(runtime),
         "message": message[:1200] if isinstance(message, str) else str(message)[:1200],
     }
-    if isinstance(runtime, dict) and runtime.get("failures"):
-        summary["runtime_failures"] = runtime["failures"][:MAX_RUNTIME_FAILURES]
-        if artifact_result.get("status") == "error":
-            summary["status"] = "error"
-            summary["message"] = "Artifact was not published. Follow the typed runtime failures."
+    if isinstance(runtime, dict):
+        failures = runtime.get("failures")
+        if isinstance(failures, list) and failures:
+            summary["runtime_failures"] = failures[:MAX_RUNTIME_FAILURES]
+    if artifact_result.get("status") == "error" or (
+        isinstance(runtime, dict) and runtime.get("success") is False
+    ):
+        summary["status"] = "error"
+        error_message = artifact_result.get("message")
+        summary["message"] = (
+            error_message[:1200]
+            if isinstance(error_message, str) and error_message
+            else "Artifact validation failed. Follow its diagnostics and typed runtime failures."
+        )
     if summary["status"] == "needs_data_model" and isinstance(parsed_final, dict):
         try:
             summary["data_requirements"] = validate_data_requirements(

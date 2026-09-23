@@ -144,7 +144,7 @@ class CubeClient:
                         raise CubeAuthenticationError(
                             str(error) if error else "Cube rejected Scout's service credentials."
                         )
-                    if response.status_code in {400, 401, 403, 404, 422}:
+                    if response.status_code in {400, 404, 422}:
                         if error:
                             raise CubeQueryError(str(error))
                         response.raise_for_status()
