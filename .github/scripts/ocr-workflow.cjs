@@ -29,6 +29,43 @@ async function currentPR(github, context, env) {
   return pr;
 }
 
+// issue_comment runs are attached to the default branch, not the PR, so the PR
+// kept showing the failed `review` check from the last pull_request_target run
+// even after an @ocr re-run passed (PR #501). Record the re-run's result on the
+// PR head under the same name; GitHub shows the latest check run per name.
+// One terminal check, never an in-progress one that a failed update could strand.
+const REVIEW_CHECK = 'review';
+
+const defaultDelay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function recordReviewCheck({ github, context, core, env, delay }) {
+  const conclusion = { success: 'success', failure: 'failure' }[env.REVIEW_RESULT];
+  if (context.eventName !== 'issue_comment' || !conclusion) {
+    core.info(`No PR review check recorded for ${context.eventName} result ${env.REVIEW_RESULT}.`);
+    return;
+  }
+  if (!/^[a-f0-9]{40}$/.test(env.REVIEW_HEAD || '')) throw new Error('Invalid review head.');
+  const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${context.runId}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
+  const check = {
+    ...context.repo, name: REVIEW_CHECK, head_sha: env.REVIEW_HEAD, status: 'completed', conclusion,
+    external_id: String(context.runId), details_url: runUrl,
+    output: {
+      title: conclusion === 'success' ? 'Review re-run passed' : 'Review re-run failed',
+      summary: `Result of the \`@ocr\` re-run for \`${env.REVIEW_HEAD}\`. See the PR comments for the gate and review. [Workflow run](${runUrl})`,
+    },
+  };
+  // A failure here is invisible from the PR (this job's own check sits on the
+  // default branch), so retry once to ride out a transient API error.
+  try {
+    await github.rest.checks.create(check);
+  } catch (error) {
+    core.warning(`Retrying the PR review check after: ${error.message}`);
+    await (delay || defaultDelay)(5000);
+    await github.rest.checks.create(check);
+  }
+  core.info(`PR review check recorded as ${conclusion}.`);
+}
+
 async function prepareReview({ github, context, core, fs, env }) {
   await currentPR(github, context, env);
   const hash = crypto.createHash('sha256');
@@ -321,4 +358,4 @@ async function finishClaude({ github, context, core, fs, env }) {
   }
 }
 
-module.exports = { prepareReview, finishReview, prepareClaude, finishClaude };
+module.exports = { prepareReview, finishReview, prepareClaude, finishClaude, recordReviewCheck };
