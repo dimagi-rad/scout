@@ -1196,3 +1196,41 @@ async def test_read_dependency_inspection_paginates_without_creating_cache(works
     assert artifact.semantic_query_manifest == {}
     assert artifact.semantic_queries == []
     assert not await ArtifactSemanticQuery.objects.filter(artifact=artifact).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_dependency_tool_and_api_page_in_the_same_order(
+    workspace, member_user, member_client
+):
+    doc = graph_doc()
+    queries = doc["blocks"][1]["config"]["queries"]
+    # Mixed case sorts differently under Python and most DB collations.
+    queries["Zeta"] = deepcopy(queries["visits_by_day"])
+    queries["alpha"] = deepcopy(queries["visits_by_day"])
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    persisted = [
+        row.query_key async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact)
+    ]
+    tool = next(
+        t
+        for t in create_artifact_graph_tools(workspace, member_user)
+        if t.name == "get_artifact_semantic_queries"
+    )
+
+    from_tool = await tool.ainvoke({"artifact_id": str(artifact.id)})
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/"
+    response = await member_client.get(url)
+    assert response.status_code == 200
+    from_api = response.json()
+
+    tool_keys = [r["query_key"] for r in from_tool["semantic_queries"]]
+    assert tool_keys == [r["query_key"] for r in from_api["semantic_queries"]]
+    assert tool_keys == persisted
