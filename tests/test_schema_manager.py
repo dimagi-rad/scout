@@ -577,7 +577,11 @@ class TestBuildViewSchemaTenantCoverage:
             ],
         }
 
-    def test_zero_active_tenants_fails_and_records_full_exclusion(self, workspace, tenant):
+    def test_a_transient_source_state_keeps_the_views(self, workspace, tenant):
+        """A load in progress is not a retirement: the views may serve again."""
+        TenantSchema.objects.create(
+            tenant=tenant, schema_name="t_loading", state=SchemaState.MATERIALIZING
+        )
         with (
             patch(
                 "apps.workspaces.services.schema_manager.get_managed_db_connection"
@@ -587,6 +591,24 @@ class TestBuildViewSchemaTenantCoverage:
             SchemaManager().build_view_schema(workspace)
 
         mock_connection.assert_not_called()
+
+    def test_zero_active_tenants_fails_and_records_full_exclusion(self, workspace, tenant):
+        with (
+            patch(
+                "apps.workspaces.services.schema_manager.get_managed_db_connection"
+            ) as mock_connection,
+            pytest.raises(ValueError, match="no active schema"),
+        ):
+            SchemaManager().build_view_schema(workspace)
+
+        # No schema of this tenant can serve again, so the only physical statement
+        # drops the views: left behind they would block a RESTRICT retirement.
+        statements = [
+            call.args[0].as_string()
+            for call in mock_connection.return_value.cursor.return_value.execute.call_args_list
+        ]
+        assert len(statements) == 1
+        assert "DROP SCHEMA IF EXISTS" in statements[0]
         view_schema = WorkspaceViewSchema.objects.get(workspace=workspace)
         assert view_schema.state == SchemaState.FAILED
         assert "no active schema" in view_schema.last_error

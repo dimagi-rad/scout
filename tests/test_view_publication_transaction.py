@@ -451,36 +451,24 @@ def test_concurrent_view_creation_cannot_slip_past_the_retirement_locks(owned, m
     ) == ["v1"]
 
 
-def test_source_plan_cannot_publish_empty_after_selected_schema_retires(owned, managed):
-
-    workspace, tenant, old = _one_tenant_workspace(owned, managed)
-    newer_name = owned.register("dqr_" + _suffix())
-    _seed_tenant_schema(managed, newer_name, sentinel="v2")
+def test_retirement_cannot_run_between_source_planning_and_managed_discovery(owned, managed):
+    """Publication plans its sources from control rows, then discovers their tables
+    in the managed database. T must be held across both, or a retirement in
+    between could leave the plan pointing at a dropped schema."""
+    workspace, tenant, _old = _one_tenant_workspace(owned, managed)
     manager = SchemaManager()
     original = sm.get_managed_db_transaction
-    fired = False
+    probes = []
 
-    def retire_between_control_plan_and_managed_discovery():
-        nonlocal fired
-        if not fired:
-            fired = True
-            with try_tenant_data_lock(tenant.id) as held:
-                if held:
-                    TenantSchema.objects.filter(pk=old.pk).update(state=SchemaState.TEARDOWN)
-                    TenantSchema.objects.create(
-                        tenant=tenant, schema_name=newer_name, state=SchemaState.ACTIVE
-                    )
-                    manager.retire_tenant_schema(old)
+    def probe_then_open():
+        with try_tenant_data_lock(tenant.id) as held:
+            probes.append(held)
         return original()
 
-    with patch.object(
-        sm,
-        "get_managed_db_transaction",
-        side_effect=retire_between_control_plan_and_managed_discovery,
-    ):
+    with patch.object(sm, "get_managed_db_transaction", side_effect=probe_then_open):
         published = manager.build_view_schema(workspace)
-    assert published.state == SchemaState.ACTIVE
-    assert published.view_sources["views"]
+
+    assert probes == [False], "Publication must hold T across managed discovery"
     published_view = view_name(manager._view_prefix(tenant), "raw_cases")
     assert _read_through_role(published.schema_name, published_view) == ["v1"]
 

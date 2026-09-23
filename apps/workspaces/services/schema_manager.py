@@ -52,8 +52,9 @@ _MAX_VIEW_PREFIX_LEN = 32
 _PUBLICATION_MARKER_VERSION = 1
 
 # Retirement takes ACCESS EXCLUSIVE locks on every relation of the schema; a
-# reader that never ends would otherwise pin the worker forever. Exceeding this
-# fails the retirement visibly and it is retried with backoff.
+# reader that never ends would otherwise pin the worker forever. This bounds each
+# lock wait (not the whole transaction); exceeding it fails the retirement
+# visibly and it is retried with backoff.
 _RETIRE_LOCK_TIMEOUT = "30s"
 
 # The publication transaction holds W, T and the view lock; never let it sit
@@ -645,10 +646,18 @@ class SchemaManager:
                     "Run a data refresh before building the view schema."
                 )
         except ValueError as exc:
+            fields = ["state", "last_error", "tenant_coverage"]
+            # When the sources are retiring these views can never serve again, and
+            # they would keep the RESTRICT retirement of those schemas blocked.
+            if self._sources_are_retiring(tenants) and self._drop_view_schema_physically(
+                view_schema_name
+            ):
+                vs.physical_build_token = ""
+                fields.append("physical_build_token")
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
             vs.tenant_coverage = coverage
-            vs.save(update_fields=["state", "last_error", "tenant_coverage"])
+            vs.save(update_fields=fields)
             raise
 
         build_token = uuid.uuid4().hex
@@ -850,6 +859,48 @@ class SchemaManager:
                 conn.rollback()
         except Exception:
             logger.exception("Rolling back the view publication for '%s' failed", view_schema_name)
+
+    @staticmethod
+    def _sources_are_retiring(tenants) -> bool:
+        """True when every schema of these tenants is on its way out (or gone).
+
+        A transient control-plane state (a load in progress, a failed teardown
+        about to revert to ACTIVE) must not cost a workspace its readable views.
+        """
+        return (
+            not TenantSchema.objects.filter(tenant__in=tenants)
+            .exclude(state__in=[SchemaState.TEARDOWN, SchemaState.EXPIRED, SchemaState.FAILED])
+            .exists()
+        )
+
+    def _drop_view_schema_physically(self, view_schema_name: str) -> bool:
+        """Drop a view schema in its own short transaction; True once committed.
+
+        Best-effort: the caller is already failing on a condition the operator has
+        to act on, and a managed-database outage must not replace that message.
+        """
+        try:
+            conn = get_managed_db_transaction()
+        except Exception:
+            logger.exception("Could not connect to drop view schema '%s'", view_schema_name)
+            return False
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(view_schema_name)
+                )
+            )
+            cursor.close()
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to drop view schema '%s'", view_schema_name)
+            self._rollback_publication(conn, view_schema_name)
+            return False
+        finally:
+            if not conn.closed:
+                conn.close()
+        return True
 
     @staticmethod
     def _missing_views(cursor, vs) -> list[str]:

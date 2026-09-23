@@ -9,11 +9,12 @@ from datetime import timedelta
 from functools import wraps
 from typing import NamedTuple
 
+import psycopg
 import psycopg.errors
 import sentry_sdk
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import close_old_connections
+from django.db import DatabaseError, close_old_connections
 from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
@@ -55,6 +56,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.data_operation import (
+    DataLockTimeout,
     run_data_thread,
     serialized_workspace_data,
     tenant_data_lock,
@@ -1569,22 +1571,54 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
         )
         return
 
+    try:
+        retired = await _retire_under_tenant_lock(schema, attempt)
+    except _RetirementNotStarted as exc:
+        # Nothing was dropped and nothing else re-arms a TEARDOWN row.
+        logger.exception("teardown_schema: could not start retiring schema %s", schema.id)
+        await _retry_retirement(schema, [], attempt, str(exc.__cause__ or exc))
+        return
+    if retired:
+        # Dependent view schemas that still list this tenant in their coverage
+        # are reconciled after T is released: rebuilt against a surviving
+        # ACTIVE schema, or failed truthfully when pure TTL expiry left no data.
+        await _reconcile_dependent_view_schemas_after_teardown(schema)
+
+
+class _RetirementNotStarted(Exception):
+    """Taking T or re-reading the row failed before retirement touched anything."""
+
+
+async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
+    """Retire ``schema`` while holding T; True once it is physically dropped."""
     manager = SchemaManager()
-    async with tenant_data_lock([schema.tenant_id]):
-        await schema.arefresh_from_db()
+    async with contextlib.AsyncExitStack() as stack:
+        try:
+            await stack.enter_async_context(tenant_data_lock([schema.tenant_id]))
+            await schema.arefresh_from_db()
+        except (DataLockTimeout, DatabaseError, psycopg.OperationalError) as exc:
+            raise _RetirementNotStarted from exc
         if schema.state != SchemaState.TEARDOWN:
-            return
+            return False
         try:
             await run_data_thread(manager.retire_tenant_schema, schema)
         except SchemaStillReferenced as exc:
-            await _retry_retirement(schema, exc.dependents, attempt, str(exc))
-            return
+            await _retry_retirement(
+                schema,
+                exc.dependents,
+                attempt,
+                str(exc),
+                # Nothing we can rebuild will move an unlisted dependent (a type or
+                # function left inside the schema); don't spend a day on retries.
+                converges=bool(exc.dependents) or not exc.detail,
+            )
+            return False
         except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
             # A reader held the relations past the retirement lock timeout, or
             # locked them in the opposite order; the transaction rolled back and
             # nothing was dropped, so simply try again later.
             await _retry_retirement(schema, [], attempt, str(exc))
-            return
+            return False
         except Exception as exc:
             superseded = (
                 await TenantSchema.objects.filter(
@@ -1600,7 +1634,7 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
                     "teardown_schema: retiring superseded schema %s failed; retained", schema.id
                 )
                 await _retry_retirement(schema, [], attempt, str(exc))
-                return
+                return False
             # Nothing else serves this tenant and the physical schema still exists —
             # revert to ACTIVE rather than stranding readable data in TEARDOWN.
             schema.state = SchemaState.ACTIVE
@@ -1636,18 +1670,16 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
                 "teardown_schema: failed to mark schema %s EXPIRED after teardown", schema.id
             )
             raise
-
-    # Dependent view schemas that still list this tenant in their coverage are
-    # reconciled after T is released: rebuilt against a surviving ACTIVE schema,
-    # or failed truthfully when pure TTL expiry left no data.
-    await _reconcile_dependent_view_schemas_after_teardown(schema)
+    return True
 
 
-async def _retry_retirement(schema, dependents: list[dict], attempt: int, reason: str) -> None:
+async def _retry_retirement(
+    schema, dependents: list[dict], attempt: int, reason: str, *, converges: bool = True
+) -> None:
     """Keep a still-referenced schema, move its readers, and try again later."""
-    if attempt + 1 >= _RETIRE_MAX_ATTEMPTS:
+    if not converges or attempt + 1 >= _RETIRE_MAX_ATTEMPTS:
         logger.error(
-            "teardown_schema: giving up retiring schema %s (%s) after %d attempts: %s — "
+            "teardown_schema: giving up retiring schema %s (%s) after attempt %d: %s — "
             "left in TEARDOWN; find what still depends on it",
             schema.id,
             schema.schema_name,
@@ -1657,11 +1689,11 @@ async def _retry_retirement(schema, dependents: list[dict], attempt: int, reason
         return
     dependent_schemas = sorted({d["schema"] for d in dependents if d.get("schema")})
     logger.warning(
-        "teardown_schema: retiring schema %s (%s) deferred (attempt %d, %d dependent "
-        "schemas asked to rebuild): %s",
+        "teardown_schema: retiring schema %s (%s) deferred after attempt %d (%d dependent "
+        "schemas): %s",
         schema.id,
         schema.schema_name,
-        attempt,
+        attempt + 1,
         len(dependent_schemas),
         reason,
     )

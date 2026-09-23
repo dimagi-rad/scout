@@ -1,5 +1,6 @@
 """Tests for schema TTL tasks."""
 
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,7 +18,8 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.data_operation import DataLockTimeout
+from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
 from apps.workspaces.tasks import _RETIRE_MAX_ATTEMPTS, expire_inactive_schemas, teardown_schema
 
 
@@ -601,14 +603,7 @@ async def _superseded_teardown_schema(active_schema, tenant):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    "failure",
-    [
-        RuntimeError("connection dropped"),
-        psycopg.errors.DeadlockDetected("deadlock detected"),
-    ],
-)
-async def test_failed_retirement_of_a_superseded_schema_is_retried(active_schema, tenant, failure):
+async def test_failed_retirement_of_a_superseded_schema_is_retried(active_schema, tenant):
     """Nothing else re-arms a TEARDOWN row, so an unclassified failure must
     reschedule rather than strand the physical schema forever."""
     await _superseded_teardown_schema(active_schema, tenant)
@@ -617,7 +612,7 @@ async def test_failed_retirement_of_a_superseded_schema_is_retried(active_schema
         patch("apps.workspaces.tasks.SchemaManager") as MockManager,
         patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
     ):
-        MockManager.return_value.retire_tenant_schema.side_effect = failure
+        MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("dropped")
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id), attempt=2)
 
@@ -640,6 +635,85 @@ async def test_retirement_stops_retrying_after_the_attempt_cap(active_schema, te
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("still broken")
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id), attempt=_RETIRE_MAX_ATTEMPTS - 1)
+
+    retry.return_value.defer_async.assert_not_awaited()
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        psycopg.errors.LockNotAvailable("lock timeout"),
+        psycopg.errors.DeadlockDetected("deadlock detected"),
+    ],
+)
+async def test_lock_contention_keeps_the_only_schema_in_teardown_and_retries(
+    active_schema, failure
+):
+    """Nothing was dropped and no other schema serves, yet a lock timeout is not a
+    reason to resurrect: the row stays TEARDOWN and retirement is rescheduled."""
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = failure
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_awaited_once()
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_tenant_lock_timeout_reschedules_instead_of_stranding(active_schema):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    @asynccontextmanager
+    async def never_granted(_tenant_ids):
+        raise DataLockTimeout("T held by a long load")
+        yield
+
+    with (
+        patch("apps.workspaces.tasks.tenant_data_lock", never_granted),
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    MockManager.return_value.retire_tenant_schema.assert_not_called()
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=1
+    )
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unlisted_leftover_object_gives_up_at_once(active_schema):
+    """A type or function left inside the schema is not something a rebuild moves."""
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = SchemaStillReferenced(
+            active_schema.schema_name, [], detail="type leftover depends on schema"
+        )
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
 
     retry.return_value.defer_async.assert_not_awaited()
     await active_schema.arefresh_from_db()
