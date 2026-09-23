@@ -2,6 +2,7 @@ import { Loader2, X } from "lucide-react"
 import { useState } from "react"
 import { api } from "@/api/client"
 import type { ActiveJob } from "@/api/jobs"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 
 interface Props {
   job: ActiveJob
@@ -20,6 +21,7 @@ interface Props {
  */
 export function MaterializationProgressBanner({ job, workspaceId }: Props) {
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "error">("idle")
+  const { canWrite } = useWorkspaceRole(workspaceId)
 
   const handleCancel = async (e: React.MouseEvent) => {
     e.preventDefault()
@@ -127,26 +129,28 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleCancel}
-          disabled={cancelState === "pending"}
-          className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors shrink-0 ${
-            cancelState === "pending"
-              ? "border-blue-600/20 text-blue-400 cursor-not-allowed dark:border-blue-400/20 dark:text-blue-500"
-              : "border-blue-600/30 text-blue-700 hover:border-red-400 hover:bg-red-50 hover:text-red-600 dark:border-blue-400/30 dark:text-blue-300 dark:hover:border-red-400/50 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-          }`}
-          data-testid="materialization-banner-stop-btn"
-          title={
-            cancelState === "error" ? "Cancel failed — try again" : "Stop data loading"
-          }
-        >
-          <X
-            className={`h-3.5 w-3.5 ${cancelState === "pending" ? "animate-pulse" : ""}`}
-            aria-hidden="true"
-          />
-          <span>{stopLabel}</span>
-        </button>
+        {canWrite && (
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={cancelState === "pending"}
+            className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors shrink-0 ${
+              cancelState === "pending"
+                ? "border-blue-600/20 text-blue-400 cursor-not-allowed dark:border-blue-400/20 dark:text-blue-500"
+                : "border-blue-600/30 text-blue-700 hover:border-red-400 hover:bg-red-50 hover:text-red-600 dark:border-blue-400/30 dark:text-blue-300 dark:hover:border-red-400/50 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+            }`}
+            data-testid="materialization-banner-stop-btn"
+            title={
+              cancelState === "error" ? "Cancel failed — try again" : "Stop data loading"
+            }
+          >
+            <X
+              className={`h-3.5 w-3.5 ${cancelState === "pending" ? "animate-pulse" : ""}`}
+              aria-hidden="true"
+            />
+            <span>{stopLabel}</span>
+          </button>
+        )}
 
         <style>{`
           @keyframes mat-indeterminate {
