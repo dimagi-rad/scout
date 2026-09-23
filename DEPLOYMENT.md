@@ -26,8 +26,8 @@ target with **no in-repo IaC** (issue #248, finding 11#1):
 - **Compute:** ECS Fargate (cluster `labs-jj-cluster`; services
   `labs-jj-scout-web`, `labs-jj-scout-mcp`, `labs-jj-scout-worker`) — **not**
   EC2/Kamal like production.
-- **AWS account:** `858923557655` (ECR registry
-  `858923557655.dkr.ecr.us-east-1.amazonaws.com`) — distinct from the
+- **AWS account:** the Connect Labs account (its ECR registry is set by the
+  `ECR_REGISTRY` value in `deploy-labs.yml`) — distinct from the
   Scout-production account.
 - **Path prefix:** served under `/scout` via `FORCE_SCRIPT_NAME`
   (`config/settings/connectlabs.py`) and the nginx `/scout/...` locations
