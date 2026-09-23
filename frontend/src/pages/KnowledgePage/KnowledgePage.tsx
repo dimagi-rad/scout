@@ -55,6 +55,7 @@ export function KnowledgePage() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const isNew = location.pathname.endsWith("/new")
+  const listPath = isNew || id ? location.pathname.replace(/\/[^/]+\/?$/, "") : location.pathname
 
   useEffect(() => {
     setPage(1)
@@ -77,9 +78,9 @@ export function KnowledgePage() {
     } else {
       // The role can resolve to read after the form opened optimistically.
       setFormOpen(false)
-      navigate("/knowledge", { replace: true })
+      navigate(listPath, { replace: true })
     }
-  }, [isNew, canWrite, navigate])
+  }, [isNew, canWrite, navigate, listPath])
 
   useEffect(() => {
     if (id && !isNew && knowledgeItems.length > 0) {
@@ -117,7 +118,7 @@ export function KnowledgePage() {
     if (!open) {
       setEditItem(null)
       if (isNew || id) {
-        navigate("/knowledge")
+        navigate(listPath)
       }
     }
   }

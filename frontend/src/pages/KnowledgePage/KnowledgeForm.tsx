@@ -114,6 +114,7 @@ export function KnowledgeForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (readOnly) return
     setLoading(true)
     setError(null)
 
