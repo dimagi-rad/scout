@@ -244,7 +244,7 @@ def _system_prompt_cache_key(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
-    write_capable: bool = True,
+    write_capable: bool = False,
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
@@ -257,6 +257,8 @@ def _system_prompt_cache_key(
     materialization guidance differs between interactive (fire-and-resume) and
     headless (blocking) runs. Includes ``canvas_write`` because write-capable
     chats get different dataset-editing instructions from read-only chats.
+    Includes ``write_capable`` because it selects the artifact prompt and the
+    read-only or write-capable materialization guidance.
     """
     prompt_hash = hashlib.md5(
         (workspace.system_prompt or "").encode(), usedforsecurity=False
@@ -281,7 +283,7 @@ async def _semantic_catalog_context(workspace) -> str:
 
 
 async def _fetch_semantic_model_context(
-    workspace, interactive: bool = True, write_capable: bool = True
+    workspace, interactive: bool = True, write_capable: bool = False
 ) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
@@ -1101,7 +1103,9 @@ def _build_tools(
         # all canvas writes are delegated to the Canvas Manager subagent,
         # which read-only workspace members do not get at all.
         tools.append(create_canvas_read_tool(workspace, user, conversation_id))
-        if canvas_write:
+        # build_agent_graph already folds write_capable into canvas_write; checking
+        # both keeps a direct caller that forgets write_capable from failing open.
+        if canvas_write and write_capable:
             tools.append(
                 create_canvas_manager_tool(
                     workspace,
@@ -1122,7 +1126,7 @@ async def _build_system_prompt(
     user,
     interactive: bool = True,
     canvas_write: bool = False,
-    write_capable: bool = True,
+    write_capable: bool = False,
 ) -> tuple[str, str]:
     """Assemble the workspace system prompt as a (stable, volatile) split.
 
@@ -1230,7 +1234,7 @@ Dataset editing vocabulary:
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
 
-    if interactive and canvas_write:
+    if interactive and canvas_write and write_capable:
         stable_sections.append("""
 ## Semantic Canvas (dataset editing)
 

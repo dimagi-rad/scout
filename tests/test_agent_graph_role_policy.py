@@ -35,14 +35,18 @@ def test_read_graph_keeps_queries_and_artifact_inspection_but_filters_writes(wor
     query.name = "query"
     run_materialization = AsyncMock()
     run_materialization.name = "run_materialization"
+    cancel_materialization = AsyncMock()
+    cancel_materialization.name = "cancel_materialization"
 
     tools = _by_name(
         _build_tools(
             workspace,
             read_user,
-            [query, run_materialization],
+            [query, run_materialization, cancel_materialization],
             conversation_id="thread",
             interactive=True,
+            # canvas_write=True so the canvas_manager exclusion comes from the role gate.
+            canvas_write=True,
             write_capable=False,
         )
     )
@@ -53,6 +57,7 @@ def test_read_graph_keeps_queries_and_artifact_inspection_but_filters_writes(wor
     assert "canvas_read" in tools
     assert {
         "run_materialization",
+        "cancel_materialization",
         "save_learning",
         "save_as_recipe",
         "artifact_manager",
