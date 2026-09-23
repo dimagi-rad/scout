@@ -176,7 +176,7 @@ export function ArtifactCard({
           aria-label={`Open ${artifact.title}`}
           data-testid={`artifact-open-${artifact.id}`}
         >
-          <CardHeader className="min-w-0 gap-4 pb-3 pr-16">
+          <CardHeader className={`min-w-0 gap-4 pb-3 ${canWrite ? "pr-16" : ""}`}>
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <Badge
                 variant="secondary"

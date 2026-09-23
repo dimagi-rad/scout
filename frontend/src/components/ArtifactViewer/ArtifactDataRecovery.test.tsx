@@ -139,10 +139,12 @@ describe("ArtifactDataRecovery", () => {
         />,
       )
 
-      expect(await screen.findByTestId("artifact-data-recover")).toBeDisabled()
+      const restore = await screen.findByTestId("artifact-data-recover")
+      expect(restore).toBeDisabled()
       expect(screen.getByTestId("artifact-data-recover-readonly-hint")).toHaveTextContent(
         "Read-only access",
       )
+      await userEvent.click(restore)
       expect(post).not.toHaveBeenCalled()
     } finally {
       useAppStore.setState({ domains: [] })
