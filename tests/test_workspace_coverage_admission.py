@@ -28,6 +28,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.credential_coverage import CoverageRecovery
+from apps.workspaces.services.invite_notifications import describe_workspace_sources
 from apps.workspaces.services.member_coverage import (
     MembersLackTenant,
     accept_invite_if_covered,
@@ -311,6 +312,14 @@ def test_awaiting_invite_banner_names_what_is_still_needed(client, user, t1, t2)
     assert "Source Two" in message
     assert "Source One" not in message
     assert not mail.outbox
+
+
+@pytest.mark.django_db
+def test_invite_notices_ask_for_every_source(user, t1, t2):
+    phrase = describe_workspace_sources(_workspace(user, t1, t2))
+
+    assert " and " in phrase
+    assert " or " not in phrase
 
 
 @pytest.mark.django_db(transaction=True)
