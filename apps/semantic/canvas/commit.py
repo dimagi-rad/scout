@@ -29,6 +29,7 @@ from apps.semantic.models import (
     SemanticCanvasChange,
     SemanticDataset,
     SemanticField,
+    SemanticModel,
     SemanticRelationship,
 )
 from apps.semantic.services.catalog import _sync_fields
@@ -43,6 +44,10 @@ class _CommitConflict(Exception):
     def __init__(self, conflicts: list[dict[str, Any]]) -> None:
         super().__init__("canvas commit conflict")
         self.conflicts = conflicts
+
+
+class _CatalogChanged(Exception):
+    pass
 
 
 def commit_canvas(canvas, user=None) -> dict[str, Any]:
@@ -74,6 +79,21 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
 
     try:
         committed = _commit_transaction(canvas, pending, user)
+    except _CatalogChanged:
+        return {
+            "committed": [],
+            "blocked": True,
+            "conflicts": [],
+            "blocking_diagnostics": [
+                {
+                    "severity": "error",
+                    "code": "CATALOG_CHANGED",
+                    "object": "canvas",
+                    "path": "",
+                    "message": "The semantic catalog changed during validation. Review the canvas diagnostics and save again; your drafts are preserved.",
+                }
+            ],
+        }
     except _CommitConflict as exc:
         return {
             "committed": [],
@@ -123,7 +143,20 @@ def _commit_transaction(canvas, pending: list[SemanticCanvasChange], user) -> li
     committed: list[dict[str, Any]] = []
     now = timezone.now()
     with transaction.atomic():
-        model = canvas.semantic_model
+        # Catalog refresh takes this same lock; a probe from before that refresh
+        # must not be committed after it using stale inferred columns.
+        model = SemanticModel.objects.select_for_update().get(pk=canvas.semantic_model_id)
+        for change in pending:
+            if (
+                change.object_type == ObjectType.CUSTOM_DATASET
+                and change.change_type == ChangeType.CREATE
+            ):
+                validation = change.fields.get("_validation") or {}
+                if (
+                    model.status != SemanticModel.Status.ACTIVE
+                    or validation.get("catalog_revision") != model.updated_at.isoformat()
+                ):
+                    raise _CatalogChanged
         workspace = canvas.workspace
         for change in pending:
             # Capture identity before settle/delete clears the draft fields.

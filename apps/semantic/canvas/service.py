@@ -823,21 +823,28 @@ def validate_custom_dataset_draft(canvas, change: SemanticCanvasChange) -> dict[
     """Compile + probe a custom-dataset draft; cache the result on the row.
 
     Column inference runs a LIMIT 0 probe against the workspace DB, so the
-    result is cached on the change row keyed by the SQL's hash and only
-    recomputed when the definition changes.
+    Successful probes are reusable only for the same SQL and catalog revision.
+    The workspace has one model, refreshed in place; its cached Python instance
+    and the SQL text alone cannot tell us whether a rebuild changed the tables.
     """
     fields = dict(change.fields)
     definition_sql = fields.get("definition_sql", "")
     sql_hash = hashlib.sha256(definition_sql.encode("utf-8")).hexdigest()[:16]
     cached = fields.get("_validation") or {}
-    if cached.get("sql_hash") == sql_hash:
-        return cached
-
     result: dict[str, Any] = {"sql_hash": sql_hash, "error": "", "columns": [], "compiled_sql": ""}
     try:
+        model = get_active_semantic_model(canvas.workspace)
+        revision = model.updated_at.isoformat()
+        if (
+            cached.get("sql_hash") == sql_hash
+            and cached.get("catalog_revision") == revision
+            and not cached.get("error")
+        ):
+            return cached
+        result["catalog_revision"] = revision
         compiled = compile_custom_dataset_sql(
             definition_sql,
-            allowed_tables=allowed_custom_dataset_tables(canvas.semantic_model),
+            allowed_tables=allowed_custom_dataset_tables(model),
         )
         columns = infer_custom_dataset_columns(canvas.workspace, compiled)
         result["compiled_sql"] = compiled

@@ -951,6 +951,86 @@ def pending_dataset_op(monkeypatch):
     }
 
 
+def _refresh_canvas_catalog(workspace, monkeypatch, names):
+    tables = [
+        PhysicalTable(
+            name=name,
+            type="table",
+            description="",
+            columns=[{"name": "username", "type": "text"}],
+            primary_key="username",
+        )
+        for name in names
+    ]
+    monkeypatch.setattr(catalog_service, "load_physical_tables", lambda ws: ("new_schema", tables))
+    return catalog_service.ensure_semantic_model(workspace)
+
+
+def test_canvas_revalidates_unchanged_sql_after_catalog_refresh(
+    canvas, workspace, pending_dataset_op, monkeypatch
+):
+    apply_operations(canvas, [pending_dataset_op])
+    probe = canvas_service.infer_custom_dataset_columns
+    assert probe.call_count == 1
+    canvas_projection(canvas)
+    assert probe.call_count == 1
+    revision = canvas.changes.get().fields["_validation"]["catalog_revision"]
+
+    refreshed = _refresh_canvas_catalog(workspace, monkeypatch, ["raw_users"])
+    assert refreshed.id == canvas.semantic_model_id
+    removed = canvas_projection(canvas)
+    assert removed["can_commit"] is False
+    assert any("raw_visits" in d["message"] for d in removed["diagnostics"])
+    assert canvas.changes.get().fields["_validation"]["catalog_revision"] != revision
+    assert probe.call_count == 1  # Removed source is rejected before a DB probe.
+
+    _refresh_canvas_catalog(workspace, monkeypatch, ["raw_users", "raw_visits"])
+    restored = canvas_projection(canvas)
+    assert restored["can_commit"] is True
+    assert restored["diagnostics"] == []
+    assert probe.call_count == 2
+
+
+def test_canvas_refresh_reinfers_changed_columns(
+    canvas, workspace, pending_dataset_op, monkeypatch
+):
+    apply_operations(canvas, [pending_dataset_op])
+    canvas_service.infer_custom_dataset_columns.return_value = [
+        {"name": "username", "type": "bigint"}
+    ]
+    _refresh_canvas_catalog(workspace, monkeypatch, ["raw_visits"])
+    result = canvas_projection(canvas)
+    assert result["objects"][0]["fields"]["columns"] == [{"name": "username", "type": "bigint"}]
+
+
+def test_canvas_failed_probe_is_not_sticky(canvas, pending_dataset_op):
+    canvas_service.infer_custom_dataset_columns.side_effect = [
+        RuntimeError("temporary outage"),
+        [{"name": "username", "type": "text"}],
+    ]
+    initial = apply_operations(canvas, [pending_dataset_op])
+    assert initial["can_commit"] is False
+    assert canvas_projection(canvas)["can_commit"] is True
+
+
+def test_canvas_commit_blocks_catalog_change_after_validation(
+    canvas, workspace, pending_dataset_op, monkeypatch, user
+):
+    apply_operations(canvas, [pending_dataset_op])
+    original = canvas_commit_module._commit_transaction
+
+    def refresh_before_commit(canvas, pending, user):
+        _refresh_canvas_catalog(workspace, monkeypatch, ["raw_users"])
+        return original(canvas, pending, user)
+
+    monkeypatch.setattr(canvas_commit_module, "_commit_transaction", refresh_before_commit)
+    result = commit_canvas(canvas, user)
+    assert result["blocked"] is True
+    assert result["blocking_diagnostics"][0]["code"] == "CATALOG_CHANGED"
+    assert not CustomDataset.objects.filter(workspace=workspace, name="visit_stats").exists()
+    assert canvas.changes.get().change_type == SemanticCanvasChange.ChangeType.CREATE
+
+
 @pytest.mark.parametrize("object_type", ["dataset", "custom_dataset"])
 @pytest.mark.parametrize("use_uuid", [False, True])
 def test_pending_dataset_metadata_resolves_by_name_or_uuid(
