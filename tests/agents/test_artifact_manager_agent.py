@@ -8,6 +8,7 @@ from langgraph.errors import GraphRecursionError
 from apps.agents.subagents.events import reset_subagent_event_queue, set_subagent_event_queue
 from apps.agents.tools.artifact_manager_agent import (
     ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE,
+    _artifact_manager_failure_result,
     _forward_nested_event,
     _SubagentTraceRecorder,
     _summarize_result,
@@ -167,11 +168,26 @@ def test_artifact_manager_rejects_invalid_data_model_handoff(requirements):
 
     summary = _summarize_result([], json.dumps(response))
 
-    assert summary["status"] == "error"
+    assert summary["status"] == "invalid_data_requirements"
     assert "data_requirements" not in summary
     assert "no model change is authorized" in summary["message"]
     assert 1 <= len(summary["requirement_errors"]) <= 4
     assert all(set(error) == {"path", "code", "message"} for error in summary["requirement_errors"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requirements", [[_topic_requirement()], [{}]])
+async def test_failed_manager_run_never_returns_an_actionable_model_proposal(requirements):
+    result = await _artifact_manager_failure_result(
+        "parent",
+        _SubagentTraceRecorder(),
+        [],
+        json.dumps({"status": "needs_data_model", "data_requirements": requirements}),
+        "The run failed.",
+    )
+    assert result["status"] == "error"
+    assert "data_requirements" not in result
+    assert "requirement_errors" not in result
 
 
 @pytest.mark.asyncio

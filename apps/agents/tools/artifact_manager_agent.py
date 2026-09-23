@@ -367,6 +367,8 @@ async def _artifact_manager_failure_result(
     result = _summarize_result(messages, final_text)
     result["status"] = "error"
     result["message"] = message[:1200]
+    result.pop("data_requirements", None)
+    result.pop("requirement_errors", None)
     await _emit_subagent_event(
         _subagent_error_event(parent_tool_call_id, result["message"]),
         trace,
@@ -821,7 +823,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
                 parsed_final.get("data_requirements")
             )
         except ValidationError as exc:
-            summary["status"] = "error"
+            summary["status"] = "invalid_data_requirements"
             summary["requirement_errors"] = [
                 {
                     "path": "/".join(str(part) for part in error["loc"])[:200],
