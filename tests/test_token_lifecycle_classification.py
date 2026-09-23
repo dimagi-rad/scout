@@ -24,8 +24,14 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 
+from apps.common.error_codes import ErrorCode
 from apps.users.services import token_refresh
-from apps.users.services.token_refresh import TokenRefreshError, refresh_oauth_token_sync
+from apps.users.services.token_refresh import (
+    TokenRefreshError,
+    TokenRefreshRejected,
+    TokenRefreshUnavailable,
+    refresh_oauth_token_sync,
+)
 
 
 def _social_token():
@@ -98,8 +104,13 @@ class TestSyncRefreshLogLevels:
             "apps.users.services.token_refresh.requests.post",
             return_value=_post_returning(400, body),
         ):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 refresh_oauth_token_sync(_social_token(), "https://provider.test/o/token/")
+            rejected = error_code == "invalid_grant"
+            assert caught.type is (TokenRefreshRejected if rejected else TokenRefreshError)
+            assert caught.value.code == (
+                ErrorCode.AUTH_TOKEN_EXPIRED if rejected else ErrorCode.AUTH_REFRESH_FAILED
+            )
 
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -116,8 +127,10 @@ class TestSyncRefreshLogLevels:
             "apps.users.services.token_refresh.requests.post",
             return_value=_post_returning(400, '{"error": "surprise-leaky-value"}'),
         ):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 refresh_oauth_token_sync(_social_token(), "https://provider.test/o/token/")
+            assert caught.type is TokenRefreshError
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
 
         assert "surprise-leaky-value" not in caplog.text
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -131,8 +144,11 @@ class TestSyncRefreshLogLevels:
             "apps.users.services.token_refresh.requests.post",
             return_value=_post_returning(status, "nope"),
         ):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 refresh_oauth_token_sync(_social_token(), "https://provider.test/o/token/")
+            retryable = status == 429
+            assert caught.type is (TokenRefreshUnavailable if retryable else TokenRefreshError)
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
     @pytest.mark.parametrize("status", [500, 502, 503])
@@ -143,8 +159,10 @@ class TestSyncRefreshLogLevels:
             "apps.users.services.token_refresh.requests.post",
             return_value=_post_returning(status, "boom"),
         ):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 refresh_oauth_token_sync(_social_token(), "https://provider.test/o/token/")
+            assert caught.type is TokenRefreshUnavailable
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors, f"HTTP {status} must stay at ERROR"
         assert any(r.exc_info for r in errors)
@@ -156,8 +174,10 @@ class TestSyncRefreshLogLevels:
             "apps.users.services.token_refresh.requests.post",
             side_effect=requests.ConnectionError("dns is down"),
         ):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 refresh_oauth_token_sync(_social_token(), "https://provider.test/o/token/")
+            assert caught.type is TokenRefreshUnavailable
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors and any(r.exc_info for r in errors)
 

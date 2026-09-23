@@ -115,8 +115,9 @@ class TestCredentialResolverTokenRefresh:
         with patch(
             "apps.users.services.credential_resolver.token_needs_refresh", return_value=True
         ):
-            with pytest.raises(CredentialResolutionError):
+            with pytest.raises(CredentialResolutionError) as caught:
                 await _aresolve_oauth_credential(mock_token, "commcare")
+        assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
 
     @pytest.mark.asyncio
     async def test_valid_oauth_credential_carries_refresh_callable(self):
@@ -209,5 +210,7 @@ class TestSyncTokenRefresh:
         response = MagicMock()
         response.raise_for_status.side_effect = RuntimeError("500")
         with patch("apps.users.services.token_refresh.requests.post", return_value=response):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 refresh_oauth_token_sync(social_token, "https://token/")
+            assert caught.type is TokenRefreshError
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
