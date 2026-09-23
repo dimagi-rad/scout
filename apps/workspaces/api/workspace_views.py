@@ -27,6 +27,7 @@ from apps.workspaces.access import (
     missing_tenants_by_workspace,
     missing_tenants_for_member,
     missing_tenants_payload,
+    needed_text,
     remedy_text,
 )
 from apps.workspaces.models import (
@@ -118,19 +119,32 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
     return tried
 
 
+# Bounds the provider fan-out and keeps queued refreshes from spending their
+# timeout waiting on the (serialized) persistence legs of the ones ahead.
+MEMBER_REFRESH_CONCURRENCY = 4
+
+
 async def _arefresh_members_for_provider(users, provider) -> None:
-    """Refresh each user's own identities for ``provider`` concurrently.
+    """Best-effort refresh of each user's own identities for ``provider``.
 
-    Concurrent so the wait is bounded by one ``SHARE_REFRESH_TIMEOUT`` rather than
-    one per uncovered member.
+    Advisory only: the locked coverage check decides, so one member's failure
+    must neither fail the request nor stop the others.
     """
-    await asyncio.gather(*(_arefresh_target_for_workspace(user, [provider]) for user in users))
+    gate = asyncio.Semaphore(MEMBER_REFRESH_CONCURRENCY)
 
+    async def refresh(user):
+        async with gate:
+            await _arefresh_target_for_workspace(user, [provider])
 
-def _needed_text(missing) -> str:
-    return "; ".join(
-        f"'{t['tenant_name']}': {t['remedy']}" for t in missing_tenants_payload(missing)
-    )
+    results = await asyncio.gather(*(refresh(user) for user in users), return_exceptions=True)
+    for user, result in zip(users, results, strict=True):
+        if isinstance(result, Exception):
+            logger.warning(
+                "Source-add refresh failed for member=%s provider=%s",
+                user.id,
+                provider,
+                exc_info=result,
+            )
 
 
 def _member_label(user) -> str:
@@ -379,7 +393,7 @@ class WorkspaceListView(APIView):
                 {
                     "error": (
                         "You can't use every selected source with your own account yet. "
-                        f"Still needed — {_needed_text(missing)}."
+                        f"Still needed — {needed_text(missing)}."
                     ),
                     "missing_tenants": missing_tenants_payload(missing),
                 },
@@ -638,12 +652,16 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_201_CREATED,
             )
 
-        missing = missing_for_user(target, workspace)
-        if missing:
+        # authz-exempt: skip the refresh for an existing member; admission answers 409.
+        already_member = WorkspaceMembership.objects.filter(
+            workspace=workspace, user=target
+        ).exists()
+        gaps = () if already_member else missing_for_user(target, workspace)
+        if gaps:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
             # using their own token, then re-check — no manual reconnect needed.
-            providers = sorted({t.provider for t in missing})
+            providers = sorted({t.provider for t in gaps})
             async_to_sync(_arefresh_target_for_workspace)(target, providers)
 
         # Every member must cover every source (#381), so a target still missing
@@ -828,7 +846,7 @@ def _awaiting_invite_message(invite, user) -> str:
         )
     return (
         f"You were invited to '{invite.workspace.name}', which needs access to every one "
-        f"of its data sources. Still needed — {_needed_text(missing)}. It unlocks "
+        f"of its data sources. Still needed — {needed_text(missing)}. It unlocks "
         "automatically once you have them."
     )
 
@@ -925,8 +943,8 @@ class WorkspaceTenantView(APIView):
             return Response(
                 {
                     "error": (
-                        "You do not have access to this tenant. "
-                        f"To add it, {remedy_text(requester_missing[0])}."
+                        "You can't add this source until you have usable access to it "
+                        f"yourself — {remedy_text(requester_missing[0])}."
                     ),
                     "missing_tenants": missing_tenants_payload(requester_missing),
                 },
@@ -935,7 +953,8 @@ class WorkspaceTenantView(APIView):
 
         # Refresh uncovered members with their own tokens before the locked recheck,
         # so someone granted access upstream since their last login is not refused.
-        lacking = members_lacking_tenant(workspace, tenant)
+        already_added = WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+        lacking = [] if already_added else members_lacking_tenant(workspace, tenant)
         if lacking:
             async_to_sync(_arefresh_members_for_provider)(
                 [user for user, _missing in lacking], tenant.provider

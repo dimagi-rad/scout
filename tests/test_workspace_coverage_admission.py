@@ -13,7 +13,6 @@ from unittest.mock import patch
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
-from django.core import mail
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -27,6 +26,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services import invite_notifications
 from apps.workspaces.services.credential_coverage import CoverageRecovery
 from apps.workspaces.services.invite_notifications import describe_workspace_sources
 from apps.workspaces.services.member_coverage import (
@@ -90,6 +90,28 @@ class TestSourceAdd:
         return client.post(
             f"/api/workspaces/{ws.id}/tenants/", {"tenant_id": str(tenant.id)}, format="json"
         )
+
+    def test_readding_an_attached_source_does_no_member_refresh(self, client, user, t1):
+        ws = _workspace(user, t1)
+        _member(ws, "brian@example.com")
+        client.force_login(user)
+
+        with patch(REFRESH, side_effect=_no_refresh) as refresh:
+            resp = self._post(client, ws, t1)
+
+        assert resp.status_code == 200
+        refresh.assert_not_called()
+
+    def test_one_members_refresh_failure_does_not_fail_the_request(self, client, user, t1, t2):
+        ws = _workspace(user, t1)
+        _member(ws, "brian@example.com", t1)
+        grant_tenant_access(user, t2)
+        client.force_login(user)
+
+        with patch(REFRESH, side_effect=RuntimeError("provider down")):
+            resp = self._post(client, ws, t2)
+
+        assert resp.status_code == 409
 
     def test_refused_when_another_member_cannot_use_it(self, client, user, t1, t2):
         ws = _workspace(user, t1)
@@ -161,7 +183,8 @@ class TestSourceAdd:
         resp = self._post(client, ws, t2)
 
         assert resp.status_code == 400
-        assert resp.json()["error"].startswith("You do not have access to this tenant.")
+        assert resp.json()["error"].startswith("You can't add this source until")
+        assert [t["recovery"] for t in resp.json()["missing_tenants"]] == ["reconnect"]
 
     def test_service_refuses_without_the_views_precheck(self, user, t1, t2):
         """The view's pre-check only decides who to refresh; the locked check decides."""
@@ -196,6 +219,18 @@ class TestDirectAdd:
         assert not WorkspaceMembership.objects.filter(workspace=ws, user=target).exists()
         assert refresh.call_args.args[1] == ["commcare"]
 
+    def test_admission_stays_all_of_with_the_read_switch_off(self, settings, client, user, t1, t2):
+        settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+        ws = _workspace(user, t1, t2)
+        target = User.objects.create_user(email="partial@example.com", password="pass")
+        grant_tenant_access(target, t1)
+        client.force_login(user)
+
+        with patch(REFRESH, side_effect=_no_refresh):
+            resp = self._add(client, ws, target.email)
+
+        assert resp.json()["result"] == "invite_awaiting_access"
+
     def test_full_coverage_target_becomes_a_member(self, client, user, t1, t2):
         ws = _workspace(user, t1, t2)
         target = User.objects.create_user(email="full@example.com", password="pass")
@@ -226,6 +261,7 @@ class TestDirectAdd:
 
         resp = self._add(client, ws, target.email)
 
+        assert resp.status_code == 201
         assert resp.json()["result"] == "member"
 
 
@@ -273,6 +309,19 @@ class TestInviteResolution:
 
 @pytest.mark.django_db
 class TestCreate:
+    def test_create_stays_all_of_with_the_read_switch_off(self, settings, client, user, t1, t2):
+        settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+        grant_tenant_access(user, t1)
+        client.force_login(user)
+
+        resp = client.post(
+            "/api/workspaces/",
+            {"name": "Both", "tenant_ids": [str(t1.id), str(t2.id)]},
+            format="json",
+        )
+
+        assert resp.status_code == 400
+
     def test_every_requested_source_needs_a_usable_credential(self, client, user, t1, t2):
         grant_tenant_access(user, t1)
         TenantMembership.objects.create(user=user, tenant=t2)
@@ -305,7 +354,7 @@ class TestCreate:
 
 
 @pytest.mark.django_db
-def test_awaiting_invite_banner_names_what_is_still_needed(client, user, t1, t2):
+def test_awaiting_invite_banner_names_what_is_still_needed(client, user, t1, t2, mocker):
     ws = _workspace(user, t1, t2)
     invitee = User.objects.create_user(email="inv@example.com", password="pass")
     grant_tenant_access(invitee, t1)
@@ -317,12 +366,13 @@ def test_awaiting_invite_banner_names_what_is_still_needed(client, user, t1, t2)
         expires_at=timezone.now() + timedelta(days=7),
     )
     client.force_login(invitee)
+    send = mocker.patch.object(invite_notifications, "send_email")
 
     message = client.get("/api/invites/").json()[0]["message"]
 
     assert "Source Two" in message
     assert "Source One" not in message
-    assert not mail.outbox
+    send.defer.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -335,7 +385,7 @@ def test_invite_notices_ask_for_every_source(user, t1, t2):
 
 @pytest.mark.django_db(transaction=True)
 class TestMutationRaces:
-    """Admission and source add serialize on the workspace row (ACCESS-CONTRACT §4):
+    """Admission and source add serialize on the workspace row (#381):
     whichever commits second re-evaluates against the other's change."""
 
     def test_member_admission_waits_for_a_concurrent_source_add(self, user, t1, t2):

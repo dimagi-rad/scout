@@ -540,7 +540,8 @@ class MissingTenant:
     """One workspace tenant a member cannot currently use, with its remedy.
 
     Carries only source identity and team labels — never credential material —
-    because it is returned verbatim to the member being denied.
+    because it is returned to the member being denied, and to a manager told which
+    members cannot use a source they are adding.
     """
 
     tenant_id: str

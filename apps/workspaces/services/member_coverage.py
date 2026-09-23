@@ -6,11 +6,12 @@ would create that state in the first place. They are strictly all-of regardless
 of the read gate's rollout switch, so while the switch is off a partially covering
 user is no longer admitted (they get an awaiting-access invite instead of any-of
 access). That is deliberate: every gap admitted now is a member the flip takes
-dark later (ACCESS-CONTRACT §3).
+dark later (#381).
 
 Final checks and mutations run under a lock on the workspace row, shared by every
-mutation here, so a concurrent member add and source add cannot each pass against
-the state the other is about to change (ACCESS-CONTRACT §4). Upstream refreshes
+admission mutation here, so a concurrent member add and source add cannot each pass
+against the state the other is about to change. Source removal does not take it;
+that race can only refuse an admission, never admit a gap. Upstream refreshes
 happen before the lock, never inside it.
 """
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
+from apps.workspaces.access import _workspace_tenants
 from apps.workspaces.models import (
     Workspace,
     WorkspaceInviteStatus,
@@ -43,13 +45,6 @@ class MembersLackTenant(Exception):
 
 def _lock(workspace) -> None:
     Workspace.objects.select_for_update().only("pk").get(pk=workspace.pk)
-
-
-def _workspace_tenants(workspace) -> list:
-    return [
-        wt.tenant
-        for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant")
-    ]
 
 
 def missing_for_user(user, workspace) -> tuple[MissingTenant, ...]:
