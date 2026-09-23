@@ -612,3 +612,22 @@ def test_retirement_refuses_a_schema_holding_a_non_relation_object(owned, manage
         SchemaManager().retire_tenant_schema(tenant_schema)
 
     assert _schema_exists(managed, tenant_schema.schema_name)
+
+
+def test_reconcile_reports_a_failed_republish_instead_of_raising(owned, managed):
+    """Callers use reconcile as a pre-check; a republish that cannot succeed (no
+    source left to serve) must come back as a status, not abort them."""
+    workspace, _tenant, tenant_schema = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    managed.execute(
+        psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(vs.schema_name))
+    )
+    TenantSchema.objects.filter(pk=tenant_schema.pk).update(state=SchemaState.TEARDOWN)
+
+    result = manager.reconcile_view_publication(workspace)
+
+    assert result["status"] == "republish_failed"
+    assert result["reason"] == "physical_missing"
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.FAILED

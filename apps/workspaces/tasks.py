@@ -1155,6 +1155,8 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         reconciliation = await _to_thread_fresh_db(manager.reconcile_view_publication, workspace)
         if reconciliation.get("status") == "republished":
             vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
+        elif reconciliation.get("status") == "republish_failed":
+            raise RuntimeError(reconciliation["error"])
         else:
             vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
@@ -1655,11 +1657,12 @@ async def _retry_retirement(schema, dependents: list[dict], attempt: int, reason
         return
     dependent_schemas = sorted({d["schema"] for d in dependents if d.get("schema")})
     logger.warning(
-        "teardown_schema: schema %s (%s) still referenced (attempt %d): %s — retaining "
-        "and retrying after the dependent workspaces rebuild",
+        "teardown_schema: retiring schema %s (%s) deferred (attempt %d, %d dependent "
+        "schemas asked to rebuild): %s",
         schema.id,
         schema.schema_name,
         attempt,
+        len(dependent_schemas),
         reason,
     )
     async for vs in WorkspaceViewSchema.objects.filter(schema_name__in=dependent_schemas):

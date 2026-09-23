@@ -233,3 +233,11 @@ async def test_cancelled_drained_thread_keeps_parent_tenant_ownership_until_stop
     assert stopped.is_set()
     with try_tenant_data_lock(tenant) as held:
         assert held
+
+
+async def test_workspace_lock_cannot_be_taken_while_holding_tenant_locks():
+    """W after T would invert the global order a publication (W then T) relies on."""
+    async with tenant_data_lock([uuid.uuid4()]):
+        with pytest.raises(LockOrderError):
+            async with workspace_data_lock(uuid.uuid4()):
+                pass

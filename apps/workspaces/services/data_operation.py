@@ -179,6 +179,9 @@ async def workspace_data_lock(workspace_id):
     if key in held:
         yield
         return
+    tenant_owner, tenant_keys = _held_tenants.get()
+    if tenant_owner is task and tenant_keys:
+        raise LockOrderError("Cannot acquire a workspace lock while holding tenant locks")
     lock_key = _lock_key(key)
     # A dedicated session keeps the lock across awaits and thread-based pipeline
     # work. Closing it also releases the lock if a worker is cancelled or dies.

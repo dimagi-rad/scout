@@ -425,7 +425,8 @@ class SchemaManager:
                 cursor.fetchall(), key=lambda rel: (rel[1] not in ("v", "m"), rel[0])
             )
             for relname, relkind in relations:
-                if relkind == "S":
+                # LOCK TABLE rejects sequences, materialized views and foreign tables.
+                if relkind not in ("r", "p", "v"):
                     continue
                 cursor.execute(
                     psycopg.sql.SQL("LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE").format(
@@ -493,8 +494,11 @@ class SchemaManager:
             remaining = blocked
 
     def _drop_schema_roles(self, schema_name: str) -> None:
-        conn = get_managed_db_connection()
+        # Best effort all the way down: the schema is already dropped, and an
+        # escaping error would make the caller revert the row to ACTIVE.
+        conn = None
         try:
+            conn = get_managed_db_connection()
             cursor = conn.cursor()
             self._drop_readonly_role(cursor, schema_name)
             self._drop_dbt_role(cursor, schema_name)
@@ -506,7 +510,8 @@ class SchemaManager:
                 schema_name,
             )
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def _drop_dbt_role(self, cursor, schema_name: str) -> None:
         """Drop the low-privilege dbt role for a schema (issue #241).
@@ -611,9 +616,9 @@ class SchemaManager:
             entry_fields.append("state")
         vs.save(update_fields=entry_fields)
 
+        coverage = {"included_tenants": [], "excluded_tenants": []}
         try:
             if not tenants:
-                coverage = {"included_tenants": [], "excluded_tenants": []}
                 raise ValueError(f"Workspace {workspace.id} has no tenants")
 
             active_schemas = {
@@ -1003,7 +1008,13 @@ class SchemaManager:
             workspace.id,
             reason,
         )
-        self._build_view_schema(workspace)
+        try:
+            self._build_view_schema(workspace)
+        except Exception as exc:
+            # The build already recorded its outcome on the row; report rather
+            # than raise so callers using this as a pre-check still run.
+            logger.exception("Republishing the view schema for workspace '%s' failed", workspace.id)
+            return {"status": "republish_failed", "reason": reason, "error": str(exc)[:500]}
         return {"status": "republished", "reason": reason}
 
     @staticmethod
