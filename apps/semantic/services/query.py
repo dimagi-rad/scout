@@ -156,7 +156,12 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         if time_dimension
         else None
     )
-    resolved_filters = [_resolve_filter(model, f) for f in filters]
+    resolved_filters = [
+        _resolve_filter(
+            model, f, timezone_name=(query_spec.get("query_context") or {}).get("timezone")
+        )
+        for f in filters
+    ]
 
     datasets = {
         member.dataset.id
@@ -312,10 +317,12 @@ def _resolve_member(
     return ResolvedMember(dataset=dataset, field=field, member=member)
 
 
-def _resolve_filter(model, filter_spec: dict[str, Any]) -> tuple[ResolvedMember, dict[str, Any]]:
+def _resolve_filter(
+    model, filter_spec: dict[str, Any], *, timezone_name=None
+) -> tuple[ResolvedMember, dict[str, Any]]:
     if not isinstance(filter_spec, dict):
         raise SemanticQueryError("Each filter must be an object.")
-    validate_date_filter(filter_spec)
+    validate_date_filter(filter_spec, timezone_name)
     field = filter_spec.get("field") or filter_spec.get("member")
     member = _resolve_member(
         model,

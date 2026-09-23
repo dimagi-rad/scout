@@ -9,9 +9,12 @@ from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
 from django.core.cache import cache
 from django.test import AsyncClient
+from freezegun import freeze_time
 
 from apps.artifacts.models import Artifact, ArtifactType
-from apps.users.models import TenantMembership, User
+from apps.artifacts.services.graph_runtime import check_graph_artifact
+from apps.artifacts.views import _artifact_query_cache_key
+from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from tests.test_date_context import CONTEXT, story
 
@@ -56,7 +59,7 @@ async def test_query_inspector_resolves_controls_and_separates_filter_cache(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_inspector_invalid_binding_does_not_fall_back_to_all_time(
-    member_client, workspace, live_artifact
+    member_client, workspace, live_artifact, caplog
 ):
     doc = story()
     doc["blocks"][1]["inputs"]["date_range"] = {"$ref": "removed.value"}
@@ -73,6 +76,8 @@ async def test_inspector_invalid_binding_does_not_fall_back_to_all_time(
         "error": "Invalid artifact date context. Check the dates, timezone, and date-control bindings."
     }
     run.assert_not_awaited()
+    assert str(live_artifact.id) in caplog.text
+    assert "Unresolved date binding: removed.value" in caplog.text
 
 
 @pytest.mark.django_db(transaction=True)
@@ -80,10 +85,6 @@ async def test_inspector_invalid_binding_does_not_fall_back_to_all_time(
 async def test_inspector_and_runtime_check_execute_same_default_periods(
     member_client, workspace, live_artifact
 ):
-    from freezegun import freeze_time
-
-    from apps.artifacts.services.graph_runtime import check_graph_artifact
-
     live_artifact.data = {"story_doc": story(compare=True)}
     await live_artifact.asave(update_fields=["data"])
     result = {"columns": ["sessions.count"], "rows": [[18]], "row_count": 1}
@@ -129,8 +130,6 @@ def query_surface_ready():
 
 @pytest.fixture
 def workspace(db):
-    from apps.users.models import Tenant
-
     tenant = Tenant.objects.create(
         provider="commcare", external_id="test-domain", canonical_name="Test Domain"
     )
@@ -160,8 +159,6 @@ def other_user(db):
 
 @pytest.fixture
 def other_workspace(db):
-    from apps.users.models import Tenant
-
     tenant = Tenant.objects.create(
         provider="commcare", external_id="other-domain", canonical_name="Other Domain"
     )
@@ -456,3 +453,34 @@ async def test_query_results_cached_across_opens(live_artifact, member_client, m
     assert first.json()["queries"] == second.json()["queries"]
     # No re-execution on the cached second open.
     assert calls_after_second == calls_after_first
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_malformed_stored_query_does_not_crash_inspector(
+    live_artifact, member_client, workspace
+):
+    live_artifact.semantic_queries = [
+        None,
+        {"name": "valid", "measures": ["visits.count"], "query_context": {}},
+    ]
+    await live_artifact.asave(update_fields=["semantic_queries"])
+    with patch(
+        "apps.artifacts.views.run_semantic_query",
+        new=AsyncMock(return_value=MOCK_SUBMISSIONS_RESULT),
+    ) as run:
+        response = await member_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
+        )
+    assert response.status_code == 200
+    assert response.json()["queries"][0]["error"] == "Semantic query must be an object"
+    assert response.json()["queries"][1]["rows"] == MOCK_SUBMISSIONS_RESULT["rows"]
+    run.assert_awaited_once()
+
+
+def test_cache_context_without_timezone_uses_default(live_artifact, settings):
+    first = _artifact_query_cache_key(live_artifact, resolved_queries=[{"query_context": {}}])
+    second = _artifact_query_cache_key(
+        live_artifact, resolved_queries=[{"query_context": {"timezone": settings.TIME_ZONE}}]
+    )
+    assert first == second

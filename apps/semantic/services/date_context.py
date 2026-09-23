@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import calendar
 import re
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
@@ -76,7 +76,7 @@ def resolve_date_range(value, context: dict) -> dict:
         preset = value.get("preset")
         if preset not in PRESETS:
             raise DateContextError(f"Unsupported date preset. Use one of: {', '.join(PRESETS)}.")
-        end = calendar_date(context["today"])
+        end = calendar_date(context.get("today") if isinstance(context, dict) else None)
         start = end
         try:
             if preset == "yesterday":
@@ -143,8 +143,10 @@ def resolve_query_dates(query: dict, context=None) -> dict:
         if not member:
             raise DateContextError("A date_range requires time_dimension.")
         bounds = resolve_date_range(result.pop("date_range"), resolved_context)
+        existing = result.get("filters") or []
+        existing = existing if isinstance(existing, list) else [existing]
         result["filters"] = [
-            *(result.get("filters") or []),
+            *existing,
             {
                 "field": member,
                 "operator": "inDateRange",
@@ -154,8 +156,10 @@ def resolve_query_dates(query: dict, context=None) -> dict:
     return result
 
 
-def validate_date_filter(spec: dict) -> None:
+def validate_date_filter(spec: dict, timezone_name: str | None = None) -> None:
     operator = spec.get("operator", "equals")
+    if not isinstance(operator, str):
+        raise DateContextError("Filter operator must be a string.")
     if operator not in {
         "inDateRange",
         "notInDateRange",
@@ -170,26 +174,33 @@ def validate_date_filter(spec: dict) -> None:
     allowed_lengths = {1, 2} if operator in {"inDateRange", "notInDateRange"} else {1}
     if len(values) not in allowed_lengths:
         raise DateContextError(f"Invalid number of dates for {operator}.")
-    for value in values:
+    parsed = []
+    zone = ZoneInfo(timezone_name or settings.TIME_ZONE)
+    for index, value in enumerate(values):
         try:
             if not isinstance(value, str):
                 raise TypeError
             if "T" in value:
-                datetime.fromisoformat(value.replace("Z", "+00:00"))
+                instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
             else:
-                calendar_date(value)
-        except (TypeError, ValueError) as exc:
+                instant = datetime.combine(
+                    calendar_date(value), time.max if index == 1 else time.min
+                )
+            parsed.append(
+                (instant if instant.tzinfo else instant.replace(tzinfo=zone)).astimezone(UTC)
+            )
+        except (OverflowError, TypeError, ValueError) as exc:
             raise DateContextError(
                 "Date filters require ISO dates, not preset strings. For relative dates use date_range={preset: last_30_days}."
             ) from exc
-    if len(values) == 2 and all(len(value) == 10 for value in values) and values[0] > values[1]:
+    if len(parsed) == 2 and parsed[0] > parsed[1]:
         raise DateContextError("Date range start must be on or before its end.")
 
 
 def agent_date_context() -> str:
     context = query_context()
     return (
-        f"\n## Current date context\nCurrent instant: {context['as_of']}. "
+        "\n## Current date context\n"
         f"Reporting timezone: {context['timezone']}. Today: {context['today']}.\n"
         "This is the current clock, not the latest available data date. Use supported date presets "
         "and let the runtime resolve them. Never infer today from model memory or source timestamps.\n"

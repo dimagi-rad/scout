@@ -5,9 +5,21 @@ import { api } from "@/api/client"
 import type { ArtifactDetail, ArtifactQueryContext } from "@/components/ArtifactGraph/types"
 import { ArtifactViewer } from "./ArtifactViewer"
 import type { QueryDataResponse } from "./types"
-import { useArtifactQueryData } from "./useArtifactQueryData"
+import { useArtifactDateSources, useArtifactQueryData } from "./useArtifactQueryData"
 
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
+
+it("does not carry removed date-control ids into another artifact revision", () => {
+  const artifact: ArtifactDetail = { id: "artifact", title: "Test", type: "story", code: "", data: {}, semantic_queries: [], version: 1 }
+  const { result, rerender } = renderHook(({ value }) => useArtifactDateSources(value), { initialProps: { value: artifact } })
+  const staleUpdate = result.current[1]
+  act(() => result.current[1]({ removed: { start: "2026-09-01", end: "2026-09-02" } }))
+  expect(result.current[0]).toHaveProperty("removed")
+  rerender({ value: { ...artifact, version: 2 } })
+  expect(result.current[0]).toEqual({})
+  act(() => staleUpdate({ removed: { start: "2026-09-01", end: "2026-09-02" } }))
+  expect(result.current[0]).toEqual({})
+})
 
 const context = {
   as_of: "2026-09-16T00:30:00Z", timezone: "Asia/Singapore", today: "2026-09-16",

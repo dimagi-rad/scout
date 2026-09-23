@@ -127,12 +127,14 @@ async def test_agent_node_applies_cache_control_breakpoints():
     with (
         patch("apps.agents.graph.base.ChatAnthropic", return_value=mock_llm),
         patch("apps.agents.graph.base._build_tools", return_value=[]),
+        patch("apps.agents.graph.base.agent_date_context", return_value="DATE CONTEXT") as clock,
         patch(
             "apps.agents.graph.base._build_system_prompt",
             new=AsyncMock(return_value=("STABLE PREFIX", "VOLATILE SUFFIX")),
         ),
     ):
         graph = await graph_base.build_agent_graph(workspace, user)
+        clock.assert_called_once()
 
     # Drive a single agent turn through the compiled graph.
     state = {

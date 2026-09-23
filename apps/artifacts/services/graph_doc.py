@@ -684,14 +684,22 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
         )
         if preset not in PRESETS:
             diagnostics.append(
-                problem("Unsupported date preset", block_id=block_id, code="date_preset")
+                problem(
+                    f"Unsupported date preset {preset!r}. Use one of: {', '.join(PRESETS)}",
+                    block_id=block_id,
+                    code="date_preset",
+                )
             )
         if (
             block_type == "period_selector"
             and config.get("default_comparison", "previous_period") not in COMPARISONS
         ):
             diagnostics.append(
-                problem("Unsupported comparison preset", block_id=block_id, code="date_comparison")
+                problem(
+                    f"Unsupported comparison preset {config.get('default_comparison')!r}. Use one of: {', '.join(COMPARISONS)}",
+                    block_id=block_id,
+                    code="date_comparison",
+                )
             )
     if block_type == "semantic_query":
         queries = config.get("queries")

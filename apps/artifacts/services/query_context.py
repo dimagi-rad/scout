@@ -20,7 +20,7 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
     if not isinstance(overrides, dict):
         raise DateContextError("sources must be an object keyed by date-control block id.")
     blocks = {}
-    for block in normalize_doc(doc)["blocks"]:
+    for index, block in enumerate(normalize_doc(doc)["blocks"]):
         if (
             not isinstance(block, dict)
             or not isinstance(block.get("id"), str)
@@ -28,15 +28,21 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
             or not isinstance(block.get("config") or {}, dict)
             or not isinstance(block.get("inputs") or {}, dict)
         ):
-            raise DateContextError("Invalid artifact block; date bindings cannot be resolved.")
+            raise DateContextError(
+                f"Invalid artifact block at index {index}; date bindings cannot be resolved."
+            )
         if block["id"] in blocks:
-            raise DateContextError("Duplicate artifact block id; date bindings are ambiguous.")
+            raise DateContextError(
+                f"Duplicate artifact block id {block['id']!r}; date bindings are ambiguous."
+            )
         blocks[block["id"]] = block
     unknown = set(overrides) - {
         key for key, block in blocks.items() if block["type"] in {"date_filter", "period_selector"}
     }
     if unknown:
-        raise DateContextError("Only existing date-control blocks may be overridden.")
+        raise DateContextError(
+            f"Unknown date-control blocks: {', '.join(sorted(map(str, unknown)))}."
+        )
     sources = {}
     for key, block in blocks.items():
         config = block.get("config") or {}

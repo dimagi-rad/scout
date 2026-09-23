@@ -1,12 +1,11 @@
 import { useRef, useState } from "react"
 
 import { cn } from "@/lib/utils"
-import type { DateRange } from "@/components/ArtifactGraph/types"
 import { ArtifactActions } from "./ArtifactActions"
 import { ArtifactCanvas, type ArtifactCanvasHandle } from "./ArtifactCanvas"
 import { ArtifactDataDialog } from "./ArtifactDataDialog"
 import { useArtifactDetail } from "./useArtifactDetail"
-import { useArtifactQueryData } from "./useArtifactQueryData"
+import { useArtifactDateSources, useArtifactQueryData } from "./useArtifactQueryData"
 
 interface ArtifactViewerProps {
   artifactId: string
@@ -17,9 +16,9 @@ interface ArtifactViewerProps {
 
 export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: ArtifactViewerProps) {
   const [dataOpen, setDataOpen] = useState(false)
-  const [dateSources, setDateSources] = useState<Record<string, DateRange>>({})
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
+  const [dateSources, setDateSources] = useArtifactDateSources(artifact)
   const {
     queryData,
     isLoading: isDataLoading,

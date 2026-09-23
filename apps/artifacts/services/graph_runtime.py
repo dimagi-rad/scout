@@ -22,12 +22,21 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     )
     diagnostics = validate_doc(doc)
     manifest = build_semantic_query_manifest(doc)
+    manifest_summary = {
+        "schema_version": manifest.get("schema_version"),
+        "entry_count": len(manifest.get("entries", [])),
+        "unresolved_count": len(manifest.get("unresolved", [])),
+    }
     try:
         resolved, context = resolve_artifact_queries(doc)
     except DateContextError as exc:
         return {
             "success": False,
-            "diagnostics": [{"severity": "error", "code": "date_context", "message": str(exc)}],
+            "diagnostics": [
+                *diagnostics,
+                {"severity": "error", "code": "date_context", "message": str(exc)},
+            ],
+            "manifest": manifest_summary,
             "queries": [],
             "key_warnings": [],
             "summary": "Date context could not be resolved",
@@ -70,11 +79,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
         "success": not diagnostics and not key_warnings and ok_count == len(query_results),
         "query_context": context,
         "diagnostics": diagnostics,
-        "manifest": {
-            "schema_version": manifest.get("schema_version"),
-            "entry_count": len(manifest.get("entries", [])),
-            "unresolved_count": len(manifest.get("unresolved", [])),
-        },
+        "manifest": manifest_summary,
         "queries": query_results,
         "key_warnings": key_warnings,
         "summary": f"{ok_count}/{len(query_results)} queries ok",

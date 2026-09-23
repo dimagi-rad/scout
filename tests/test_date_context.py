@@ -1,8 +1,11 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from apps.artifacts.services.graph_doc import validate_doc
+from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.artifacts.services.query_context import resolve_artifact_queries
 from apps.semantic.services.date_context import (
     DateContextError,
@@ -14,6 +17,7 @@ from apps.semantic.services.date_context import (
     resolve_query_dates,
     validate_date_filter,
 )
+from mcp_server import server
 
 CONTEXT = {"as_of": "2026-09-16T13:00:00Z", "timezone": "America/New_York"}
 
@@ -50,8 +54,6 @@ def test_dst_uses_calendar_days_not_elapsed_hours(instant):
     context = date_context({**CONTEXT, "as_of": instant})
     current = context["presets"]["last_7_days"]
     previous = current["comparisons"]["previous_period"]
-    from datetime import date
-
     assert (date.fromisoformat(current["end"]) - date.fromisoformat(current["start"])).days == 6
     assert (date.fromisoformat(current["start"]) - date.fromisoformat(previous["end"])).days == 1
     assert (date.fromisoformat(previous["end"]) - date.fromisoformat(previous["start"])).days == 6
@@ -215,10 +217,6 @@ def test_malformed_saved_blocks_fail_validation(block):
 
 @pytest.mark.asyncio
 async def test_chat_tool_forwards_date_intent(monkeypatch):
-    from unittest.mock import AsyncMock
-
-    from mcp_server import server
-
     workspace = object()
     # This is an argument-forwarding unit test, not a DB lifecycle test. Earlier
     # integration tests can leave a connection in the shared async worker thread.
@@ -254,3 +252,81 @@ def test_agent_clock_is_runtime_not_model_memory(monkeypatch):
     monkeypatch.setattr("django.utils.timezone.now", lambda: datetime(2026, 9, 16, 12, tzinfo=UTC))
     assert "2026-09-16" in agent_date_context()
     assert "latest available data date" in agent_date_context()
+
+
+def test_agent_clock_is_stable_within_reporting_day(monkeypatch):
+    monkeypatch.setattr("django.utils.timezone.now", lambda: datetime(2026, 9, 16, 12, tzinfo=UTC))
+    first = agent_date_context()
+    monkeypatch.setattr("django.utils.timezone.now", lambda: datetime(2026, 9, 16, 13, tzinfo=UTC))
+    assert agent_date_context() == first
+    monkeypatch.setattr("django.utils.timezone.now", lambda: datetime(2026, 9, 17, 13, tzinfo=UTC))
+    assert agent_date_context() != first
+
+
+def test_scalar_filter_is_preserved_with_relative_dates():
+    original = {"field": "sessions.status", "operator": "equals", "value": "complete"}
+    query = resolve_query_dates(
+        {
+            "time_dimension": "sessions.created_at",
+            "date_range": {"preset": "today"},
+            "filters": original,
+        },
+        CONTEXT,
+    )
+    assert query["filters"][0] == original
+    assert len(query["filters"]) == 2
+
+
+@pytest.mark.parametrize("operator", [None, [], {}, 0])
+def test_malformed_operator_is_validation_error(operator):
+    with pytest.raises(DateContextError, match="operator must be a string"):
+        validate_date_filter({"operator": operator})
+    doc = story()
+    doc["blocks"][1]["config"]["queries"]["sessions"]["filters"] = [
+        {"field": "sessions.created_at", "operator": operator}
+    ]
+    assert any(d["code"] == "date_filter_value" for d in validate_doc(doc))
+
+
+@pytest.mark.parametrize("context", [None, [], {}, CONTEXT])
+def test_unresolved_context_is_validation_error(context):
+    with pytest.raises(DateContextError):
+        resolve_date_range({"preset": "today"}, context)
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        ["2026-09-16T00:00:00Z", "2026-09-15T00:00:00Z"],
+        ["2026-09-16T01:00:00+00:00", "2026-09-16T02:00:00+02:00"],
+        ["2026-09-16T12:00:00", "2026-09-16T11:00:00"],
+    ],
+)
+def test_reversed_timestamp_filters_are_rejected(bounds):
+    with pytest.raises(DateContextError, match="on or before"):
+        validate_date_filter({"operator": "inDateRange", "values": bounds})
+
+
+def test_timestamp_ordering_uses_offsets_and_inclusive_date_end():
+    validate_date_filter(
+        {"operator": "inDateRange", "values": ["2026-09-16T01:00:00+02:00", "2026-09-15T23:30:00Z"]}
+    )
+    validate_date_filter(
+        {"operator": "inDateRange", "values": ["2026-09-16T20:00:00Z", "2026-09-16"]},
+        "America/New_York",
+    )
+
+
+def test_timestamp_conversion_outside_calendar_is_validation_error():
+    with pytest.raises(DateContextError):
+        validate_date_filter({"operator": "afterDate", "values": ["0001-01-01T00:00:00+02:00"]})
+
+
+@pytest.mark.asyncio
+async def test_runtime_date_errors_preserve_document_diagnostics():
+    doc = story()
+    doc["blocks"][0]["config"]["default"] = "unsupported"
+    result = await check_graph_artifact(SimpleNamespace(data={"story_doc": doc}))
+    assert result["success"] is False
+    assert {d["code"] for d in result["diagnostics"]} >= {"date_context", "date_preset"}
+    assert result["manifest"]["entry_count"] == 1

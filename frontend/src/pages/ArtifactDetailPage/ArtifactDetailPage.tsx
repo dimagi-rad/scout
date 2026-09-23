@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/store/store"
 import { artifactPath } from "@/lib/artifactPath"
+import { useArtifactDateSources } from "@/components/ArtifactViewer/useArtifactQueryData"
 
 export function ArtifactDetailPage() {
   const { artifactId, workspaceId: urlWorkspaceId } = useParams()
@@ -49,9 +50,9 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const adoptedWorkspaceRef = useRef(false)
   const [dataOpen, setDataOpen] = useState(false)
-  const [dateSources, setDateSources] = useState<Record<string, { start: string; end: string }>>({})
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
+  const [dateSources, setDateSources] = useArtifactDateSources(artifact)
   const {
     queryData,
     isLoading: isDataLoading,

@@ -870,6 +870,7 @@ async def build_agent_graph(
 
     base_tool_node = ToolNode(tools)
     tool_node = _make_injecting_tool_node(base_tool_node, injections)
+    volatile_prompt += agent_date_context()
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
         """Prepend the system prompt and invoke the LLM.
@@ -917,7 +918,7 @@ async def build_agent_graph(
                         answered_ids.add(tc_id)
 
         messages = [
-            _build_cached_system_message(stable_prompt, volatile_prompt + agent_date_context()),
+            _build_cached_system_message(stable_prompt, volatile_prompt),
             *repaired,
         ]
         # cache_control lands on the last eligible message block, caching the

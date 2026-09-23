@@ -16,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.cache import cache
 from django.db import IntegrityError
 from django.db.models import Q
@@ -64,8 +65,13 @@ def _artifact_query_cache_key(
     # short-lived cache. Timezone and the compiled date filters remain in it.
     if resolved_queries is not None:
         resolved_queries = [
-            {**query, "query_context": {"timezone": query["query_context"]["timezone"]}}
-            if query.get("query_context")
+            {
+                **query,
+                "query_context": {
+                    "timezone": query["query_context"].get("timezone", settings.TIME_ZONE)
+                },
+            }
+            if isinstance(query, dict) and isinstance(query.get("query_context"), dict)
             else query
             for query in resolved_queries
         ]
@@ -965,7 +971,8 @@ class ArtifactQueryDataView(View):
                 queries, resolved_context = resolve_artifact_queries(doc, runtime)
             else:
                 queries, resolved_context = artifact.semantic_queries, None
-        except (DateContextError, json.JSONDecodeError):
+        except (DateContextError, json.JSONDecodeError) as exc:
+            logger.warning("Artifact %s date context rejected: %s", artifact.id, exc)
             return JsonResponse(
                 {
                     "error": "Invalid artifact date context. Check the dates, timezone, and date-control bindings."
@@ -990,6 +997,8 @@ class ArtifactQueryDataView(View):
             )
 
         async def _run_one(i: int, entry: dict) -> dict:
+            if not isinstance(entry, dict):
+                return {"name": f"semantic_query_{i}", "error": "Semantic query must be an object"}
             name = entry.get("name", f"semantic_query_{i}")
             query_spec = {k: v for k, v in entry.items() if k != "name"}
             try:
