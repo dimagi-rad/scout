@@ -46,6 +46,7 @@ export function RecipesPage() {
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   // Refetch on workspace change so the previous workspace's recipes don't
   // linger (they then 404 against the new workspace id).
@@ -145,14 +146,17 @@ export function RecipesPage() {
   }, [])
 
   const handleConfirmDelete = useCallback(async () => {
-    if (!deleteDialogRecipe) return
+    if (!deleteDialogRecipe || isDeleting) return
 
+    setIsDeleting(true)
     try {
       await deleteRecipe(deleteDialogRecipe.id)
     } catch (error) {
       if (!isCurrentAccount()) return
       setDeleteError(writeErrorMessage(error, "Couldn’t delete this recipe. Try again.", canWrite))
       return
+    } finally {
+      if (isCurrentAccount()) setIsDeleting(false)
     }
     if (!isCurrentAccount()) return
     setDeleteDialogRecipe(null)
@@ -160,7 +164,7 @@ export function RecipesPage() {
     if (id === deleteDialogRecipe.id) {
       navigate("/recipes")
     }
-  }, [deleteDialogRecipe, deleteRecipe, id, navigate, isCurrentAccount, canWrite])
+  }, [deleteDialogRecipe, isDeleting, deleteRecipe, id, navigate, isCurrentAccount, canWrite])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {
@@ -201,6 +205,7 @@ export function RecipesPage() {
       return (
         <div className="container mx-auto px-8 py-8">
           <RecipeRunDetail
+            key={run.id}
             recipe={currentRecipe}
             run={run}
             onBack={handleBackFromRun}
@@ -236,7 +241,7 @@ export function RecipesPage() {
 
         <AlertDialog
           open={!!deleteDialogRecipe}
-          onOpenChange={() => setDeleteDialogRecipe(null)}
+          onOpenChange={() => !isDeleting && setDeleteDialogRecipe(null)}
         >
           <AlertDialogContent>
             <AlertDialogHeader>
@@ -256,6 +261,7 @@ export function RecipesPage() {
               <Button
                 variant="destructive"
                 onClick={handleConfirmDelete}
+                disabled={isDeleting}
                 data-testid="recipe-confirm-delete"
               >
                 Delete
@@ -306,7 +312,7 @@ export function RecipesPage() {
 
       <AlertDialog
         open={!!deleteDialogRecipe}
-        onOpenChange={() => setDeleteDialogRecipe(null)}
+        onOpenChange={() => !isDeleting && setDeleteDialogRecipe(null)}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -326,6 +332,7 @@ export function RecipesPage() {
             <Button
               variant="destructive"
               onClick={handleConfirmDelete}
+              disabled={isDeleting}
               data-testid="recipe-confirm-delete"
             >
               Delete

@@ -87,6 +87,7 @@ export function RecipeDetail({
     setDescription(recipe.description)
     setPrompt(recipe.prompt || "")
     setHasChanges(false)
+    setWriteError(null)
   }, [recipe])
 
   const reportWriteError = useCallback(
