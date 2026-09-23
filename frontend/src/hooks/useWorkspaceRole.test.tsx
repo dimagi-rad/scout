@@ -80,6 +80,12 @@ describe("writeErrorMessage", () => {
     )
   })
 
+  it("keeps retry advice for a read member's CSRF failure", () => {
+    expect(writeErrorMessage(new ApiError(403, "Forbidden"), "Try again.", false)).toBe(
+      "Try again.",
+    )
+  })
+
   it("keeps the fallback for non-permission failures", () => {
     expect(writeErrorMessage(new ApiError(500, "boom"), "Try again.", false)).toBe("Try again.")
     expect(writeErrorMessage(new Error("offline"), "Try again.", false)).toBe("Try again.")
