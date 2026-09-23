@@ -10,7 +10,12 @@ from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantConnection, TenantMembership, User
-from apps.users.services.oauth_scope import account_scope, provider_accounts
+from apps.users.services.oauth_scope import (
+    account_scope,
+    canonical_provider,
+    memberships_on_provider,
+    provider_accounts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,16 +83,25 @@ def record_validated_upstream_denial(connection, *, code, tenant_id=None, now=No
         logger.info("Skipping upstream denial: unsupported code for connection=%s", connection.pk)
         return None
     now = now or timezone.now()
-    memberships = TenantMembership.all_objects.filter(
+    connection_memberships = TenantMembership.all_objects.filter(
         connection=connection,
         user_id=connection.user_id,
-        tenant__provider=connection.provider,
         archived_at__isnull=True,
+    )
+    # Verification claims alias tenants (commcare-custom on commcare), so an
+    # exact provider match here would leave a denied alias tenant live.
+    memberships = connection_memberships.filter(
+        tenant_id__in=memberships_on_provider(
+            connection_memberships, connection.provider, "tenant_id"
+        )
     )
     if tenant_id is not None:
         memberships = memberships.filter(tenant_id=tenant_id)
     else:
-        if connection.provider == "ocs" and connection.credential_type == TenantConnection.OAUTH:
+        if (
+            canonical_provider(connection.provider) == "ocs"
+            and connection.credential_type == TenantConnection.OAUTH
+        ):
             memberships = memberships.filter(
                 Q(provider_metadata__team_slug=connection.scope_key)
                 | Q(provider_metadata__team_slug__isnull=True)
