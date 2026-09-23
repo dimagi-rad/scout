@@ -153,8 +153,12 @@ test('oversized review text is truncated below GitHub\'s comment limit', () => {
   assert.ok(body.length <= COMMENT_LIMIT);
   assert.match(body, /truncated this review/);
   assert.ok(body.endsWith(marker(RECEIPT)));
-  const emoji = renderReviewComment('\u{1F600}'.repeat(COMMENT_LIMIT), RECEIPT);
+  // The leading character puts the cut offset inside a surrogate pair.
+  const emoji = renderReviewComment(`a${'\u{1F600}'.repeat(COMMENT_LIMIT)}`, RECEIPT);
   assert.ok(emoji.length <= COMMENT_LIMIT);
   assert.doesNotMatch(emoji, /[\ud800-\udbff](?![\udc00-\udfff])/);
   assert.equal(renderReviewComment('z'.repeat(1000), RECEIPT), `${'z'.repeat(1000)}\n\n${marker(RECEIPT)}`);
+  const fenced = renderReviewComment(`intro\n\`\`\`\n${'w'.repeat(COMMENT_LIMIT)}\n\`\`\``, RECEIPT);
+  assert.ok(fenced.startsWith("intro\n```\n```\n\n_The workflow truncated"));
+  assert.ok(fenced.length <= COMMENT_LIMIT);
 });

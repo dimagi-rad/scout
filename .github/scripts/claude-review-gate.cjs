@@ -136,7 +136,13 @@ function renderReviewComment(text, receipt) {
   let body = text.replaceAll('<!--', '<!\u200b--').trim();
   if (!body) throw new Error('Empty review comment.');
   if (body.length > REVIEW_TEXT_LIMIT) {
-    body = body.slice(0, REVIEW_TEXT_LIMIT - TRUNCATION_NOTE.length).replace(/[\ud800-\udbff]$/, '') + TRUNCATION_NOTE;
+    const cut = body.slice(0, REVIEW_TEXT_LIMIT - TRUNCATION_NOTE.length).replace(/[\ud800-\udbff]$/, '');
+    // Cut at a line break and close a severed code fence so the note and the
+    // receipt marker don't render as visible text inside it.
+    const lastBreak = cut.lastIndexOf('\n');
+    body = lastBreak > 0 ? cut.slice(0, lastBreak) : cut;
+    if ((body.match(/^ {0,3}```/gm) || []).length % 2) body += '\n```';
+    body += TRUNCATION_NOTE;
   }
   return `${body}\n\n${RECEIPT_PREFIX}${JSON.stringify(receipt)} -->`;
 }
