@@ -330,7 +330,8 @@ async def test_close_all_pools_waits_for_an_open_in_flight_on_its_loop():
         opener = asyncio.create_task(pool_mod.get_pool(_base_params("t_alpha")))
         await opening.wait()
         closer = asyncio.create_task(pool_mod.close_all_pools())
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
         assert not closer.done()
         finish_open.set()
         await opener

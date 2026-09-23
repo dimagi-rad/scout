@@ -156,7 +156,9 @@ async def _get_or_open_pool(
             except Exception:
                 # The pool was already closed; failing its cleanup must not
                 # fail a request we can serve with a fresh pool.
-                logger.warning("Failed to finalise closed managed-DB pool %r", entry.pool.name)
+                logger.warning(
+                    "Failed to finalise closed managed-DB pool %r", entry.pool.name, exc_info=True
+                )
 
     await _reserve_slot(deadline)
     try:
@@ -341,7 +343,9 @@ def release_pools_of_finished_loops() -> None:
         dead = [_pools.pop(key) for key, entry in list(_pools.items()) if entry.loop.is_closed()]
         # A contended asyncio.Lock binds to its loop, so its value pins the weak
         # key forever; nothing can await on a closed loop, so drop its lock.
-        for loop in [loop for loop in list(_open_locks) if loop.is_closed()]:
+        # No _opening equivalent is needed: asyncio.run cancels and awaits a
+        # dying loop's tasks, so get_pool's release guards run before it closes.
+        for loop in [lp for lp in _open_locks if lp.is_closed()]:
             _open_locks.pop(loop, None)
     for entry in dead:
         # Drive the generator's finally by hand; with the loop closed it never awaits.
@@ -368,7 +372,8 @@ async def close_all_pools() -> None:
     loop = asyncio.get_running_loop()
     release_pools_of_finished_loops()
     # Holding the loop's open lock means no open on this loop is mid-flight, so
-    # one can't commit a pool right after we snapshot.
+    # one can't commit a pool right after we snapshot. The wait is bounded: an
+    # opener holds the lock for at most _SLOT_WAIT_SECONDS plus its open timeout.
     async with _open_lock(loop):
         with _state_lock:
             # Claim under the lock, as the sweep does, so nothing drives these twice.
