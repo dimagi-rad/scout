@@ -68,6 +68,7 @@ function readRetryDelay(error, attempt) {
     const wait = Number.isFinite(header) && header >= 0 ? header * 1000 : RATE_LIMIT_WAIT;
     return wait <= RATE_LIMIT_WAIT ? Math.max(wait, READ_RETRY_DELAYS[attempt]) : null;
   }
+  // Node's own ERR_* codes are deterministic misuse; undici's UND_ERR_* are transport failures.
   const transient = status === null
     ? typeof error?.code === 'string' && /^(?:E(?!RR_)[A-Z][A-Z0-9_]*|UND_ERR_[A-Z_]+)$/.test(error.code)
     : status >= 500;
@@ -325,7 +326,7 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
   let decision = { passed: false, reason: 'Claude review evidence could not be loaded or validated.' };
   let comments, state;
   let stage;
-  const readPr = () => retryRead('the PR fetch', () => github.rest.pulls.get({
+  const readPr = (label = 'the PR fetch') => retryRead(label, () => github.rest.pulls.get({
     ...context.repo, pull_number: Number(env.PR_NUMBER) }), { core, delay });
   const readComments = (label = 'the comments fetch') => retryRead(label, () => commentsFor(github, context, env.PR_NUMBER), { core, delay });
   try {
@@ -369,8 +370,8 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
       const { data: posted } = await github.rest.issues.createComment({ ...context.repo,
         issue_number: Number(env.PR_NUMBER), body: renderReviewComment(structuredResult.review_comment, receipt) });
       stage = 'posted review verification';
-      const { data: latestPr } = await readPr();
-      comments = await readComments();
+      const { data: latestPr } = await readPr('the posted review PR fetch');
+      comments = await readComments('the posted review comments fetch');
       // The listing can lag the write. The create response is GitHub's own record
       // of the comment, and it still has to pass the full artifact check.
       if (posted?.id && !comments.some(comment => String(comment.id) === String(posted.id))) {
@@ -430,7 +431,7 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
     core.info('Recorded verified Claude review for future incremental follow-ups.');
   } catch (error) {
     const reason = 'Claude review receipt or checkpoint could not be published safely.';
-    core.warning(`Claude checkpoint publication stopped during ${stage} (${safeErrorSummary(error)}).`);
+    core.warning(`Claude receipt or checkpoint publication stopped during ${stage} (${safeErrorSummary(error)}).`);
     core.setFailed(reason);
     try { await publishClaudeReceipt({ github, context, core, env, delay }, 'blocked', reason); }
     catch { core.warning('The blocked Claude receipt could not be published.'); }
