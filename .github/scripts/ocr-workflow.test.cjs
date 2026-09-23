@@ -283,5 +283,6 @@ test('the trusted verify step, not the model, posts the Claude review', () => {
   assert.doesNotMatch(verify, /structured_output|CLAUDE_RESULT/);
   assert.match(verify, /EXECUTION_FILE: \$\{\{ steps\.claude\.outputs\.execution_file \}\}/);
   assert.match(verify, /if: \$\{\{ !cancelled\(\)/);
-  assert.match(workflow, /  review:[\s\S]*permissions:\n      contents: read\n      pull-requests: write\n      issues: write\n/);
+  const reviewJob = workflow.slice(workflow.indexOf('\n  review:\n') + 1).split(/\n  [a-z_-]+:\n/)[0];
+  assert.match(reviewJob, /\n    permissions:\n      contents: read\n      pull-requests: write\n      issues: write\n/);
 });
