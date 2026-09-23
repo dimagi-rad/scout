@@ -287,15 +287,14 @@ export function Sidebar() {
                     {retryingVerification ? "Verifying…" : "Retry verification"}
                   </button>
                 )}
-                {!threadsAccessRetryable && (
-                  <Link
-                    to={`${pathPrefix}/settings/connections`}
-                    className="mt-1 block text-primary underline-offset-2 hover:underline"
-                    data-testid="sidebar-threads-connected-accounts"
-                  >
-                    Open Connected Accounts
-                  </Link>
-                )}
+                <Link
+                  to={`${pathPrefix}/settings/connections`}
+                  onClick={collapseSidebar}
+                  className="mt-1 block text-primary underline-offset-2 hover:underline"
+                  data-testid="sidebar-threads-connected-accounts"
+                >
+                  Open Connected Accounts
+                </Link>
               </div>
             )}
             {threadsStatus === "error" && !threadsAccessLostMessage && (

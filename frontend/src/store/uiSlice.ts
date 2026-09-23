@@ -163,7 +163,11 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           return
         }
         if (!isCurrent()) return
-        await get().uiActions.fetchThreads(workspaceId)
+        // The workspace list's has_access gates the lost-access modal; refresh it too.
+        await Promise.all([
+          get().domainActions.fetchDomains(),
+          get().uiActions.fetchThreads(workspaceId),
+        ])
       },
       updateThreadTitle: async (threadId: string, title: string, workspaceId: string) => {
         const isCurrent = requests.start(undefined, workspaceId)
