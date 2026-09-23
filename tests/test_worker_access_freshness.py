@@ -4,24 +4,22 @@ The worker entry, post-wait and between-tenant checkpoints go through the same
 authorizer as HTTP requests, with the background budget.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from django.utils import timezone
+from asgiref.sync import sync_to_async
+from django.db import connection, transaction
 
 from apps.common.error_codes import ErrorCode
-from apps.users.models import Tenant, TenantMembership, UpstreamAccessProof
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant
 from apps.workspaces.services.access_freshness import (
     FRESHNESS_DENIAL_REASONS,
     FRESHNESS_ERROR_CODES,
-    UPSTREAM_ACCESS_LOST,
-    VerificationBudget,
-    arecheck_tenant_access,
 )
 from tests.upstream_proofs import (
-    STALE_AGE,
     agrant_fresh_upstream_access,
     amake_proof_stale,
     make_proof_stale,
@@ -183,64 +181,87 @@ async def test_fresh_actor_loads_without_any_provider_call(
     assert upstream_provider.requests == []
 
 
+@sync_to_async
+def _bound_refresh_candidate(tenant, workspace, membership, schema_name):
+    with transaction.atomic():
+        schema = TenantSchema.objects.create(
+            tenant=tenant,
+            schema_name=schema_name,
+            state=SchemaState.PROVISIONING,
+            refresh_workspace_id=workspace.id,
+            refresh_actor_user_id=membership.user_id,
+            refresh_membership_id=membership.id,
+        )
+        args = {
+            "schema_id": str(schema.id),
+            "membership_id": str(membership.id),
+            "actor_user_id": str(membership.user_id),
+            "workspace_id": str(workspace.id),
+        }
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO procrastinate_jobs (queue_name, task_name, status, args) "
+                "VALUES (%s, %s, %s::procrastinate_job_status, %s::jsonb) RETURNING id",
+                [
+                    "default",
+                    "apps.workspaces.tasks.refresh_tenant_schema",
+                    "doing",
+                    json.dumps(args),
+                ],
+            )
+            job_id = cursor.fetchone()[0]
+        schema.refresh_job_id = job_id
+        schema.save(update_fields=["refresh_job_id"])
+        return schema, args, job_id
+
+
+async def _run_refresh(schema_args, job_id):
+    return await workspaces_tasks.refresh_tenant_schema(
+        context=MagicMock(job=MagicMock(id=job_id)), **schema_args
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_tenant_refresh_is_refused_when_revoked(tenant, user, upstream_provider):
-    membership = await agrant_fresh_upstream_access(user, tenant)
-    await UpstreamAccessProof.objects.filter(connection__user=user, tenant=tenant).aupdate(
-        verified_at=timezone.now() - STALE_AGE
+async def test_tenant_refresh_is_refused_when_revoked(workspace, tenant, user, upstream_provider):
+    membership = await TenantMembership.objects.aget(user=user, tenant=tenant)
+    schema, args, job_id = await _bound_refresh_candidate(
+        tenant, workspace, membership, "test_domain_r1"
     )
+    await amake_proof_stale(user, tenant)
     upstream_provider.domains = []
-    schema = await TenantSchema.objects.acreate(
-        tenant=tenant, schema_name="test_domain_r1", state=SchemaState.PROVISIONING
-    )
     create_schema = MagicMock()
 
     with patch.object(workspaces_tasks.SchemaManager, "create_physical_schema", create_schema):
-        result = await workspaces_tasks.refresh_tenant_schema(
-            context=MagicMock(job=MagicMock(id=1)),
-            schema_id=str(schema.id),
-            membership_id=str(membership.id),
-        )
+        result = await _run_refresh(args, job_id)
 
     await schema.arefresh_from_db()
     assert schema.state == SchemaState.FAILED
-    assert result["error_code"] == ErrorCode.AUTH_ACCESS_DENIED
+    assert result["status"] == "denied"
     create_schema.assert_not_called()
+    assert not await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_tenant_refresh_outage_keeps_the_membership(tenant, user, upstream_provider):
-    membership = await agrant_fresh_upstream_access(user, tenant)
+async def test_tenant_refresh_outage_is_retryable_and_keeps_the_membership(
+    workspace, tenant, user, upstream_provider
+):
+    membership = await TenantMembership.objects.aget(user=user, tenant=tenant)
+    _schema, args, job_id = await _bound_refresh_candidate(
+        tenant, workspace, membership, "test_domain_r2"
+    )
     await amake_proof_stale(user, tenant)
     upstream_provider.failure = 503
-    schema = await TenantSchema.objects.acreate(
-        tenant=tenant, schema_name="test_domain_r2", state=SchemaState.PROVISIONING
-    )
+    create_schema = MagicMock()
 
-    result = await workspaces_tasks.refresh_tenant_schema(
-        context=MagicMock(job=MagicMock(id=1)),
-        schema_id=str(schema.id),
-        membership_id=str(membership.id),
-    )
+    with patch.object(workspaces_tasks.SchemaManager, "create_physical_schema", create_schema):
+        result = await _run_refresh(args, job_id)
 
     assert result["error_code"] == ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
+    assert "retry" in result["error"].lower()
+    create_schema.assert_not_called()
     assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db(transaction=True)
-async def test_tenant_recheck_refuses_an_archived_membership(tenant, user, upstream_provider):
-    await agrant_fresh_upstream_access(user, tenant)
-    await TenantMembership.objects.filter(user=user, tenant=tenant).aupdate(
-        archived_at=timezone.now()
-    )
-
-    reason = await arecheck_tenant_access(user.id, tenant.id, budget=VerificationBudget.BACKGROUND)
-
-    assert reason == UPSTREAM_ACCESS_LOST
-    assert upstream_provider.requests == []
 
 
 def test_every_freshness_denial_reason_has_a_registry_code():

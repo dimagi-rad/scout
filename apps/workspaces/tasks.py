@@ -57,7 +57,6 @@ from apps.workspaces.models import (
 from apps.workspaces.services.access_freshness import (
     FRESHNESS_ERROR_CODES,
     VerificationBudget,
-    arecheck_tenant_access,
 )
 from apps.workspaces.services.data_operation import (
     run_data_thread,
@@ -349,6 +348,20 @@ async def refresh_tenant_schema(
             "retry_required": True,
         }
 
+    # Recheck upstream here, outside any transaction, so the claim's database-only
+    # decision sees fresh proofs; the claim still makes and records the decision.
+    try:
+        actor = await User.objects.filter(id=actor_user_id).afirst()
+        if actor is not None:
+            await aresolve_workspace_access_ex(
+                actor,
+                workspace_id,
+                minimum_role=WorkspaceRole.READ_WRITE,
+                verification=VerificationBudget.BACKGROUND,
+            )
+    except (TypeError, ValueError, ValidationError):
+        pass  # Malformed ids: the claim below rejects the job against its recorded request.
+
     claim = await _to_thread_fresh_db(
         claim_refresh_candidate,
         schema_id=schema_id,
@@ -385,17 +398,6 @@ async def refresh_tenant_schema(
             "error_code": ErrorCode.INTERNAL_ERROR,
             "error": "The refresh could not be started. Retry the refresh from the workspace.",
             "retry_required": True,
-        }
-
-    denial_reason = await arecheck_tenant_access(
-        membership.user_id, membership.tenant_id, budget=VerificationBudget.BACKGROUND
-    )
-    if denial_reason is not None:
-        new_schema.state = SchemaState.FAILED
-        await new_schema.asave(update_fields=["state"])
-        return {
-            "error": access_denied_body(WorkspaceAccess(denied_reason=denial_reason))["error"],
-            "error_code": str(FRESHNESS_ERROR_CODES[denial_reason]),
         }
 
     manager = SchemaManager()
@@ -1180,7 +1182,10 @@ def _run_pipeline_with_progress(
 
 
 def _refresh_denial_result(reason: str) -> dict:
-    if reason == DENIED_MEMBERSHIP_MISSING:
+    if reason in FRESHNESS_ERROR_CODES:
+        error_code = FRESHNESS_ERROR_CODES[reason]
+        error = access_denied_body(WorkspaceAccess(denied_reason=reason))["error"]
+    elif reason == DENIED_MEMBERSHIP_MISSING:
         error_code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         error = "The requesting user no longer has access to this tenant, so nothing was run."
     elif reason == DENIED_WORKSPACE_UNLINKED:
