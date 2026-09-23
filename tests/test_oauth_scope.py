@@ -79,7 +79,7 @@ def test_memberships_on_provider_multiple_fields_drop_provider_column(mixed_memb
 
 
 def test_memberships_on_provider_requires_a_field():
-    with pytest.raises(ValueError, match="at least one field"):
+    with pytest.raises(ValueError, match="at least one field is required"):
         memberships_on_provider(TenantMembership.all_objects.none(), "commcare")
 
 

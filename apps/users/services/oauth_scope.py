@@ -24,7 +24,7 @@ def _provider_rows(provider, fields):
     would sweep Connect tenants into a CommCare connection.
     """
     if not fields:
-        raise ValueError("memberships_on_provider needs at least one field")
+        raise ValueError("at least one field is required to project membership rows")
 
     def keep(row):
         return same_provider(row[-1], provider)
