@@ -130,9 +130,15 @@ def test_message_loader_flattens_messages_with_composite_pk():
     with patch.object(loader._session, "get", side_effect=[sessions_page, detail]):
         pages = list(loader.load_pages())
         rows = [r for pg, _ in pages for r in pg]
+        revision = rows[0]["snapshot_revision"]
+        assert len(revision) == 64
+        assert rows[1]["snapshot_revision"] == revision
+        assert rows[0]["message_version"] != rows[1]["message_version"]
         assert rows == [
             {
-                "message_id": "sess-1:0",
+                "message_id": f"sess-1:v2:{revision}:0",
+                "snapshot_revision": revision,
+                "message_version": rows[0]["message_version"],
                 "session_id": "sess-1",
                 "message_index": 0,
                 "role": "user",
@@ -142,7 +148,9 @@ def test_message_loader_flattens_messages_with_composite_pk():
                 "tags": [],
             },
             {
-                "message_id": "sess-1:1",
+                "message_id": f"sess-1:v2:{revision}:1",
+                "snapshot_revision": revision,
+                "message_version": rows[1]["message_version"],
                 "session_id": "sess-1",
                 "message_index": 1,
                 "role": "assistant",

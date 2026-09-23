@@ -1047,6 +1047,8 @@ def _write_ocs_messages(
             """
         CREATE TABLE {schema}.raw_messages (
             message_id TEXT PRIMARY KEY,
+            snapshot_revision TEXT NOT NULL,
+            message_version TEXT NOT NULL,
             session_id TEXT,
             message_index INTEGER,
             role TEXT,
@@ -1076,6 +1078,8 @@ def _write_ocs_messages(
                     r.get("created_at"),
                     json.dumps(r.get("metadata") or {}),
                     json.dumps(r.get("tags") or []),
+                    r["snapshot_revision"],
+                    r["message_version"],
                 )
                 for r in page
             ]
@@ -1452,8 +1456,8 @@ _OCS_MESSAGES_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_messages
         (message_id, session_id, message_index, role, content,
-         created_at, metadata, tags)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+         created_at, metadata, tags, snapshot_revision, message_version)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (message_id) DO UPDATE SET
         role=EXCLUDED.role, content=EXCLUDED.content,
         metadata=EXCLUDED.metadata, tags=EXCLUDED.tags

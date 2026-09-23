@@ -19,6 +19,7 @@ from apps.workspaces.models import MaterializationRun
 from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
+from mcp_server.source_identity import source_identity
 
 if TYPE_CHECKING:
     from apps.workspaces.models import TenantMetadata, TenantSchema
@@ -270,10 +271,14 @@ async def pipeline_describe_table(
             }
         )
 
+    identity = source_identity(
+        pipeline_config.provider if pipeline_config else None, table_name, columns
+    )
     return {
         "name": table_name,
         "description": source_descriptions.get(table_name, ""),
         "columns": columns,
+        **({"identity": identity} if identity else {}),
     }
 
 

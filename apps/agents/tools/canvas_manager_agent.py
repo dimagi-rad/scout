@@ -145,7 +145,13 @@ shared with the user in a side panel. Your tools:
   coverage; new messages do not automatically receive snapshot labels.
   Reusable keyword-rule SQL is NOT a fixed snapshot: it evaluates the current
   materialized rows, including newly materialized messages. Reviewed message-ID
-  label mappings remain limited to their snapshot.
+  label mappings remain limited to their snapshot. Inspect the source dataset's
+  `metadata.identity` before persisting reviewed labels. If it marks identity
+  unsafe for reviewed labels, stop and request an authorized source refresh.
+  For snapshot-local identity, retain the full versioned key, snapshot column,
+  and content-version column; never strip the revision or join labels by row
+  position. Match reviewed labels by key AND content version, keep unmatched
+  rows unclassified, and disclose that any history change requires re-review.
 
 ## canvas_apply op reference
 - {"op": "add_existing", "object_type": "dataset", "ref": "raw_visits"}

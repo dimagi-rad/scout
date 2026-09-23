@@ -8,10 +8,12 @@ the design spec.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Iterator
 
-from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader
+from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader, OCSExportError
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,7 @@ class OCSMessageLoader(OCSBaseLoader):
             # a missing ``messages`` is treated as empty (not an error) — but the
             # JSON parse itself is validated via _get_json (finding 03#6).
             messages = self._get_json(detail_url).get("messages") or []
-            rows = [_map_message(session_id, idx, msg) for idx, msg in enumerate(messages)]
+            rows = map_session_messages(session_id, messages)
             total_messages += len(rows)
             yield rows, total_sessions
         logger.info(
@@ -66,9 +68,31 @@ class OCSMessageLoader(OCSBaseLoader):
         return [row for page, _ in self.load_pages() for row in page]
 
 
-def _map_message(session_id: str, index: int, raw: dict) -> dict:
+def _revision(value: object) -> str:
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def map_session_messages(session_id: str, messages: list[dict]) -> list[dict]:
+    """Any history change invalidates positional labels, including duplicate rows.
+
+    OCS exposes no durable message ID. A session-wide revision deliberately
+    invalidates earlier labels even on append; it must not pretend to be a
+    source identity or match the old unguarded ``session:index`` namespace.
+    """
+    if not isinstance(messages, list) or any(not isinstance(message, dict) for message in messages):
+        raise OCSExportError("Session messages must be a list of message objects.")
+    revision = _revision([session_id, messages])
+    return [_map_message(session_id, index, raw, revision) for index, raw in enumerate(messages)]
+
+
+def _map_message(session_id: str, index: int, raw: dict, revision: str) -> dict:
     return {
-        "message_id": f"{session_id}:{index}",
+        "message_id": f"{session_id}:v2:{revision}:{index}",
+        "snapshot_revision": revision,
+        "message_version": _revision(raw),
         "session_id": session_id,
         "message_index": index,
         "role": raw.get("role") or "",

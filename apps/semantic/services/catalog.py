@@ -48,6 +48,7 @@ from mcp_server.services.metadata import (
     pipeline_table_primary_keys,
     workspace_list_tables,
 )
+from mcp_server.source_identity import source_identity
 
 
 class SemanticCatalogUnavailable(Exception):
@@ -68,6 +69,7 @@ class PhysicalTable:
     materialized_at: str | None = None
     primary_key: str = ""
     source_tenant_ids: tuple[str, ...] = ()
+    identity: dict[str, Any] | None = None
 
 
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_]+")
@@ -282,12 +284,28 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
             pipeline_config,
         )
         columns = (detail or {}).get("columns", [])
+        source = sources.get(table_name) if sources else None
+        source_provider = (
+            pipeline_config.provider
+            if pipeline_config
+            else next(
+                (
+                    tenant.provider
+                    for tenant in tenants
+                    if source and str(tenant.id) == source.tenant_id
+                ),
+                None,
+            )
+        )
         physical_tables.append(
             PhysicalTable(
                 name=table_name,
                 type=entry.get("type", "table"),
                 description=(detail or {}).get("description") or entry.get("description", ""),
                 columns=columns,
+                identity=source_identity(
+                    source_provider, source.source_table_name if source else table_name, columns
+                ),
                 materialized_row_count=entry.get("materialized_row_count"),
                 materialized_at=entry.get("materialized_at"),
                 primary_key=primary_keys.get(table_name, "")
@@ -408,6 +426,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                         "source_type": table.type,
                         "materialized_at": table.materialized_at,
                         "row_count_verified": False,
+                        **({"identity": table.identity} if table.identity else {}),
                         **(
                             {"source_tenant_ids": list(table.source_tenant_ids)}
                             if table.source_tenant_ids
