@@ -806,8 +806,15 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         message = final_text or "Artifact manager completed."
         touched_blocks = _touched_blocks_from_artifact_result(artifact_result)
     if not isinstance(status, str) or not status.strip():
-        status = "error"
-        message = "Artifact Manager returned an invalid status; no model change is authorized."
+        fallback = artifact_result.get("status")
+        if isinstance(fallback, str) and fallback.strip():
+            status = fallback
+            message = (
+                f"Artifact operation returned {fallback}; the manager's final status was invalid."
+            )
+        else:
+            status = "error"
+            message = "Artifact Manager returned an invalid status; no model change is authorized."
     summary = {
         "status": status,
         "artifact_id": artifact.get("id") if isinstance(artifact, dict) else None,

@@ -206,6 +206,25 @@ async def test_malformed_status_preserves_typed_failure_summary(status):
     assert "invalid status" in summary["message"]
     assert "data_requirements" not in summary
 
+    published = _summarize_result(
+        [
+            ToolMessage(
+                name="artifact_write",
+                tool_call_id="write",
+                content=json.dumps(
+                    {
+                        "status": "created",
+                        "artifact": {"id": "saved", "version": 1},
+                    }
+                ),
+            )
+        ],
+        final_text,
+    )
+    assert published["status"] == "created"
+    assert published["artifact_id"] == "saved"
+    assert "data_requirements" not in published
+
     failure = await _artifact_manager_failure_result(
         "parent", _SubagentTraceRecorder(), [], final_text, "The run failed."
     )

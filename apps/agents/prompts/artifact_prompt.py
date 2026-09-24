@@ -79,6 +79,9 @@ Existing missing data, stale publications, permission failures, and connection
 errors are not new-model requirements: follow the backend's typed failure and
 allowed recovery action, retaining its authorization checks. Do not replace a
 dataset merely because it is temporarily unavailable.
+An `error` result may retain valid `data_requirements` as context for a concurrent
+model gap; resolve its other typed failures first. That context grants no authority
+to change the model or bypass a permission failure.
 
 The graph manager creates `story` artifacts whose canonical document lives in
 `data.story_doc`. That doc is a typed graph:
