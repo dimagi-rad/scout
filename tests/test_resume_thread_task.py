@@ -352,8 +352,9 @@ async def test_resume_semantic_build_failure_maps_to_failed():
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert "semantic model failed to build" in tj.error_summary
-    assert tj.failure_phase == ThreadJob.FailurePhase.QUERY_BUILD
-    assert _termination_to_dict(tj, [])["retry_available"] is False
+    # Stored semantic build prose cannot distinguish a transient validator outage.
+    assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
+    assert _termination_to_dict(tj, [])["retry_available"] is True
 
 
 @pytest.mark.asyncio
@@ -1332,7 +1333,8 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_resume_cascade_teardown_view_schema_advises_rerun():
+@pytest.mark.parametrize("current_state", [SchemaState.ACTIVE, SchemaState.EXPIRED])
+async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     """07#9: when the view schema is FAILED because a tenant schema it depends on
     was torn down (cascade), re-running materialization IS the fix. The resume
     prompt must invite a re-run, NOT forbid it / claim a system-side fix."""
@@ -1345,6 +1347,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun():
         view_schema_state=SchemaState.FAILED,
         last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
     )
+    await TenantSchema.objects.filter(schema_name="W_vsc_s2").aupdate(state=current_state)
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
@@ -1358,7 +1361,11 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun():
     body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
     lower = body.lower()
     # Correct, cause-specific advice: re-running materialization WILL fix it.
-    assert "re-running materialization will fix this" in lower
+    if current_state == SchemaState.ACTIVE:
+        assert "re-running materialization will fix this" in lower
+    else:
+        assert "re-running materialization rebuilds the expired data" in lower
+        assert "once those access prerequisites are met" in lower
     # The WRONG advice from the generic-build-failure branch must NOT appear.
     assert "do not re-run materialization" not in lower
     assert "a system-side fix is required" not in lower
@@ -1366,7 +1373,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun():
     # error_summary tells the truthful, recoverable story.
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
-    assert "re-running materialization will rebuild it" in tj.error_summary.lower()
+    assert "re-running materialization" in tj.error_summary.lower()
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
     assert _termination_to_dict(tj, [])["retry_available"] is True
 

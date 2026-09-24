@@ -12,7 +12,7 @@ from apps.users.decorators import async_login_required
 from apps.workspaces import tasks as workspace_tasks
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
-from apps.workspaces.services.failure_guidance import REQUIRES_REMEDIATION, summary_failures
+from apps.workspaces.services.failure_guidance import BLOCKS_IMMEDIATE_RETRY, summary_failures
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
 
 
 def _needs_materialization_retry_check(job: ThreadJob) -> bool:
-    if job.state not in {ThreadJob.State.FAILED, ThreadJob.State.CANCELLED}:
+    if job.state != ThreadJob.State.FAILED:
         return False
     if job.failure_phase in {ThreadJob.FailurePhase.RESUME, ThreadJob.FailurePhase.QUERY_BUILD}:
         return False
@@ -83,7 +83,9 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
         retry_available = False
     elif _needs_materialization_retry_check(job):
         failures = summary_failures([*job.materialization_preflight_failures, *run_results])
-        retry_available = not failures or any(f.code not in REQUIRES_REMEDIATION for f in failures)
+        retry_available = not failures or any(
+            f.code not in BLOCKS_IMMEDIATE_RETRY for f in failures
+        )
     return {
         "thread_job_id": str(job.id),
         "thread_id": str(job.thread_id),

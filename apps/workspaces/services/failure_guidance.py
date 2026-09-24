@@ -44,14 +44,11 @@ CREDENTIAL_GUIDANCE: dict[str, str] = {
     ),
 }
 
-# A plain Retry cannot repair these prerequisites. Transient refresh failures
-# remain retryable; a 401 and an authoritative 403 must not be treated alike.
-REQUIRES_REMEDIATION = frozenset(
+# Stored credential failures must not permanently hide Retry after reconnecting.
+# Only an authoritative denial or pipeline configuration defect blocks it here.
+BLOCKS_IMMEDIATE_RETRY = frozenset(
     {
-        ErrorCode.AUTH_CREDENTIAL_MISSING,
-        ErrorCode.AUTH_TOKEN_EXPIRED,
         ErrorCode.AUTH_ACCESS_DENIED,
-        ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
         ErrorCode.PIPELINE_UNRESOLVED,
     }
 )

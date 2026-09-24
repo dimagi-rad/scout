@@ -2843,12 +2843,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             async for tenant in workspace.tenants.all()
             if tenant.id not in active_ids
         ]
-    missing_data_guidance = (
-        f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
-        "Verify current access and account credentials before refreshing their data. "
-        "If you cannot access a source, ask someone with access to refresh it. "
-        "Then recheck the workspace query layer and semantic model; do not claim recovery until verified."
-    )
+    missing_data_guidance = ""
+    if missing_active_tenants:
+        missing_data_guidance = (
+            f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
+            "Verify current access and account credentials before refreshing their data. "
+            "If you cannot access a source, ask someone with access to refresh it. "
+            "Then recheck the workspace query layer and semantic model; do not claim recovery until verified."
+        )
+        if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+            missing_data_guidance += (
+                " Re-running materialization rebuilds the expired data and dependent views "
+                "once those access prerequisites are met."
+            )
 
     if missing_active_tenants:
         body = (
@@ -3218,7 +3225,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         query_build_failed = (
             status == "completed"
             and not missing_active_tenants
-            and (view_schema_failed or semantic_unavailable)
+            and view_schema_failed
             and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in view_schema_error
         )
         failure_phase = (

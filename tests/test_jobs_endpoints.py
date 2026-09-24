@@ -35,9 +35,9 @@ User = get_user_model()
     "code,retry",
     [
         (ErrorCode.AUTH_ACCESS_DENIED, False),
-        (ErrorCode.AUTH_TOKEN_EXPIRED, False),
-        (ErrorCode.AUTH_CREDENTIAL_MISSING, False),
-        (ErrorCode.WORKSPACE_TENANT_UNREACHABLE, False),
+        (ErrorCode.AUTH_TOKEN_EXPIRED, True),
+        (ErrorCode.AUTH_CREDENTIAL_MISSING, True),
+        (ErrorCode.WORKSPACE_TENANT_UNREACHABLE, True),
         (ErrorCode.PIPELINE_UNRESOLVED, False),
         (ErrorCode.AUTH_REFRESH_FAILED, True),
         (ErrorCode.CONNECTION_ERROR, True),
@@ -77,7 +77,7 @@ def test_retry_policy_uses_codes_at_every_failure_surface(code, retry, surface):
             False,
             True,
         ),
-        ({"sessions": {"state": "completed"}}, "materialization", True, False),
+        ({"sessions": {"state": "completed"}}, "materialization", True, True),
         ({"sessions": {"state": "cancelled"}}, "materialization", False, True),
         (
             {"sessions": {"state": "failed", "error": "uncoded failure"}},
@@ -123,6 +123,21 @@ def test_completed_source_runs_do_not_offer_reload_for_a_query_build_failure(pha
     )
     results = [{"sources": {"sessions": {"state": "completed"}}}]
     assert _termination_to_dict(job, results)["retry_available"] is retry
+
+
+def test_cancelled_job_can_retry_even_with_recorded_remediation_failure():
+    job = SimpleNamespace(
+        id="job",
+        thread_id="thread",
+        tool_call_id="tool",
+        state=ThreadJob.State.CANCELLED,
+        completed_at=None,
+        error_summary="Stopped",
+        failure_phase="",
+        started_at=None,
+        materialization_preflight_failures=[{"error_code": ErrorCode.AUTH_ACCESS_DENIED}],
+    )
+    assert _termination_to_dict(job, [])["retry_available"] is True
 
 
 @pytest.mark.asyncio
@@ -177,7 +192,7 @@ async def test_retry_policy_loads_run_results_and_preflight_failures_by_job():
         item["tool_call_id"]: item["retry_available"]
         for item in response.json()["recent_terminations"]
     }
-    assert flags == {"7001": True, "7002": True, "7003": False, "7004": True}
+    assert flags == {"7001": True, "7002": True, "7003": True, "7004": True}
 
 
 @pytest.mark.asyncio

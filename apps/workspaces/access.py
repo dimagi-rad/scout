@@ -137,8 +137,7 @@ _FRESHNESS_MESSAGES = {
         "Reconnect it under Connected Accounts."
     ),
     UPSTREAM_ACCESS_LOST: (
-        "Your access to one of this workspace's sources was removed upstream. "
-        + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
+        "For one of this workspace's sources: " + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
     ),
     VERIFICATION_UNAVAILABLE: (
         "We couldn't verify your access to this workspace right now. Please retry shortly."
