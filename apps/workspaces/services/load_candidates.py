@@ -12,6 +12,7 @@ dropped by a bounded-retry cleanup.
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from dataclasses import dataclass
 
@@ -35,6 +36,18 @@ _SUPERSEDABLE_RUN_STATES = (
     MaterializationRun.RunState.FAILED,
     MaterializationRun.RunState.CANCELLED,
 )
+
+
+def load_owner_token(job_id: int | None) -> int:
+    """The candidate owner id for one load attempt.
+
+    A load outside a queue job (the agent's blocking tool) gets a fresh negative
+    token: procrastinate ids are positive, so it never matches a real job, and it
+    differs per attempt, so one job-less attempt cannot pass for another.
+    """
+    if job_id is not None:
+        return job_id
+    return -(secrets.randbits(62) + 1)
 
 
 @dataclass(frozen=True)
@@ -156,15 +169,15 @@ def promote_candidate_schema(
             )
             job_id = refresh_job_id
         else:
-            # A None job would match any job-less run on the schema, so a load
-            # without a job id can never prove it owns the candidate.
+            # None would match any job-less candidate and run; job-less loads use
+            # load_owner_token instead, whose run records no queue job.
             owned = (
                 candidate.load_workspace_id is not None
                 and candidate.load_workspace_id == workspace_id
                 and workspace_job_id is not None
                 and candidate.load_job_id == workspace_job_id
             )
-            job_id = workspace_job_id
+            job_id = workspace_job_id if workspace_job_id and workspace_job_id > 0 else None
         if not owned:
             return Promotion(promoted=False)
 
