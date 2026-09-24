@@ -157,9 +157,14 @@ def capture_load_intent(tenant_ids, kind: str) -> dict[str, int]:
                     # answers it, even one whose fetch has already started.
                     intent[tenant_id] = generation.requested_generation
                     continue
-            elif pending and generation.loading_generation < generation.requested_generation:
+            elif (
+                kind == INTENT_FULL_REFRESH
+                and pending
+                and generation.loading_generation < generation.requested_generation
+            ):
                 intent[tenant_id] = generation.requested_generation
                 continue
+            # Every arm that is satisfied without a new generation continues above.
             generation.requested_generation += 1
             generation.save(update_fields=["requested_generation", "updated_at"])
             intent[tenant_id] = generation.requested_generation
