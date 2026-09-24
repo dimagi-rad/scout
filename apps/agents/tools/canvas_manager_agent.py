@@ -34,6 +34,7 @@ from apps.agents.subagents.events import (
 )
 from apps.agents.subagents.forwarding import NestedEventForwarder
 from apps.agents.tools.canvas_tool import create_canvas_tools
+from apps.semantic.services.date_context import agent_date_context
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -322,7 +323,10 @@ def _build_canvas_manager_graph(
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
         state_messages = [m for m in list(state["messages"]) if not isinstance(m, SystemMessage)]
-        messages = [SystemMessage(content=CANVAS_MANAGER_SYSTEM_PROMPT), *state_messages]
+        messages = [
+            SystemMessage(content=CANVAS_MANAGER_SYSTEM_PROMPT + agent_date_context()),
+            *state_messages,
+        ]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
