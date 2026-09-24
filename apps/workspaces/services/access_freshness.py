@@ -234,6 +234,41 @@ async def aadmit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) ->
     return _admission_from(check, results)
 
 
+async def averify_membership_history(
+    user_id, tenant_ids, *, budget: VerificationBudget
+) -> str | None:
+    """Recheck every connection the user has held these tenants through, live or archived.
+
+    Recovery must include archived tombstones: a confirmed revocation archives the
+    membership, and only a successful verification of the same connection may restore
+    it. Returns the most severe denial reason, or ``None`` when every check verified.
+    """
+    rows = [
+        row
+        async for row in TenantMembership.all_objects.filter(
+            user_id=user_id, tenant_id__in=list(tenant_ids), connection__isnull=False
+        ).values_list("tenant_id", "connection_id", "archived_at")
+    ]
+    grouped, _unbound = _group_by_connection((tenant, conn) for tenant, conn, _at in rows)
+    if not grouped:
+        return CREDENTIAL_MISSING
+    live_connections = {conn for _tenant, conn, archived_at in rows if archived_at is None}
+    stale = {connection_id: frozenset(ids) for connection_id, ids in grouped.items()}
+    results = dict(zip(stale, await _averify_stale(user_id, stale, budget), strict=True))
+    # A dead tombstone connection must not mask a transient failure on the credential
+    # that still backs live access, or the user loses the retryable state.
+    live = [conn for conn in results if conn in live_connections]
+    if live:
+        return most_severe(filter(None, (denial_reason(results[conn]) for conn in live)))
+    # Nothing live: any one connection can restore any-of access, so a retryable
+    # outcome anywhere must not be masked by a terminal one elsewhere.
+    reasons = [reason for reason in map(denial_reason, results.values()) if reason]
+    if len(reasons) < len(results):
+        return None  # a connection verified; the caller re-reads what it restored
+    retryable = [reason for reason in reasons if reason in RETRYABLE_REASONS]
+    return most_severe(retryable or reasons)
+
+
 def final_denial_reason(admission: UpstreamAdmission, final: FreshnessCheck) -> str:
     """Reason to report when post-recheck local state still lacks a fresh proof."""
     if final.unbound:
