@@ -444,3 +444,42 @@ class TestRemediationWithoutCoverage:
         assert (
             client.get(f"/api/workspaces/{partial_member.id}/knowledge/export/").status_code == 403
         )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("get", "/api/workspaces/{ws}/"),
+        ("get", "/api/workspaces/{ws}/members/"),
+        ("get", "/api/workspaces/{ws}/tenants/"),
+        ("delete", "/api/workspaces/{ws}/"),
+    ],
+)
+def test_switch_off_keeps_the_any_of_decision_on_exempt_paths(
+    settings, client, user, two_sources, method, path
+):
+    """With the switch off nothing is exempt: a member with no live source is
+    denied remediation paths exactly as before #380."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    ws = _workspace(user, *two_sources)
+    _join(ws, user, role=WorkspaceRole.MANAGE)
+    client.force_login(user)
+
+    resp = getattr(client, method)(path.format(ws=ws.id))
+
+    assert resp.status_code == 403
+    assert Workspace.objects.filter(pk=ws.pk).exists()
+
+
+@pytest.mark.django_db
+def test_switch_off_list_matches_the_any_of_rule(settings, client, user, partial_member):
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    client.force_login(user)
+
+    entry = _list_entry(client, partial_member)
+    assert entry["has_access"] is True
+    assert entry["missing_tenants"] == []
+
+    TenantMembership.objects.filter(user=user).update(archived_at=timezone.now())
+    assert _list_entry(client, partial_member)["has_access"] is False
