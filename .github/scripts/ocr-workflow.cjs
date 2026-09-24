@@ -2,7 +2,7 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { evaluateClaudeReview, describeDenials } = require('./claude-review-gate.cjs');
+const { evaluateClaudeRun, evaluateClaudeReview, describeDenials, finalResult, renderReviewComment } = require('./claude-review-gate.cjs');
 const { evaluateReview } = require('./ocr-gate.cjs');
 const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheckpointMatches } = require('./ocr-state.cjs');
 
@@ -27,6 +27,105 @@ async function currentPR(github, context, env) {
     throw new Error('The PR changed during review. Run @ocr again for the current commits.');
   }
   return pr;
+}
+
+// issue_comment runs are attached to the default branch, not the PR, so the PR
+// kept showing the failed `review` check from the last pull_request_target run
+// even after an @ocr re-run passed (PR #501). Record the re-run's result on the
+// PR head under the same name; GitHub shows the latest check run per name.
+// One terminal check, never an in-progress one that a failed update could strand.
+const REVIEW_CHECK = 'review';
+
+const defaultDelay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Claude's evidence reads run after an expensive review, and a transient API blip
+// there blocked PR #550 (run 35895493640) until a manual re-run. Only idempotent
+// reads are retried; never the comment write.
+const READ_RETRY_DELAYS = [2000, 5000];
+// GitHub asks clients to wait out rate limits (retry-after, else at least a
+// minute); retrying sooner extends the block. Longer waits are not worth holding the job.
+const RATE_LIMIT_WAIT = 60000;
+
+function httpStatus(error) {
+  const status = error?.status;
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+function isRateLimited(error) {
+  const status = httpStatus(error);
+  if (status === 429) return true;
+  // Secondary limits are 403s with retry-after or a fixed message; other 403s
+  // (permissions, primary limit) will not clear within a bounded wait.
+  return status === 403 && (error.response?.headers?.['retry-after'] !== undefined
+    || /secondary rate limit/i.test(String(error.message)));
+}
+
+// Milliseconds to wait before retrying, or null when the error is not worth retrying.
+function readRetryDelay(error, attempt) {
+  const status = httpStatus(error);
+  if (isRateLimited(error)) {
+    const header = Number(error.response?.headers?.['retry-after']);
+    const wait = Number.isFinite(header) && header >= 0 ? header * 1000 : RATE_LIMIT_WAIT;
+    return wait <= RATE_LIMIT_WAIT ? Math.max(wait, READ_RETRY_DELAYS[attempt]) : null;
+  }
+  // Node's own ERR_* codes are deterministic misuse; undici's UND_ERR_* are transport failures.
+  const transient = status === null
+    ? typeof error?.code === 'string' && /^(?:E(?!RR_)[A-Z][A-Z0-9_]*|UND_ERR_[A-Z_]+)$/.test(error.code)
+    : status >= 500;
+  return transient ? READ_RETRY_DELAYS[attempt] : null;
+}
+
+// Our own fence failures (a newer attempt or changed state), as distinct from API errors in logs.
+class CheckpointFenceError extends Error {}
+
+// Fixed vocabulary only: error messages can echo request or transcript content.
+// The class name (RequestError) is logged rather than error.name, which is caller-set.
+function safeErrorSummary(error) {
+  const name = error?.constructor?.name;
+  const status = httpStatus(error);
+  const label = typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(name) ? name : 'UnknownError';
+  return status === null ? label : `${label}, HTTP ${status}`;
+}
+
+async function retryRead(label, read, { core, delay }) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      const wait = attempt < READ_RETRY_DELAYS.length ? readRetryDelay(error, attempt) : null;
+      if (wait === null) throw error;
+      core.warning(`Retrying ${label} after ${safeErrorSummary(error)} (attempt ${attempt + 2} of ${READ_RETRY_DELAYS.length + 1}).`);
+      await (delay || defaultDelay)(wait);
+    }
+  }
+}
+
+async function recordReviewCheck({ github, context, core, env, delay }) {
+  const conclusion = { success: 'success', failure: 'failure' }[env.REVIEW_RESULT];
+  if (context.eventName !== 'issue_comment' || !conclusion) {
+    core.info(`No PR review check recorded for ${context.eventName} result ${env.REVIEW_RESULT}.`);
+    return;
+  }
+  if (!/^[a-f0-9]{40}$/.test(env.REVIEW_HEAD || '')) throw new Error('Invalid review head.');
+  const runUrl = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${context.runId}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
+  const check = {
+    ...context.repo, name: REVIEW_CHECK, head_sha: env.REVIEW_HEAD, status: 'completed', conclusion,
+    external_id: String(context.runId), details_url: runUrl,
+    output: {
+      title: conclusion === 'success' ? 'Review re-run passed' : 'Review re-run failed',
+      summary: `Result of the \`@ocr\` re-run for \`${env.REVIEW_HEAD}\`. See the PR comments for the gate and review. [Workflow run](${runUrl})`,
+    },
+  };
+  // A failure here is invisible from the PR (this job's own check sits on the
+  // default branch), so retry once to ride out a transient API error.
+  try {
+    await github.rest.checks.create(check);
+  } catch (error) {
+    core.warning(`Retrying the PR review check after ${safeErrorSummary(error)}.`);
+    await (delay || defaultDelay)(5000);
+    await github.rest.checks.create(check);
+  }
+  core.info(`PR review check recorded as ${conclusion}.`);
 }
 
 async function prepareReview({ github, context, core, fs, env }) {
@@ -131,8 +230,8 @@ const trustedClaudeReceipt = comment => comment?.user?.login === 'github-actions
   && (!comment.performed_via_github_app || comment.performed_via_github_app.slug === 'github-actions')
   && typeof comment.body === 'string' && comment.body.startsWith(CLAUDE_MARKER);
 
-async function publishClaudeReceipt({ github, context, core, env }, status, reason, summarize = true) {
-  const comments = await commentsFor(github, context, env.PR_NUMBER);
+async function publishClaudeReceipt({ github, context, core, env, delay }, status, reason, summarize = true) {
+  const comments = await retryRead('the receipt comments fetch', () => commentsFor(github, context, env.PR_NUMBER), { core, delay });
   const receipts = comments.filter(trustedClaudeReceipt);
   if (receipts.length > 1) throw new Error('Ambiguous Claude receipt state.');
   const previous = receipts[0];
@@ -153,7 +252,7 @@ async function publishClaudeReceipt({ github, context, core, env }, status, reas
   return body;
 }
 
-async function prepareClaude({ github, context, core, fs, env }) {
+async function prepareClaude({ github, context, core, fs, env, delay }) {
   const receipt = { nonce: crypto.randomBytes(32).toString('hex'), repository: env.GITHUB_REPOSITORY,
     pr: Number(env.PR_NUMBER), run: String(context.runId), attempt: env.GITHUB_RUN_ATTEMPT,
     head: env.REVIEW_HEAD, base: env.REVIEW_BASE };
@@ -161,7 +260,7 @@ async function prepareClaude({ github, context, core, fs, env }) {
   const receiptEnv = { ...env, CLAUDE_RECEIPT: JSON.stringify(receipt) };
   let stage = 'receipt-state publication';
   try {
-    const published = await publishClaudeReceipt({ github, context, core, env: receiptEnv }, 'pending',
+    const published = await publishClaudeReceipt({ github, context, core, env: receiptEnv, delay }, 'pending',
       'Review preparation has started; completion is not yet verified.');
     if (!published) throw new Error('A newer review attempt exists.');
     stage = 'PR recheck';
@@ -181,7 +280,7 @@ async function prepareClaude({ github, context, core, fs, env }) {
   } catch {
     const reason = 'Claude review preparation failed; no completed review was established.';
     core.warning(`Claude preparation stopped during ${stage}.`);
-    try { await publishClaudeReceipt({ github, context, core, env: receiptEnv }, 'blocked', reason); }
+    try { await publishClaudeReceipt({ github, context, core, env: receiptEnv, delay }, 'blocked', reason); }
     catch { core.warning('The blocked Claude receipt could not be published.'); }
     throw new Error(reason);
   }
@@ -222,35 +321,78 @@ function currentVerifiedReceipt(comments, env, context) {
   } catch { return false; }
 }
 
-async function finishClaude({ github, context, core, fs, env }) {
+async function finishClaude({ github, context, core, fs, env, delay }) {
   core.setOutput('claude_verified', 'false');
   let decision = { passed: false, reason: 'Claude review evidence could not be loaded or validated.' };
   let comments, state;
+  let stage;
+  const readPr = (label = 'the PR fetch') => retryRead(label, () => github.rest.pulls.get({
+    ...context.repo, pull_number: Number(env.PR_NUMBER) }), { core, delay });
+  const readComments = (label = 'the comments fetch') => retryRead(label, () => commentsFor(github, context, env.PR_NUMBER), { core, delay });
   try {
-    const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(env.PR_NUMBER) });
-    comments = await commentsFor(github, context, env.PR_NUMBER);
+    stage = 'pr fetch';
+    const { data: pr } = await readPr();
+    stage = 'comments fetch';
+    comments = await readComments();
+    stage = 'receipt read';
     const receipt = JSON.parse(fs.readFileSync(path.join(env.RUNNER_TEMP, 'scout-claude-receipt.json'), 'utf8'));
     env = { ...env, CLAUDE_RECEIPT: JSON.stringify(receipt) };
-    if (receipt.run !== String(context.runId) || receipt.attempt !== env.GITHUB_RUN_ATTEMPT
+    stage = 'receipt identity';
+    if (receipt?.run !== String(context.runId) || receipt.attempt !== env.GITHUB_RUN_ATTEMPT
         || receipt.repository !== env.GITHUB_REPOSITORY || receipt.pr !== Number(env.PR_NUMBER)) throw new Error('Receipt identity mismatch.');
-    const sdkMessages = JSON.parse(fs.readFileSync(env.EXECUTION_FILE, 'utf8'));
+    stage = 'execution file read';
+    const execution = fs.readFileSync(env.EXECUTION_FILE, 'utf8');
+    stage = 'execution file parse';
+    const sdkMessages = JSON.parse(execution);
+    stage = 'evidence evaluation';
     for (const line of describeDenials(sdkMessages)) core.warning(line);
-    decision = evaluateClaudeReview({
+    // Read from the execution file, not a step output: a review-sized comment
+    // passed through env can exceed the per-variable limit and stop the step.
+    const structuredResult = Array.isArray(sdkMessages) ? finalResult(sdkMessages)?.structured_output : undefined;
+    const review = {
       expectedHead: env.REVIEW_HEAD, expectedBase: env.REVIEW_BASE, expectedReceipt: receipt,
       currentPr: { state: pr.state, head: pr.head.sha, base: pr.base.sha },
       actionOutcome: env.CLAUDE_OUTCOME, actionConclusion: env.CLAUDE_CONCLUSION,
-      sdkMessages,
-      structuredResult: JSON.parse(env.CLAUDE_RESULT),
-      baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments,
-    });
+      sdkMessages, structuredResult,
+    };
+    const run = evaluateClaudeRun(review);
+    const claudeState = readClaudeReceiptState(comments);
+    if (!run.passed) {
+      decision = run;
+    } else if (claudeState?.status !== 'pending' || claudeState.run !== String(context.runId)
+        || claudeState.attempt !== env.GITHUB_RUN_ATTEMPT) {
+      decision = { passed: false, reason: 'A newer Claude review attempt superseded this run.' };
+    } else {
+      // The workflow posts so the model needs no shell write: markdown in a
+      // gh pr comment argument trips the Bash permission checker (run 35856432255).
+      // The gate re-reads the PR and comments and verifies the artifact as before.
+      stage = 'review posting';
+      const { data: posted } = await github.rest.issues.createComment({ ...context.repo,
+        issue_number: Number(env.PR_NUMBER), body: renderReviewComment(structuredResult.review_comment, receipt) });
+      stage = 'posted review verification';
+      const { data: latestPr } = await readPr('the posted review PR fetch');
+      comments = await readComments('the posted review comments fetch');
+      // The listing can lag the write. The create response is GitHub's own record
+      // of the comment, and it still has to pass the full artifact check.
+      if (posted?.id && !comments.some(comment => String(comment.id) === String(posted.id))) {
+        comments = [...comments, posted];
+      }
+      decision = evaluateClaudeReview({ ...review,
+        currentPr: { state: latestPr.state, head: latestPr.head.sha, base: latestPr.base.sha },
+        baselineIssueCommentIds: JSON.parse(env.BASELINE_ISSUE_IDS), issueComments: comments });
+    }
     state = readState(comments);
     if (decision.passed && (!state || !state.passed || state.head !== env.REVIEW_HEAD || state.base !== env.REVIEW_BASE
         || state.policy !== env.POLICY || state.run !== String(context.runId))) {
       decision = { passed: false, reason: 'The accepted OCR checkpoint no longer matches this Claude review.' };
     }
-  } catch { /* Deliberately do not log raw transcript or exceptions; denials are sanitized above. */ }
+  } catch (error) {
+    // Deliberately do not log raw transcript or exception messages; denials are sanitized above.
+    core.warning(`Claude verification stopped during ${stage} (${safeErrorSummary(error)}).`);
+  }
   try {
-    const published = await publishClaudeReceipt({ github, context, core, env }, decision.passed ? 'verified' : 'blocked',
+    stage = 'verdict receipt';
+    const published = await publishClaudeReceipt({ github, context, core, env, delay }, decision.passed ? 'verified' : 'blocked',
       decision.passed ? 'Review completed with no high or critical findings.' : decision.reason, false);
     if (!published) {
       core.setFailed('A newer Claude review attempt superseded this run.');
@@ -262,32 +404,38 @@ async function finishClaude({ github, context, core, fs, env }) {
       return;
     }
     // Re-read after receipt publication; no stale checkpoint may be advanced.
-    await currentPR(github, context, env);
-    comments = await commentsFor(github, context, env.PR_NUMBER);
+    stage = 'checkpoint pr recheck';
+    // currentPR's "PR changed" error has no status, so it fails fast rather than retrying.
+    await retryRead('the PR recheck', () => currentPR(github, context, env), { core, delay });
+    stage = 'checkpoint comments fetch';
+    comments = await readComments('the checkpoint comments fetch');
+    stage = 'checkpoint update';
     const latest = readState(comments);
     if (!latest || JSON.stringify(latest) !== JSON.stringify(state)
-        || !currentVerifiedReceipt(comments, env, context)) throw new Error('Review checkpoint or attempt changed.');
+        || !currentVerifiedReceipt(comments, env, context)) throw new CheckpointFenceError('Review checkpoint or attempt changed.');
     const comment = comments.find(trustedComment);
     const previousMarker = encodeState(state);
-    if (!comment.body.includes(previousMarker)) throw new Error('Accepted OCR marker is not replaceable.');
+    if (!comment.body.includes(previousMarker)) throw new CheckpointFenceError('Accepted OCR marker is not replaceable.');
     state.claudeHead = env.REVIEW_HEAD;
     await github.rest.issues.updateComment({ ...context.repo, comment_id: comment.id,
       body: comment.body.replace(previousMarker, encodeState(state)) });
-    const persistedComments = await commentsFor(github, context, env.PR_NUMBER);
+    stage = 'checkpoint persistence check';
+    const persistedComments = await readComments('the checkpoint persistence fetch');
     const persisted = readState(persistedComments);
     if (!persisted || JSON.stringify(persisted) !== JSON.stringify(state)
         || !currentVerifiedReceipt(persistedComments, env, context)) {
-      throw new Error('Review checkpoint persistence could not be confirmed.');
+      throw new CheckpointFenceError('Review checkpoint persistence could not be confirmed.');
     }
     await core.summary.addRaw(published).write();
     core.setOutput('claude_verified', 'true');
     core.info('Recorded verified Claude review for future incremental follow-ups.');
-  } catch {
+  } catch (error) {
     const reason = 'Claude review receipt or checkpoint could not be published safely.';
+    core.warning(`Claude receipt or checkpoint publication stopped during ${stage} (${safeErrorSummary(error)}).`);
     core.setFailed(reason);
-    try { await publishClaudeReceipt({ github, context, core, env }, 'blocked', reason); }
+    try { await publishClaudeReceipt({ github, context, core, env, delay }, 'blocked', reason); }
     catch { core.warning('The blocked Claude receipt could not be published.'); }
   }
 }
 
-module.exports = { prepareReview, finishReview, prepareClaude, finishClaude };
+module.exports = { prepareReview, finishReview, prepareClaude, finishClaude, recordReviewCheck };

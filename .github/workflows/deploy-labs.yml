@@ -24,7 +24,7 @@ env:
   ECS_WEB_SERVICE: labs-jj-scout-web
   ECS_MCP_SERVICE: labs-jj-scout-mcp
   ECS_WORKER_SERVICE: labs-jj-scout-worker
-  ECR_REGISTRY: 858923557655.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY_LABS }}
   ECR_BACKEND: labs-jj-scout
   ECR_FRONTEND: labs-jj-scout-frontend
 
@@ -41,6 +41,16 @@ jobs:
       frontend: ${{ steps.changes.outputs.frontend }}
       mcp: ${{ steps.changes.outputs.mcp }}
     steps:
+      # The registry lives in a repository variable to keep the account ID out of
+      # this public repo. Without it the image tags would be "/repo:tag", which
+      # only fails deep inside the build after the image is built.
+      - name: Check ECR registry variable
+        run: |
+          if [ -z "$ECR_REGISTRY" ]; then
+            echo "::error::Repository variable ECR_REGISTRY_LABS is not set. Set it to the Connect Labs ECR registry host (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:

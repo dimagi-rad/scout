@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
 
+from apps.common.error_codes import ErrorCode
 from apps.workspaces.access import aworkspace_write_allowed, tool_write_denied
 
 if TYPE_CHECKING:
@@ -66,6 +67,10 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         # Dedupe-aware: waits for any in-progress materialization on this
         # workspace's tenants rather than starting a parallel run.
         summary = await materialize_workspace_blocking(workspace_id, user_id, job_id)
+        # A lost-tenant denial falls through: its per-tenant guidance is the remedy.
+        if summary.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
+            return tool_write_denied()
+
         tenants = summary.get("tenants", [])
         loaded = sum(1 for t in tenants if t.get("success"))
         view_schema = summary.get("view_schema")

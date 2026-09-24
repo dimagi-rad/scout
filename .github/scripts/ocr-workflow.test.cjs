@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { prepareReview, finishReview, prepareClaude, finishClaude } = require('./ocr-workflow.cjs');
+const { prepareReview, finishReview, prepareClaude, finishClaude, recordReviewCheck } = require('./ocr-workflow.cjs');
 const { MARKER, encodeState, readState } = require('./ocr-state.cjs');
 
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40), PRIOR = 'c'.repeat(40), MERGE = 'd'.repeat(40);
@@ -230,7 +230,7 @@ test('prior review context is fetched with fixed read APIs before Claude, not an
 test('policy checkouts use the executing workflow revision even when PR base predates the helpers', () => {
   const workflow = require('node:fs').readFileSync(path.join(__dirname, '../workflows/ocr.yml'), 'utf8');
   const checkouts = workflow.split(/      - name: /).filter(step => step.includes('uses: actions/checkout@'));
-  assert.equal(checkouts.length, 2);
+  assert.equal(checkouts.length, 3);
   for (const checkout of checkouts) {
     assert.match(checkout, /ref: \$\{\{ github\.workflow_sha \}\}/);
     assert.doesNotMatch(checkout, /ref:.*(?:outputs\.base|outputs\.head|pull_request)/);
@@ -269,4 +269,88 @@ test('verified receipt from a different identity cannot authorize Claude reuse',
     assert.equal(h.outputs.full_review, 'false');
     assert.equal(h.outputs.claude_head, '');
   }
+});
+
+test('the trusted verify step, not the model, posts the Claude review', () => {
+  const workflow = require('node:fs').readFileSync(path.join(__dirname, '../workflows/ocr.yml'), 'utf8');
+  const steps = workflow.split(/      - name: /);
+  const claude = steps.find(step => step.startsWith('Run Claude review'));
+  const verify = steps.find(step => step.startsWith('Verify Claude receipt'));
+  assert.doesNotMatch(claude, /gh pr comment:|scout-claude-receipt|scout-claude-artifact/);
+  assert.match(claude, /structured review_comment field/);
+  // A review-sized comment in an env var can exceed the per-variable limit, so
+  // the verify step reads structured output from the execution file instead.
+  assert.doesNotMatch(verify, /structured_output|CLAUDE_RESULT/);
+  assert.match(verify, /EXECUTION_FILE: \$\{\{ steps\.claude\.outputs\.execution_file \}\}/);
+  assert.match(verify, /if: \$\{\{ !cancelled\(\)/);
+  const reviewJob = workflow.slice(workflow.indexOf('\n  review:\n') + 1).split(/\n  [a-z_-]+:\n/)[0];
+  assert.match(reviewJob, /\n    permissions:\n      contents: read\n      pull-requests: write\n      issues: write\n/);
+});
+
+function checkHarness(eventName, overrides = {}) {
+  const h = harness(overrides);
+  h.context.eventName = eventName;
+  h.checks = [];
+  h.github.rest.checks = { async create(args) { h.checks.push(args); return { data: { id: 99 } }; } };
+  return h;
+}
+
+test('@ocr re-run results are recorded as a terminal review check on the PR head', async () => {
+  for (const result of ['success', 'failure']) {
+    const h = checkHarness('issue_comment', { REVIEW_RESULT: result });
+    await recordReviewCheck(h);
+    assert.equal(h.checks.length, 1);
+    const [args] = h.checks;
+    assert.equal(args.name, 'review');
+    assert.equal(args.head_sha, HEAD);
+    assert.equal(args.status, 'completed');
+    assert.equal(args.conclusion, result);
+    assert.equal(args.details_url, 'https://github.com/owner/repo/actions/runs/20/attempts/1');
+  }
+});
+
+test('a transient check API failure is retried once, and a second failure surfaces', async () => {
+  const h = checkHarness('issue_comment', { REVIEW_RESULT: 'success' });
+  let calls = 0;
+  const delays = [];
+  h.github.rest.checks.create = async args => {
+    calls += 1;
+    if (calls === 1) throw new Error('502');
+    h.checks.push(args);
+    return { data: { id: 99 } };
+  };
+  await recordReviewCheck({ ...h, delay: async ms => { delays.push(ms); } });
+  assert.equal(calls, 2);
+  assert.equal(h.checks.length, 1);
+  assert.deepEqual(delays, [5000]);
+
+  const down = checkHarness('issue_comment', { REVIEW_RESULT: 'failure' });
+  down.github.rest.checks.create = async () => { throw new Error('502'); };
+  await assert.rejects(recordReviewCheck({ ...down, delay: async () => {} }), /502/);
+});
+
+test('pull_request_target, cancelled, skipped and malformed runs record no review check', async () => {
+  for (const [event, overrides] of [['pull_request_target', { REVIEW_RESULT: 'failure' }],
+    ['issue_comment', { REVIEW_RESULT: 'cancelled' }], ['issue_comment', { REVIEW_RESULT: 'skipped' }],
+    ['issue_comment', { REVIEW_RESULT: '' }]]) {
+    const h = checkHarness(event, overrides);
+    await recordReviewCheck(h);
+    assert.deepEqual(h.checks, []);
+  }
+  const bad = checkHarness('issue_comment', { REVIEW_RESULT: 'success', REVIEW_HEAD: 'main' });
+  await assert.rejects(recordReviewCheck(bad), /Invalid review head/);
+  assert.deepEqual(bad.checks, []);
+});
+
+test('only the separate issue_comment job can write checks', () => {
+  const workflow = require('node:fs').readFileSync(path.join(__dirname, '../workflows/ocr.yml'), 'utf8');
+  const start = workflow.indexOf('\n  review-check:\n');
+  assert.notEqual(start, -1);
+  const job = workflow.slice(start + 1).split(/\n  [a-z_-]+:\n/)[0];
+  assert.match(job, /needs: \[prepare, review\]/);
+  assert.match(job, /if: \$\{\{ always\(\) && github\.event_name == 'issue_comment' && needs\.prepare\.outputs\.authorized == 'true' \}\}/);
+  assert.match(job, /\n    permissions:\n      contents: read\n      checks: write\n/);
+  assert.match(job, /REVIEW_HEAD: \$\{\{ needs\.prepare\.outputs\.head \}\}/);
+  assert.match(job, /REVIEW_RESULT: \$\{\{ needs\.review\.result \}\}/);
+  assert.equal((workflow.match(/checks: write/g) || []).length, 1);
 });

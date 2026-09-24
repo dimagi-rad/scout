@@ -1,11 +1,12 @@
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, type ReactNode } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
+import { useWorkspaceRole, writeErrorMessage } from "@/hooks/useWorkspaceRole"
+import { Button } from "@/components/ui/button"
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -40,9 +41,12 @@ export function RecipesPage() {
   } = useAppStore((s) => s.recipeActions)
 
   const { status: networkStatus } = useNetworkStatus()
+  const { canWrite } = useWorkspaceRole()
   const [runnerOpen, setRunnerOpen] = useState(false)
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   // Refetch on workspace change so the previous workspace's recipes don't
   // linger (they then 404 against the new workspace id).
@@ -137,20 +141,30 @@ export function RecipesPage() {
   )
 
   const handleDelete = useCallback((recipe: Recipe) => {
+    setDeleteError(null)
     setDeleteDialogRecipe(recipe)
   }, [])
 
   const handleConfirmDelete = useCallback(async () => {
-    if (!deleteDialogRecipe) return
+    if (!deleteDialogRecipe || isDeleting) return
 
-    await deleteRecipe(deleteDialogRecipe.id)
+    setIsDeleting(true)
+    try {
+      await deleteRecipe(deleteDialogRecipe.id)
+    } catch (error) {
+      if (!isCurrentAccount()) return
+      setDeleteError(writeErrorMessage(error, "Couldn’t delete this recipe. Try again.", canWrite))
+      return
+    } finally {
+      if (isCurrentAccount()) setIsDeleting(false)
+    }
     if (!isCurrentAccount()) return
     setDeleteDialogRecipe(null)
 
     if (id === deleteDialogRecipe.id) {
       navigate("/recipes")
     }
-  }, [deleteDialogRecipe, deleteRecipe, id, navigate, isCurrentAccount])
+  }, [deleteDialogRecipe, isDeleting, deleteRecipe, id, navigate, isCurrentAccount, canWrite])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {
@@ -185,24 +199,28 @@ export function RecipesPage() {
     [navigate],
   )
 
+  let body: ReactNode = null
+
   if (id && runId && currentRecipe) {
     const run = recipeRuns.find((r) => r.id === runId)
     if (run) {
-      return (
+      body = (
         <div className="container mx-auto px-8 py-8">
           <RecipeRunDetail
+            key={run.id}
             recipe={currentRecipe}
             run={run}
             onBack={handleBackFromRun}
             onUpdateRun={handleUpdateRun}
+            canWrite={canWrite}
           />
         </div>
       )
     }
   }
 
-  if (id && currentRecipe) {
-    return (
+  if (!body && id && currentRecipe) {
+    body = (
       <div className="container mx-auto px-8 py-8">
         <RecipeDetail
           recipe={currentRecipe}
@@ -212,6 +230,7 @@ export function RecipesPage() {
           onRun={handleRunFromDetail}
           onUpdateRun={handleUpdateRun}
           onViewRun={handleViewRun}
+          canWrite={canWrite}
         />
 
         <RecipeRunner
@@ -221,32 +240,11 @@ export function RecipesPage() {
           onRun={handleExecuteRun}
           onRunComplete={handleRunComplete}
         />
-
-        <AlertDialog
-          open={!!deleteDialogRecipe}
-          onOpenChange={() => setDeleteDialogRecipe(null)}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete Recipe</AlertDialogTitle>
-              <AlertDialogDescription>
-                Are you sure you want to delete "{deleteDialogRecipe?.name}"? This
-                action cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleConfirmDelete}>
-                Delete
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
       </div>
     )
   }
 
-  return (
+  body ??= (
     <div className="container mx-auto px-8 py-8">
       <div className="mb-8">
         <h1 className="text-2xl font-bold">Recipes</h1>
@@ -271,6 +269,7 @@ export function RecipesPage() {
           onView={handleView}
           onRun={handleRun}
           onDelete={handleDelete}
+          canWrite={canWrite}
         />
       )}
 
@@ -281,10 +280,17 @@ export function RecipesPage() {
         onRun={handleExecuteRun}
         onRunComplete={handleRunComplete}
       />
+    </div>
+  )
 
+  // One dialog outside the branches: the list also renders at /recipes/:id
+  // until the detail loads, and a branch switch must not unmount it.
+  return (
+    <>
+      {body}
       <AlertDialog
         open={!!deleteDialogRecipe}
-        onOpenChange={() => setDeleteDialogRecipe(null)}
+        onOpenChange={(open) => !open && !isDeleting && setDeleteDialogRecipe(null)}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -294,14 +300,24 @@ export function RecipesPage() {
               action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError && (
+            <p className="text-sm text-destructive" role="alert">
+              {deleteError}
+            </p>
+          )}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleConfirmDelete}>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDelete}
+              disabled={isDeleting}
+              data-testid="recipe-confirm-delete"
+            >
               Delete
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </>
   )
 }

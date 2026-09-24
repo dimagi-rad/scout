@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react"
 import { ArtifactGraphRenderer, type ArtifactDetail } from "@/components/ArtifactGraph"
 import type { DateRange } from "@/components/ArtifactGraph/types"
 import { withBasePath } from "@/config"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { cn } from "@/lib/utils"
 import { ArtifactDataRecovery } from "./ArtifactDataRecovery"
 import type { QueryDataResponse } from "./types"
@@ -35,6 +36,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
     const isGraphArtifact = artifact?.type === "story"
     const hasLiveQueries = Boolean(artifact?.semantic_queries.length)
     const recovery = useArtifactDataRecovery(artifactId, workspaceId, hasLiveQueries)
+    const { canWrite } = useWorkspaceRole(workspaceId)
     const dataIsReady =
       !hasLiveQueries ||
       (recovery.state?.queryable ?? (
@@ -101,6 +103,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
                 isStarting={recovery.isStarting}
                 onRecover={() => void recovery.startRecovery()}
                 onRetryCheck={() => void recovery.refetch()}
+                canRecover={canWrite}
               />
             )}
             {dataIsReady && isGraphArtifact && (

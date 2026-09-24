@@ -16,6 +16,7 @@ from django.core.cache import cache
 from django.test import AsyncClient
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.providers.ocs.provider import OCSProvider, team_slug_from_uid
 from apps.users.services.credential_resolver import (
@@ -28,6 +29,7 @@ from apps.users.services.merge import merge_users
 from apps.users.services.tenant_resolution import _sync_memberships, resolve_ocs_chatbots
 from apps.users.services.token_refresh import (
     TokenRefreshError,
+    TokenRefreshRejected,
     refresh_oauth_token,
     refresh_oauth_token_sync,
 )
@@ -912,8 +914,10 @@ async def test_recorded_refresh_failure_clears_on_success(user, httpx_mock):
     account, conn = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
     token = await SocialToken.objects.select_related("account", "app").aget(account=account)
     httpx_mock.add_response(method="POST", status_code=400, json={"error": "invalid_grant"})
-    with pytest.raises(TokenRefreshError):
+    with pytest.raises(TokenRefreshError) as caught:
         await refresh_oauth_token(token, "https://example.com/token")
+    assert caught.type is TokenRefreshRejected
+    assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
     assert await aconnection_status(conn) == "expired"
     httpx_mock.add_response(
         method="POST", json={"access_token": "new", "refresh_token": "new-secret"}
@@ -934,8 +938,10 @@ async def test_stale_refresh_failure_does_not_poison_reconnected_credentials(use
         token="reconnected", token_secret="new-secret"
     )
     httpx_mock.add_response(method="POST", status_code=400, json={"error": "invalid_grant"})
-    with pytest.raises(TokenRefreshError):
+    with pytest.raises(TokenRefreshError) as caught:
         await refresh_oauth_token(stale, "https://example.com/token")
+    assert caught.type is TokenRefreshRejected
+    assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
     assert await aconnection_status(conn) == "connected"
 
 
@@ -989,8 +995,10 @@ async def test_sync_refresh_records_failure_and_clears_after_success(user, reque
     token = await SocialToken.objects.select_related("account", "app").aget(account=account)
     url = "https://example.com/token"
     requests_mock.post(url, status_code=400, json={"error": "invalid_grant"})
-    with pytest.raises(TokenRefreshError):
+    with pytest.raises(TokenRefreshError) as caught:
         await sync_to_async(refresh_oauth_token_sync)(token, url)
+    assert caught.type is TokenRefreshRejected
+    assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
     assert await aconnection_status(conn) == "expired"
     requests_mock.post(url, json={"access_token": "new", "refresh_token": "new-secret"})
     await sync_to_async(refresh_oauth_token_sync)(token, url)
@@ -1011,6 +1019,8 @@ async def test_stale_failure_cannot_erase_current_credential_failure(user, httpx
     current = await SocialToken.objects.select_related("account", "app").aget(account=account)
     for token in [current, stale]:
         httpx_mock.add_response(method="POST", status_code=400, json={"error": "invalid_grant"})
-        with pytest.raises(TokenRefreshError):
+        with pytest.raises(TokenRefreshError) as caught:
             await refresh_oauth_token(token, "https://example.com/token")
+        assert caught.type is TokenRefreshRejected
+        assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
     assert await aconnection_status(conn) == "expired"

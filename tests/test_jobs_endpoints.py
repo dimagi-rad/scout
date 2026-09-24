@@ -23,6 +23,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.tasks import reconcile_stale_thread_job
+from tests.tenant_access import ausable_connection
 
 User = get_user_model()
 
@@ -43,7 +44,9 @@ async def test_active_jobs_returns_pending_job_with_progress():
         canonical_name="Test Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="s_t1",
@@ -378,7 +381,9 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
         canonical_name="Test Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_t1")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     tj = await ThreadJob.objects.acreate(
@@ -518,7 +523,9 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
         canonical_name="Connect Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ccc_999")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
@@ -577,7 +584,9 @@ async def test_active_jobs_passes_through_progress_unit():
         canonical_name="OCS Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ocs_unit")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
@@ -630,7 +639,9 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
         canonical_name="CommCare Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_cc_x")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(

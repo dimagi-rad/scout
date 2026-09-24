@@ -6,7 +6,7 @@ their required env vars are not configured.
 Run smoke tests against the real platform database:
 
     uv run pytest -m smoke --override-ini="addopts=" \
-        -o "DJANGO_SETTINGS_MODULE=config.settings.development" \
+        --ds=config.settings.development \
         -s --log-cli-level=INFO
 """
 

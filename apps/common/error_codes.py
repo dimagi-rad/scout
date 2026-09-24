@@ -59,6 +59,34 @@ class ErrorCode(StrEnum):
     # and another user's credential must not be substituted.
     WORKSPACE_TENANT_UNREACHABLE = "WORKSPACE_TENANT_UNREACHABLE"
 
+    # The actor is not a read-write or manage member of the workspace (never was,
+    # was removed, or was downgraded while a job waited). A Scout role problem,
+    # not an upstream one: must not share AUTH_ACCESS_DENIED, whose remedy is a
+    # provider admin. Retrying as the same user cannot succeed.
+    WORKSPACE_ROLE_INSUFFICIENT = "WORKSPACE_ROLE_INSUFFICIENT"
+
+    # The acting user may not read this workspace now (not a member, or missing
+    # one of its sources). A Scout authorization decision re-checked per tool
+    # call, not an upstream 403: it must not share AUTH_ACCESS_DENIED, which
+    # upstream-denial handling treats as authoritative revocation. Retrying in
+    # the same turn cannot succeed, so the agent ends the turn on it.
+    WORKSPACE_ACCESS_DENIED = "WORKSPACE_ACCESS_DENIED"
+
+    # A queued refresh job does not match the request its candidate schema records
+    # (stale, duplicated, or foreign job). Nothing ran; this is not an authorization
+    # failure, so it must not be reported as a missing role.
+    REFRESH_REQUEST_MISMATCH = "REFRESH_REQUEST_MISMATCH"
+
+    # A previous refresh left evidence that cannot be verified (ambiguous or
+    # malformed queue job), so a new refresh stays blocked until an operator
+    # reconciles it. Retrying does not help.
+    REFRESH_RECOVERY_REQUIRED = "REFRESH_RECOVERY_REQUIRED"
+
+    # Upstream access could not be re-verified within the job's budget (provider
+    # outage, timeout, or another verification still running). Memberships are
+    # untouched; retrying later can succeed without any user action.
+    ACCESS_VERIFICATION_UNAVAILABLE = "ACCESS_VERIFICATION_UNAVAILABLE"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.

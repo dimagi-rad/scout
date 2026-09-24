@@ -13,8 +13,8 @@ Description: Scout production infrastructure (EC2 + Kamal). Does NOT cover the c
 # The *connect-labs* deployment is a DIFFERENT, OUT-OF-REPO target:
 #   - ECS Fargate (cluster `labs-jj-cluster`, services labs-jj-scout-web /
 #     -mcp / -worker), NOT EC2/Kamal.
-#   - A separate AWS account: 858923557655 (ECR registry
-#     858923557655.dkr.ecr.us-east-1.amazonaws.com).
+#   - A separate AWS account (the Connect Labs account; its ECR registry is
+#     the ECR_REGISTRY_LABS Actions variable read by deploy-labs.yml).
 #   - Served under the /scout path prefix (FORCE_SCRIPT_NAME, see
 #     config/settings/connectlabs.py + frontend/nginx.prod.conf).
 #   - Deployed by `.github/workflows/deploy-labs.yml`, which only builds and

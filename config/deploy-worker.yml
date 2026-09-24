@@ -9,6 +9,11 @@ service: scout-worker
 
 image: scout/api
 
+# Worker deploys use `kamal redeploy`, which never prunes; CI's pre-deploy
+# guard (scripts/host-disk-guard.sh) applies the same count only when no
+# drain receipt could reference a stopped worker.
+retain_containers: 3
+
 servers:
   web:
     hosts:

@@ -4,7 +4,13 @@ import pytest
 
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.common.error_codes import ErrorCode
-from apps.workspaces.tasks import _CREDENTIAL_GUIDANCE, _credential_guidance, _summary_failures
+from apps.workspaces.access import tool_write_denied
+from apps.workspaces.tasks import (
+    _CREDENTIAL_GUIDANCE,
+    _ROLE_DENIED_MESSAGE,
+    _credential_guidance,
+    _summary_failures,
+)
 
 
 @pytest.mark.asyncio
@@ -54,6 +60,68 @@ async def test_headless_materialization_tool_reports_failure(workspace, user, mo
     result = await tool.ainvoke({})
     assert result["status"] == "failed"
     assert result["tenants_loaded"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_materialization_tool_preserves_post_wait_authorization_denial(
+    workspace, user, monkeypatch
+):
+    denied = {
+        "status": "denied",
+        "error_code": ErrorCode.WORKSPACE_ROLE_INSUFFICIENT,
+        "error": _ROLE_DENIED_MESSAGE,
+        "tenants": [],
+        "all_succeeded": False,
+        "guidance": [],
+    }
+
+    called = False
+
+    async def _denied_after_wait(*_args):
+        nonlocal called
+        called = True
+        return denied
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _denied_after_wait)
+
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+
+    assert called, "the tool short-circuited before the blocking run"
+    assert result == tool_write_denied()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_tool_renders_lost_tenant_denial_with_its_guidance(
+    workspace, user, monkeypatch
+):
+    failures = [
+        {
+            "tenant": "lost",
+            "success": False,
+            "error": "no live commcare membership for the acting user",
+            "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+        }
+    ]
+
+    async def _denied_after_wait(*_args):
+        return {
+            "status": "denied",
+            "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+            "error": "No tenant memberships found",
+            "tenants": failures,
+            "all_succeeded": False,
+            "guidance": _credential_guidance(_summary_failures(failures)),
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _denied_after_wait)
+
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+
+    assert result["status"] == "failed"
+    assert result["tenants_not_loaded"] == ["lost"]
+    assert _CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in result["message"]
 
 
 @pytest.mark.asyncio
