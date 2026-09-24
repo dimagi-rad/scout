@@ -963,16 +963,37 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
 
 def _artifact_write_result_for_summary(messages: list[Any], requested_id: Any) -> dict[str, Any]:
     results = []
-    for message in reversed(messages):
+    for message in messages:
         if isinstance(message, ToolMessage) and message.name == "artifact_write":
             results.append(_parse_json_object(message.content) or {})
-    latest = results[0] if results else {}
+    latest = results[-1] if results else {}
     if not isinstance(requested_id, str) or not requested_id:
         return latest
 
     # Cleanup of another artifact must not replace the requested deliverable.
     # Only tool-confirmed results can authorize the model's selected target.
-    for result in results:
+    selected_index = None
+    for index, result in enumerate(results):
+        runtime = result.get("runtime")
+        if result.get("status") not in ("created", "updated", "replaced", "checked") or (
+            isinstance(runtime, dict) and runtime.get("success") is False
+        ):
+            continue
+        artifact = result.get("artifact")
+        artifact_id = artifact.get("id") if isinstance(artifact, dict) else None
+        if (
+            isinstance(artifact_id, str)
+            and artifact_id
+            and (artifact_id == requested_id or result.get("previous_artifact_id") == requested_id)
+        ):
+            requested_id = artifact_id
+            selected_index = index
+    if selected_index is None:
+        return latest
+
+    # A later failure stays authoritative, but an earlier failed attempt must
+    # not invalidate a subsequent successful publish or check of this target.
+    for result in reversed(results[selected_index + 1 :]):
         runtime = result.get("runtime")
         if result.get("status") in ("error", "denied") or (
             isinstance(runtime, dict) and runtime.get("success") is False
@@ -980,13 +1001,7 @@ def _artifact_write_result_for_summary(messages: list[Any], requested_id: Any) -
             return result
         if result.get("status") not in ("created", "updated", "replaced", "checked"):
             return latest
-        artifact = result.get("artifact")
-        if isinstance(artifact, dict) and artifact.get("id") == requested_id:
-            return result
-        # A later published revision supersedes an earlier selected ID.
-        if result.get("previous_artifact_id") == requested_id:
-            return latest
-    return latest
+    return results[selected_index]
 
 
 def _parse_json_object(value: Any) -> dict[str, Any] | None:

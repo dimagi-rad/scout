@@ -179,10 +179,14 @@ def test_selected_deliverable_survives_cleanup_of_another_artifact():
 @pytest.mark.parametrize("requested_id", [None, "", "invented", [], {"id": "deliverable"}])
 def test_unverified_deliverable_selection_keeps_latest_tool_result(requested_id):
     summary = _summarize_result(
-        [_write_message(_published_artifact_result("saved"))],
+        [
+            _write_message({"status": "error", "message": "Earlier attempt failed."}, "failed"),
+            _write_message(_published_artifact_result("saved")),
+        ],
         json.dumps({"status": "done", "artifact_id": requested_id}),
     )
     assert summary["artifact_id"] == "saved"
+    assert summary["status"] == "done"
 
 
 @pytest.mark.parametrize("status", ["updated", "replaced"])
@@ -198,6 +202,39 @@ def test_selected_predecessor_cannot_override_a_later_published_revision(status)
         json.dumps({"status": "done", "artifact_id": "v1"}),
     )
     assert summary["artifact_id"] == "v2"
+
+
+def test_selected_revision_follows_successors_without_switching_to_cleanup():
+    summary = _summarize_result(
+        [
+            _write_message(_published_artifact_result("v1")),
+            _write_message(
+                _published_artifact_result("v2", status="updated", previous_artifact_id="v1"),
+                "update-1",
+            ),
+            _write_message(
+                _published_artifact_result("v3", status="replaced", previous_artifact_id="v2"),
+                "update-2",
+            ),
+            _write_message(_published_artifact_result("v1", status="checked"), "old-check"),
+            _write_message(_published_artifact_result("other"), "cleanup"),
+        ],
+        json.dumps({"status": "done", "artifact_id": "v1"}),
+    )
+    assert summary["artifact_id"] == "v3"
+
+
+def test_successful_deliverable_after_a_failed_attempt_remains_selected():
+    summary = _summarize_result(
+        [
+            _write_message({"status": "error", "message": "Earlier attempt failed."}, "failed"),
+            _write_message(_published_artifact_result("deliverable")),
+            _write_message(_published_artifact_result("other"), "cleanup"),
+        ],
+        json.dumps({"status": "done", "artifact_id": "deliverable"}),
+    )
+    assert summary["status"] == "done"
+    assert summary["artifact_id"] == "deliverable"
 
 
 @pytest.mark.parametrize("status", ["error", "denied", "checked"])
