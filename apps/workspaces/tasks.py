@@ -415,26 +415,21 @@ async def refresh_tenant_schema(
         }
 
     # Upstream freshness is checked here, after the claim's transaction closed, so
-    # no row lock is held across a provider call. A denial fails this candidate
-    # like any other refresh failure, with its own code (an outage says retry).
-    access = await aresolve_workspace_access_ex(
-        membership.user,
-        workspace_id,
-        minimum_role=WorkspaceRole.READ_WRITE,
-        verification=VerificationBudget.BACKGROUND,
-    )
-    if not access.granted:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        if access.denied_reason in FRESHNESS_ERROR_CODES:
-            return _refresh_denial_result(access.denied_reason)
-        return _refresh_denial_result(DENIED_ROLE_REQUIRED)
+    # no row lock is held across a provider call.
+    denial = await _refresh_access_denial(membership, workspace_id, new_schema, context.job.id)
+    if denial is not None:
+        return denial
 
     # T serializes this refresh with every other writer of the tenant (workspace
     # loads, retirement). Sibling work happens only after T is released: never
     # wait on another workspace's lock while holding a tenant lock.
     try:
         async with tenant_data_lock([new_schema.tenant_id]):
-            outcome = await _run_claimed_refresh(context, new_schema, membership)
+            # The wait for T can outlast the proof (up to the lock timeout), and
+            # the fetch must not run on stale authority: check again under T.
+            outcome = await _refresh_access_denial(
+                membership, workspace_id, new_schema, context.job.id
+            ) or await _run_claimed_refresh(context, new_schema, membership)
     except DataLockTimeout:
         logger.warning("Refresh of '%s' timed out waiting for its tenant", new_schema.schema_name)
         await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
@@ -563,9 +558,32 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
     return {"status": "active", "schema_id": str(new_schema.id)}
 
 
-async def _end_refresh_load(schema, job_id: int, generation: int) -> None:
-    await _to_thread_fresh_db(end_load_generation, schema.tenant_id, generation)
+async def _refresh_access_denial(membership, workspace_id, schema, job_id) -> dict | None:
+    """Fail the candidate and return the denial if the actor's authority lapsed.
+
+    A denial fails the candidate like any other refresh failure, with its own
+    code (an outage says retry).
+    """
+    access = await aresolve_workspace_access_ex(
+        membership.user,
+        workspace_id,
+        minimum_role=WorkspaceRole.READ_WRITE,
+        verification=VerificationBudget.BACKGROUND,
+    )
+    if access.granted:
+        return None
     await _drop_claimed_refresh_schema_and_fail(schema, job_id)
+    if access.denied_reason in FRESHNESS_ERROR_CODES:
+        return _refresh_denial_result(access.denied_reason)
+    return _refresh_denial_result(DENIED_ROLE_REQUIRED)
+
+
+async def _end_refresh_load(schema, job_id: int, generation: int) -> None:
+    try:
+        await _to_thread_fresh_db(end_load_generation, schema.tenant_id, generation)
+    finally:
+        # Paired: a failure clearing the marker must not leave the candidate live.
+        await _drop_claimed_refresh_schema_and_fail(schema, job_id)
 
 
 def _preflight_failure(tenant, error: str, code: str = "") -> dict:
