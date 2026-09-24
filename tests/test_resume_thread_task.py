@@ -1364,8 +1364,9 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     if current_state == SchemaState.ACTIVE:
         assert "re-running materialization will fix this" in lower
     else:
-        assert "re-running materialization rebuilds the expired data" in lower
-        assert "once those access prerequisites are met" in lower
+        assert "re-running materialization rebuilds them" in lower
+    assert "account credentials" not in lower
+    assert "ask someone with access" not in lower
     # The WRONG advice from the generic-build-failure branch must NOT appear.
     assert "do not re-run materialization" not in lower
     assert "a system-side fix is required" not in lower
@@ -1374,6 +1375,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert "re-running materialization" in tj.error_summary.lower()
+    assert "account credentials" not in tj.error_summary.lower()
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
     assert _termination_to_dict(tj, [])["retry_available"] is True
 

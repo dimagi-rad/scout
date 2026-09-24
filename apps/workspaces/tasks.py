@@ -2847,13 +2847,16 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     if missing_active_tenants:
         missing_data_guidance = (
             f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
-            "Verify current access and account credentials before refreshing their data. "
-            "If you cannot access a source, ask someone with access to refresh it."
         )
         if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             missing_data_guidance += (
-                " Re-running materialization rebuilds the expired data and dependent views "
-                "once those access prerequisites are met."
+                "The data and dependent views expired or were torn down. "
+                "Re-running materialization rebuilds them."
+            )
+        else:
+            missing_data_guidance += (
+                "Verify current access and account credentials before refreshing their data. "
+                "If you cannot access a source, ask someone with access to refresh it."
             )
 
     if missing_active_tenants:
