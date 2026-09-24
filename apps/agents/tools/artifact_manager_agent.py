@@ -801,6 +801,7 @@ def _child_tool_call_id(raw_id: str) -> str:
 def _extract_final_text(messages: list[Any]) -> str:
     for message in reversed(messages):
         if isinstance(message, AIMessage) and message.content:
+            # A non-text final message must not revive an earlier model proposal.
             return str(message.text)
     return ""
 
@@ -1000,7 +1001,10 @@ def _artifact_write_result_for_summary(messages: list[Any], requested_id: Any) -
         ):
             return result
         if result.get("status") not in ("created", "updated", "replaced", "checked"):
-            return latest
+            return {
+                "status": "error",
+                "message": "Artifact Manager received an invalid write result; verify the artifact before continuing.",
+            }
     return results[selected_index]
 
 

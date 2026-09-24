@@ -178,6 +178,12 @@ def test_final_text_joins_text_blocks_without_including_reasoning_or_tool_conten
     assert _extract_final_text([message]) == '```json\n{"status":"done"}\n```'
 
 
+def test_non_text_final_message_does_not_revive_an_earlier_model_proposal():
+    earlier = _final_message({"status": "needs_data_model"}, content_blocks=True)
+    final = AIMessage(content=[{"type": "thinking", "thinking": "No final response"}])
+    assert _extract_final_text([earlier, final]) == ""
+
+
 def test_selected_deliverable_survives_cleanup_of_another_artifact():
     deliverable = _published_artifact_result("deliverable")
     cleanup = _published_artifact_result(
@@ -300,15 +306,21 @@ def test_deliverable_selection_uses_latest_check_of_the_same_artifact():
     assert summary["runtime_summary"] == "Fresh"
 
 
-def test_unparseable_latest_write_does_not_resurrect_an_earlier_deliverable():
+@pytest.mark.parametrize("cleanup_after_invalid", [False, True])
+def test_unparseable_write_never_substitutes_an_unrelated_artifact(cleanup_after_invalid):
+    messages = [
+        _write_message(_published_artifact_result("deliverable")),
+        ToolMessage(name="artifact_write", tool_call_id="broken", content="not JSON"),
+    ]
+    if cleanup_after_invalid:
+        messages.append(_write_message(_published_artifact_result("other"), "cleanup"))
     summary = _summarize_result(
-        [
-            _write_message(_published_artifact_result("deliverable")),
-            ToolMessage(name="artifact_write", tool_call_id="broken", content="not JSON"),
-        ],
+        messages,
         json.dumps({"status": "done", "artifact_id": "deliverable"}),
     )
     assert summary["artifact_id"] is None
+    assert summary["status"] == "error"
+    assert "invalid write result" in summary["message"]
 
 
 @pytest.mark.asyncio
