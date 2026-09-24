@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import threading
+import time
 
 from django.contrib.auth import get_user_model
 from django.db import connection, transaction
@@ -119,3 +120,39 @@ async def arow_locked(lock, *, release=None, release_after=None, acquire_timeout
         holder.stop()
         await asyncio.to_thread(holder.join)
     holder.check()
+
+
+def wait_until_blocked_on_lock(timeout=JOIN_TIMEOUT_SECONDS):
+    """Return once another backend in this database is waiting on a lock.
+
+    Replaces a fixed sleep before acting on a waiter: under load the waiter may not
+    have reached the lock yet, and the test would then pass without exercising the
+    lock wait at all.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            )
+            if cursor.fetchone()[0]:
+                return
+        time.sleep(0.01)
+    raise AssertionError("no backend started waiting on the lock")
+
+
+async def await_blocked_on_lock():
+    """:func:`wait_until_blocked_on_lock` for async tests.
+
+    Runs on a plain thread, not the thread-sensitive executor, which the blocked
+    waiter may itself be occupying.
+    """
+
+    def poll():
+        try:
+            wait_until_blocked_on_lock()
+        finally:
+            connection.close()
+
+    await asyncio.to_thread(poll)
