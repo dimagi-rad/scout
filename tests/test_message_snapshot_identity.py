@@ -189,11 +189,16 @@ async def test_namespaced_views_keep_their_declared_source_identity(
         )
     elif described:
         assert identity["version"] == 2
+        assert identity["kind"] == "snapshot_local"
+        assert identity["safe_for_reviewed_labels"] is True
+        assert identity["snapshot_column"] == "snapshot_revision"
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mapping", ["valid", "legacy", "unlisted", "other_tenant", "stale"])
+@pytest.mark.parametrize(
+    "mapping", ["valid", "legacy", "unlisted", "other_tenant", "stale", "query_failed"]
+)
 async def test_mcp_view_identity_uses_only_authorized_publication_provenance(
     workspace, tenant, mapping, monkeypatch
 ):
@@ -214,7 +219,10 @@ async def test_mcp_view_identity_uses_only_authorized_publication_provenance(
     if mapping == "stale":
         published.append({"name": "new_view_not_in_prior_map"})
     monkeypatch.setattr(
-        "mcp_server.services.metadata.workspace_list_tables", AsyncMock(return_value=published)
+        "mcp_server.services.metadata.workspace_list_tables",
+        AsyncMock(side_effect=TimeoutError("Managed database temporarily unavailable"))
+        if mapping == "query_failed"
+        else AsyncMock(return_value=published),
     )
     await WorkspaceViewSchema.objects.acreate(
         workspace=workspace,
@@ -233,7 +241,7 @@ async def test_mcp_view_identity_uses_only_authorized_publication_provenance(
         assert identity["kind"] == "snapshot_local"
         assert identity["safe_for_reviewed_labels"] is True
         assert identity["source_scope"] == "tenant"
-        assert set(identity["scope_columns"]) <= {column["name"] for column in columns}
+        assert identity["scope_columns"] == ["session_id"]
     else:
         assert identity["kind"] == "unknown"
         assert identity["safe_for_reviewed_labels"] is False

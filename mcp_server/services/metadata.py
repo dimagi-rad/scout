@@ -18,7 +18,6 @@ from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
 from apps.workspaces.models import MaterializationRun, SchemaState, WorkspaceViewSchema
 from apps.workspaces.services.view_sources import (
-    ViewSourcesError,
     parse_view_sources,
     validate_published_views,
 )
@@ -308,9 +307,9 @@ async def workspace_table_identity(
         if sources is not None:
             published = await workspace_list_tables(ctx)
             validate_published_views(sources, {table["name"] for table in published})
-    except ViewSourcesError:
+    except Exception:
         logger.warning(
-            "Unverified source identity for workspace %s table %s: invalid view provenance",
+            "Could not verify source identity for workspace %s table %s",
             workspace_id,
             table_name,
             exc_info=True,

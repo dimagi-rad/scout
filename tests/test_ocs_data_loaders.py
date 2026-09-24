@@ -140,7 +140,10 @@ def test_message_loader_flattens_messages_with_composite_pk():
                 ).encode()
             ).hexdigest()
 
-        original_messages = detail.json.return_value["messages"]
+        original_messages = [
+            {key: message[key] for key in ("role", "content", "created_at", "metadata", "tags")}
+            for message in detail.json.return_value["messages"]
+        ]
         revision = digest(["sess-1", original_messages])
         assert rows[0]["snapshot_revision"] == revision
         assert rows[1]["snapshot_revision"] == revision

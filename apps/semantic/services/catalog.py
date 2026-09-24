@@ -320,9 +320,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 columns=columns,
                 identity=(detail or {}).get("identity")
                 or (
-                    source_identity(
-                        source_provider, source.source_table_name if source else table_name, columns
-                    )
+                    source_identity(source_provider, source_table, columns)
                     if source_provider is not None and detail is not None
                     else unverified_source_identity()
                 ),
