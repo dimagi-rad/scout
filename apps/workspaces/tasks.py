@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import time
+import uuid
 from collections.abc import Iterable
 from datetime import timedelta
 from functools import wraps
@@ -65,6 +66,7 @@ from apps.workspaces.services.access_freshness import (
 )
 from apps.workspaces.services.data_operation import (
     DataLockTimeout,
+    LockOrderError,
     run_data_thread,
     serialized_workspace_data,
     tenant_data_lock,
@@ -678,6 +680,14 @@ def serialized_workspace_materialization(function):
     return wrapped
 
 
+# The view build re-reads the workspace's sources and cannot expand the T set
+# this load holds, so a source added mid-run surfaces as a LockOrderError.
+_SOURCE_ADDED_DURING_LOAD = (
+    "A source was added while this load was running, so this run did not republish "
+    "the workspace's views; the follow-up queued when the source was added does."
+)
+
+
 @serialized_workspace_materialization
 async def materialize_workspace_core(
     workspace_id: str,
@@ -786,11 +796,12 @@ async def materialize_workspace_core(
             # Added after the tenant locks were taken; loading it now would run
             # outside T. Report it truthfully and let a re-run cover it.
             tenant_results.append(
+                # No error code: every code carries advice (e.g. reconnect an
+                # account) that would contradict "run it again".
                 _preflight_failure(
                     tm.tenant,
                     "This source was added while the load was starting and was not "
                     "loaded. Run the load again to include it.",
-                    ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
                 )
             )
             continue
@@ -843,6 +854,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": True,
                     "reused_generation": evidence.generation,
@@ -958,7 +970,9 @@ async def materialize_workspace_core(
             )
             view_schema_outcome = {
                 "ok": False,
-                "error": str(exc)[:500],
+                "error": (
+                    _SOURCE_ADDED_DURING_LOAD if isinstance(exc, LockOrderError) else str(exc)[:500]
+                ),
                 "tenant_coverage": tenant_coverage,
             }
 
@@ -1121,19 +1135,38 @@ async def materialize_workspace(
         result = await materialize_workspace_core(
             workspace_id, user_id, job_id, load_intent=load_intent
         )
-        preflight_failures = [
-            {
-                "tenant_id": entry["tenant_id"],
-                "provider": entry["provider"],
-                "error": str(entry["error"])[:1000],
-                "error_code": str(entry.get("error_code") or ""),
-            }
-            for entry in result.get("tenants", [])
-            if entry.get("state") == TENANT_NOT_RUN
-        ]
+        preflight_failures = _resume_records(result)
         return result
     finally:
         await _defer_resume_for_job(job_id, preflight_failures)
+
+
+def _resume_records(result: dict) -> list[dict]:
+    """What the chat resume needs beyond this job's run rows.
+
+    Preflight failures explain tenants that never produced a run. A reused
+    tenant has no run under this job either; its entry names the reused run so
+    the resume reports what was served instead of "the run recorded nothing".
+    """
+    tenants = result.get("tenants", [])
+    return [
+        {
+            "tenant_id": entry["tenant_id"],
+            "provider": entry["provider"],
+            "error": str(entry["error"])[:1000],
+            "error_code": str(entry.get("error_code") or ""),
+        }
+        for entry in tenants
+        if entry.get("state") == TENANT_NOT_RUN
+    ] + [
+        {
+            "tenant_id": entry["tenant_id"],
+            "provider": entry["provider"],
+            "reused_run_id": str(entry["result"]["run_id"]),
+        }
+        for entry in tenants
+        if entry.get("reused_generation") and entry.get("tenant_id")
+    ]
 
 
 async def _defer_resume_for_job(job_id: int, preflight_failures: list[dict] | None = None) -> None:
@@ -1331,19 +1364,29 @@ async def _load_workspace_candidate(
     """
     # The candidate owner; a job-less load (the agent's blocking tool) gets a token.
     owner = load_owner_token(job_id)
+    config = raw_load_fingerprint(pipeline_config)
     await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tm.tenant_id)
     generation = await _to_thread_fresh_db(begin_load_generation, tm.tenant_id)
-    config = raw_load_fingerprint(pipeline_config)
-    opened = await _to_thread_fresh_db(
-        open_workspace_candidate,
-        tm.tenant,
-        workspace_id=workspace.id,
-        job_id=owner,
-        generation=generation,
-        config_fingerprint=config,
-    )
+    try:
+        opened = await _to_thread_fresh_db(
+            open_workspace_candidate,
+            tm.tenant,
+            workspace_id=workspace.id,
+            job_id=owner,
+            generation=generation,
+            config_fingerprint=config,
+        )
+    except BaseException:
+        # No candidate yet, but the generation is marked loading: clear it, or
+        # later requests stop joining it and its resumable candidate is lost.
+        await asyncio.shield(_end_load(tm.tenant_id, generation))
+        raise
     candidate = opened.schema
-    await _defer_abandoned_candidate_drops(tm.tenant_id, keep_id=candidate.id)
+    try:
+        await _defer_abandoned_candidate_drops(tm.tenant_id, keep_id=candidate.id)
+    except Exception:
+        # Cleanup is best effort; the periodic sweep retries it.
+        logger.exception("Could not queue cleanup of abandoned candidates for %s", tm.tenant_id)
     if opened.resumed:
         logger.info(
             "Resuming failed candidate '%s' for tenant %s (generation %d)",
@@ -1384,6 +1427,10 @@ async def _load_workspace_candidate(
     if isinstance(result, dict) and opened.resumed:
         result = {**result, "resumed": True}
     return result
+
+
+async def _end_load(tenant_id, generation: int) -> None:
+    await _to_thread_fresh_db(end_load_generation, tenant_id, generation)
 
 
 async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation: int) -> None:
@@ -3036,6 +3083,18 @@ async def _uncovered_tenant_summaries(
     return summaries
 
 
+def _reused_run_ids(recorded: list[dict] | None) -> list[uuid.UUID]:
+    ids = []
+    for entry in recorded or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            ids.append(uuid.UUID(str(entry.get("reused_run_id"))))
+        except ValueError:
+            continue
+    return ids
+
+
 async def _aggregate_materialization_state(
     procrastinate_job_id: int,
     workspace,
@@ -3071,8 +3130,14 @@ async def _aggregate_materialization_state(
     runs = [
         r
         async for r in MaterializationRun.objects.filter(
-            procrastinate_job_id=procrastinate_job_id,
-        ).select_related("tenant_schema__tenant")
+            Q(procrastinate_job_id=procrastinate_job_id)
+            | Q(
+                id__in=_reused_run_ids(preflight_failures),
+                tenant_schema__tenant__workspace_tenants__workspace=workspace,
+            )
+        )
+        .select_related("tenant_schema__tenant")
+        .distinct()
     ]
     uncovered = await _uncovered_tenant_summaries(
         workspace,
