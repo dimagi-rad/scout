@@ -304,3 +304,9 @@ def test_reconcile_missing_joins_a_first_load_already_fetching(tenant):
 def test_intent_keys_are_normalized_tenant_uuids(tenant):
     braced = "{" + str(tenant.id).upper() + "}"
     assert parse_load_intent({braced: 1}) == {str(tenant.id): 1}
+
+
+def test_two_spellings_of_one_tenant_keep_the_stricter_requirement(tenant):
+    braced = "{" + str(tenant.id).upper() + "}"
+    assert parse_load_intent({str(tenant.id): 3, braced: 1}) == {str(tenant.id): 3}
+    assert parse_load_intent({braced: 1, str(tenant.id): 3}) == {str(tenant.id): 3}

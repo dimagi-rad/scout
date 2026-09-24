@@ -16,6 +16,7 @@ from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.users.models import Tenant
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantLoadGeneration,
     TenantSchema,
@@ -45,6 +46,15 @@ class _Pipeline:
         self.calls.append((membership.tenant_id, target_schema.id if target_schema else None))
         if self.fail_times:
             self.fail_times -= 1
+            if target_schema is not None:
+                # What a real failed fetch leaves behind: the resume cursors' run.
+                MaterializationRun.objects.create(
+                    tenant_schema=target_schema,
+                    pipeline=pipeline.name,
+                    procrastinate_job_id=job_id,
+                    state=MaterializationRun.RunState.FAILED,
+                    result={"sources": {}},
+                )
             raise RuntimeError("provider timed out")
         return completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
 
@@ -190,6 +200,41 @@ async def test_a_failed_load_keeps_last_good_serving_and_the_retry_resumes_its_c
     [active] = await _active_schemas(tenant)
     assert active.id == first_candidate
     drop.assert_not_awaited()
+
+
+async def test_a_resumed_generation_is_reused_by_a_request_that_joined_it(workspace, tenant, user):
+    """The failed attempt's run is superseded at promotion, so the generation the
+    resume published is reusable instead of forcing every joiner to reload."""
+    sibling = await _sibling(user, tenant)
+    first_intent = await _intent(workspace)
+    second_intent = await _intent(sibling)
+
+    pipeline = _Pipeline(fail_times=1)
+    async with _loads(pipeline):
+        assert (await _run(workspace, user, load_intent=first_intent))["all_succeeded"] is False
+        resumed = await _run(workspace, user, load_intent=first_intent)
+        joined = await _run(sibling, user, load_intent=second_intent)
+
+    assert resumed["tenants"][0]["result"]["resumed"] is True
+    assert len(pipeline.calls) == 2
+    assert "reused_generation" in joined["tenants"][0]
+
+
+async def test_a_promotion_whose_retirement_cannot_be_queued_is_rolled_back(
+    workspace, tenant, user
+):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user)
+        [last_good] = await _active_schemas(tenant)
+        with patch("apps.workspaces.tasks.teardown_schema.configure") as retire:
+            retire.return_value.defer.side_effect = RuntimeError("queue unavailable")
+            result = await _run(workspace, user)
+
+    assert result["all_succeeded"] is False
+    assert [s.id for s in await _active_schemas(tenant)] == [last_good.id]
+    candidate = await TenantSchema.objects.aget(id=pipeline.calls[-1][1])
+    assert candidate.state == SchemaState.FAILED
 
 
 async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old_candidate(

@@ -12,6 +12,7 @@ dropped by a bounded-retry cleanup.
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from dataclasses import dataclass
 
@@ -28,6 +29,25 @@ from apps.workspaces.models import (
     TenantSchema,
 )
 from apps.workspaces.services.load_generations import publish_generation, resumable_candidate
+
+_SUPERSEDABLE_RUN_STATES = (
+    MaterializationRun.RunState.COMPLETED,
+    MaterializationRun.RunState.PARTIAL,
+    MaterializationRun.RunState.FAILED,
+    MaterializationRun.RunState.CANCELLED,
+)
+
+
+def load_owner_token(job_id: int | None) -> int:
+    """The candidate owner id for one load attempt.
+
+    A load outside a queue job (the agent's blocking tool) gets a fresh negative
+    token: procrastinate ids are positive, so it never matches a real job, and it
+    differs per attempt, so one job-less attempt cannot pass for another.
+    """
+    if job_id is not None:
+        return job_id
+    return -(secrets.randbits(62) + 1)
 
 
 @dataclass(frozen=True)
@@ -48,9 +68,11 @@ def open_workspace_candidate(
     """Resume this generation's matching FAILED candidate, or create a fresh one.
 
     The caller holds T for ``tenant``, so no other writer can be filling or
-    resuming a candidate concurrently; the row lock guards the reconciler.
+    resuming a candidate concurrently; the Tenant row lock orders this against
+    promotion and the reconciler.
     """
     with transaction.atomic():
+        Tenant.objects.select_for_update().get(id=tenant.id)
         match = resumable_candidate(tenant.id, generation, config_fingerprint)
         if match is not None:
             resumed = TenantSchema.objects.filter(
@@ -117,7 +139,12 @@ def promote_candidate_schema(
     or the workspace load that opened it), and must carry an owned, COMPLETED,
     fingerprinted run of the generation being loaded. Every other ACTIVE schema
     becomes TEARDOWN in the same transaction and the generation is published
-    under the same commit.
+    under the same commit. Earlier runs on a resumed candidate are superseded
+    (STALE) here, after the load consumed their resume cursors, so the published
+    run is the only live evidence and the generation stays reusable.
+
+    Nothing sweeps stranded TEARDOWN rows: the caller must queue a teardown for
+    each of ``retired_schema_ids`` in the same transaction or on commit.
     """
     tenant_id = (
         TenantSchema.objects.filter(id=candidate_id).values_list("tenant_id", flat=True).first()
@@ -142,12 +169,15 @@ def promote_candidate_schema(
             )
             job_id = refresh_job_id
         else:
+            # None would match any job-less candidate and run; job-less loads use
+            # load_owner_token instead, whose run records no queue job.
             owned = (
                 candidate.load_workspace_id is not None
                 and candidate.load_workspace_id == workspace_id
+                and workspace_job_id is not None
                 and candidate.load_job_id == workspace_job_id
             )
-            job_id = workspace_job_id
+            job_id = workspace_job_id if workspace_job_id and workspace_job_id > 0 else None
         if not owned:
             return Promotion(promoted=False)
 
@@ -177,6 +207,10 @@ def promote_candidate_schema(
         ):
             return Promotion(promoted=False)
 
+        MaterializationRun.objects.filter(
+            tenant_schema_id=candidate.id,
+            state__in=_SUPERSEDABLE_RUN_STATES,
+        ).exclude(id=run.id).update(state=MaterializationRun.RunState.STALE)
         retired = tuple(row.id for row in rows if row.state == SchemaState.ACTIVE)
         TenantSchema.objects.filter(id__in=retired).update(state=SchemaState.TEARDOWN)
         candidate.state = SchemaState.ACTIVE
@@ -212,6 +246,7 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
     for resume by the same pending generation.
     """
     with transaction.atomic():
+        Tenant.objects.select_for_update().get(id=tenant_id)
         orphans = list(
             TenantSchema.objects.select_for_update().filter(
                 tenant_id=tenant_id,
@@ -228,17 +263,21 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
         return orphans
 
 
-def abandoned_workspace_candidates(tenant_id, *, keep_id=None) -> list[TenantSchema]:
+def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
     """FAILED workspace candidates no load will resume, other than ``keep_id``.
 
     Called by the writer under T once it has chosen its candidate (the resumed
     one is ``keep_id``); only that one can match the pending generation's
     config, so every other FAILED candidate is abandoned partial data.
+    ``keep_id`` is required: excluding None would exclude nothing and hand the
+    resumable candidate to cleanup.
     """
-    return list(
-        TenantSchema.objects.filter(
-            tenant_id=tenant_id,
-            state=SchemaState.FAILED,
-            load_workspace_id__isnull=False,
-        ).exclude(id=keep_id)
-    )
+    with transaction.atomic():
+        Tenant.objects.select_for_update().get(id=tenant_id)
+        return list(
+            TenantSchema.objects.filter(
+                tenant_id=tenant_id,
+                state=SchemaState.FAILED,
+                load_workspace_id__isnull=False,
+            ).exclude(id=keep_id)
+        )

@@ -1,5 +1,7 @@
 """Candidate lifecycle for shared-tenant loads: open, resume, promote, fail, settle."""
 
+import uuid
+
 import pytest
 from django.utils import timezone
 
@@ -12,6 +14,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.load_candidates import (
     abandoned_workspace_candidates,
     fail_workspace_candidate,
+    load_owner_token,
     open_workspace_candidate,
     promote_candidate_schema,
     settle_orphaned_workspace_candidates,
@@ -20,6 +23,7 @@ from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     begin_load_generation,
     capture_load_intent,
+    reusable_generation,
 )
 from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
 
@@ -27,9 +31,10 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 CONFIG = "raw-config-a"
 FINGERPRINT = "current-fingerprint"
+JOB = 11
 
 
-def _open(tenant, workspace, *, generation, job_id=None, config=CONFIG):
+def _open(tenant, workspace, *, generation, job_id=JOB, config=CONFIG):
     return open_workspace_candidate(
         tenant,
         workspace_id=workspace.id,
@@ -39,7 +44,7 @@ def _open(tenant, workspace, *, generation, job_id=None, config=CONFIG):
     )
 
 
-def _completed_run(schema, *, job_id=None, result=None, state=None):
+def _completed_run(schema, *, job_id=JOB, result=None, state=None):
     return MaterializationRun.objects.create(
         tenant_schema=schema,
         pipeline="commcare_sync",
@@ -49,7 +54,7 @@ def _completed_run(schema, *, job_id=None, result=None, state=None):
     )
 
 
-def _promote(candidate, workspace, generation, run, *, job_id=None, fingerprint=FINGERPRINT):
+def _promote(candidate, workspace, generation, run, *, job_id=JOB, fingerprint=FINGERPRINT):
     return promote_candidate_schema(
         candidate.id,
         accessed_at=timezone.now(),
@@ -145,7 +150,7 @@ def test_promotion_rejects_invalid_run_without_retiring_last_good(tenant, worksp
         result["load_fingerprint"] = "different-execution"
     run = _completed_run(
         active if invalid == "wrong_schema" else candidate,
-        job_id=999 if invalid == "wrong_job" else None,
+        job_id=999 if invalid == "wrong_job" else JOB,
         result=result,
         state=state,
     )
@@ -185,9 +190,7 @@ def test_promotion_swaps_active_atomically_and_publishes_the_generation(
 
 
 @pytest.mark.parametrize("mismatch", ["generation", "candidate_job", "other_workspace"])
-def test_promotion_rejects_superseded_generation_or_foreign_owner(
-    tenant, workspace, user, mismatch
-):
+def test_promotion_rejects_superseded_generation_or_foreign_owner(tenant, workspace, mismatch):
     generation = begin_load_generation(tenant.id)
     candidate = _open(tenant, workspace, generation=generation, job_id=42).schema
     run = _completed_run(candidate, job_id=42)
@@ -195,7 +198,7 @@ def test_promotion_rejects_superseded_generation_or_foreign_owner(
     outcome = promote_candidate_schema(
         candidate.id,
         accessed_at=timezone.now(),
-        workspace_id=user.id if mismatch == "other_workspace" else workspace.id,
+        workspace_id=uuid.uuid4() if mismatch == "other_workspace" else workspace.id,
         workspace_job_id=43 if mismatch == "candidate_job" else 42,
         loading_generation=generation + 1 if mismatch == "generation" else generation,
         run_id=run.id,
@@ -251,3 +254,52 @@ def test_a_load_still_publishes_after_a_refresh_asked_for_the_next_generation(te
         generation,
         generation + 1,
     )
+
+
+def test_a_load_without_a_job_id_cannot_prove_ownership(tenant, workspace):
+    """None == None must not stand in for ownership: it would accept any job-less
+    run on the schema, including another attempt's."""
+    generation = begin_load_generation(tenant.id)
+    candidate = _open(tenant, workspace, generation=generation, job_id=None).schema
+    run = _completed_run(candidate, job_id=None)
+
+    assert not _promote(candidate, workspace, generation, run, job_id=None).promoted
+    candidate.refresh_from_db()
+    assert candidate.state == SchemaState.PROVISIONING
+
+
+def test_a_resumed_then_published_generation_stays_reusable(tenant, workspace):
+    generation = begin_load_generation(tenant.id)
+    first = _open(tenant, workspace, generation=generation, job_id=1).schema
+    failed_run = _completed_run(first, job_id=1, state=MaterializationRun.RunState.FAILED)
+    fail_workspace_candidate(first.id, workspace.id, 1)
+    resumed = _open(tenant, workspace, generation=generation, job_id=2)
+    assert resumed.resumed
+    run = _completed_run(resumed.schema, job_id=2)
+
+    assert _promote(resumed.schema, workspace, generation, run, job_id=2).promoted
+
+    failed_run.refresh_from_db()
+    assert failed_run.state == MaterializationRun.RunState.STALE
+    evidence = reusable_generation(tenant.id, generation, FINGERPRINT)
+    assert evidence is not None
+    assert evidence.run.id == run.id
+
+
+def test_listing_abandoned_candidates_requires_the_kept_one():
+    with pytest.raises(TypeError):
+        abandoned_workspace_candidates(uuid.uuid4())
+
+
+def test_a_job_less_load_owns_its_candidate_through_a_per_attempt_token(tenant, workspace):
+    first, second = load_owner_token(None), load_owner_token(None)
+    assert first < 0
+    assert second < 0
+    assert first != second
+    assert load_owner_token(42) == 42
+    generation = begin_load_generation(tenant.id)
+    candidate = _open(tenant, workspace, generation=generation, job_id=first).schema
+    run = _completed_run(candidate, job_id=None)
+
+    assert not _promote(candidate, workspace, generation, run, job_id=second).promoted
+    assert _promote(candidate, workspace, generation, run, job_id=first).promoted
