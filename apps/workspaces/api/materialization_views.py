@@ -199,6 +199,11 @@ async def materialization_retry_view(request, workspace_id):
         # Captured before queueing, so requests accepted while an equivalent load
         # is still pending join it rather than each running a full load.
         load_intent = await acapture_workspace_load_intent(workspace.id, INTENT_FULL_REFRESH)
+    except Exception:
+        # Not fatal: without it the worker captures intent when the job starts.
+        logger.exception("materialization_retry_view: could not capture load intent")
+        load_intent = None
+    try:
         job = await materialize_workspace.defer_async(
             workspace_id=str(workspace.id),
             user_id=str(user.id),

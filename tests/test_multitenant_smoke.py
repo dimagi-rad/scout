@@ -90,4 +90,6 @@ def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup)
     assert kwargs["workspace_id"] == str(ws.id)
     assert kwargs["user_id"] == str(user.id)
     assert kwargs["only_unserved"] is True
+    # No chat thread waits on this dispatch, so there is no ThreadJob to resume.
+    assert kwargs["notify_thread"] is False
     assert kwargs["load_intent"] == {str(t2.id): 1}

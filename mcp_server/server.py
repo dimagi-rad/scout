@@ -1542,6 +1542,11 @@ async def run_materialization(
         try:
             # Captured before queueing so an equivalent pending load is joined.
             load_intent = await acapture_workspace_load_intent(workspace_id, INTENT_FULL_REFRESH)
+        except Exception:
+            # Not fatal: without it the worker captures intent when the job starts.
+            logger.exception("Could not capture load intent for workspace %s", workspace_id)
+            load_intent = None
+        try:
             job = await materialize_workspace.defer_async(
                 workspace_id=str(workspace_id),
                 user_id=str(user_id) if user_id else "",

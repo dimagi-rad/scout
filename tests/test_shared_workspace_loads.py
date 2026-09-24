@@ -378,12 +378,19 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
         )
         await agrant_tenant_access(user, new_source)
         await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=new_source)
-        with patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build:
+        with (
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._rebuild_dependent_view_schemas", new_callable=AsyncMock
+            ) as dependents,
+        ):
             build.return_value.tenant_coverage = {}
             result = await workspaces_tasks.materialize_workspace_core(
                 str(workspace.id), str(user.id), None, only_unserved=True
             )
 
+    # Siblings of the untouched source keep valid views; only the loaded one fans out.
+    assert list(dependents.await_args.args[0]) == [new_source.id]
     assert [call[0] for call in pipeline.calls] == [tenant.id, new_source.id]
     by_tenant = {e.get("tenant_id") or e["tenant"]: e for e in result["tenants"]}
     assert by_tenant[str(tenant.id)]["result"]["status"] == "already_loaded"
@@ -485,3 +492,46 @@ async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, 
 
     retire.assert_called_once_with(schedule_in={"seconds": 30 * 60})
     retire.return_value.defer.assert_called_once_with(schema_id=str(first.id))
+
+
+@pytest.mark.parametrize(
+    ("outcome", "rebuilds"),
+    [
+        ({"status": "denied", "error": "role changed", "tenants": []}, True),
+        ({"tenants": [], "all_succeeded": True, "view_schema": None}, False),
+        (RuntimeError("worker lost the database"), True),
+    ],
+)
+async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_views(
+    outcome, rebuilds
+):
+    """The views were marked provisioning when the source was added; if the load
+    exits before publishing them, nothing else would rebuild them."""
+    core = (
+        AsyncMock(side_effect=outcome)
+        if isinstance(outcome, Exception)
+        else AsyncMock(return_value=outcome)
+    )
+    with (
+        patch("apps.workspaces.tasks.materialize_workspace_core", core),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as rebuild,
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as resume,
+    ):
+        call = workspaces_tasks.materialize_workspace(
+            MagicMock(job=MagicMock(id=7)),
+            workspace_id="ws",
+            user_id="1",
+            only_unserved=True,
+            notify_thread=False,
+        )
+        if isinstance(outcome, Exception):
+            with pytest.raises(RuntimeError):
+                await call
+        else:
+            await call
+
+    assert rebuild.await_count == (1 if rebuilds else 0)
+    resume.assert_not_awaited()

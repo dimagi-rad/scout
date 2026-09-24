@@ -51,6 +51,7 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                     user_id=str(actor_id),
                     load_intent=intent,
                     only_unserved=True,
+                    notify_thread=False,
                 )
 
     return wt, created
