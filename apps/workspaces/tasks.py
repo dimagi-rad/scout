@@ -71,8 +71,10 @@ from apps.workspaces.services.data_operation import (
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
 from apps.workspaces.services.load_candidates import (
+    Promotion,
     abandoned_workspace_candidates,
     fail_workspace_candidate,
+    load_owner_token,
     open_workspace_candidate,
     promote_candidate_schema,
     settle_orphaned_workspace_candidates,
@@ -515,15 +517,20 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
 
     # Reset last_accessed_at so the fresh schema starts with a clean inactivity
     # TTL; otherwise expire_inactive_schemas could drop it before first use.
-    promotion = await _to_thread_fresh_db(
-        promote_candidate_schema,
-        new_schema.id,
-        accessed_at=timezone.now(),
-        refresh_job_id=job_id,
-        loading_generation=generation,
-        run_id=result.get("run_id") if isinstance(result, dict) else None,
-        fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
-    )
+    try:
+        promotion = await _to_thread_fresh_db(
+            _promote_and_queue_retirement,
+            new_schema.id,
+            accessed_at=timezone.now(),
+            refresh_job_id=job_id,
+            loading_generation=generation,
+            run_id=result.get("run_id") if isinstance(result, dict) else None,
+            fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
+        )
+    except Exception:
+        # It rolled back, so the candidate is still ours and handled as unpublished.
+        logger.exception("Publishing refresh schema '%s' failed", new_schema.schema_name)
+        promotion = Promotion(promoted=False)
     if not promotion.promoted:
         await _to_thread_fresh_db(end_load_generation, new_schema.tenant_id, generation)
         still_ours = await TenantSchema.objects.filter(
@@ -548,7 +555,6 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
             logger.exception("Failed to drop lost refresh schema '%s'", new_schema.schema_name)
         return {"status": "ignored"}
     new_schema.state = SchemaState.ACTIVE
-    await _retire_schemas(promotion.retired_schema_ids)
     return {"status": "active", "schema_id": str(new_schema.id)}
 
 
@@ -1353,11 +1359,19 @@ def _run_pipeline_with_progress(
 _RETIRE_AFTER = timedelta(minutes=30)
 
 
-async def _retire_schemas(schema_ids) -> None:
-    for schema_id in schema_ids:
-        await teardown_schema.configure(
-            schedule_in={"seconds": int(_RETIRE_AFTER.total_seconds())},
-        ).defer_async(schema_id=str(schema_id))
+def _promote_and_queue_retirement(candidate_id, **promotion) -> Promotion:
+    """Promote a candidate and queue the demoted schemas' teardown in one commit.
+
+    Nothing sweeps a TEARDOWN row whose teardown was never queued, so a worker
+    dying between the two must not be able to strand the old schema.
+    """
+    with transaction.atomic():
+        outcome = promote_candidate_schema(candidate_id, **promotion)
+        for schema_id in outcome.retired_schema_ids:
+            teardown_schema.configure(
+                schedule_in={"seconds": int(_RETIRE_AFTER.total_seconds())},
+            ).defer(schema_id=str(schema_id))
+    return outcome
 
 
 async def _load_workspace_candidate(
@@ -1371,6 +1385,8 @@ async def _load_workspace_candidate(
     the same raw-load configuration resumes it, and any other failed candidate
     is dropped by a bounded-retry cleanup.
     """
+    # The candidate owner; a job-less load (the agent's blocking tool) gets a token.
+    owner = load_owner_token(job_id)
     await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tm.tenant_id)
     generation = await _to_thread_fresh_db(begin_load_generation, tm.tenant_id)
     config = raw_load_fingerprint(pipeline_config)
@@ -1378,7 +1394,7 @@ async def _load_workspace_candidate(
         open_workspace_candidate,
         tm.tenant,
         workspace_id=workspace.id,
-        job_id=job_id,
+        job_id=owner,
         generation=generation,
         config_fingerprint=config,
     )
@@ -1396,31 +1412,31 @@ async def _load_workspace_candidate(
         result = await run_data_thread(
             _run_pipeline_with_progress, tm, credential, pipeline_config, job_id, candidate
         )
+        promotion = await _to_thread_fresh_db(
+            _promote_and_queue_retirement,
+            candidate.id,
+            accessed_at=timezone.now(),
+            workspace_id=workspace.id,
+            workspace_job_id=owner,
+            loading_generation=generation,
+            run_id=result.get("run_id") if isinstance(result, dict) else None,
+            fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
+        )
+        if not promotion.promoted:
+            raise RuntimeError(
+                "The load finished without a complete, owned result to publish; "
+                "the previous data is still being served. Run the load again."
+            )
     except asyncio.CancelledError:
         await _drain(
-            _fail_workspace_candidate(candidate, workspace.id, job_id, generation), candidate
+            _fail_workspace_candidate(candidate, workspace.id, owner, generation), candidate
         )
         raise
     except BaseException:
-        await _fail_workspace_candidate(candidate, workspace.id, job_id, generation)
+        # Includes a promotion that raised: it rolled back, so the candidate is
+        # still PROVISIONING and the generation still marked loading.
+        await _fail_workspace_candidate(candidate, workspace.id, owner, generation)
         raise
-    promotion = await _to_thread_fresh_db(
-        promote_candidate_schema,
-        candidate.id,
-        accessed_at=timezone.now(),
-        workspace_id=workspace.id,
-        workspace_job_id=job_id,
-        loading_generation=generation,
-        run_id=result.get("run_id") if isinstance(result, dict) else None,
-        fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
-    )
-    if not promotion.promoted:
-        await _fail_workspace_candidate(candidate, workspace.id, job_id, generation)
-        raise RuntimeError(
-            "The load finished without a complete, owned result to publish; "
-            "the previous data is still being served. Run the load again."
-        )
-    await _retire_schemas(promotion.retired_schema_ids)
     if isinstance(result, dict) and opened.resumed:
         result = {**result, "resumed": True}
     return result

@@ -105,14 +105,13 @@ def run_transformation_pipeline(
     ``asset_snapshot`` lets a load run exactly the assets it fingerprinted, so a
     concurrent edit cannot relabel or mix this load's transform stages.
     """
-    if asset_snapshot is not None and (
-        workspace is not None
-        or any(
-            asset.tenant_id != tenant.pk
-            or asset.workspace_id is not None
-            or asset.scope not in {TransformationScope.SYSTEM, TransformationScope.TENANT}
-            for asset in asset_snapshot
-        )
+    if asset_snapshot is not None and workspace is not None:
+        raise ValueError("asset_snapshot is only supported for tenant-scoped runs")
+    if asset_snapshot is not None and any(
+        asset.tenant_id != tenant.pk
+        or asset.workspace_id is not None
+        or asset.scope not in {TransformationScope.SYSTEM, TransformationScope.TENANT}
+        for asset in asset_snapshot
     ):
         raise ValueError("A tenant snapshot must contain only that tenant's SYSTEM/TENANT assets")
     run = TransformationRun.objects.create(
@@ -144,9 +143,9 @@ def run_transformation_pipeline(
 
     test_failures: list[TestFailure] = []
     try:
-        for stage_name, _scope, filters in stages:
+        for stage_name, scope, filters in stages:
             assets = (
-                [asset for asset in asset_snapshot if asset.scope == _scope]
+                [asset for asset in asset_snapshot if asset.scope == scope]
                 if asset_snapshot is not None
                 else list(TransformationAsset.objects.filter(**filters))
             )

@@ -100,9 +100,45 @@ def test_transform_snapshot_rejects_other_container_before_execution(
     asset = TransformationAsset(
         name="other_container",
         scope=TransformationScope.TENANT,
-        tenant_id=uuid.uuid4() if wrong_owner == "tenant" else None,
+        # The workspace case keeps the right tenant so only the workspace check can fire.
+        tenant_id=uuid.uuid4() if wrong_owner == "tenant" else tenant.pk,
         workspace=workspace if wrong_owner == "workspace" else None,
         sql_content="select 1",
     )
     with pytest.raises(ValueError, match="tenant snapshot"):
         run_transformation_pipeline(tenant, "candidate", asset_snapshot=[asset])
+
+
+def test_a_workspace_run_cannot_take_a_snapshot(tenant, workspace):
+    with pytest.raises(ValueError, match="only supported for tenant-scoped runs"):
+        run_transformation_pipeline(tenant, "candidate", workspace=workspace, asset_snapshot=[])
+
+
+def test_a_receipt_failure_ends_the_run_failed_not_transforming(tenant):
+    """Hashing the implementation can raise; the run must still end terminal, or
+    it stays in an ACTIVE state and the workspace looks mid-refresh forever."""
+    pipeline = PipelineConfig(
+        name="receipt", description="", version="1", provider="ocs", sources=[]
+    )
+    candidate = TenantSchema.objects.create(
+        tenant=tenant, schema_name="receipt_candidate", state=SchemaState.PROVISIONING
+    )
+    with (
+        patch("mcp_server.services.materializer._run_discover_phase", return_value={}),
+        patch(
+            "mcp_server.services.materializer.pipeline_fingerprint",
+            side_effect=RuntimeError("implementation path missing"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        run_pipeline(
+            SimpleNamespace(tenant=tenant, tenant_id=tenant.id, connection=None),
+            {"type": "api_key", "value": "x"},
+            pipeline,
+            target_schema=candidate,
+            defer_schema_promotion=True,
+        )
+
+    run = MaterializationRun.objects.get(tenant_schema=candidate)
+    assert run.state == MaterializationRun.RunState.FAILED
+    assert run.completed_at is not None
