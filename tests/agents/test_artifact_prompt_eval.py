@@ -66,8 +66,10 @@ def test_provider_neutral_artifacts_have_an_explicit_data_model_handoff():
     assert "identity/version guard" in ARTIFACT_PROMPT_ADDITION
     for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
         assert "OCS" not in prompt
-        assert "relationship" in prompt
-        assert "grain" in prompt
+        prose = prompt.split("Data requirements JSON Schema:")[0]
+        assert "grain" in prose
         assert "provider\nname" in prompt or "provider name" in prompt
+    assert "dimension, measure, dataset, or relationship" in ARTIFACT_MANAGER_SYSTEM_PROMPT
+    assert "reports the same `needs_data_model` gap again" in ARTIFACT_PROMPT_ADDITION
     assert "Do not invent a\n  taxonomy from column names" in CANVAS_MANAGER_SYSTEM_PROMPT
     assert {"list_datasets", "describe_dataset", "semantic_query"} == NESTED_MCP_TOOL_NAMES

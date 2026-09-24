@@ -368,6 +368,7 @@ async def _artifact_manager_failure_result(
     result["message"] = message[:1200]
     result.pop("data_requirements", None)
     result.pop("requirement_errors", None)
+    result.pop("subagent_message", None)
     await _emit_subagent_event(
         _subagent_error_event(parent_tool_call_id, result["message"]),
         trace,
@@ -817,17 +818,19 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         failures = runtime.get("failures")
         if isinstance(failures, list) and failures:
             summary["runtime_failures"] = failures[:MAX_RUNTIME_FAILURES]
-    if artifact_result.get("status") == "error" or (
+    artifact_failed = artifact_result.get("status") == "error" or (
         isinstance(runtime, dict) and runtime.get("success") is False
+    )
+    runtime_failures = runtime.get("failures") if isinstance(runtime, dict) else None
+    has_model_gap = isinstance(runtime_failures, list) and any(
+        isinstance(failure, dict) and failure.get("category") == "missing_model_dependency"
+        for failure in runtime_failures
+    )
+    if (
+        isinstance(parsed_final, dict)
+        and parsed_final.get("status") == "needs_data_model"
+        and (not artifact_failed or has_model_gap)
     ):
-        summary["status"] = "error"
-        error_message = artifact_result.get("message")
-        summary["message"] = (
-            error_message[:1200]
-            if isinstance(error_message, str) and error_message
-            else "Artifact validation failed. Follow its diagnostics and typed runtime failures."
-        )
-    if summary["status"] == "needs_data_model" and isinstance(parsed_final, dict):
         try:
             summary["data_requirements"] = validate_data_requirements(
                 parsed_final.get("data_requirements")
@@ -836,7 +839,9 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
             summary["status"] = "invalid_data_requirements"
             summary["requirement_errors"] = [
                 {
-                    "path": "/".join(str(part) for part in error["loc"])[:200],
+                    "path": ("/".join(str(part) for part in error["loc"]) or "data_requirements")[
+                        :200
+                    ],
                     "code": error["type"],
                     "message": error["msg"][:250],
                 }
@@ -851,6 +856,27 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
                 "Artifact Manager returned an invalid data-model proposal. "
                 "Retry with complete, bounded structured data_requirements; no model change is authorized."
             )
+    # A missing-model handoff is not a success claim. Preserve it when all the
+    # typed failures describe that same gap, while retaining other failures as
+    # errors (including mixed access/runtime failures and malformed payloads).
+    model_handoff = (
+        summary["status"] == "needs_data_model"
+        and bool(summary.get("data_requirements"))
+        and isinstance(runtime_failures, list)
+        and bool(runtime_failures)
+        and all(
+            isinstance(failure, dict) and failure.get("category") == "missing_model_dependency"
+            for failure in runtime_failures
+        )
+    )
+    if artifact_failed and not model_handoff:
+        summary["status"] = "error"
+        error_message = artifact_result.get("message")
+        summary["message"] = (
+            error_message[:1200]
+            if isinstance(error_message, str) and error_message
+            else "Artifact validation failed. Follow its diagnostics and typed runtime failures."
+        )
     return summary
 
 

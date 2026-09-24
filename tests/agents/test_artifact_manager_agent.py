@@ -173,6 +173,7 @@ def test_artifact_manager_rejects_invalid_data_model_handoff(requirements):
     assert "no model change is authorized" in summary["message"]
     assert 1 <= len(summary["requirement_errors"]) <= 8
     assert all(set(error) == {"path", "code", "message"} for error in summary["requirement_errors"])
+    assert all(error["path"] for error in summary["requirement_errors"])
 
 
 def test_invalid_handoff_keeps_bounded_gap_description_and_missing_field_details():
@@ -200,12 +201,54 @@ async def test_failed_manager_run_never_returns_an_actionable_model_proposal(req
         "parent",
         _SubagentTraceRecorder(),
         [],
-        json.dumps({"status": "needs_data_model", "data_requirements": requirements}),
+        json.dumps(
+            {
+                "status": "needs_data_model",
+                "data_requirements": requirements,
+                "message": "A model change is needed.",
+            }
+        ),
         "The run failed.",
     )
     assert result["status"] == "error"
     assert "data_requirements" not in result
     assert "requirement_errors" not in result
+    assert "subagent_message" not in result
+
+
+@pytest.mark.parametrize("tool_status", ["checked", "error"])
+@pytest.mark.parametrize("mixed_failure", [False, True])
+def test_failed_check_preserves_model_gap_without_hiding_other_failures(tool_status, mixed_failure):
+    failures = [{"category": "missing_model_dependency", "message": "visits.reviewed is missing"}]
+    if mixed_failure:
+        failures.append({"category": "permission_required", "message": "Access denied"})
+    result = {
+        "status": tool_status,
+        "runtime": {"success": False, "failures": failures},
+    }
+    response = {
+        "status": "needs_data_model",
+        "message": "A reviewed dimension is missing; approval is required before creating it.",
+        "data_requirements": [
+            {
+                "kind": "dimension",
+                "source_datasets": ["visits"],
+                "source_members": ["visits.status"],
+                "grain": "One visit",
+                "need": "Create visits.reviewed only after explicit approval.",
+                "decisions": ["User must approve the classification rules"],
+            }
+        ],
+    }
+    messages = [
+        ToolMessage(name="artifact_write", tool_call_id="check", content=json.dumps(result))
+    ]
+    summary = _summarize_result(messages, json.dumps(response))
+    assert summary["status"] == ("error" if mixed_failure else "needs_data_model")
+    assert summary["data_requirements"] == response["data_requirements"]
+    assert summary["runtime_failures"] == failures
+    if not mixed_failure:
+        assert summary["message"] == response["message"]
 
 
 @pytest.mark.asyncio

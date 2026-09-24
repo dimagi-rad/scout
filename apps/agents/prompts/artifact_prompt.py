@@ -73,6 +73,8 @@ writes or embed query rows in an artifact.
 
 After committing and verifying the members are queryable, call `artifact_manager`
 with exact member names, definitions, scope, and the requested presentation.
+If it reports the same `needs_data_model` gap again, resolve or explain that
+prerequisite instead of repeatedly asking it to invent fields or write SQL.
 Existing missing data, stale publications, permission failures, and connection
 errors are not new-model requirements: follow the backend's typed failure and
 allowed recovery action, retaining its authorization checks. Do not replace a
