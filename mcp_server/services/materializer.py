@@ -440,11 +440,35 @@ def run_pipeline(
         # same in-memory snapshot: the fingerprint is this run's receipt for what
         # it built, and shared-load reuse and promotion accept nothing weaker.
         # Computed inside this try so a failure (e.g. hashing the source tree)
-        # still ends the run FAILED instead of stranding it in TRANSFORMING.
-        asset_snapshot = list(TransformationAsset.objects.filter(tenant=tenant_membership.tenant))
-        load_fingerprint = pipeline_fingerprint(
-            pipeline, tenant_membership.tenant, assets=asset_snapshot
-        )
+        # still ends the run terminal instead of stranding it in TRANSFORMING.
+        try:
+            asset_snapshot = list(
+                TransformationAsset.objects.filter(tenant=tenant_membership.tenant)
+            )
+            load_fingerprint = pipeline_fingerprint(
+                pipeline, tenant_membership.tenant, assets=asset_snapshot
+            )
+        except Exception as e:
+            # The sources are committed, so the run is PARTIAL (truthful, and
+            # resumable) rather than FAILED as if nothing had loaded.
+            committed = any(
+                s.get("state") == "completed" or _has_committed_cursor(s)
+                for s in source_results.values()
+            )
+            run.state = (
+                MaterializationRun.RunState.PARTIAL
+                if committed
+                else MaterializationRun.RunState.FAILED
+            )
+            run.completed_at = datetime.now(UTC)
+            run.result = {
+                "pipeline": pipeline.name,
+                "sources": source_results,
+                "error": _summarize_error(e),
+                "error_code": code_of(e),
+            }
+            run.save(update_fields=["state", "completed_at", "result"])
+            raise
 
     except MaterializationCancelled:
         # State is already CANCELLED (set by the canceller before raising via
