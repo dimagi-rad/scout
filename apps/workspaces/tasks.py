@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections.abc import Iterable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import wraps
 from typing import NamedTuple
 
@@ -77,6 +77,7 @@ from apps.workspaces.services.data_recovery import recovery_query_surface
 from apps.workspaces.services.load_candidates import (
     Promotion,
     abandoned_workspace_candidates,
+    candidate_last_attempt_at,
     fail_workspace_candidate,
     load_owner_token,
     open_workspace_candidate,
@@ -1463,9 +1464,22 @@ async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
     )
     for schema in abandoned:
         try:
-            await drop_abandoned_candidate.defer_async(schema_id=str(schema.id))
+            await _queue_candidate_drop(schema)
+        except AlreadyEnqueued:
+            continue
         except Exception:
             logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
+
+
+def _drop_lock(schema_id) -> str:
+    return f"drop_abandoned_candidate:{schema_id}"
+
+
+async def _queue_candidate_drop(schema) -> None:
+    """Queue one drop per candidate, pinned to the attempt it was judged on."""
+    await drop_abandoned_candidate.configure(queueing_lock=_drop_lock(schema.id)).defer_async(
+        schema_id=str(schema.id), last_attempt_at=schema.last_attempt_at.isoformat()
+    )
 
 
 _CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
@@ -1474,11 +1488,16 @@ _CANDIDATE_DROP_MAX_ATTEMPTS = 10
 
 
 @task
-async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
+async def drop_abandoned_candidate(
+    schema_id: str, attempt: int = 0, last_attempt_at: str = ""
+) -> None:
     """Drop the partial data of a failed candidate no load will resume.
 
     Holds T so a writer cannot be resuming this candidate while it is dropped.
-    A failed drop is retried with backoff and then left for an operator.
+    ``last_attempt_at`` is the attempt the candidate was judged abandoned on; if
+    a load has resumed it since (and failed again), it is the pending
+    generation's resume point and is kept. A failed drop is retried with
+    backoff and then left for an operator.
     """
     schema = await TenantSchema.objects.filter(id=schema_id).afirst()
     if schema is None:
@@ -1488,6 +1507,10 @@ async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
             await schema.arefresh_from_db()
             if schema.state != SchemaState.FAILED or schema.load_workspace_id is None:
                 return
+            if last_attempt_at:
+                current = await _to_thread_fresh_db(candidate_last_attempt_at, schema.id)
+                if current is None or current != datetime.fromisoformat(last_attempt_at):
+                    return
             await run_data_thread(SchemaManager().teardown, schema)
             await (
                 MaterializationRun.objects.filter(tenant_schema=schema)
@@ -1510,8 +1533,12 @@ async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
         delay = min(
             _CANDIDATE_DROP_RETRY_BASE_SECONDS * (2**attempt), _CANDIDATE_DROP_RETRY_MAX_SECONDS
         )
-        await drop_abandoned_candidate.configure(schedule_in={"seconds": delay}).defer_async(
-            schema_id=str(schema_id), attempt=attempt + 1
+        # The running job holds no queueing lock once doing, so the retry can
+        # take it; that keeps the sweep from stacking a second chain.
+        await drop_abandoned_candidate.configure(
+            schedule_in={"seconds": delay}, queueing_lock=_drop_lock(schema_id)
+        ).defer_async(
+            schema_id=str(schema_id), attempt=attempt + 1, last_attempt_at=last_attempt_at
         )
 
 
@@ -1564,9 +1591,7 @@ async def sweep_workspace_load_candidates(timestamp: int = 0) -> dict:
         counts["settled"] += len(orphans)
         for schema in abandoned:
             try:
-                await drop_abandoned_candidate.configure(
-                    queueing_lock=f"drop_abandoned_candidate:{schema.id}"
-                ).defer_async(schema_id=str(schema.id))
+                await _queue_candidate_drop(schema)
             except AlreadyEnqueued:
                 continue
             except Exception:

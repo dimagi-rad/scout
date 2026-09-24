@@ -22,6 +22,8 @@ from dataclasses import dataclass
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import F, Max
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from apps.common.identifiers import refresh_schema_name
@@ -275,32 +277,50 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
         return orphans
 
 
+def _failed_workspace_candidates(tenant_id):
+    # A resume reuses the row, so its creation time says nothing about the last
+    # attempt; each attempt starts a run, so the newest run's start does.
+    return TenantSchema.objects.filter(
+        tenant_id=tenant_id,
+        state=SchemaState.FAILED,
+        load_workspace_id__isnull=False,
+    ).annotate(last_attempt_at=Coalesce(Max("materialization_runs__started_at"), F("created_at")))
+
+
+def candidate_last_attempt_at(schema_id):
+    """When a load last worked on this candidate (None if it is gone)."""
+    return (
+        TenantSchema.objects.filter(id=schema_id)
+        .annotate(
+            last_attempt_at=Coalesce(Max("materialization_runs__started_at"), F("created_at"))
+        )
+        .values_list("last_attempt_at", flat=True)
+        .first()
+    )
+
+
 def unresumable_workspace_candidates(tenant_id, *, stale_before) -> list[TenantSchema]:
     """FAILED workspace candidates no pending load will resume.
 
     Resume needs the tenant's pending generation, so a candidate of any other
     generation is abandoned. One of the pending generation is kept for a retry
-    until it was created before ``stale_before``; past that nobody is coming
-    back for it, and a later load simply starts fresh. Requires T.
+    until its last attempt is older than ``stale_before``; past that nobody is
+    coming back for it, and a later load simply starts fresh. Each returned row
+    carries ``last_attempt_at``. Requires T.
     """
     assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
-        failed = TenantSchema.objects.filter(
-            tenant_id=tenant_id,
-            state=SchemaState.FAILED,
-            load_workspace_id__isnull=False,
-        )
+        failed = list(_failed_workspace_candidates(tenant_id))
         generation = TenantLoadGeneration.objects.filter(tenant_id=tenant_id).first()
-        if (
-            generation is not None
-            and generation.requested_generation > generation.published_generation
-        ):
-            failed = failed.exclude(
-                load_generation=generation.requested_generation,
-                created_at__gte=stale_before,
-            )
-        return list(failed)
+        if generation is None or generation.requested_generation <= generation.published_generation:
+            return failed
+        return [
+            schema
+            for schema in failed
+            if schema.load_generation != generation.requested_generation
+            or schema.last_attempt_at < stale_before
+        ]
 
 
 def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
@@ -317,10 +337,4 @@ def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
     assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
-        return list(
-            TenantSchema.objects.filter(
-                tenant_id=tenant_id,
-                state=SchemaState.FAILED,
-                load_workspace_id__isnull=False,
-            ).exclude(id=keep_id)
-        )
+        return list(_failed_workspace_candidates(tenant_id).exclude(id=keep_id))

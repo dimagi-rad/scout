@@ -76,9 +76,7 @@ async def _loads(pipeline: _Pipeline):
         ),
         patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
-        patch(
-            "apps.workspaces.tasks.drop_abandoned_candidate.defer_async", new_callable=AsyncMock
-        ) as drop,
+        patch("apps.workspaces.tasks._queue_candidate_drop", new_callable=AsyncMock) as drop,
     ):
         retire.return_value.defer_async = AsyncMock(return_value=1)
         yield drop
@@ -253,7 +251,9 @@ async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old
     assert retried["all_succeeded"] is True
     first_candidate, second_candidate = (call[1] for call in pipeline.calls)
     assert first_candidate != second_candidate
-    drop.assert_awaited_once_with(schema_id=str(first_candidate))
+    [(queued,), _] = drop.await_args
+    assert queued.id == first_candidate
+    drop.assert_awaited_once()
 
 
 async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
@@ -351,9 +351,12 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=2)
-        retry.assert_called_once_with(schedule_in={"seconds": 240})
+        retry.assert_called_once_with(
+            schedule_in={"seconds": 240},
+            queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
+        )
         retry.return_value.defer_async.assert_awaited_once_with(
-            schema_id=str(candidate.id), attempt=3
+            schema_id=str(candidate.id), attempt=3, last_attempt_at=""
         )
 
         retry.reset_mock()

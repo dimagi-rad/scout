@@ -10,16 +10,23 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.utils import timezone
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.workspaces import tasks as workspaces_tasks
-from apps.workspaces.models import SchemaState, TenantLoadGeneration, TenantSchema
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantLoadGeneration,
+    TenantSchema,
+)
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     tenant_data_lock,
     tenant_data_lock_if_free,
 )
+from apps.workspaces.services.load_candidates import candidate_last_attempt_at
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.django_db(transaction=True)]
 
@@ -133,3 +140,58 @@ async def test_the_non_waiting_lock_reuses_a_held_tenant_and_refuses_expansion()
         with pytest.raises(LockOrderError):
             async with tenant_data_lock_if_free(other):
                 pass
+
+
+async def _attempt(schema):
+    return await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.FAILED,
+        result={"sources": {}},
+    )
+
+
+async def test_a_pending_candidate_attempted_recently_is_kept_despite_its_age(tenant, workspace):
+    """A resume reuses the row, so age is measured from the last attempt, not creation."""
+    await _ledger(tenant, requested=3, published=2)
+    retried = await _candidate(
+        tenant, workspace, state=SchemaState.FAILED, generation=3, age=timedelta(days=2)
+    )
+    await _attempt(retried)
+
+    _counts, queued = await _sweep()
+
+    assert queued == set()
+
+
+async def test_a_drop_skips_a_candidate_resumed_after_it_was_queued(tenant, workspace):
+    """Queued as stale, then resumed and failed again: it is the pending
+    generation's resume point again and must survive the queued drop."""
+    candidate = await _candidate(
+        tenant, workspace, state=SchemaState.FAILED, generation=3, age=timedelta(days=2)
+    )
+    judged_on = await sync_to_async(candidate_last_attempt_at)(candidate.id)
+    await _attempt(candidate)
+
+    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+        await workspaces_tasks.drop_abandoned_candidate(
+            schema_id=str(candidate.id), last_attempt_at=judged_on.isoformat()
+        )
+
+    teardown.assert_not_called()
+    await candidate.arefresh_from_db()
+    assert candidate.state == SchemaState.FAILED
+
+
+async def test_a_drop_proceeds_when_nothing_attempted_the_candidate_since(tenant, workspace):
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
+    judged_on = await sync_to_async(candidate_last_attempt_at)(candidate.id)
+
+    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+        await workspaces_tasks.drop_abandoned_candidate(
+            schema_id=str(candidate.id), last_attempt_at=judged_on.isoformat()
+        )
+
+    teardown.assert_called_once()
+    await candidate.arefresh_from_db()
+    assert candidate.state == SchemaState.EXPIRED
