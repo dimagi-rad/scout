@@ -49,6 +49,7 @@ from apps.workspaces.tasks import (
     reconcile_refresh_candidates,
     refresh_tenant_schema,
 )
+from tests.pipeline_doubles import completed_refresh_run
 
 JOB_RETENTION = timedelta(hours=JOB_RETENTION_HOURS)
 STALLED_AFTER = timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS)
@@ -1099,7 +1100,9 @@ def test_real_enqueue_is_claimed_and_published_by_the_worker(
                 return_value={"type": "api_key", "value": "token"},
             ),
             patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
-            patch("apps.workspaces.tasks.run_pipeline") as pipeline,
+            patch(
+                "apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run
+            ) as pipeline,
             patch("apps.workspaces.tasks._rebuild_dependent_view_schemas"),
             patch("apps.workspaces.tasks._rebuild_single_tenant_semantic_models"),
         ):
