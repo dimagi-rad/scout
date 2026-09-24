@@ -25,6 +25,12 @@ actionable one naming each missing source and its remedy — so callers can say
 "connect team Y" instead of a dead, unexplained 403. The
 ``(workspace, membership)`` tuple API is preserved; ``*_ex`` variants expose the
 reason, and ``access_denied_body`` builds the response payload from it.
+
+With ``UPSTREAM_ACCESS_FRESHNESS_ENFORCED`` on, a locally granted decision (the
+coverage check above) must also pass upstream-freshness admission
+(``services/access_freshness.py``): stale proofs are rechecked before protected data
+is released, and a check that cannot complete is a retryable denial rather than a
+lost membership. The two switches are independent.
 """
 
 from __future__ import annotations
@@ -35,6 +41,21 @@ from django.conf import settings
 
 from apps.users.models import PROVIDER_CHOICES, TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.services.access_freshness import (
+    CREDENTIAL_EXPIRED,
+    CREDENTIAL_MISSING,
+    RETRYABLE_REASONS,
+    UPSTREAM_ACCESS_LOST,
+    VERIFICATION_IN_PROGRESS,
+    VERIFICATION_UNAVAILABLE,
+    VerificationBudget,
+    aadmit_upstream,
+    acheck_freshness,
+    admit_upstream,
+    check_freshness,
+    final_denial_reason,
+    freshness_enforced,
+)
 from apps.workspaces.services.credential_coverage import (
     CoverageRecovery,
     MissingTenant,
@@ -65,8 +86,9 @@ class WorkspaceAccess:
 
     ``workspace``/``membership`` are set iff access is granted. On denial they are
     ``None`` and ``denied_reason`` is one of ``NOT_MEMBER`` / ``TENANT_ACCESS_LOST`` /
-    ``INSUFFICIENT_ROLE``; for ``TENANT_ACCESS_LOST``, ``missing_tenants`` lists
-    each workspace tenant the member cannot use, with its remedy.
+    ``INSUFFICIENT_ROLE`` or an upstream-freshness reason; for ``TENANT_ACCESS_LOST``,
+    ``missing_tenants`` lists each workspace tenant the member cannot use, with its
+    remedy.
     """
 
     workspace: object | None = None
@@ -81,6 +103,55 @@ class WorkspaceAccess:
     @property
     def lost_tenant_names(self) -> tuple[str, ...]:
         return tuple(sorted({t.tenant_name for t in self.missing_tenants if t.tenant_name}))
+
+    @property
+    def retryable(self) -> bool:
+        return self.denied_reason in RETRYABLE_REASONS
+
+
+def _freshness_denied(reason: str | None) -> WorkspaceAccess:
+    return WorkspaceAccess(denied_reason=reason or VERIFICATION_UNAVAILABLE)
+
+
+def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceAccess:
+    """Name the upstream cause when this very recheck is what archived the coverage.
+
+    A generic lost-coverage denial reads as "not connected"; a revocation or dead
+    sign-in just observed upstream needs its own remedy (ask a provider admin, or
+    reconnect), so keep the missing tenants and report the observed reason.
+    """
+    if result.denied_reason == TENANT_ACCESS_LOST and admission.reason in (
+        UPSTREAM_ACCESS_LOST,
+        CREDENTIAL_EXPIRED,
+    ):
+        return WorkspaceAccess(
+            denied_reason=admission.reason, missing_tenants=result.missing_tenants
+        )
+    return result
+
+
+CONNECTED_ACCOUNTS_PATH = "/settings/connections"
+
+_FRESHNESS_MESSAGES = {
+    CREDENTIAL_MISSING: (
+        "Scout has no usable connection for one of this workspace's sources. "
+        "Reconnect it under Connected Accounts."
+    ),
+    CREDENTIAL_EXPIRED: (
+        "Your sign-in for one of this workspace's sources has expired. "
+        "Reconnect it under Connected Accounts."
+    ),
+    UPSTREAM_ACCESS_LOST: (
+        "Your access to one of this workspace's sources was removed upstream. "
+        "Reconnect or ask an admin to restore it."
+    ),
+    VERIFICATION_UNAVAILABLE: (
+        "We couldn't verify your access to this workspace right now. Please retry shortly."
+    ),
+    VERIFICATION_IN_PROGRESS: (
+        "Your access to this workspace is being verified. Please retry in a moment."
+    ),
+}
 
 
 def remedy_text(missing: MissingTenant) -> str:
@@ -146,7 +217,29 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
             "lost_tenants": list(result.lost_tenant_names),
             "missing_tenants": payload,
         }
+    if result.denied_reason in _FRESHNESS_MESSAGES:
+        body = {
+            "error": _FRESHNESS_MESSAGES[result.denied_reason],
+            "reason": result.denied_reason,
+            "retryable": result.retryable,
+            "recovery_url": CONNECTED_ACCOUNTS_PATH,
+        }
+        if result.missing_tenants:
+            body["lost_tenants"] = list(result.lost_tenant_names)
+            body["missing_tenants"] = missing_tenants_payload(result.missing_tenants)
+        return body
     return {"error": _GENERIC_DENIED}
+
+
+def _live_tenant_ids(workspace) -> list:
+    return list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
+
+
+async def _alive_tenant_ids(workspace) -> list:
+    return [
+        tenant_id
+        async for tenant_id in workspace.workspace_tenants.values_list("tenant_id", flat=True)
+    ]
 
 
 def _shares_live_tenant(user, tenant_ids) -> bool:
@@ -243,22 +336,10 @@ def _role_satisfies(role: str, minimum_role: str) -> bool:
     return role_rank is not None and minimum_rank is not None and role_rank >= minimum_rank
 
 
-def resolve_workspace_access_ex(
-    user,
-    workspace_id,
-    *,
-    minimum_role: str = WorkspaceRole.READ,
-    require_coverage: bool = True,
+def _resolve_local_access_ex(
+    user, workspace_id, *, minimum_role: str, require_coverage: bool
 ) -> WorkspaceAccess:
-    """Resolve access, exposing the denial reason (see ``WorkspaceAccess``).
-
-    ``require_coverage=False`` is only for the few remediation actions that read
-    no tenant data (remove a source, leave, delete the workspace, list its
-    sources). Without it a member who lost a source for good could never get out
-    of the state, since the fix itself would be refused (ACCESS-CONTRACT §5).
-    It applies only while all-of is enforced, so with the rollout switch off every
-    endpoint keeps exactly the pre-#380 any-of decision.
-    """
+    """Membership, tenant coverage and role, from local state only."""
     try:
         wm = WorkspaceMembership.objects.select_related("workspace").get(
             workspace_id=workspace_id, user=user
@@ -267,7 +348,7 @@ def resolve_workspace_access_ex(
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     missing = (
         missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
-        if require_coverage or not all_of_access_enforced()
+        if require_coverage
         else ()
     )
     if missing:
@@ -277,14 +358,8 @@ def resolve_workspace_access_ex(
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
 
 
-async def aresolve_workspace_access_ex(
-    user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
-) -> WorkspaceAccess:
-    """Async: resolve access, exposing the denial reason (see ``WorkspaceAccess``).
-
-    No ``require_coverage`` here: the remediation actions it exists for are all
-    sync DRF views, and async callers are data paths that must always check it.
-    """
+async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) -> WorkspaceAccess:
+    """Async twin of ``_resolve_local_access_ex`` (always requires coverage)."""
     try:
         wm = await WorkspaceMembership.objects.select_related("workspace").aget(
             workspace_id=workspace_id, user=user
@@ -297,6 +372,78 @@ async def aresolve_workspace_access_ex(
     if not _role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
+
+
+def resolve_workspace_access_ex(
+    user,
+    workspace_id,
+    *,
+    minimum_role: str = WorkspaceRole.READ,
+    verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
+    require_coverage: bool = True,
+) -> WorkspaceAccess:
+    """Resolve access, exposing the denial reason (see ``WorkspaceAccess``).
+
+    ``verification`` selects the upstream-freshness budget for protected data;
+    ``None`` is the recovery-metadata mode, which needs membership but must stay
+    reachable while upstream verification is failing.
+
+    ``require_coverage=False`` is only for the few remediation actions that read
+    no tenant data (remove a missing source, leave, hand the manager role to
+    another member, delete a workspace nobody else is in, open its page). Without
+    it a member who lost a source for good could never get out of the state, since
+    the fix itself would be refused (ACCESS-CONTRACT §5). Those actions skip
+    freshness too, for the same reason. It applies only while all-of is enforced,
+    so with the rollout switch off every endpoint keeps exactly the pre-#380
+    decision.
+    """
+    require_coverage = require_coverage or not all_of_access_enforced()
+    if not require_coverage:
+        verification = None
+
+    def local():
+        return _resolve_local_access_ex(
+            user, workspace_id, minimum_role=minimum_role, require_coverage=require_coverage
+        )
+
+    result = local()
+    if verification is None or not result.granted or not freshness_enforced():
+        return result
+    admission = admit_upstream(user.pk, _live_tenant_ids(result.workspace), budget=verification)
+    if not admission.rechecked:
+        return result if admission.admitted else _freshness_denied(admission.reason)
+    result = local()
+    if not result.granted:
+        return _attribute_observed_denial(result, admission)
+    final = check_freshness(user.pk, _live_tenant_ids(result.workspace))
+    return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
+
+
+async def aresolve_workspace_access_ex(
+    user,
+    workspace_id,
+    *,
+    minimum_role: str = WorkspaceRole.READ,
+    verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
+) -> WorkspaceAccess:
+    """Async twin of ``resolve_workspace_access_ex``.
+
+    No ``require_coverage`` here: the remediation actions it exists for are all
+    sync DRF views, and async callers are data paths that must always check it.
+    """
+    result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
+    if verification is None or not result.granted or not freshness_enforced():
+        return result
+    admission = await aadmit_upstream(
+        user.pk, await _alive_tenant_ids(result.workspace), budget=verification
+    )
+    if not admission.rechecked:
+        return result if admission.admitted else _freshness_denied(admission.reason)
+    result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
+    if not result.granted:
+        return _attribute_observed_denial(result, admission)
+    final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
+    return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
 
 
 def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):

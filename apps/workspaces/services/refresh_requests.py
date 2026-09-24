@@ -14,8 +14,8 @@ from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant, TenantMembership
-from apps.workspaces.access import workspace_write_allowed
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant
+from apps.workspaces.access import resolve_workspace_access_ex
+from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceRole, WorkspaceTenant
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,15 @@ def claim_refresh_candidate(
             tenant_id=schema.tenant_id,
         ).exists():
             return _settle_denied_candidate(schema, DENIED_WORKSPACE_UNLINKED)
-        if not workspace_write_allowed(membership.user, schema.refresh_workspace_id):
+        # Local decision only: upstream freshness must never be rechecked while this
+        # transaction holds row locks. The worker checks it right after the claim.
+        access = resolve_workspace_access_ex(
+            membership.user,
+            schema.refresh_workspace_id,
+            minimum_role=WorkspaceRole.READ_WRITE,
+            verification=None,
+        )
+        if not access.granted:
             return _settle_denied_candidate(schema, DENIED_ROLE_REQUIRED)
 
         schema.refresh_claimed_at = timezone.now()

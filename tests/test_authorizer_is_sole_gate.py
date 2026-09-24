@@ -1,6 +1,6 @@
 """Fitness test: workspace access must be decided ONLY by apps/workspaces/access.py.
 
-The access rule (WorkspaceMembership AND a live tenant) lives in one authorizer so
+The access rule (WorkspaceMembership AND coverage of its tenants) lives in one authorizer so
 it can't be partially forgotten. This test fails CI if any view/tool/service
 resolves workspace access by querying ``WorkspaceMembership`` directly — i.e. a
 query filtered by BOTH a workspace key and a user key, the authorizer's signature

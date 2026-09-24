@@ -233,7 +233,9 @@ async def test_expiry_partial_rebuild_and_correct_source_restore(published_sourc
     with patch("apps.workspaces.tasks.teardown_schema.configure") as retry:
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema.func(str(setup.schemas[0].id))
-    retry.return_value.defer_async.assert_awaited_once()
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(setup.schemas[0].id), attempt=1
+    )
     await setup.view.arefresh_from_db()
     await setup.schemas[0].arefresh_from_db()
     assert setup.view.state == SchemaState.ACTIVE
