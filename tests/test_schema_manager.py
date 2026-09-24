@@ -599,7 +599,11 @@ class TestBuildViewSchemaTenantCoverage:
             ) as mock_connection,
             pytest.raises(ValueError, match="no active schema"),
         ):
+            mock_connection.return_value.closed = False
             SchemaManager().build_view_schema(workspace)
+
+        mock_connection.return_value.commit.assert_called_once()
+        mock_connection.return_value.close.assert_called_once()
 
         # No schema of this tenant can serve again, so the only physical work
         # drops the views: left behind they would block a RESTRICT retirement.
