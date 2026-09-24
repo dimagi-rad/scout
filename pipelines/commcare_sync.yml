@@ -8,13 +8,22 @@ sources:
     description: "CommCare case records"
   - name: forms
     description: "CommCare form submission records (includes nested case updates)"
+    auxiliary_tables:
+      raw_form_cases: "One row per distinct form/case association; not a form or case count"
 
 metadata_discovery:
   description: "Extract application structure, case types, and form definitions"
 
 relationships:
   - from_table: raw_forms
-    from_column: case_ids
+    from_column: form_id
+    to_table: raw_form_cases
+    to_column: form_id
+    relationship_type: one_to_many
+    description: "A form may update multiple cases; expand through the form/case bridge"
+  - from_table: raw_form_cases
+    from_column: case_id
     to_table: raw_cases
     to_column: case_id
-    description: "Form submissions reference the cases they update (case_ids is a JSON array)"
+    relationship_type: many_to_one
+    description: "Each form/case association identifies one case"
