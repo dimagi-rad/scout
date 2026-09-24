@@ -17,6 +17,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.data_operation import _LOCK_NAMESPACE, _lock_key
 from apps.workspaces.services.schema_manager import SchemaManager
 
 
@@ -41,7 +42,6 @@ def test_concurrent_builds_publish_current_membership(workspace, tenant, members
     second_started = threading.Event()
     worker_context = threading.local()
     physical_sources = set()
-    second_backend = []
 
     def managed_connection():
         if worker_context.name == "first":
@@ -69,9 +69,6 @@ def test_concurrent_builds_publish_current_membership(workspace, tenant, members
         worker_context.name = name
         try:
             if name == "second":
-                with connection.cursor() as cursor:
-                    cursor.execute("SELECT pg_backend_pid()")
-                    second_backend.append(cursor.fetchone()[0])
                 second_started.set()
             current = (
                 queued_workspace if name == "second" else Workspace.objects.get(pk=workspace.pk)
@@ -108,11 +105,12 @@ def test_concurrent_builds_publish_current_membership(workspace, tenant, members
             while not other.done():
                 with connection.cursor() as cursor:
                     cursor.execute(
-                        "SELECT wait_event FROM pg_stat_activity WHERE pid = %s",
-                        [second_backend[0]],
+                        "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+                        "AND classid = %s AND objid = %s AND NOT granted",
+                        [_LOCK_NAMESPACE, _lock_key(workspace.id) & 0xFFFFFFFF],
                     )
                     row = cursor.fetchone()
-                if row and row[0] == "advisory":
+                if row:
                     break
                 assert time.monotonic() < deadline, (
                     "Second build neither finished nor waited for serialization"

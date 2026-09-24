@@ -1329,8 +1329,9 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     try:
         vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
-        # build_view_schema owns the row state (marks it FAILED on any failure), so
-        # don't re-write state here and risk clobbering a concurrent transition —
+        # build_view_schema owns the row state (FAILED for a first build, ACTIVE
+        # plus last_error when the rolled-back views still serve), so don't
+        # re-write state here and risk clobbering a concurrent transition —
         # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
         skip_reason = (
@@ -1529,6 +1530,22 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             if access is None or not access.granted:
                 raise ValueError(_recovery_requester_denied_message(access))
 
+            try:
+                reconciliation = await _to_thread_fresh_db(
+                    SchemaManager().reconcile_view_publication, recovery.workspace
+                )
+                if reconciliation.get("status") == "republish_failed":
+                    logger.warning(
+                        "Recovery %s: view publication diverges and could not be republished: %s",
+                        recovery_id,
+                        reconciliation.get("error"),
+                    )
+            except Exception:
+                # A republish can fail for the very reason this recovery exists
+                # (e.g. no loaded source yet); the repair below must still run.
+                logger.exception(
+                    "Reconciling the view publication for recovery %s failed", recovery_id
+                )
             surface = await recovery_query_surface(recovery)
             action = surface.get("recovery_action")
             if action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:

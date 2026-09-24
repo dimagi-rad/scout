@@ -290,7 +290,10 @@ async def test_failed_ddl_preserves_last_good_source_map(published_sources):
         with pytest.raises(RuntimeError, match="post-DDL"):
             await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
     await setup.view.arefresh_from_db()
-    assert setup.view.state == SchemaState.FAILED
+    # The publication rolled back, so the last-good views keep serving: the row
+    # stays ACTIVE with its prior provenance and only records why the rebuild failed.
+    assert setup.view.state == SchemaState.ACTIVE
+    assert "post-DDL" in setup.view.last_error
     assert setup.view.view_sources == original
     view = await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
     assert len(view.view_sources["views"]) == len(original["views"]) + 1
