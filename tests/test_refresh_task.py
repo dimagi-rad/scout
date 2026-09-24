@@ -334,7 +334,7 @@ async def test_real_pipeline_defers_refresh_promotion_to_owned_worker_cas(
     ).aexists()
     assert old_active_schema.state == SchemaState.TEARDOWN
     semantic_rebuild.assert_awaited_once_with(workspace_id=str(workspace.id))
-    teardown_deferrer.defer_async.assert_awaited_once_with(schema_id=str(old_active_schema.id))
+    teardown_deferrer.defer.assert_called_once_with(schema_id=str(old_active_schema.id))
 
 
 @pytest.mark.asyncio
@@ -377,7 +377,7 @@ async def test_refresh_task_schedules_old_schema_teardown(
     await old_active_schema.arefresh_from_db()
     assert old_active_schema.state == SchemaState.TEARDOWN
     mock_configure.assert_called_once_with(schedule_in={"seconds": 30 * 60})
-    deferrer.defer_async.assert_awaited_once_with(schema_id=str(old_active_schema.id))
+    deferrer.defer.assert_called_once_with(schema_id=str(old_active_schema.id))
 
 
 @pytest.mark.asyncio
@@ -772,6 +772,31 @@ async def test_refresh_publishes_its_generation_so_equivalent_loads_reuse_it(
     assert ledger.published_generation == 1
     assert ledger.published_schema_id == provisioning_schema.id
     assert ledger.loading_generation == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_refresh_whose_retirement_cannot_be_queued_publishes_nothing(
+    provisioning_schema, old_active_schema, tenant_membership_obj
+):
+    patches = _refresh_patches()
+    with contextlib.ExitStack() as stack:
+        mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+        mocks["retire"].return_value.defer.side_effect = RuntimeError("queue unavailable")
+        result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+            **await _refresh_auth_kwargs(tenant_membership_obj),
+        )
+
+    assert result["retry_required"] is True
+    await old_active_schema.arefresh_from_db()
+    await provisioning_schema.arefresh_from_db()
+    assert old_active_schema.state == SchemaState.ACTIVE
+    assert provisioning_schema.state == SchemaState.FAILED
+    ledger = await TenantLoadGeneration.objects.aget(tenant_id=provisioning_schema.tenant_id)
+    assert (ledger.published_generation, ledger.loading_generation) == (0, 0)
 
 
 @pytest.mark.asyncio

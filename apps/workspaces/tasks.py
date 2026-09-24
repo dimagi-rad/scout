@@ -517,15 +517,20 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
 
     # Reset last_accessed_at so the fresh schema starts with a clean inactivity
     # TTL; otherwise expire_inactive_schemas could drop it before first use.
-    promotion = await _to_thread_fresh_db(
-        promote_candidate_schema,
-        new_schema.id,
-        accessed_at=timezone.now(),
-        refresh_job_id=job_id,
-        loading_generation=generation,
-        run_id=result.get("run_id") if isinstance(result, dict) else None,
-        fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
-    )
+    try:
+        promotion = await _to_thread_fresh_db(
+            _promote_and_queue_retirement,
+            new_schema.id,
+            accessed_at=timezone.now(),
+            refresh_job_id=job_id,
+            loading_generation=generation,
+            run_id=result.get("run_id") if isinstance(result, dict) else None,
+            fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
+        )
+    except Exception:
+        # It rolled back, so the candidate is still ours and handled as unpublished.
+        logger.exception("Publishing refresh schema '%s' failed", new_schema.schema_name)
+        promotion = Promotion(promoted=False)
     if not promotion.promoted:
         await _to_thread_fresh_db(end_load_generation, new_schema.tenant_id, generation)
         still_ours = await TenantSchema.objects.filter(
@@ -550,7 +555,6 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
             logger.exception("Failed to drop lost refresh schema '%s'", new_schema.schema_name)
         return {"status": "ignored"}
     new_schema.state = SchemaState.ACTIVE
-    await _retire_schemas(promotion.retired_schema_ids)
     return {"status": "active", "schema_id": str(new_schema.id)}
 
 
