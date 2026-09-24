@@ -21,6 +21,7 @@ from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
+from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
@@ -67,6 +68,7 @@ from apps.workspaces.services.data_operation import (
     run_data_thread,
     serialized_workspace_data,
     tenant_data_lock,
+    tenant_data_lock_if_free,
     workspace_data_lock,
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
@@ -78,6 +80,7 @@ from apps.workspaces.services.load_candidates import (
     open_workspace_candidate,
     promote_candidate_schema,
     settle_orphaned_workspace_candidates,
+    unresumable_workspace_candidates,
 )
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
@@ -1463,6 +1466,67 @@ async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
         await drop_abandoned_candidate.configure(schedule_in={"seconds": delay}).defer_async(
             schema_id=str(schema_id), attempt=attempt + 1
         )
+
+
+# How long a failed candidate of the still-pending generation waits for a retry
+# to resume it before the sweep treats it as abandoned.
+_UNRESUMED_CANDIDATE_TTL = timedelta(hours=24)
+
+
+@app.periodic(cron="7,22,37,52 * * * *")
+@task
+async def sweep_workspace_load_candidates(timestamp: int = 0) -> dict:
+    """Reclaim workspace-load candidates whose writer died or no load will resume.
+
+    A load settles orphans only when the same tenant loads again, so a tenant
+    that is never reloaded would otherwise keep a dead candidate's schema
+    forever. A tenant whose T is held has a live writer and is skipped.
+    """
+    tenant_ids = [
+        tenant_id
+        async for tenant_id in TenantSchema.objects.filter(
+            load_workspace_id__isnull=False,
+            state__in=[SchemaState.PROVISIONING, SchemaState.FAILED],
+        )
+        .values_list("tenant_id", flat=True)
+        .distinct()
+    ]
+    counts = {"settled": 0, "drops_queued": 0, "skipped_busy": 0}
+    for tenant_id in tenant_ids:
+        try:
+            async with tenant_data_lock_if_free(tenant_id) as locked:
+                if not locked:
+                    counts["skipped_busy"] += 1
+                    continue
+                orphans = await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tenant_id)
+                abandoned = await _to_thread_fresh_db(
+                    unresumable_workspace_candidates,
+                    tenant_id,
+                    stale_before=timezone.now() - _UNRESUMED_CANDIDATE_TTL,
+                )
+        except Exception:
+            logger.exception("sweep_workspace_load_candidates: tenant %s failed", tenant_id)
+            continue
+        for orphan in orphans:
+            logger.error(
+                "Settled orphaned load candidate %s (%s) for tenant %s: its writer died",
+                orphan.id,
+                orphan.schema_name,
+                tenant_id,
+            )
+        counts["settled"] += len(orphans)
+        for schema in abandoned:
+            try:
+                await drop_abandoned_candidate.configure(
+                    queueing_lock=f"drop_abandoned_candidate:{schema.id}"
+                ).defer_async(schema_id=str(schema.id))
+            except AlreadyEnqueued:
+                continue
+            except Exception:
+                logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
+                continue
+            counts["drops_queued"] += 1
+    return counts
 
 
 def _refresh_denial_result(reason: str) -> dict:

@@ -243,10 +243,15 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
 
     A writer holds T for its candidate's whole PROVISIONING life, so a caller
     holding T sees only orphans. They become FAILED, which keeps them eligible
-    for resume by the same pending generation.
+    for resume by the same pending generation. Any loading marker is equally a
+    dead writer's, so it is cleared: later requests then join the pending
+    generation and resume its candidate instead of starting another.
     """
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
+        TenantLoadGeneration.objects.filter(tenant_id=tenant_id).exclude(
+            loading_generation=0
+        ).update(loading_generation=0)
         orphans = list(
             TenantSchema.objects.select_for_update().filter(
                 tenant_id=tenant_id,
@@ -261,6 +266,33 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
         for orphan in orphans:
             orphan.state = SchemaState.FAILED
         return orphans
+
+
+def unresumable_workspace_candidates(tenant_id, *, stale_before) -> list[TenantSchema]:
+    """FAILED workspace candidates no pending load will resume.
+
+    Resume needs the tenant's pending generation, so a candidate of any other
+    generation is abandoned. One of the pending generation is kept for a retry
+    until it was created before ``stale_before``; past that nobody is coming
+    back for it, and a later load simply starts fresh. Call under T.
+    """
+    with transaction.atomic():
+        Tenant.objects.select_for_update().get(id=tenant_id)
+        failed = TenantSchema.objects.filter(
+            tenant_id=tenant_id,
+            state=SchemaState.FAILED,
+            load_workspace_id__isnull=False,
+        )
+        generation = TenantLoadGeneration.objects.filter(tenant_id=tenant_id).first()
+        if (
+            generation is not None
+            and generation.requested_generation > generation.published_generation
+        ):
+            failed = failed.exclude(
+                load_generation=generation.requested_generation,
+                created_at__gte=stale_before,
+            )
+        return list(failed)
 
 
 def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
