@@ -191,6 +191,17 @@ def test_missing_error_detail_uses_a_readable_failure_message():
     assert graph_runtime._query_failure(None)["message"] == "Semantic query failed"
 
 
+def test_failed_check_preserves_runtime_document_diagnostics():
+    diagnostics = [{"severity": "error", "code": "missing_block", "path": "blocks.0"}]
+    result = {"status": "checked", "runtime": {"success": False, "diagnostics": diagnostics}}
+    summary = _summarize_result(
+        [ToolMessage(name="artifact_write", tool_call_id="check", content=json.dumps(result))],
+        json.dumps({"status": "done", "message": "Incorrect success claim"}),
+    )
+    assert summary["status"] == "error"
+    assert summary["diagnostics"] == diagnostics
+
+
 @pytest.mark.parametrize("claimed_status", ["done", "needs_data_model"])
 def test_static_artifact_failure_cannot_be_overridden_by_model_output(claimed_status):
     result = {

@@ -18,6 +18,7 @@ import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -37,6 +38,10 @@ export function Sidebar() {
   const threads = useAppStore((s) => s.threads)
   const threadsStatus = useAppStore((s) => s.threadsStatus)
   const threadsAccessLostMessage = useAppStore((s) => s.threadsAccessLostMessage)
+  const threadsAccessRetryable = useAppStore((s) => s.threadsAccessRetryable)
+  const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
+  const [verifyingWorkspaceId, setVerifyingWorkspaceId] = useState<string | null>(null)
+  const retryingVerification = verifyingWorkspaceId !== null && verifyingWorkspaceId === activeDomainId
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
@@ -262,6 +267,34 @@ export function Sidebar() {
                 data-testid="sidebar-threads-access-lost"
               >
                 <p>{threadsAccessLostMessage}</p>
+                {threadsAccessRetryable && (
+                  <button
+                    type="button"
+                    disabled={retryingVerification}
+                    onClick={() => {
+                      if (!activeDomainId) return
+                      const workspaceId = activeDomainId
+                      setVerifyingWorkspaceId(workspaceId)
+                      void retryAccessVerification(workspaceId).finally(() =>
+                        setVerifyingWorkspaceId((current) =>
+                          current === workspaceId ? null : current,
+                        ),
+                      )
+                    }}
+                    className="mt-1 text-primary underline-offset-2 hover:underline disabled:opacity-50"
+                    data-testid="sidebar-threads-retry-verification"
+                  >
+                    {retryingVerification ? "Verifying…" : "Retry verification"}
+                  </button>
+                )}
+                <Link
+                  to={`${pathPrefix}/settings/connections`}
+                  onClick={collapseSidebar}
+                  className="mt-1 block text-primary underline-offset-2 hover:underline"
+                  data-testid="sidebar-threads-connected-accounts"
+                >
+                  Open Connected Accounts
+                </Link>
               </div>
             )}
             {threadsStatus === "error" && !threadsAccessLostMessage && (
@@ -361,7 +394,7 @@ export function Sidebar() {
             title="Connected Accounts"
             data-testid="sidebar-connections"
           >
-            <Link to={`${pathPrefix}/settings/connections`} onClick={collapseSidebar}>
+            <Link to={`${pathPrefix}${CONNECTIONS_PATH}`} onClick={collapseSidebar}>
               <Link2 className="h-4 w-4 shrink-0" />
               <span className="scout-sidebar-label min-w-0 truncate">
                 Connected Accounts

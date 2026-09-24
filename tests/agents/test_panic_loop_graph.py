@@ -10,7 +10,7 @@ import json
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from apps.agents.graph.base import _should_escalate
+from apps.agents.graph.base import _should_escalate, _workspace_access_denial
 
 
 def _err_tool_message(
@@ -183,3 +183,39 @@ class TestShouldEscalate:
             _ok_with_text("c"),
         ]
         assert _should_escalate(messages) is False
+
+
+class TestWorkspaceAccessDenial:
+    """A workspace access denial holds for the rest of the turn, so the graph
+    ends the turn on the first one with the authorizer's remedy."""
+
+    def _denied(self, tool_call_id="tc", message="Still needed: 'Bot B', reconnect."):
+        body = json.dumps(
+            {"success": False, "error": {"code": "WORKSPACE_ACCESS_DENIED", "message": message}}
+        )
+        return ToolMessage(content=body, tool_call_id=tool_call_id, name="query")
+
+    def test_first_denial_ends_the_turn_with_its_message(self):
+        messages = [HumanMessage(content="count"), _ai_with_tool_call("a"), self._denied("a")]
+
+        assert _workspace_access_denial(messages) == "Still needed: 'Bot B', reconnect."
+
+    def test_a_later_round_that_succeeds_clears_it(self):
+        messages = [
+            _ai_with_tool_call("a"),
+            self._denied("a"),
+            _ai_with_tool_call("b"),
+            _ok_tool_message("b"),
+        ]
+
+        assert _workspace_access_denial(messages) is None
+
+    def test_a_successful_sibling_in_the_same_round_does_not_hide_it(self):
+        messages = [_ai_with_tool_call("a"), self._denied("a"), _ok_tool_message("b")]
+
+        assert _workspace_access_denial(messages) == "Still needed: 'Bot B', reconnect."
+
+    def test_other_errors_do_not_count(self):
+        messages = [_ai_with_tool_call("a"), _err_tool_message("AUTH_ACCESS_DENIED", "a")]
+
+        assert _workspace_access_denial(messages) is None

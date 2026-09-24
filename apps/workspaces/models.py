@@ -40,6 +40,11 @@ class TenantSchema(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     last_accessed_at = models.DateTimeField(null=True, blank=True)
+    refresh_job_id = models.BigIntegerField(null=True, blank=True, unique=True)
+    refresh_workspace_id = models.UUIDField(null=True, blank=True)
+    refresh_actor_user_id = models.BigIntegerField(null=True, blank=True)
+    refresh_membership_id = models.UUIDField(null=True, blank=True)
+    refresh_claimed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-last_accessed_at"]
@@ -407,6 +412,10 @@ class WorkspaceViewSchema(models.Model):
         db_default={},
         help_text="Versioned source identities from the last successful physical view publication.",
     )
+    # Managed-side commit marker (COMMENT ON SCHEMA) of the publication this row
+    # describes. Control and managed databases are not one transaction; a mismatch
+    # means the physical layer committed a build this row never recorded.
+    physical_build_token = models.CharField(max_length=32, blank=True, default="", db_default="")
     last_accessed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

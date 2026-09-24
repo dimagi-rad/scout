@@ -165,8 +165,7 @@ validation. Use the backend's typed `runtime.failures`, not message matching:
 - `permission_required` or `configuration_required`: explain the required access/operator intervention, without retrying.
 - `transient_runtime_failure`: do not change the model/document; at most one bounded retry when `retryable=true`.
 - Unknown `runtime_failure`: stop and report it; do not guess a destructive repair.
-Treat
-`runtime.success=false`, `diagnostics`, and `key_warnings` as blocking
+Treat `runtime.success=false`, `diagnostics`, and `key_warnings` as blocking
 publication failures. Do not set `run_check=false` to publish a user-facing
 artifact.
 
@@ -793,6 +792,8 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     artifact = artifact_result.get("artifact") if isinstance(artifact_result, dict) else None
     runtime = artifact_result.get("runtime") if isinstance(artifact_result, dict) else None
     diagnostics = artifact_result.get("diagnostics") if isinstance(artifact_result, dict) else None
+    if diagnostics is None and isinstance(runtime, dict):
+        diagnostics = runtime.get("diagnostics")
     if isinstance(parsed_final, dict):
         status = parsed_final.get("status") or artifact_result.get("status") or "done"
         message = parsed_final.get("message") or final_text

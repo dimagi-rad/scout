@@ -12,9 +12,18 @@ interface ArtifactListProps {
   onSearchChange: (search: string) => void
   onUpdate: (item: ArtifactSummary, data: { title?: string; description?: string }) => Promise<void>
   onDelete: (item: ArtifactSummary) => void | Promise<void>
+  canWrite?: boolean
 }
 
-export function ArtifactList({ workspace, items, search, onSearchChange, onUpdate, onDelete }: ArtifactListProps) {
+export function ArtifactList({
+  workspace,
+  items,
+  search,
+  onSearchChange,
+  onUpdate,
+  onDelete,
+  canWrite = true,
+}: ArtifactListProps) {
   const navigate = useNavigate()
 
   function handleOpen(artifact: ArtifactSummary) {
@@ -60,6 +69,7 @@ export function ArtifactList({ workspace, items, search, onSearchChange, onUpdat
             onOpen={() => handleOpen(item)}
             onUpdate={(data) => onUpdate(item, data)}
             onDelete={() => onDelete(item)}
+            canWrite={canWrite}
           />
         ))}
       </div>

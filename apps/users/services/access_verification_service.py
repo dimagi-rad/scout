@@ -36,7 +36,7 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
-from apps.users.services.oauth_scope import canonical_provider
+from apps.users.services.oauth_scope import amemberships_on_provider
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     TokenRefreshRejected,
@@ -239,41 +239,36 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
 
 async def _map_provider_result(claim, result):
     # Claims and publication both match memberships on the canonical provider, so
-    # the mapping sandwiched between them must too. An exact comparison misses an
-    # alias tenant (commcare-custom on a commcare connection), which then never
-    # reaches result.tenant_ids, and publication -- whose omission scope IS
-    # canonical -- archives the membership and denies a tenant the provider just
-    # confirmed. Canonicalize in Python: a provider__startswith filter would sweep
-    # commcare_connect into commcare, because canonical_provider resolves
-    # commcare_connect first.
-    connection_provider = canonical_provider(claim.observation.provider)
+    # the mapping sandwiched between them must too, or publication archives an
+    # alias tenant the provider just confirmed.
+    provider = claim.observation.provider
     if result.outcome == VerificationOutcome.COMPLETE:
-        tenant_ids = {
-            tenant_id
-            async for tenant_id, tenant_provider in TenantMembership.all_objects.filter(
+        tenant_ids = await amemberships_on_provider(
+            TenantMembership.all_objects.filter(
                 user_id=claim.observation.user_id,
                 connection_id=claim.observation.connection_id,
                 tenant__external_id__in=result.external_ids,
-            ).values_list("tenant_id", "tenant__provider")
-            if canonical_provider(tenant_provider) == connection_provider
-        }
-        return VerificationResult.complete(tenant_ids)
+            ),
+            provider,
+            "tenant_id",
+        )
+        return VerificationResult.complete(set(tenant_ids))
     if result.outcome == VerificationOutcome.CREDENTIAL_REJECTED:
         return VerificationResult.credential_rejected(result.error_code)
     if result.outcome == VerificationOutcome.TENANT_DENIED:
-        tenant_id = None
-        async for candidate_id, tenant_provider in TenantMembership.all_objects.filter(
-            user_id=claim.observation.user_id,
-            connection_id=claim.observation.connection_id,
-            tenant__external_id=result.denied_external_id,
-            tenant_id__in=claim.requested_tenant_ids,
-        ).values_list("tenant_id", "tenant__provider"):
-            if canonical_provider(tenant_provider) == connection_provider:
-                tenant_id = candidate_id
-                break
-        if tenant_id is None:
+        candidates = await amemberships_on_provider(
+            TenantMembership.all_objects.filter(
+                user_id=claim.observation.user_id,
+                connection_id=claim.observation.connection_id,
+                tenant__external_id=result.denied_external_id,
+                tenant_id__in=claim.requested_tenant_ids,
+            ),
+            provider,
+            "tenant_id",
+        )
+        if not candidates:
             return VerificationResult.indeterminate(_VERIFICATION_INDETERMINATE)
-        return VerificationResult.tenant_denied(tenant_id, result.error_code)
+        return VerificationResult.tenant_denied(candidates[0], result.error_code)
     if result.outcome == VerificationOutcome.UNAVAILABLE:
         return VerificationResult.unavailable(result.error_code)
     return VerificationResult.indeterminate(result.error_code)
@@ -385,13 +380,6 @@ def _durable_result(receipt, requested_tenant_ids):
     return None
 
 
-# Outcomes whose verdict belongs to specific tenants rather than to the whole
-# connection. Only these may be gated on the receipt's recorded tenant scope.
-_TENANT_SCOPED_OUTCOMES = frozenset(
-    {VerificationOutcome.COMPLETE, VerificationOutcome.TENANT_DENIED}
-)
-
-
 def _attempt_matches_waiter_lineage(
     receipt, lease_token, original, current, requested_tenant_ids
 ) -> bool:
@@ -403,19 +391,8 @@ def _attempt_matches_waiter_lineage(
         and current is not None
     ):
         observations.append(replace(current, upstream_denied_at=original.upstream_denied_at))
-    # A rejected credential, an unreachable provider or an indeterminate answer
-    # applies to every tenant on the connection, so a waiter asking about other
-    # tenants may still reuse it and skip a second upstream discovery. Passing the
-    # receipt's own scope satisfies attempt_receipt_matches' subset test without
-    # weakening its lease and observation checks, which are the real gates here.
-    # A legacy receipt carries an empty scope and still matches nothing.
-    scope = (
-        requested_tenant_ids
-        if receipt is not None and receipt.outcome in _TENANT_SCOPED_OUTCOMES
-        else getattr(receipt, "tenant_ids", frozenset())
-    )
     return any(
-        attempt_receipt_matches(receipt, lease_token, observation, scope)
+        attempt_receipt_matches(receipt, lease_token, observation, requested_tenant_ids)
         for observation in observations
     )
 

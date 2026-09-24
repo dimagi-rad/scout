@@ -46,16 +46,11 @@ async def query_readiness_error(workspace, query, code, message, *, category, re
     The subject has no persisted artifact or recovery history. The existing
     service only reads catalog/publication state; it never loads provider data.
     """
-    try:
-        surface = await (readiness or QueryReadiness(workspace, [query])).surface()
-    except Exception:
-        logger.warning(
-            "Unable to inspect query readiness for workspace %s", workspace.id, exc_info=True
-        )
-        return query_error(code, message, category=category)
+    surface = await (readiness or QueryReadiness(workspace, [query])).surface()
     if surface is None:
         return query_error(code, message, category=category)
     if surface.get("status") == "model_drift":
+        # Batch readiness describes the whole document, not a specific query.
         return query_error(code, message, category="missing_model_dependency")
     if not surface.get("queryable"):
         action = surface.get("recovery_action")

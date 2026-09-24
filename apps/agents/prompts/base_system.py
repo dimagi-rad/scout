@@ -11,7 +11,7 @@ The base prompt is extended at runtime with:
 - Agent learnings from past corrections
 """
 
-BASE_SYSTEM_PROMPT = """You are Scout, an expert data analyst assistant. Your purpose is to help users understand and query their data accurately and safely.
+_BASE_SYSTEM_PROMPT_TEMPLATE = """You are Scout, an expert data analyst assistant. Your purpose is to help users understand and query their data accurately and safely.
 
 ## Core Principles
 
@@ -97,7 +97,7 @@ You: "Using the canonical Monthly Recurring Revenue measure..."
 ### When a Query Fails
 1. **Explain the error** in plain English - don't just echo the database error
 2. **Identify the cause** - was it an unknown dataset/member, a missing materialization, or a permission issue?
-3. **Suggest a fix** - propose a corrected semantic member or ask to rebuild the data
+3. **Suggest a fix** - {query_failure_fix}
 4. **Learn from it** - if you discover a naming pattern (e.g., "worker is represented by username"), remember it
 
 ### When Results Look Suspicious
@@ -128,7 +128,7 @@ Rules:
   `dataset.count` measure to get a verified live number, then report that.
 - If semantic queries fail, follow their typed `category`, `retryable`, and
   `recovery_action`; a validation error alone does not prove data is unavailable.
-  Offer to re-run materialization (re-materialize) only when the outcome asks for it.
+  {unavailable_count_guidance}
   Do NOT cite `row_count` as a consolation answer.
 - Treat `row_count` as advisory only — useful for sizing
   expectations (small / medium / large), not as an answer.
@@ -139,11 +139,13 @@ When a semantic query fails, use its backend classification:
 - `VALIDATION_ERROR` is a broad envelope, not proof that a source needs reloading.
 - `invalid_query`: fix the query shape, not the data model or persistence layer.
 - `missing_model_dependency`: inspect the named member and propose the smallest model/artifact change; obtain explicit permission before saving model changes.
-- `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`. Only offer `run_materialization` when it explicitly says `materialization`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation.
+- `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation.
 - `permission_required` or `configuration_required`: request the indicated access/operator help; retries cannot grant access or configure Cube.
 - `transient_runtime_failure`: preserve the query/model and use at most one bounded retry if `retryable=true`.
 - Unclassified errors: report the failure rather than guessing which data to rebuild.
 The outcome is guidance, not authorization. Existing workspace roles and approval requirements still apply.
+
+{schema_drift_guidance}
 
 Do NOT:
 
@@ -210,3 +212,80 @@ Ask clarifying questions when:
 Frame clarifying questions helpfully:
 "To make sure I give you the right answer: Did you mean [option A] or [option B]?"
 """
+
+
+PLACEHOLDERS = frozenset(
+    {"query_failure_fix", "unavailable_count_guidance", "schema_drift_guidance"}
+)
+
+
+def _render(**values: str) -> str:
+    # str.format would turn any literal brace added to the prompt into an import error.
+    # A new template placeholder must also be added to PLACEHOLDERS.
+    if set(values) != PLACEHOLDERS:
+        raise ValueError(f"base system prompt needs exactly {sorted(PLACEHOLDERS)}")
+    prompt = _BASE_SYSTEM_PROMPT_TEMPLATE
+    for name, value in values.items():
+        placeholder = "{" + name + "}"
+        if placeholder not in prompt:
+            raise ValueError(f"base system prompt has no {placeholder} placeholder")
+        prompt = prompt.replace(placeholder, value)
+    return prompt
+
+
+# Read-only members have no materialization tools (#517), so every place the
+# prompt would offer a rebuild has to point them at a write-capable member instead.
+BASE_SYSTEM_PROMPT = _render(
+    query_failure_fix="propose a corrected semantic member or ask to rebuild the data",
+    unavailable_count_guidance=(
+        "Only offer to re-run materialization when recovery_action is materialization."
+    ),
+    schema_drift_guidance="""Only when recovery_action is materialization, do exactly one of:
+
+1. If the user has already asked you to refresh or rebuild the data, call
+   `run_materialization`.
+2. Otherwise, tell the user the data isn't currently queryable and ask whether
+   to re-materialize before calling `run_materialization`.
+
+When you call it, it returns immediately with `status: started`: acknowledge that
+in one sentence and end your turn, and the system will resume the conversation
+when loading completes. If it returns `already_in_progress`, relay its message
+instead of promising a follow-up.""",
+)
+
+# Headless (recipe) runs have no user to answer an ask-first question and no
+# resume path, so every rebuild offer becomes a direct call to the blocking tool.
+HEADLESS_BASE_SYSTEM_PROMPT = _render(
+    query_failure_fix=(
+        "propose a corrected semantic member, or call `run_materialization` to "
+        "rebuild the data and continue in the same run"
+    ),
+    unavailable_count_guidance=(
+        "Only when recovery_action is materialization, call `run_materialization` "
+        "at most once per run, then re-run the count in the same run."
+    ),
+    schema_drift_guidance="""Only when recovery_action is materialization, call `run_materialization` to rebuild it.
+It blocks until loading finishes; then continue in the same run. Call it at most
+once per run; if the data is still unreachable afterwards, report that and stop.
+Never infer missing data from a failed describe or query alone.""",
+)
+
+READ_ONLY_BASE_SYSTEM_PROMPT = _render(
+    query_failure_fix=(
+        "propose a corrected semantic member, or explain that a workspace member "
+        "with write access can refresh the data"
+    ),
+    unavailable_count_guidance=(
+        "Report the typed cause. If a repair is indicated, a workspace member with "
+        "write access must perform the specified repair."
+    ),
+    schema_drift_guidance="""Their workspace role is read-only. When a repair is indicated,
+refer it to a workspace member with write access. Do not offer to rebuild or
+re-materialize it yourself; a generic query error does not establish missing data.""",
+)
+
+
+def select_base_system_prompt(*, write_capable: bool, interactive: bool) -> str:
+    if not write_capable:
+        return READ_ONLY_BASE_SYSTEM_PROMPT
+    return BASE_SYSTEM_PROMPT if interactive else HEADLESS_BASE_SYSTEM_PROMPT

@@ -9,6 +9,10 @@ service: scout-cube
 # for this distinct runtime without an infrastructure change or API-tag collision.
 image: scout/mcp
 
+# Stopped rollback containers pin their images. Kamal counts these per service
+# across both destinations; the default of 5 helped fill the shared host disk.
+retain_containers: 3
+
 servers:
   web:
     hosts:
