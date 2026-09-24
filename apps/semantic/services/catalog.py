@@ -631,8 +631,18 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
             is_visible=True,
         ).prefetch_related("fields")
     )
+    diagnostics = []
     datasets_by_table: dict[str, list[SemanticDataset]] = {}
     for dataset in datasets:
+        metadata = dataset.metadata or {}
+        if "source_table_name" in metadata and len(metadata.get("source_tenant_ids", [])) != 1:
+            diagnostics.append(
+                {
+                    "level": "warning",
+                    "code": "relationship_source_provenance",
+                    "message": f"Dataset '{dataset.name}' has ambiguous source ownership; generated joins were omitted.",
+                }
+            )
         datasets_by_table.setdefault(dataset.table_name, []).append(dataset)
 
     def visible_field(dataset: SemanticDataset, column: str):
@@ -643,7 +653,6 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
         )
 
     active_names: set[str] = set()
-    diagnostics = []
     curated_names = {
         name
         for name, metadata in SemanticRelationship.objects.filter(workspace=workspace).values_list(
@@ -675,7 +684,7 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                         {
                             "level": "warning",
                             "code": "relationship_key_type",
-                            "message": f"Relationship '{name}' requires compatible scalar keys; arrays/objects require a bridge.",
+                            "message": f"Relationship '{name}' requires compatible physical scalar keys; arrays/objects require a bridge and calculated keys must be modeled explicitly.",
                         }
                     )
                     continue
@@ -712,7 +721,13 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                             "generated": True,
                             "description": rel.description,
                             "key_pairs": rel.key_pairs,
-                            "key_scope": "source_tenant",
+                            "key_scope": (
+                                "source_tenant"
+                                if "source_table_name" in (from_dataset.metadata or {})
+                                else "table_name"
+                                if from_dataset.table_name == rel.from_table
+                                else "view_prefix"
+                            ),
                             "require_unique_target": rel.require_unique_target,
                         },
                     },

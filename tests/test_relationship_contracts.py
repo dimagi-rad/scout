@@ -8,6 +8,7 @@ from django.db import connection
 
 from apps.semantic.models import SemanticDataset, SemanticModel, SemanticRelationship
 from apps.semantic.services import catalog, cube_schema
+from apps.semantic.services.cube import generate_cube_schema
 from mcp_server.pipeline_registry import (
     PipelineRegistry,
     RelationshipConfig,
@@ -69,6 +70,16 @@ def test_hq_forms_use_a_distinct_association_bridge(workspace):
     assert {r.relationship_type for r in relationships} == {"one_to_many", "many_to_one"}
     assert all("case_ids}" not in r.join_expression for r in relationships)
     assert len(relationships) == 2
+    assert all(r.metadata["key_scope"] == "table_name" for r in relationships)
+    cubes = {cube["name"]: cube for cube in generate_cube_schema(model)["cubes"]}
+    for name, primary_key in [
+        ("raw_forms", "form_id"),
+        ("raw_form_cases", "form_case_id"),
+        ("raw_cases", "case_id"),
+    ]:
+        key = next(field for field in cubes[name]["dimensions"] if field["name"] == primary_key)
+        assert key["primary_key"] is True
+    assert cubes["raw_forms"]["measures"][0]["type"] == "count"
 
     # A later refresh replaces, rather than accumulates, the association snapshot.
     _write_forms(
@@ -180,11 +191,32 @@ def test_non_scalar_keys_are_not_promoted_as_equality_joins(workspace, monkeypat
 def test_all_pipeline_relationships_have_deliberate_cardinality():
     registry = PipelineRegistry()
     assert not registry.load_errors
-    assert registry.get("commcare_sync").sources[1].auxiliary_tables["raw_form_cases"]
-    assert registry.get("ocs_sync").relationships[-1].require_unique_target is True
+    forms = next(
+        source for source in registry.get("commcare_sync").sources if source.name == "forms"
+    )
+    assert forms.auxiliary_tables["raw_form_cases"]
+    participants = next(
+        rel for rel in registry.get("ocs_sync").relationships if rel.to_table == "raw_participants"
+    )
+    assert participants.require_unique_target is True
     assert all(
         r.relationship_type == "many_to_one" for r in registry.get("connect_sync").relationships
     )
+
+
+@pytest.mark.parametrize("owners", [[], ["tenant-a", "tenant-b"]])
+def test_ambiguous_join_ownership_emits_diagnostic(workspace, owners):
+    model = SemanticModel.objects.create(workspace=workspace, name="Ambiguous")
+    _dataset(
+        model,
+        "raw_forms",
+        [("form_id", "text")],
+        "form_id",
+        source={"source_table_name": "raw_forms", "source_tenant_ids": owners},
+    )
+    diagnostics = catalog._sync_relationships(model, workspace)
+    assert diagnostics[0]["code"] == "relationship_source_provenance"
+    assert not SemanticRelationship.objects.filter(workspace=workspace).exists()
 
 
 @pytest.mark.asyncio
