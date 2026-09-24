@@ -88,6 +88,12 @@ def test_unknown_controls_and_missing_bindings_do_not_run_unfiltered():
         resolve_artifact_queries(doc, CONTEXT)
 
 
+@pytest.mark.parametrize("compare", [False, True])
+def test_explicit_unresolved_control_never_uses_its_saved_default(compare):
+    with pytest.raises(DateContextError, match="date_range must be"):
+        resolve_artifact_queries(story(compare=compare), {**CONTEXT, "sources": {"range": None}})
+
+
 def test_comparison_cannot_silently_ignore_a_second_date_binding():
     doc = story(compare=True)
     doc["blocks"][1]["inputs"]["date_range"] = {
