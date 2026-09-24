@@ -1354,6 +1354,35 @@ def _write_forms(
         if on_page is not None:
             on_page(total, rows_total)
 
+    # Keep a distinct association grain; JSONB arrays are not scalar foreign keys.
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_form_cases CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+            CREATE TABLE {schema}.raw_form_cases (
+                form_case_id TEXT PRIMARY KEY,
+                form_id TEXT NOT NULL,
+                case_id TEXT NOT NULL,
+                UNIQUE (form_id, case_id)
+            )
+            """
+        ).format(schema=sid)
+    )
+    cur.execute(
+        psql.SQL(
+            """
+            INSERT INTO {schema}.raw_form_cases (form_case_id, form_id, case_id)
+            SELECT DISTINCT jsonb_build_array(f.form_id, c.value #>> '{{}}')::text,
+                f.form_id, c.value #>> '{{}}'
+            FROM {schema}.raw_forms f
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(f.case_ids) = 'array' THEN f.case_ids ELSE '[]'::jsonb END
+            ) c(value)
+            WHERE jsonb_typeof(c.value) = 'string' AND c.value #>> '{{}}' <> ''
+            """
+        ).format(schema=sid)
+    )
+    cur.execute(psql.SQL("CREATE INDEX ON {}.raw_form_cases (case_id)").format(sid))
     return total
 
 
