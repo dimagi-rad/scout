@@ -995,6 +995,8 @@ async def semantic_query(
     workspace_id: str = "",
     user_id: str = "",
     thread_id: str = "",
+    date_range: dict | None = None,
+    query_context: dict | None = None,
 ) -> dict:
     """Run a structured semantic query against the workspace semantic model.
 
@@ -1003,6 +1005,8 @@ async def semantic_query(
         dimensions: Semantic dimension members such as ["visits.username"].
         time_dimension: Optional time dimension member, such as "visits.visited_at".
         granularity: Optional time bucket: day, week, month, quarter, or year.
+        date_range: Optional {"preset":"last_30_days"} or {"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}. Requires time_dimension; inclusive calendar dates.
+        query_context: Optional reporting context {"timezone":"America/New_York"}; defaults to the server reporting timezone and current clock.
         filters: Optional filters: [{"field": "visits.username", "operator": "equals", "value": "a@example.com"}].
         order_by: Optional ordering: [{"field": "visits.count", "direction": "desc"}].
         limit: Maximum rows, clamped server-side.
@@ -1022,6 +1026,8 @@ async def semantic_query(
         filters=filters or [],
         order_by=order_by or [],
         limit=limit,
+        date_range=date_range,
+        query_context=query_context,
     ) as tc:
         if not workspace_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
@@ -1042,6 +1048,8 @@ async def semantic_query(
                 "filters": filters or [],
                 "order_by": order_by or [],
                 "limit": limit,
+                **({"date_range": date_range} if date_range is not None else {}),
+                **({"query_context": query_context} if query_context is not None else {}),
             },
             user_id=user_id,
         )
