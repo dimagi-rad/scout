@@ -393,6 +393,11 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
         )
         await agrant_tenant_access(user, new_source)
         await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=new_source)
+        # Serving but near its inactivity TTL: publishing over it must count as use.
+        touched_before = timezone.now() - timedelta(hours=23)
+        await TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).aupdate(
+            last_accessed_at=touched_before
+        )
         with (
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
@@ -406,6 +411,8 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
 
     # Siblings of the untouched source keep valid views; only the loaded one fans out.
     assert list(dependents.await_args.args[0]) == [new_source.id]
+    [served] = await _active_schemas(tenant)
+    assert served.last_accessed_at > touched_before
     assert [call[0] for call in pipeline.calls] == [tenant.id, new_source.id]
     by_tenant = {e.get("tenant_id") or e["tenant"]: e for e in result["tenants"]}
     assert by_tenant[str(tenant.id)]["result"]["status"] == "already_loaded"

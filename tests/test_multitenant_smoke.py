@@ -100,3 +100,26 @@ def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup)
     # No chat thread waits on this dispatch, so there is no ThreadJob to resume.
     assert kwargs["notify_thread"] is False
     assert kwargs["load_intent"] == {str(t2.id): 1}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_adding_an_unloaded_second_source_builds_views_for_the_first_meanwhile(api_client, setup):
+    """Going from one source to two there are no views yet; without building them
+    now the workspace, including the source already serving, would be dark for
+    the whole load."""
+    user, ws, t2 = setup
+
+    with (
+        patch(
+            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        ) as rebuild,
+        patch("apps.workspaces.services.workspace_service.materialize_workspace.defer") as load,
+    ):
+        api_client.force_login(user)
+        resp = api_client.post(
+            f"/api/workspaces/{ws.id}/tenants/", {"tenant_id": str(t2.id)}, format="json"
+        )
+
+    assert resp.status_code == 202
+    rebuild.assert_called_once_with(workspace_id=str(ws.id))
+    load.assert_called_once()

@@ -841,14 +841,19 @@ async def materialize_workspace_core(
                 )
             )
             continue
-        if (
-            only_unserved
-            and await TenantSchema.objects.filter(
+        served = (
+            await TenantSchema.objects.filter(
                 tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
-            ).aexists()
-        ):
+            ).afirst()
+            if only_unserved
+            else None
+        )
+        if served is not None:
             # A source added to the workspace loads before publication; sources
             # already serving data are only published, never reloaded for it.
+            # The views about to be published read this schema, so it counts as
+            # used; otherwise the inactivity sweep could drop it from under them.
+            await served.atouch()
             tenant_results.append(
                 {
                     "tenant": tenant_id,

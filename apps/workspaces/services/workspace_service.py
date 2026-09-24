@@ -31,8 +31,11 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
     ``actor_id``, and the views and Cube are published after that load, so the new
     source is never published as an empty or missing view. The existing views are
     left ACTIVE meanwhile: marking them provisioning would take every source's
-    data tools offline for the whole load. Uses get_or_create to handle
-    concurrent requests; only a newly created link dispatches work.
+    data tools offline for the whole load. A workspace with no ACTIVE views yet
+    (typically going from one source to two) gets them built now, serving the
+    existing sources with the new one excluded, so it is never dark while the
+    new source loads. Uses get_or_create to handle concurrent requests; only a
+    newly created link dispatches work.
 
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
@@ -47,6 +50,10 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 )
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
             else:
+                if not WorkspaceViewSchema.objects.filter(
+                    workspace=workspace, state=SchemaState.ACTIVE
+                ).exists():
+                    rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
                 intent = capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING)
                 materialize_workspace.defer(
                     workspace_id=str(workspace.id),
