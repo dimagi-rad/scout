@@ -79,6 +79,7 @@ from apps.workspaces.services.query_state import (
 )
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
+    DENIED_ROLE_REQUIRED,
     DENIED_WORKSPACE_UNLINKED,
     LegacyRefreshJobs,
     LegacyRefreshReconciliation,
@@ -350,21 +351,6 @@ async def refresh_tenant_schema(
             "retry_required": True,
         }
 
-    # Recheck upstream here, outside any transaction, so the claim's database-only
-    # decision sees fresh proofs; the claim still makes and records the decision.
-    try:
-        actor = await User.objects.filter(id=actor_user_id).afirst()
-        if actor is not None:
-            await aresolve_workspace_access_ex(
-                actor,
-                workspace_id,
-                minimum_role=WorkspaceRole.READ_WRITE,
-                verification=VerificationBudget.BACKGROUND,
-            )
-    except (TypeError, ValueError, ValidationError):
-        # Malformed ids: the claim below rejects the job against its recorded request.
-        logger.info("refresh_tenant_schema: skipped pre-claim recheck for job %s", context.job.id)
-
     claim = await _to_thread_fresh_db(
         claim_refresh_candidate,
         schema_id=schema_id,
@@ -402,6 +388,21 @@ async def refresh_tenant_schema(
             "error": "The refresh could not be started. Retry the refresh from the workspace.",
             "retry_required": True,
         }
+
+    # Upstream freshness is checked here, after the claim's transaction closed, so
+    # no row lock is held across a provider call. A denial fails this candidate
+    # like any other refresh failure, with its own code (an outage says retry).
+    access = await aresolve_workspace_access_ex(
+        membership.user,
+        workspace_id,
+        minimum_role=WorkspaceRole.READ_WRITE,
+        verification=VerificationBudget.BACKGROUND,
+    )
+    if not access.granted:
+        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
+        if access.denied_reason in FRESHNESS_ERROR_CODES:
+            return _refresh_denial_result(access.denied_reason)
+        return _refresh_denial_result(DENIED_ROLE_REQUIRED)
 
     manager = SchemaManager()
     try:

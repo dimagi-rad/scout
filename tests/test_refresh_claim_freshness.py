@@ -1,7 +1,7 @@
-"""The refresh worker rechecks upstream before claiming and decides inside the claim.
+"""The refresh worker checks upstream freshness right after its claim.
 
-The claim runs in a transaction, where the gate never contacts a provider, so the
-worker's recheck just before it is what keeps proofs fresh for that decision.
+The claim runs in a transaction and decides membership and role locally, so no row
+lock is ever held across a provider call; freshness is checked once it closes.
 """
 
 import json
@@ -19,6 +19,7 @@ from apps.workspaces.services.access_freshness import (
     FRESHNESS_DENIAL_REASONS,
     FRESHNESS_ERROR_CODES,
 )
+from apps.workspaces.services.refresh_requests import claim_refresh_candidate
 from tests.upstream_proofs import amake_proof_stale
 
 
@@ -101,10 +102,33 @@ async def test_tenant_refresh_outage_is_retryable_and_keeps_the_membership(
 
     assert result["error_code"] == ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
     assert "retry" in result["error"].lower()
-    assert upstream_provider.requests, "the pre-claim recheck must reach the provider"
+    assert upstream_provider.requests, "the post-claim recheck must reach the provider"
     create_schema.assert_not_called()
     assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
 
 
 def test_every_freshness_denial_reason_has_a_registry_code():
     assert set(FRESHNESS_ERROR_CODES) == set(FRESHNESS_DENIAL_REASONS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_claim_decides_locally_even_with_a_stale_proof(
+    workspace, tenant, user, upstream_provider
+):
+    membership = await TenantMembership.objects.aget(user=user, tenant=tenant)
+    schema, _args, job_id = await _bound_refresh_candidate(
+        tenant, workspace, membership, "test_domain_r3"
+    )
+    await amake_proof_stale(user, tenant)
+
+    claim = await sync_to_async(claim_refresh_candidate)(
+        schema_id=str(schema.id),
+        membership_id=str(membership.id),
+        actor_user_id=str(user.id),
+        workspace_id=str(workspace.id),
+        job_id=job_id,
+    )
+
+    assert claim.status == "claimed"
+    assert upstream_provider.requests == []
