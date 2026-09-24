@@ -11,6 +11,7 @@ from apps.workspaces.models import (
     TenantLoadGeneration,
     TenantSchema,
 )
+from apps.workspaces.services.data_operation import LockOrderError, sync_tenant_data_lock
 from apps.workspaces.services.load_candidates import (
     abandoned_workspace_candidates,
     fail_workspace_candidate,
@@ -35,13 +36,19 @@ JOB = 11
 
 
 def _open(tenant, workspace, *, generation, job_id=JOB, config=CONFIG):
-    return open_workspace_candidate(
-        tenant,
-        workspace_id=workspace.id,
-        job_id=job_id,
-        generation=generation,
-        config_fingerprint=config,
-    )
+    with sync_tenant_data_lock([tenant.id]):
+        return open_workspace_candidate(
+            tenant,
+            workspace_id=workspace.id,
+            job_id=job_id,
+            generation=generation,
+            config_fingerprint=config,
+        )
+
+
+def _abandoned(tenant, keep_id):
+    with sync_tenant_data_lock([tenant.id]):
+        return abandoned_workspace_candidates(tenant.id, keep_id=keep_id)
 
 
 def _completed_run(schema, *, job_id=JOB, result=None, state=None):
@@ -88,7 +95,7 @@ def test_a_failed_candidate_is_resumed_by_the_same_generation_and_config(tenant,
     assert again.schema.id == first.id
     assert again.schema.state == SchemaState.PROVISIONING
     assert again.schema.load_job_id == 2
-    assert abandoned_workspace_candidates(tenant.id, keep_id=again.schema.id) == []
+    assert _abandoned(tenant, again.schema.id) == []
 
 
 @pytest.mark.parametrize("change", ["config", "generation"])
@@ -111,9 +118,7 @@ def test_a_mismatched_load_starts_fresh_and_abandons_the_old_candidate(tenant, w
 
     assert not again.resumed
     assert again.schema.id != first.id
-    assert [c.id for c in abandoned_workspace_candidates(tenant.id, keep_id=again.schema.id)] == [
-        first.id
-    ]
+    assert [c.id for c in _abandoned(tenant, again.schema.id)] == [first.id]
 
 
 @pytest.mark.parametrize(
@@ -218,14 +223,15 @@ def test_only_the_owning_load_can_fail_its_candidate(tenant, workspace):
     assert fail_workspace_candidate(candidate.id, workspace.id, 5) is None
 
 
-def test_orphans_found_under_the_tenant_lock_become_resumable(tenant, workspace):
+def test_orphans_settled_while_holding_t_become_resumable(tenant, workspace):
     generation = begin_load_generation(tenant.id)
     orphan = _open(tenant, workspace, generation=generation, job_id=1).schema
     refresh = TenantSchema.objects.create(
         tenant=tenant, schema_name="refresh_cand", state=SchemaState.PROVISIONING, refresh_job_id=9
     )
 
-    settled = settle_orphaned_workspace_candidates(tenant.id)
+    with sync_tenant_data_lock([tenant.id]):
+        settled = settle_orphaned_workspace_candidates(tenant.id)
 
     assert [s.id for s in settled] == [orphan.id]
     refresh.refresh_from_db()
@@ -303,3 +309,50 @@ def test_a_job_less_load_owns_its_candidate_through_a_per_attempt_token(tenant, 
 
     assert not _promote(candidate, workspace, generation, run, job_id=second).promoted
     assert _promote(candidate, workspace, generation, run, job_id=first).promoted
+
+
+@pytest.mark.parametrize("operation", ["settle", "open", "abandoned"])
+def test_candidate_lifecycle_changes_refuse_a_caller_without_t(tenant, workspace, operation):
+    """The Tenant row lock is released at commit; only T spans a writer's load, so
+    a caller without it could fail a live writer's candidate underneath it."""
+    generation = begin_load_generation(tenant.id)
+    live = _open(tenant, workspace, generation=generation).schema
+    calls = {
+        "settle": lambda: settle_orphaned_workspace_candidates(tenant.id),
+        "open": lambda: open_workspace_candidate(
+            tenant,
+            workspace_id=workspace.id,
+            job_id=JOB,
+            generation=generation,
+            config_fingerprint=CONFIG,
+        ),
+        "abandoned": lambda: abandoned_workspace_candidates(tenant.id, keep_id=live.id),
+    }
+
+    with pytest.raises(LockOrderError):
+        calls[operation]()
+    live.refresh_from_db()
+    assert live.state == SchemaState.PROVISIONING
+
+
+def test_holding_another_tenants_t_does_not_count(tenant, workspace):
+    with sync_tenant_data_lock([uuid.uuid4()]), pytest.raises(LockOrderError):
+        settle_orphaned_workspace_candidates(tenant.id)
+
+
+def test_a_tests_failed_generation_is_published_and_reusable(tenant, workspace):
+    """Promotion publishes a run whose data-quality tests failed; reuse must accept
+    the same run, or that fingerprint would reload forever."""
+    generation = begin_load_generation(tenant.id)
+    candidate = _open(tenant, workspace, generation=generation).schema
+    run = _completed_run(
+        candidate,
+        result={
+            "sources": {},
+            "load_fingerprint": FINGERPRINT,
+            "transforms": {"status": "tests_failed", "error": "quality assertion"},
+        },
+    )
+
+    assert _promote(candidate, workspace, generation, run).promoted
+    assert reusable_generation(tenant.id, generation, FINGERPRINT) is not None
