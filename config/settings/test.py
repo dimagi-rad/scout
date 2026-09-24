@@ -56,3 +56,6 @@ DB_CREDENTIAL_KEY = "uHcVl3o7sAzBTV0ECblIGcB4imVnoutulGMF-dNsUoM="
 
 # The shipped rule; the any-of fallback exists only for the production rollout.
 WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
+
+# Tests exercise the enforced gate; fixtures provision genuine fresh proofs.
+UPSTREAM_ACCESS_FRESHNESS_ENFORCED = True

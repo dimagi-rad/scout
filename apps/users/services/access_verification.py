@@ -149,16 +149,38 @@ def _locked_snapshot(
     clock=time.monotonic,
     cancelled: threading.Event | None = None,
 ):
-    _configure_transaction_deadline(deadline, clock, cancelled)
-    User.objects.select_for_update().get(pk=actor_user_id)
+    return _current_snapshot(
+        actor_user_id,
+        connection_id,
+        lock=True,
+        deadline=deadline,
+        clock=clock,
+        cancelled=cancelled,
+    )
+
+
+def _current_snapshot(
+    actor_user_id,
+    connection_id,
+    *,
+    lock: bool,
+    deadline=None,
+    clock=time.monotonic,
+    cancelled: threading.Event | None = None,
+):
+    if lock:
+        _configure_transaction_deadline(deadline, clock, cancelled)
+        User.objects.select_for_update().get(pk=actor_user_id)
     _configure_transaction_deadline(deadline, clock, cancelled)
     initial = TenantConnection.objects.get(pk=connection_id, user_id=actor_user_id)
     token = None
     if initial.credential_type == TenantConnection.OAUTH:
         _configure_transaction_deadline(deadline, clock, cancelled)
+        tokens = (
+            SocialToken.objects.select_for_update(of=("self",)) if lock else SocialToken.objects
+        )
         token = (
-            SocialToken.objects.select_for_update(of=("self",))
-            .select_related("account")
+            tokens.select_related("account")
             .filter(
                 account_id=initial.social_account_id,
                 account__in=provider_accounts(actor_user_id, initial.provider),
@@ -167,10 +189,14 @@ def _locked_snapshot(
         )
         if token is None:
             raise ValueError("OAuth connection has no current token")
-    _configure_transaction_deadline(deadline, clock, cancelled)
-    current = TenantConnection.objects.select_for_update().get(
-        pk=connection_id, user_id=actor_user_id
-    )
+    # Re-reading under the row lock is what makes the locked snapshot current; an
+    # unlocked read has nothing to gain from a second fetch.
+    current = initial
+    if lock:
+        _configure_transaction_deadline(deadline, clock, cancelled)
+        current = TenantConnection.objects.select_for_update().get(
+            pk=connection_id, user_id=actor_user_id
+        )
     if token is not None:
         observed_scope = account_scope(token.account)
         if (
@@ -194,6 +220,65 @@ def proof_is_fresh(proof, observation, *, now=None) -> bool:
         and proof.scope_key == observation.scope_key
         and proof.observed_denied_at == observation.upstream_denied_at
     )
+
+
+def _owned_history(actor_user_id, current, requested) -> list[tuple]:
+    """``(tenant_id, archived_at)`` for the requested tenants this connection owns."""
+    history_rows = memberships_on_provider(
+        TenantMembership.all_objects.filter(
+            user_id=actor_user_id, connection=current, tenant_id__in=requested
+        ),
+        current.provider,
+        "tenant_id",
+        "archived_at",
+        "provider_metadata",
+    )
+    scoped_ocs_oauth = (
+        canonical_provider(current.provider) == "ocs"
+        and current.credential_type == TenantConnection.OAUTH
+    )
+    return [
+        (tenant_id, archived_at)
+        for tenant_id, archived_at, metadata in history_rows
+        if not scoped_ocs_oauth
+        or (metadata or {}).get("team_slug") in (None, "", current.scope_key)
+    ]
+
+
+def _history_is_fresh(current, request, requested, history, *, now=None) -> bool:
+    if not requested or {tenant_id for tenant_id, _archived_at in history} != requested:
+        return False
+    if not all(archived_at is None for _tenant_id, archived_at in history):
+        return False
+    proofs = {
+        proof.tenant_id: proof
+        for proof in UpstreamAccessProof.objects.filter(connection=current, tenant_id__in=requested)
+    }
+    fresh_now = now or timezone.now()
+    return all(
+        tenant_id in proofs
+        and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now)
+        for tenant_id in requested
+    )
+
+
+def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> bool:
+    """Whether a claim for these tenants would return FRESH, without locking or claiming.
+
+    This is the database-only admission read: it takes no row locks and never writes a
+    lease, so hot protected-read paths can consult it on every request and only fall
+    through to :func:`claim_verification` when a recheck is actually needed.
+    """
+    requested = frozenset(tenant_ids)
+    if not requested:
+        return False
+    with transaction.atomic():
+        try:
+            current, request = _current_snapshot(actor_user_id, connection_id, lock=False)
+        except (TenantConnection.DoesNotExist, ValueError):
+            return False
+        history = _owned_history(actor_user_id, current, requested)
+        return _history_is_fresh(current, request, requested, history, now=now)
 
 
 def _observation_hash(observation: CredentialObservation) -> str:
@@ -329,46 +414,12 @@ def _claim_verification(
         ):
             return VerificationClaim(ClaimStatus.DENIED, requested)
         _configure_transaction_deadline(deadline, clock, cancelled)
-        history_rows = memberships_on_provider(
-            TenantMembership.all_objects.filter(
-                user_id=actor_user_id, connection=current, tenant_id__in=requested
-            ),
-            current.provider,
-            "tenant_id",
-            "archived_at",
-            "provider_metadata",
-        )
-        scoped_ocs_oauth = (
-            canonical_provider(current.provider) == "ocs"
-            and current.credential_type == TenantConnection.OAUTH
-        )
-        history = [
-            (tenant_id, archived_at)
-            for tenant_id, archived_at, metadata in history_rows
-            if not scoped_ocs_oauth
-            or (metadata or {}).get("team_slug") in (None, "", current.scope_key)
-        ]
+        history = _owned_history(actor_user_id, current, requested)
         owned = {tenant_id for tenant_id, _archived_at in history}
         if owned != requested:
             return VerificationClaim(ClaimStatus.DENIED, requested)
-        all_memberships_live = all(archived_at is None for _tenant_id, archived_at in history)
         _configure_transaction_deadline(deadline, clock, cancelled)
-        proofs = {
-            proof.tenant_id: proof
-            for proof in UpstreamAccessProof.objects.filter(
-                connection=current, tenant_id__in=requested
-            )
-        }
-        fresh_now = now or timezone.now()
-        if (
-            requested
-            and all_memberships_live
-            and all(
-                tenant_id in proofs
-                and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now)
-                for tenant_id in requested
-            )
-        ):
+        if _history_is_fresh(current, request, requested, history, now=now):
             _ensure_before_deadline(deadline, clock, cancelled)
             return VerificationClaim(
                 ClaimStatus.FRESH, requested, observation=request.observation, request=request
@@ -839,6 +890,7 @@ def publish_verification(
 
 
 aclaim_verification = sync_to_async(claim_verification)
+aproofs_are_fresh = sync_to_async(proofs_are_fresh)
 apublish_verification = sync_to_async(publish_verification)
 apublish_verification_receipt = sync_to_async(publish_verification_receipt)
 arebase_verification_claim = sync_to_async(rebase_verification_claim)

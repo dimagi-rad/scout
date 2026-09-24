@@ -19,6 +19,7 @@ from django.utils import timezone
 
 from apps.users.adapters import decrypt_credential, encrypt_credential
 from apps.users.models import TenantConnection, TenantMembership, UpstreamAccessProof
+from apps.users.services.access_verification import snapshot_credential
 
 USABLE_TEST_SECRET = "test-user:test-api-key"
 
@@ -171,4 +172,24 @@ def grant_ocs_team_access(user, tenant, connection, *, team_slug=None) -> Tenant
     TenantMembership.all_objects.filter(user=user, tenant=tenant).update(
         connection=connection, provider_metadata=metadata, archived_at=None
     )
+    record_fresh_oauth_proof(connection, tenant)
     return TenantMembership.objects.get(user=user, tenant=tenant)
+
+
+def record_fresh_oauth_proof(connection, tenant) -> UpstreamAccessProof:
+    """A just-verified proof for an OAuth ``connection``, as a successful listing leaves."""
+    token = SocialToken.objects.filter(account_id=connection.social_account_id).first()
+    observation = snapshot_credential(connection, token).observation
+    proof, _ = UpstreamAccessProof.objects.update_or_create(
+        connection=connection,
+        tenant=tenant,
+        defaults={
+            "credential_fingerprint": observation.credential_fingerprint,
+            "account_identity": observation.account_identity,
+            "scope_key": observation.scope_key,
+            "observed_denied_at": observation.upstream_denied_at,
+            "verified_at": timezone.now(),
+            "last_attempt_result": "complete",
+        },
+    )
+    return proof

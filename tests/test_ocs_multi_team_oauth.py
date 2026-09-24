@@ -47,7 +47,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.credential_coverage import CoverageRecovery
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
-from tests.tenant_access import agrant_tenant_access
+from tests.tenant_access import agrant_tenant_access, record_fresh_oauth_proof
 
 
 @pytest.fixture
@@ -401,6 +401,8 @@ async def test_two_team_user_covers_an_all_of_workspace(user, mocker):
         )
         assert tm.archived_at is None
         assert tm.connection.scope_key == team
+        # The listing just succeeded: what upstream freshness admission reads.
+        await sync_to_async(record_fresh_oauth_proof)(tm.connection, tenant)
 
     workspace = await Workspace.objects.acreate(name="Both teams", created_by=user)
     await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant_a)
