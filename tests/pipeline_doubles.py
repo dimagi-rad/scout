@@ -24,7 +24,8 @@ def completed_pipeline_run(membership, credential, pipeline, job_id, target_sche
         completed_at=timezone.now(),
         result={"sources": {}, "load_fingerprint": fingerprint},
     )
-    return {"status": "completed", "run_id": str(run.id), "load_fingerprint": fingerprint, **extra}
+    # extra first: the gate-critical keys below must not be overridable by accident.
+    return {**extra, "status": "completed", "run_id": str(run.id), "load_fingerprint": fingerprint}
 
 
 @pytest.fixture
