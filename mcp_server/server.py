@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import logging
 import os
@@ -68,8 +67,9 @@ from apps.workspaces.models import (
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_MISSING,
     RETRYABLE_REASONS,
-    VERIFICATION_IN_PROGRESS,
+    VERIFICATION_UNAVAILABLE,
     VerificationBudget,
+    aadmit_upstream,
     acheck_freshness,
     freshness_enforced,
 )
@@ -501,17 +501,30 @@ async def _accessible_workspace_memberships(user_id: str, workspace_ids: list[st
     return [membership async for membership in qs.order_by("workspace__name", "workspace_id")]
 
 
-async def _catalog_denial(user, workspace_id, *, verify: bool) -> str | None:
+async def _recheck_catalog_workspaces(user, workspace_ids) -> None:
+    """One bounded upstream recheck for the workspaces a listing may verify.
+
+    Batched by connection under one shared deadline, the same invariant the gate
+    keeps for a single workspace, so listing K workspaces never costs K rechecks.
+    """
+    if not workspace_ids or not freshness_enforced():
+        return
+    tenant_ids = [
+        tenant_id
+        async for tenant_id in WorkspaceTenant.objects.filter(
+            workspace_id__in=list(workspace_ids)
+        ).values_list("tenant_id", flat=True)
+    ]
+    await aadmit_upstream(user.pk, set(tenant_ids), budget=VerificationBudget.INTERACTIVE)
+
+
+async def _catalog_denial(user, workspace_id) -> str | None:
     """Why a workspace's dataset catalog may not be listed for this user, else ``None``.
 
-    Only the active or explicitly requested workspaces may trigger an upstream
-    recheck; an open-ended listing judges the rest from persisted proofs so one
-    call never fans out to every provider. A stale proof there is reported as
-    unverified, which the caller clears by requesting that workspace explicitly.
+    Database-only: any upstream recheck happened once, beforehand, in
+    ``_recheck_catalog_workspaces``. A proof still stale here is reported as
+    unconfirmed, which the caller clears by requesting that workspace explicitly.
     """
-    if verify:
-        access = await aresolve_workspace_access_ex(user, workspace_id)
-        return None if access.granted else (access.denied_reason or NOT_MEMBER)
     local = await aresolve_workspace_access_ex(user, workspace_id, verification=None)
     if not local.granted:
         return local.denied_reason or NOT_MEMBER
@@ -524,7 +537,7 @@ async def _catalog_denial(user, workspace_id, *, verify: bool) -> str | None:
     check = await acheck_freshness(user.pk, tenant_ids)
     if check.fresh:
         return None
-    return CREDENTIAL_MISSING if check.unbound else VERIFICATION_IN_PROGRESS
+    return CREDENTIAL_MISSING if check.unbound else VERIFICATION_UNAVAILABLE
 
 
 async def _resolve_accessible_workspace(workspace_id: str, user_id: str = "") -> Workspace:
@@ -707,17 +720,18 @@ async def list_datasets(
         workspace_roles: dict[str, str] = {}
         if user_id:
             candidates = await _accessible_workspace_memberships(user_id, requested_workspace_ids)
-            verifiable_ids = {str(workspace_id), *requested_workspace_ids}
-            denials = await asyncio.gather(
-                *(
-                    _catalog_denial(
-                        membership.user,
-                        membership.workspace_id,
-                        verify=str(membership.workspace_id) in verifiable_ids,
-                    )
-                    for membership in candidates
+            verifiable_ids = set(requested_workspace_ids)
+            with contextlib.suppress(ValueError, AttributeError, TypeError):
+                verifiable_ids.add(str(uuid.UUID(str(workspace_id))))
+            denials = []
+            if candidates:
+                actor = candidates[0].user
+                await _recheck_catalog_workspaces(
+                    actor,
+                    {str(m.workspace_id) for m in candidates} & verifiable_ids,
                 )
-            )
+                for membership in candidates:
+                    denials.append(await _catalog_denial(actor, membership.workspace_id))
             memberships = [m for m, denial in zip(candidates, denials, strict=True) if not denial]
             # Retryable denials are named separately so the agent can say "retry
             # shortly" instead of reporting that the datasets do not exist.
@@ -1216,22 +1230,31 @@ async def get_materialization_status(
         return tc["result"]
 
 
+async def _materialization_write_access(
+    workspace_id: str,
+    user_id: str,
+    *,
+    verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
+) -> WorkspaceAccess:
+    """Resolve the injected actor through the central minimum-role authorizer."""
+    if not workspace_id or not user_id:
+        return WorkspaceAccess(denied_reason=NOT_MEMBER)
+    try:
+        user = await User.objects.aget(id=user_id)
+    except (User.DoesNotExist, ValueError, _ValidationError):
+        return WorkspaceAccess(denied_reason=NOT_MEMBER)
+    return await aresolve_workspace_access_ex(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE, verification=verification
+    )
+
+
 async def _authorize_materialization_write(
     workspace_id: str,
     user_id: str,
     *,
     verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
 ):
-    """Resolve the injected actor through the central minimum-role authorizer."""
-    if not workspace_id or not user_id:
-        return None
-    try:
-        user = await User.objects.aget(id=user_id)
-    except (User.DoesNotExist, ValueError, _ValidationError):
-        return None
-    access = await aresolve_workspace_access_ex(
-        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE, verification=verification
-    )
+    access = await _materialization_write_access(workspace_id, user_id, verification=verification)
     return access.workspace if access.granted else None
 
 
@@ -1299,12 +1322,17 @@ async def cancel_materialization(
                 thread__user_id=user_id,
             ).aexists()
         )
-        if not owned and await _authorize_materialization_write(workspace_id, user_id) is None:
-            tc["result"] = error_response(
-                AUTH_ACCESS_DENIED,
-                "Verified workspace access is required to cancel a run you did not start.",
-            )
-            return tc["result"]
+        if not owned:
+            verified = await _materialization_write_access(workspace_id, user_id)
+            if not verified.granted:
+                # WORKSPACE_ACCESS_DENIED carries the gate's own remedy (e.g. "retry
+                # shortly" during an outage) and is what the agent graph stops on.
+                tc["result"] = error_response(
+                    WORKSPACE_ACCESS_DENIED,
+                    "Verified workspace access is required to cancel a run you did not "
+                    f"start. {access_denied_body(verified)['error']}",
+                )
+                return tc["result"]
 
         previous_state = run.state
         # Dedicated CANCELLED state (not FAILED) keeps a deliberate cancel

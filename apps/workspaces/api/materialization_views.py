@@ -84,6 +84,7 @@ async def materialization_cancel_view(request, workspace_id):
     orphan_job_ids = job_ids - all_tracked_job_ids
     # Orphan runs may belong to other workspaces sharing a tenant schema, so killing
     # them needs verified access, not the recovery-mode check that admitted this call.
+    # That recheck's latency is accepted: it only runs when orphans exist.
     orphan_denial = None
     skipped_unverified_runs = 0
     if orphan_job_ids:
@@ -127,10 +128,10 @@ async def materialization_cancel_view(request, workspace_id):
                     exc_info=True,
                 )
 
-    if total == 0 and not tjs and orphan_denial is not None:
+    if total == 0 and orphan_denial is not None and not tjs:
         # Runs are still active; "nothing to cancel" would be false.
         return JsonResponse(access_denied_body(orphan_denial), status=403)
-    if total == 0:
+    if total == 0 and orphan_denial is None:
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
     body = {"status": "cancelled", "runs_cancelled": total}
     if orphan_denial is not None:
