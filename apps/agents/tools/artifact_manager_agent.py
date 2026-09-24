@@ -800,9 +800,9 @@ def _child_tool_call_id(raw_id: str) -> str:
 
 def _extract_final_text(messages: list[Any]) -> str:
     for message in reversed(messages):
-        if isinstance(message, AIMessage) and message.content:
+        if isinstance(message, AIMessage):
             # A non-text final message must not revive an earlier model proposal.
-            return str(message.text)
+            return message.text
     return ""
 
 

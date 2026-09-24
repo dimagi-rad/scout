@@ -178,9 +178,12 @@ def test_final_text_joins_text_blocks_without_including_reasoning_or_tool_conten
     assert _extract_final_text([message]) == '```json\n{"status":"done"}\n```'
 
 
-def test_non_text_final_message_does_not_revive_an_earlier_model_proposal():
+@pytest.mark.parametrize(
+    "content", ["", [], [{"type": "thinking", "thinking": "No final response"}]]
+)
+def test_non_text_final_message_does_not_revive_an_earlier_model_proposal(content):
     earlier = _final_message({"status": "needs_data_model"}, content_blocks=True)
-    final = AIMessage(content=[{"type": "thinking", "thinking": "No final response"}])
+    final = AIMessage(content=content)
     assert _extract_final_text([earlier, final]) == ""
 
 
