@@ -800,8 +800,9 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     artifact = artifact_result.get("artifact") if isinstance(artifact_result, dict) else None
     runtime = artifact_result.get("runtime") if isinstance(artifact_result, dict) else None
     diagnostics = artifact_result.get("diagnostics") if isinstance(artifact_result, dict) else None
-    if diagnostics is None and isinstance(runtime, dict):
-        diagnostics = runtime.get("diagnostics")
+    if isinstance(runtime, dict) and isinstance(runtime.get("diagnostics"), list):
+        diagnostics = list(diagnostics) if isinstance(diagnostics, list) else []
+        diagnostics.extend(item for item in runtime["diagnostics"] if item not in diagnostics)
     if isinstance(parsed_final, dict):
         status = parsed_final.get("status") or artifact_result.get("status") or "done"
         message = parsed_final.get("message") or final_text
