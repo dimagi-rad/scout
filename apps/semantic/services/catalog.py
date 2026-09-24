@@ -49,6 +49,7 @@ from mcp_server.services.metadata import (
     pipeline_table_primary_keys,
     workspace_list_tables,
 )
+from mcp_server.source_identity import source_identity, unverified_source_identity
 
 
 class SemanticCatalogUnavailable(Exception):
@@ -69,6 +70,7 @@ class PhysicalTable:
     materialized_at: str | None = None
     primary_key: str = ""
     source_tenant_ids: tuple[str, ...] = ()
+    identity: dict[str, Any] | None = None
     source_table_name: str = ""
 
 
@@ -288,18 +290,16 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
             pipeline_config,
         )
         columns = (detail or {}).get("columns", [])
+        source = sources.get(table_name) if sources else None
         owner = (
             ts.tenant
             if ts is not None
             else next(
-                (
-                    tenant
-                    for tenant in tenants
-                    if sources and str(tenant.id) == sources[table_name].tenant_id
-                ),
+                (tenant for tenant in tenants if source and str(tenant.id) == source.tenant_id),
                 None,
             )
         )
+        source_provider = owner.provider if owner else None
         source_table = sources[table_name].source_table_name if sources else table_name
         time_columns = (
             SOURCE_TIME_COLUMNS.get(owner.provider, {}).get(source_table, set()) if owner else set()
@@ -319,6 +319,12 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 type=entry.get("type", "table"),
                 description=(detail or {}).get("description") or entry.get("description", ""),
                 columns=columns,
+                identity=(detail or {}).get("identity")
+                or (
+                    source_identity(source_provider, source_table, columns)
+                    if source_provider is not None and detail is not None
+                    else unverified_source_identity()
+                ),
                 materialized_row_count=entry.get("materialized_row_count"),
                 materialized_at=entry.get("materialized_at"),
                 primary_key=primary_keys.get(table_name, "")
@@ -446,6 +452,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                         "source_type": table.type,
                         "materialized_at": table.materialized_at,
                         "row_count_verified": False,
+                        **({"identity": table.identity} if table.identity else {}),
                         **(
                             {"source_table_name": table.source_table_name}
                             if table.source_table_name

@@ -9,16 +9,22 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from django.conf import settings
 from django.db import models
 
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
-from apps.workspaces.models import MaterializationRun
+from apps.workspaces.models import MaterializationRun, SchemaState, WorkspaceViewSchema
+from apps.workspaces.services.view_sources import (
+    parse_view_sources,
+    validate_published_views,
+)
 from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
+from mcp_server.source_identity import source_identity, unverified_source_identity
 
 if TYPE_CHECKING:
     from apps.workspaces.models import TenantMetadata, TenantSchema
@@ -290,11 +296,49 @@ async def pipeline_describe_table(
             }
         )
 
+    identity = source_identity(
+        pipeline_config.provider if pipeline_config else None, table_name, columns
+    )
     return {
         "name": table_name,
         "description": source_descriptions.get(table_name, ""),
         "columns": columns,
+        **({"identity": identity} if identity else {}),
     }
+
+
+async def workspace_table_identity(
+    workspace_id: UUID | str, ctx: QueryContext, table_name: str, columns: list[dict]
+) -> dict | None:
+    """Resolve a view's source from publication provenance, never its fitted name."""
+    unknown = unverified_source_identity()
+    view_schema = (
+        await WorkspaceViewSchema.objects.filter(
+            workspace_id=workspace_id, schema_name=ctx.schema_name, state=SchemaState.ACTIVE
+        )
+        .select_related("workspace")
+        .afirst()
+    )
+    if view_schema is None:
+        return unknown
+    tenants = {str(tenant.id): tenant async for tenant in view_schema.workspace.tenants.all()}
+    try:
+        sources = parse_view_sources(view_schema.view_sources, set(tenants))
+        if sources is not None:
+            published = await workspace_list_tables(ctx)
+            validate_published_views(sources, {table["name"] for table in published})
+    except Exception:
+        logger.warning(
+            "Could not verify source identity for workspace %s table %s",
+            workspace_id,
+            table_name,
+            exc_info=True,
+        )
+        return unknown
+    source = sources.get(table_name) if sources else None
+    if source is None:
+        return unknown
+    return source_identity(tenants[source.tenant_id].provider, source.source_table_name, columns)
 
 
 def _build_jsonb_annotations(
