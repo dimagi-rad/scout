@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/store/store"
 import { artifactPath } from "@/lib/artifactPath"
+import { useArtifactDateSources } from "@/components/ArtifactViewer/useArtifactQueryData"
 
 export function ArtifactDetailPage() {
   const { artifactId, workspaceId: urlWorkspaceId } = useParams()
@@ -51,13 +52,16 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
   const [dataOpen, setDataOpen] = useState(false)
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
+  const [dateSources, setDateSources] = useArtifactDateSources(artifact)
   const {
     queryData,
     isLoading: isDataLoading,
     error: dataError,
     refetch: refetchData,
     setQueryData,
-  } = useArtifactQueryData(artifactId, workspaceId)
+  } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
+    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
+  } : undefined, dataOpen)
 
   useEffect(() => {
     if (adoptedWorkspaceRef.current) {
@@ -80,9 +84,6 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
 
   function handleViewData() {
     setDataOpen(true)
-    if (!queryData && !isDataLoading) {
-      void refetchData()
-    }
   }
 
   return (
@@ -118,6 +119,7 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
           isLoading={isLoading}
           error={error}
           onQueryData={setQueryData}
+          onDateSourcesChange={setDateSources}
         />
       </div>
 

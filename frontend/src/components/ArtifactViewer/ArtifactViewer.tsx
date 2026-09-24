@@ -5,7 +5,7 @@ import { ArtifactActions } from "./ArtifactActions"
 import { ArtifactCanvas, type ArtifactCanvasHandle } from "./ArtifactCanvas"
 import { ArtifactDataDialog } from "./ArtifactDataDialog"
 import { useArtifactDetail } from "./useArtifactDetail"
-import { useArtifactQueryData } from "./useArtifactQueryData"
+import { useArtifactDateSources, useArtifactQueryData } from "./useArtifactQueryData"
 
 interface ArtifactViewerProps {
   artifactId: string
@@ -18,19 +18,19 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
   const [dataOpen, setDataOpen] = useState(false)
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
+  const [dateSources, setDateSources] = useArtifactDateSources(artifact)
   const {
     queryData,
     isLoading: isDataLoading,
     error: dataError,
     refetch: refetchData,
     setQueryData,
-  } = useArtifactQueryData(artifactId, workspaceId)
+  } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
+    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
+  } : undefined, dataOpen)
 
   function handleViewData() {
     setDataOpen(true)
-    if (!queryData && !isDataLoading) {
-      void refetchData()
-    }
   }
 
   return (
@@ -57,6 +57,7 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
         isLoading={isLoading}
         error={error}
         onQueryData={setQueryData}
+        onDateSourcesChange={setDateSources}
       />
       <ArtifactDataDialog
         open={dataOpen}

@@ -9,7 +9,7 @@ sources:
   - name: sessions
     description: "Chat sessions with timestamps, tags, and participant info"
   - name: messages
-    description: "Individual messages within sessions"
+    description: "Individual messages within sessions. Message identity is snapshot-local, not a durable upstream ID; inspect identity metadata before saving reviewed labels."
     # Messages are fetched one session-detail request at a time; progress is
     # counted in sessions because OCS exposes no message total (issue #221).
     progress_unit: sessions
@@ -27,14 +27,18 @@ relationships:
     from_column: experiment_id
     to_table: raw_experiments
     to_column: experiment_id
+    relationship_type: many_to_one
     description: "Sessions belong to a chatbot"
   - from_table: raw_messages
     from_column: session_id
     to_table: raw_sessions
     to_column: session_id
+    relationship_type: many_to_one
     description: "Messages belong to a session"
   - from_table: raw_sessions
     from_column: participant_identifier
     to_table: raw_participants
     to_column: identifier
-    description: "Sessions reference the participant"
+    relationship_type: many_to_one
+    require_unique_target: true
+    description: "Match only an unambiguous participant in this chatbot. The session API omits participant ID/platform; duplicate identifiers across platforms remain unmatched, never guessed."
