@@ -356,3 +356,30 @@ def test_a_tests_failed_generation_is_published_and_reusable(tenant, workspace):
 
     assert _promote(candidate, workspace, generation, run).promoted
     assert reusable_generation(tenant.id, generation, FINGERPRINT) is not None
+
+
+def test_a_dead_writers_active_run_is_settled_failed_and_superseded_on_publish(tenant, workspace):
+    generation = begin_load_generation(tenant.id)
+    first = _open(tenant, workspace, generation=generation, job_id=1).schema
+    stuck = _completed_run(first, job_id=1, state=MaterializationRun.RunState.LOADING)
+
+    with sync_tenant_data_lock([tenant.id]):
+        settle_orphaned_workspace_candidates(tenant.id)
+    stuck.refresh_from_db()
+    # FAILED, not STALE: the resume still reads its cursors.
+    assert stuck.state == MaterializationRun.RunState.FAILED
+    assert stuck.completed_at is not None
+
+    # The next writer, as it runs: settle, begin, then open (and resume).
+    assert begin_load_generation(tenant.id) == generation
+    resumed = _open(tenant, workspace, generation=generation, job_id=2)
+    run = _completed_run(resumed.schema, job_id=2)
+    assert _promote(resumed.schema, workspace, generation, run, job_id=2).promoted
+    stuck.refresh_from_db()
+    assert stuck.state == MaterializationRun.RunState.STALE
+    assert reusable_generation(tenant.id, generation, FINGERPRINT) is not None
+
+
+def test_a_none_keep_id_is_refused_rather_than_abandoning_everything(tenant):
+    with pytest.raises(ValueError, match="keep_id is required"):
+        abandoned_workspace_candidates(tenant.id, keep_id=None)

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 from apps.common.identifiers import refresh_schema_name
 from apps.users.models import Tenant
@@ -36,13 +37,6 @@ from apps.workspaces.services.load_generations import (
     publish_generation,
     resumable_candidate,
     transforms_publishable,
-)
-
-_SUPERSEDABLE_RUN_STATES = (
-    MaterializationRun.RunState.COMPLETED,
-    MaterializationRun.RunState.PARTIAL,
-    MaterializationRun.RunState.FAILED,
-    MaterializationRun.RunState.CANCELLED,
 )
 
 
@@ -210,10 +204,11 @@ def promote_candidate_schema(
         ):
             return Promotion(promoted=False)
 
-        MaterializationRun.objects.filter(
-            tenant_schema_id=candidate.id,
-            state__in=_SUPERSEDABLE_RUN_STATES,
-        ).exclude(id=run.id).update(state=MaterializationRun.RunState.STALE)
+        # Under T every other run on the candidate is an earlier attempt's,
+        # including a dead writer's run stuck in an active state.
+        MaterializationRun.objects.filter(tenant_schema_id=candidate.id).exclude(id=run.id).exclude(
+            state=MaterializationRun.RunState.STALE
+        ).update(state=MaterializationRun.RunState.STALE)
         retired = tuple(row.id for row in rows if row.state == SchemaState.ACTIVE)
         TenantSchema.objects.filter(id__in=retired).update(state=SchemaState.TEARDOWN)
         candidate.state = SchemaState.ACTIVE
@@ -227,7 +222,7 @@ def fail_workspace_candidate(candidate_id, workspace_id, job_id) -> TenantSchema
     """CAS this load's candidate to FAILED, keeping its data for a resume."""
     try:
         schema = TenantSchema.objects.select_related("tenant").get(id=candidate_id)
-    except (TenantSchema.DoesNotExist, TypeError, ValueError, ValidationError):
+    except (TenantSchema.DoesNotExist, ValidationError):
         return None
     changed = TenantSchema.objects.filter(
         id=schema.id,
@@ -263,6 +258,12 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
             TenantSchema.objects.filter(id__in=[o.id for o in orphans]).update(
                 state=SchemaState.FAILED
             )
+            # The dead writer's run would otherwise report the tenant as loading
+            # forever. FAILED (not STALE) keeps its cursors resumable.
+            MaterializationRun.objects.filter(
+                tenant_schema_id__in=[o.id for o in orphans],
+                state__in=list(MaterializationRun.ACTIVE_STATES),
+            ).update(state=MaterializationRun.RunState.FAILED, completed_at=timezone.now())
         for orphan in orphans:
             orphan.state = SchemaState.FAILED
         return orphans
@@ -277,6 +278,8 @@ def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
     ``keep_id`` is required: excluding None would exclude nothing and hand the
     resumable candidate to cleanup.
     """
+    if keep_id is None:
+        raise ValueError("keep_id is required; None would hand the resumable candidate to cleanup")
     assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
