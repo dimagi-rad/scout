@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api, ApiError } from "@/api/client"
+import type { TenantMembership } from "@/store/domainSlice"
+import { useAppStore } from "@/store/store"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import type { CanvasCommitReport, CanvasProjection } from "./canvasApi"
 
@@ -183,6 +185,31 @@ describe("Canvas response context", () => {
 })
 
 describe("Canvas read and mutation ordering", () => {
+  it("shows a commit-time catalog error even when the fresh projection has no problems", async () => {
+    const pending = projection("thread-a", "Preserved draft")
+    const message = "The semantic catalog changed during validation. Save again; your drafts are preserved."
+    vi.mocked(api.get).mockResolvedValueOnce(pending)
+    vi.mocked(api.post)
+      .mockResolvedValueOnce({
+        committed: [], blocked: true, conflicts: [], projection: pending,
+        blocking_diagnostics: [{
+          code: "CATALOG_CHANGED", severity: "error", object: "canvas", object_uuid: "",
+          path: "", message,
+        }],
+      })
+      .mockResolvedValueOnce(commitReport(projection("thread-a", "Saved draft", true)))
+    render(panel("workspace-a", "thread-a"))
+    await screen.findByText("Preserved draft")
+    startMutation("commit")
+    expect(await screen.findByRole("alert")).toHaveTextContent(message)
+    expect(screen.queryByTestId("canvas-problems-panel")).not.toBeInTheDocument()
+    expect(screen.getByText("Preserved draft")).toBeInTheDocument()
+    expect(screen.getByTestId("canvas-commit-button")).toBeEnabled()
+    startMutation("commit")
+    await screen.findByText("Saved draft")
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+  })
+
   it.each(["commit", "remove"])("discards a poll that completes after %s", async (kind) => {
     const oldPoll = deferred<CanvasProjection>()
     vi.mocked(api.get)
@@ -299,5 +326,23 @@ describe("Canvas read and mutation ordering", () => {
     view.unmount()
     act(() => retiredPoll())
     expect(api.get).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("Canvas for read-only members", () => {
+  afterEach(() => useAppStore.setState({ domains: [] }))
+
+  it("replaces Save all with a read-only hint", async () => {
+    useAppStore.setState({
+      domains: [{ id: "workspace-a", role: "read" } as TenantMembership],
+    })
+    vi.mocked(api.get).mockResolvedValueOnce(projection("thread-a", "A draft"))
+    render(panel("workspace-a", "thread-a"))
+
+    await screen.findByText("A draft")
+    expect(screen.queryByTestId("canvas-commit-button")).not.toBeInTheDocument()
+    expect(screen.getByTestId("canvas-readonly-hint")).toHaveTextContent("Read-only access")
+    expect(screen.queryByTestId("canvas-revert-shared_dataset")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("canvas-remove-shared_dataset")).not.toBeInTheDocument()
   })
 })

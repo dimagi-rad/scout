@@ -22,6 +22,7 @@ from apps.users.services.oauth_scope import (
     canonical_provider,
     is_active_identity,
     oauth_membership_scope_mismatch,
+    same_provider,
 )
 from apps.users.services.token_refresh import (
     credential_fingerprint,
@@ -208,7 +209,7 @@ def _oauth_gap(membership, connection, tokens, bindings):
         return _gap(CredentialGapCode.OAUTH_ACCOUNT_MISSING, membership.tenant, membership)
     if account.user_id != membership.user_id:
         return _gap(CredentialGapCode.OAUTH_ACCOUNT_USER_MISMATCH, membership.tenant, membership)
-    if canonical_provider(account.provider) != canonical_provider(membership.tenant.provider):
+    if not same_provider(account.provider, membership.tenant.provider):
         return _gap(
             CredentialGapCode.OAUTH_ACCOUNT_PROVIDER_MISMATCH,
             membership.tenant,
@@ -268,7 +269,7 @@ def _membership_gap(membership, tokens, bindings, connection_teams):
         return _gap(CredentialGapCode.MISSING_CONNECTION, tenant, membership)
     if connection.user_id != membership.user_id:
         return _gap(CredentialGapCode.CONNECTION_USER_MISMATCH, tenant, membership)
-    if canonical_provider(connection.provider) != canonical_provider(tenant.provider):
+    if not same_provider(connection.provider, tenant.provider):
         return _gap(CredentialGapCode.CONNECTION_PROVIDER_MISMATCH, tenant, membership)
 
     if connection.credential_type == TenantConnection.API_KEY:

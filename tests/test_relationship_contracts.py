@@ -298,3 +298,28 @@ def test_catalog_warnings_survive_cube_promotion(workspace, monkeypatch):
     model.refresh_from_db()
     assert model.diagnostics == warnings
     assert model.metadata["catalog_diagnostics"] == warnings
+
+
+@pytest.mark.django_db(transaction=True)
+def test_cube_failure_message_is_not_replaced_by_catalog_diagnostics(
+    workspace, monkeypatch, settings
+):
+    settings.CUBE_SCHEMA_VALIDATION_REQUIRED = False
+    model = SemanticModel.objects.create(
+        workspace=workspace,
+        name="Two failures",
+        metadata={"catalog_diagnostics": [{"level": "error", "message": "Catalog conflict"}]},
+    )
+    monkeypatch.setattr(
+        cube_schema.CubeClient,
+        "validate_schema",
+        AsyncMock(return_value={"valid": False, "errors": ["Cube compiler failure"]}),
+    )
+    with pytest.raises(cube_schema.CubeSchemaBuildError, match="Cube compiler failure"):
+        cube_schema.build_and_promote_cube_schema(workspace, model=model)
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["error"] == "Cube compiler failure"
+    assert {item["message"] for item in model.diagnostics} == {
+        "Catalog conflict",
+        "Cube compiler failure",
+    }

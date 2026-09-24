@@ -36,7 +36,7 @@ from apps.common.db_deadline import preserve_transaction_timeouts
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import TokenRefreshError, UpstreamRefreshFailed, UpstreamTokenExpired
 from apps.users.models import TenantConnection, User
-from apps.users.services.oauth_scope import account_scope, canonical_provider
+from apps.users.services.oauth_scope import account_scope, canonical_provider, same_provider
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +326,14 @@ def _ensure_before_deadline(deadline, clock) -> None:
 def _preflight_token(token, *, deadline=None, clock=time.monotonic) -> _TokenPreflight:
     with transaction.atomic(), preserve_transaction_timeouts():
         _configure_transaction_deadline(deadline, clock)
-        account = SocialAccount.objects.get(pk=token.account_id)
+        try:
+            account = SocialAccount.objects.get(pk=token.account_id)
+        except SocialAccount.DoesNotExist as exc:
+            # Callers handle only TokenRefreshError; a raw DoesNotExist from the
+            # disconnect race would surface as a 500 instead of a reconnect prompt.
+            raise TokenRefreshError(
+                "OAuth account no longer exists; reconnect this account."
+            ) from exc
         _configure_transaction_deadline(deadline, clock)
         connection_fences = tuple(
             _ConnectionFence(
@@ -368,7 +375,7 @@ def _preflight_token(token, *, deadline=None, clock=time.monotonic) -> _TokenPre
     )
     if not all(
         fence.user_id == preflight.user_id
-        and canonical_provider(fence.provider) == preflight.account_provider
+        and same_provider(fence.provider, preflight.account_provider)
         and fence.scope_key == preflight.account_scope
         for fence in connection_fences
     ):
@@ -425,7 +432,7 @@ def _identity_matches(
         current.account_id != preflight.account_id
         or current.app_id != preflight.app_id
         or current.account.user_id != preflight.user_id
-        or canonical_provider(current.account.provider) != preflight.account_provider
+        or not same_provider(current.account.provider, preflight.account_provider)
         or account_scope(current.account) != preflight.account_scope
     ):
         return False

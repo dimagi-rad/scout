@@ -5,6 +5,7 @@ import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
 import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
 import {
@@ -572,8 +573,10 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
       ? formatToolOutput(part.output)
       : null
 
+  const { canWrite } = useWorkspaceRole(workspaceId)
   const showCancelButton =
-    toolName === "run_materialization"
+    canWrite
+    && toolName === "run_materialization"
     && !!matchingJob
     && (matchingJob.state === "pending" || matchingJob.state === "running")
     && !!workspaceId

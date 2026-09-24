@@ -3,6 +3,7 @@ import { Link } from "react-router-dom"
 import { GalleryVerticalEnd, Loader2 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { ArtifactList } from "./ArtifactList"
 import type { ArtifactSummary } from "@/store/artifactSlice"
 import { Button } from "@/components/ui/button"
@@ -21,6 +22,7 @@ export function ArtifactsPage() {
   } = useAppStore((s) => s.artifactActions)
 
   const { status: networkStatus } = useNetworkStatus()
+  const { canWrite } = useWorkspaceRole()
 
   // Fetch on mount, on search change, and whenever the active workspace changes,
   // so switching workspaces refetches instead of leaving the previous
@@ -83,6 +85,7 @@ export function ArtifactsPage() {
           onSearchChange={handleSearchChange}
           onUpdate={handleUpdate}
           onDelete={handleDelete}
+          canWrite={canWrite}
         />
       )}
     </div>

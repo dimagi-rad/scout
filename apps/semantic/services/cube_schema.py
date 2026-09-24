@@ -149,13 +149,19 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
 
 
 def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
-    content = generate_cube_schema_yaml(model)
+    try:
+        content = generate_cube_schema_yaml(model)
+    except ValueError as exc:
+        # Never remove a broken filter/measure silently: that changes the metric.
+        # The normal failed-build path retains the previous active publication.
+        raise CubeSchemaBuildError(f"Could not generate Cube schema: {exc}") from exc
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
     validation = async_to_sync(CubeClient().validate_schema)(content)
+    validation_diagnostics = _diagnostics_from_validation(validation)
     diagnostics = [
         *(model.metadata or {}).get("catalog_diagnostics", []),
-        *_diagnostics_from_validation(validation),
+        *validation_diagnostics,
     ]
 
     if not validation.get("valid", False):
@@ -172,7 +178,7 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
         )
         if settings.CUBE_SCHEMA_VALIDATION_REQUIRED:
             raise CubeSchemaBuildError("Generated Cube schema failed validation.")
-        raise CubeSchemaBuildError(_diagnostics_message(diagnostics))
+        raise CubeSchemaBuildError(_diagnostics_message(validation_diagnostics))
 
     with transaction.atomic():
         CubeSchema.objects.filter(

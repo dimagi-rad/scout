@@ -26,6 +26,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.tasks import rebuild_workspace_semantic_model_core, recover_workspace_data
 from mcp_server.server import get_schema_status
+from tests.tenant_access import agrant_tenant_access, usable_connection
 
 
 @pytest.fixture
@@ -38,7 +39,9 @@ def recovery_setup(db):
     workspace = Workspace.objects.create(name="Recovery Domain")
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
     user = User.objects.create_user(email="recovery@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant=tenant)
+    TenantMembership.objects.create(
+        user=user, tenant=tenant, connection=usable_connection(user, tenant.provider)
+    )
     WorkspaceMembership.objects.create(
         workspace=workspace,
         user=user,
@@ -363,6 +366,7 @@ async def test_recovery_worker_persists_actionable_failure(
 async def test_missing_view_keeps_existing_source_data(recovery_setup):
     other = await Tenant.objects.acreate(provider="commcare", external_id="other-recovery")
     await WorkspaceTenant.objects.acreate(workspace=recovery_setup.workspace, tenant=other)
+    await agrant_tenant_access(recovery_setup.user, other)
     await TenantSchema.objects.acreate(
         tenant=recovery_setup.tenant, schema_name="recovery_present", state=SchemaState.ACTIVE
     )

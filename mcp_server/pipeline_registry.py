@@ -65,8 +65,13 @@ class RelationshipConfig:
     require_unique_target: bool = False
 
     def __post_init__(self):
-        if self.relationship_type not in {"many_to_one", "one_to_many", "one_to_one"}:
-            raise ValueError("Pipeline relationships require an explicit supported cardinality.")
+        supported = {"many_to_one", "one_to_many", "one_to_one"}
+        if self.relationship_type not in supported:
+            raise ValueError(
+                f"Relationship {self.from_table}.{self.from_column} -> "
+                f"{self.to_table}.{self.to_column} declares unsupported cardinality "
+                f"{self.relationship_type!r}; expected one of {sorted(supported)}."
+            )
         if self.require_unique_target and self.relationship_type == "one_to_many":
             raise ValueError("A one-to-many relationship cannot require a unique target key.")
         if not isinstance(self.additional_keys, list) or any(

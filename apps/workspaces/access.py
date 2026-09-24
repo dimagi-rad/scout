@@ -18,14 +18,38 @@ distinct, actionable one naming the lost project(s) — so callers can explain "
 upstream access was removed" instead of a dead, unexplained 403. The
 ``(workspace, membership)`` tuple API is preserved; ``*_ex`` variants expose the
 reason, and ``access_denied_body`` builds the response payload from it.
+
+With ``UPSTREAM_ACCESS_FRESHNESS_ENFORCED`` on, a locally granted decision must also
+pass upstream-freshness admission (``services/access_freshness.py``): stale proofs
+are rechecked before protected data is released, and a check that cannot complete
+is a retryable denial rather than a lost membership.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from django.core.cache import cache
+
 from apps.users.models import TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.services.access_freshness import (
+    CREDENTIAL_EXPIRED,
+    CREDENTIAL_MISSING,
+    RETRYABLE_REASONS,
+    UPSTREAM_ACCESS_LOST,
+    VERIFICATION_IN_PROGRESS,
+    VERIFICATION_UNAVAILABLE,
+    UpstreamAdmission,
+    VerificationBudget,
+    aadmit_upstream,
+    acheck_freshness,
+    admit_upstream,
+    averify_membership_history,
+    check_freshness,
+    final_denial_reason,
+    freshness_enforced,
+)
 
 NOT_MEMBER = "not_member"
 TENANT_ACCESS_LOST = "tenant_access_lost"
@@ -48,7 +72,7 @@ class WorkspaceAccess:
 
     ``workspace``/``membership`` are set iff access is granted. On denial they are
     ``None`` and ``denied_reason`` is one of ``NOT_MEMBER`` / ``TENANT_ACCESS_LOST`` /
-    ``INSUFFICIENT_ROLE``;
+    ``INSUFFICIENT_ROLE`` or an upstream-freshness reason (``FRESHNESS_DENIAL_REASONS``);
     ``lost_tenant_names`` names the workspace's tenants the user no longer shares.
     """
 
@@ -60,6 +84,67 @@ class WorkspaceAccess:
     @property
     def granted(self) -> bool:
         return self.workspace is not None
+
+    @property
+    def retryable(self) -> bool:
+        return self.denied_reason in RETRYABLE_REASONS
+
+
+def _freshness_denied(reason: str | None) -> WorkspaceAccess:
+    return WorkspaceAccess(denied_reason=reason or VERIFICATION_UNAVAILABLE)
+
+
+def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceAccess:
+    """Name the upstream cause when this very recheck is what archived the coverage.
+
+    A generic lost-coverage denial reads as "not connected"; a revocation or dead
+    sign-in just observed upstream needs its own remedy (ask a provider admin, or
+    reconnect), so keep the lost tenant names and report the observed reason.
+    """
+    if result.denied_reason == TENANT_ACCESS_LOST and admission.reason in (
+        UPSTREAM_ACCESS_LOST,
+        CREDENTIAL_EXPIRED,
+    ):
+        return WorkspaceAccess(
+            denied_reason=admission.reason, lost_tenant_names=result.lost_tenant_names
+        )
+    return result
+
+
+CONNECTED_ACCOUNTS_PATH = "/settings/connections"
+RETRY_COOLDOWN_SECONDS = 10
+_RETRY_PENDING = "pending"
+_REPLAYABLE_REASONS = frozenset(
+    {
+        TENANT_ACCESS_LOST,
+        CREDENTIAL_MISSING,
+        CREDENTIAL_EXPIRED,
+        UPSTREAM_ACCESS_LOST,
+        VERIFICATION_UNAVAILABLE,
+        VERIFICATION_IN_PROGRESS,
+    }
+)
+
+_FRESHNESS_MESSAGES = {
+    CREDENTIAL_MISSING: (
+        "Scout has no usable connection for one of this workspace's sources. "
+        "Reconnect it under Connected Accounts."
+    ),
+    CREDENTIAL_EXPIRED: (
+        "Your sign-in for one of this workspace's sources has expired. "
+        "Reconnect it under Connected Accounts."
+    ),
+    UPSTREAM_ACCESS_LOST: (
+        "Your access to one of this workspace's sources was removed upstream. "
+        "Reconnect or ask an admin to restore it."
+    ),
+    VERIFICATION_UNAVAILABLE: (
+        "We couldn't verify your access to this workspace right now. Please retry shortly."
+    ),
+    VERIFICATION_IN_PROGRESS: (
+        "Your access to this workspace is being verified. Please retry in a moment."
+    ),
+}
 
 
 def access_denied_body(result: WorkspaceAccess) -> dict:
@@ -79,11 +164,28 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),
         }
+    if result.denied_reason in _FRESHNESS_MESSAGES:
+        body = {
+            "error": _FRESHNESS_MESSAGES[result.denied_reason],
+            "reason": result.denied_reason,
+            "retryable": result.retryable,
+            "recovery_url": CONNECTED_ACCOUNTS_PATH,
+        }
+        if result.lost_tenant_names:
+            body["lost_tenants"] = list(result.lost_tenant_names)
+        return body
     return {"error": _GENERIC_DENIED}
 
 
 def _live_tenant_ids(workspace) -> list:
     return list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
+
+
+async def _alive_tenant_ids(workspace) -> list:
+    return [
+        tenant_id
+        async for tenant_id in workspace.workspace_tenants.values_list("tenant_id", flat=True)
+    ]
 
 
 def _tenant_rows(workspace) -> list[tuple]:
@@ -162,10 +264,8 @@ def _role_satisfies(role: str, minimum_role: str) -> bool:
     return role_rank is not None and minimum_rank is not None and role_rank >= minimum_rank
 
 
-def resolve_workspace_access_ex(
-    user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
-) -> WorkspaceAccess:
-    """Resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
+def _resolve_local_access_ex(user, workspace_id, *, minimum_role: str) -> WorkspaceAccess:
+    """Membership, tenant coverage and role, from local state only."""
     try:
         wm = WorkspaceMembership.objects.select_related("workspace").get(
             workspace_id=workspace_id, user=user
@@ -182,10 +282,8 @@ def resolve_workspace_access_ex(
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
 
 
-async def aresolve_workspace_access_ex(
-    user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
-) -> WorkspaceAccess:
-    """Async: resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
+async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) -> WorkspaceAccess:
+    """Async twin of ``_resolve_local_access_ex``."""
     try:
         wm = await WorkspaceMembership.objects.select_related("workspace").aget(
             workspace_id=workspace_id, user=user
@@ -200,6 +298,121 @@ async def aresolve_workspace_access_ex(
     if not _role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
+
+
+def resolve_workspace_access_ex(
+    user,
+    workspace_id,
+    *,
+    minimum_role: str = WorkspaceRole.READ,
+    verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
+) -> WorkspaceAccess:
+    """Resolve access, exposing the denial reason (see ``WorkspaceAccess``).
+
+    ``verification`` selects the upstream-freshness budget for protected data;
+    ``None`` is the recovery-metadata mode, which needs membership but must stay
+    reachable while upstream verification is failing.
+    """
+    result = _resolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
+    if verification is None or not result.granted or not freshness_enforced():
+        return result
+    admission = admit_upstream(user.pk, _live_tenant_ids(result.workspace), budget=verification)
+    if not admission.rechecked:
+        return result if admission.admitted else _freshness_denied(admission.reason)
+    result = _resolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
+    if not result.granted:
+        return _attribute_observed_denial(result, admission)
+    final = check_freshness(user.pk, _live_tenant_ids(result.workspace))
+    return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
+
+
+async def aresolve_workspace_access_ex(
+    user,
+    workspace_id,
+    *,
+    minimum_role: str = WorkspaceRole.READ,
+    verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
+) -> WorkspaceAccess:
+    """Async twin of ``resolve_workspace_access_ex``."""
+    result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
+    if verification is None or not result.granted or not freshness_enforced():
+        return result
+    admission = await aadmit_upstream(
+        user.pk, await _alive_tenant_ids(result.workspace), budget=verification
+    )
+    if not admission.rechecked:
+        return result if admission.admitted else _freshness_denied(admission.reason)
+    result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
+    if not result.granted:
+        return _attribute_observed_denial(result, admission)
+    final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
+    return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
+
+
+async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
+    """Explicit member-initiated recheck, reachable while protected access is denied.
+
+    Only membership is required up front — a member whose tenant was archived by a
+    revocation still qualifies — and only the caller's own connections are checked.
+    The final decision is read back from the database rather than inferred from the
+    provider answer, so a concurrent change cannot be reported as restored access.
+    """
+    local = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
+    if local.denied_reason == NOT_MEMBER:
+        return local
+    workspace = local.workspace
+    if workspace is None:
+        try:
+            membership = await WorkspaceMembership.objects.select_related("workspace").aget(
+                workspace_id=workspace_id, user=user
+            )
+        except WorkspaceMembership.DoesNotExist:
+            return WorkspaceAccess(denied_reason=NOT_MEMBER)
+        workspace = membership.workspace
+    tenant_ids = await _alive_tenant_ids(workspace)
+    if not tenant_ids or not freshness_enforced():
+        return local
+    # Keyed on the user: the protected resource is their connections, which any of
+    # their workspaces could otherwise re-trigger. A tombstoned history can never
+    # short-circuit as fresh, so without this every retry is a provider round-trip.
+    cooldown_key = f"access-verify-retry:{user.pk}"
+    if not await cache.aadd(cooldown_key, _RETRY_PENDING, RETRY_COOLDOWN_SECONDS):
+        if local.granted and (await acheck_freshness(user.pk, tenant_ids)).fresh:
+            return local
+        replayed = await cache.aget(cooldown_key)
+        # The lease is per user but a concluded reason belongs to one workspace.
+        if isinstance(replayed, dict) and replayed.get("workspace") == str(workspace_id):
+            return WorkspaceAccess(
+                denied_reason=replayed["reason"],
+                lost_tenant_names=tuple(replayed.get("lost", ())),
+            )
+        return _freshness_denied(VERIFICATION_IN_PROGRESS)
+    retry_reason = await averify_membership_history(
+        user.pk, tenant_ids, budget=VerificationBudget.INTERACTIVE
+    )
+    admission = UpstreamAdmission(admitted=False, rechecked=True, reason=retry_reason)
+    result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
+    if not result.granted:
+        if retry_reason in RETRYABLE_REASONS:
+            result = _freshness_denied(retry_reason)
+        else:
+            result = _attribute_observed_denial(result, admission)
+    else:
+        final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
+        if not final.fresh:
+            result = _freshness_denied(final_denial_reason(admission, final))
+    # Re-arm after the check: a slow provider can outlast the first window.
+    # Kept even on success: a tombstoned history can never short-circuit as fresh, so
+    # a granted retry still cost a provider call and must stay throttled.
+    concluded = _RETRY_PENDING
+    if not result.granted and result.denied_reason in _REPLAYABLE_REASONS:
+        concluded = {
+            "workspace": str(workspace_id),
+            "reason": result.denied_reason,
+            "lost": list(result.lost_tenant_names),
+        }
+    await cache.aset(cooldown_key, concluded, RETRY_COOLDOWN_SECONDS)
+    return result
 
 
 def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):

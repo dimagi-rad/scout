@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from apps.artifacts.models import Artifact, ArtifactSemanticQuery
@@ -108,6 +108,23 @@ def semantic_query_summary(record: ArtifactSemanticQuery) -> dict[str, Any]:
         "block_locations": record.block_locations,
         "unresolved_references": record.unresolved_references,
     }
+
+
+def sort_manifest_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order entries as ``order_by("query_key")`` would, which Python sorting doesn't match.
+
+    Shared by every surface that pages a manifest so they agree with each other and
+    with the persisted rows' model ordering.
+    """
+    if not entries:
+        return []
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT key FROM unnest(%s::text[]) AS key ORDER BY key",
+            [[entry["key"] for entry in entries]],
+        )
+        rank = {key: index for index, (key,) in enumerate(cursor.fetchall())}
+    return sorted(entries, key=lambda entry: rank[entry["key"]])
 
 
 def manifest_entry_summary(entry: dict[str, Any]) -> dict[str, Any]:

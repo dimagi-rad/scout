@@ -15,6 +15,10 @@ WORKER = "a" * 64
 OTHER = "b" * 64
 STARTED = "2026-09-15T10:20:30.123456789Z"
 RECEIPT_ROOT = Path(".scout-worker-drains-v1")
+# A hang guard, not a performance bound: each drain spawns dozens of Python
+# docker doubles, and on a loaded machine 10s timed out whichever test was
+# running (the one-off setgid[1408] failure was this).
+SUBPROCESS_TIMEOUT = 120
 
 DOCKER_DOUBLE = r"""
 import atexit, json, os, sys
@@ -159,7 +163,7 @@ def drain_cli(tmp_path):
             cwd=tmp_path if cwd is None else cwd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=SUBPROCESS_TIMEOUT,
             check=False,
         )
         return result, json.loads(state_file.read_text())
@@ -172,7 +176,7 @@ def drain_cli(tmp_path):
             cwd=tmp_path,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=SUBPROCESS_TIMEOUT,
             check=False,
         )
         return result, json.loads(state_file.read_text())
@@ -878,7 +882,7 @@ def test_installed_procrastinate_sigterm_finishes_running_job_without_claiming_n
         text=True,
     )
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + SUBPROCESS_TIMEOUT
         while not (tmp_path / "started").exists() and time.monotonic() < deadline:
             assert process.poll() is None
             time.sleep(0.01)
@@ -889,7 +893,7 @@ def test_installed_procrastinate_sigterm_finishes_running_job_without_claiming_n
         assert not (tmp_path / "completed").exists()
         assert not (tmp_path / "unexpected-claim").exists()
         (tmp_path / "release").touch()
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
         assert process.returncode == 0, stderr
         assert json.loads(stdout) == ["succeeded", "todo"]
         assert (tmp_path / "completed").exists()
