@@ -44,7 +44,10 @@ def test_preexisting_rows_and_old_model_writes_survive_provenance_migration(old_
         workspace=workspace, schema_name="ws_before_provenance", state="active"
     )
 
-    _migrate([AFTER])
+    # Forward to the current schema: the current model must read rows the
+    # pre-0012 writer created, and that writer must keep inserting without any
+    # column added since (every later addition needs a real database default).
+    _migrate(MigrationExecutor(connection).loader.graph.leaf_nodes())
     assert WorkspaceViewSchema.objects.get(pk=existing.pk).view_sources == {}
     existing.last_error = "An older worker can still update this row"
     existing.save()  # Includes only fields known to the pre-0012 model.

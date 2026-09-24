@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import re
 import threading
@@ -29,6 +30,11 @@ from apps.common.identifiers import (
 )
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
+from apps.workspaces.services.data_operation import (
+    LockOrderError,
+    sync_tenant_data_lock,
+    sync_workspace_data_lock,
+)
 from apps.workspaces.services.view_sources import VIEW_SOURCES_VERSION
 
 logger = logging.getLogger(__name__)
@@ -39,9 +45,67 @@ logger = logging.getLogger(__name__)
 # apps.common.identifiers (arch #235).
 _MAX_VIEW_PREFIX_LEN = 32
 
+# Schema comment written inside the publication transaction. It is the only
+# evidence a *committed* physical publication leaves behind: the control row is
+# saved afterwards in a different database, so a worker that dies in between
+# leaves a marker no row claims (see ``reconcile_view_publication``).
+_PUBLICATION_MARKER_VERSION = 1
+
+# Retirement takes ACCESS EXCLUSIVE locks on every relation of the schema; a
+# reader that never ends would otherwise pin the worker forever. This bounds each
+# lock wait (not the whole transaction); exceeding it fails the retirement
+# visibly and it is retried with backoff.
+_RETIRE_LOCK_TIMEOUT = "30s"
+
+# The publication transaction holds W, T and the view lock; never let it sit
+# behind a long in-place load indefinitely. A timeout rolls back to last-good.
+_PUBLICATION_LOCK_TIMEOUT = "30s"
 
 _VIEW_BUILD_LOCK_NAMESPACE = 0x53435642
 _view_build_context = threading.local()
+_publication_context = threading.local()
+
+
+@contextlib.contextmanager
+def _serialize_view_publication(workspace):
+    with sync_workspace_data_lock(workspace.id):
+        tenant_ids = frozenset(workspace.tenants.values_list("id", flat=True))
+        with sync_tenant_data_lock(tenant_ids), _serialize_view_build(workspace.id):
+            _publication_context.owned = (workspace.id, tenant_ids)
+            try:
+                yield
+            finally:
+                _publication_context.owned = None
+
+
+def _assert_publication_owned(workspace, tenant_ids=None):
+    owned = getattr(_publication_context, "owned", None)
+    if owned is None or owned[0] != workspace.id:
+        raise LockOrderError("View publication requires workspace and tenant ownership")
+    if tenant_ids is not None and not set(tenant_ids) <= owned[1]:
+        raise LockOrderError("Workspace sources changed after acquiring tenant locks; retry")
+
+
+class SchemaStillReferenced(Exception):
+    """A schema cannot be retired: objects outside it still depend on its relations."""
+
+    def __init__(
+        self,
+        schema_name: str,
+        dependents: list[dict],
+        detail: str = "",
+        *,
+        converges: bool = True,
+    ):
+        self.schema_name = schema_name
+        self.dependents = dependents
+        self.detail = detail
+        # False when no rebuild can move the blocker (a type, function or
+        # foreign key); retrying would only delay the operator's error log.
+        self.converges = converges
+        listed = ", ".join(f"{d['schema']}.{d['name']}" for d in dependents[:5])
+        reason = listed or detail or "unknown dependents"
+        super().__init__(f"Schema '{schema_name}' is still referenced by {reason}")
 
 
 @contextlib.contextmanager
@@ -83,6 +147,17 @@ def get_managed_db_connection():
     if not url:
         raise RuntimeError("MANAGED_DATABASE_URL is not configured")
     return psycopg.connect(url, autocommit=True)
+
+
+def get_managed_db_transaction():
+    """Managed connection with autocommit off, for DDL that must publish atomically.
+
+    Routed through ``get_managed_db_connection`` so a caller (or a test) that
+    substitutes the managed connection sees this connection too.
+    """
+    conn = get_managed_db_connection()
+    conn.autocommit = False
+    return conn
 
 
 async def aget_managed_db_connection():
@@ -275,6 +350,204 @@ class SchemaManager:
         finally:
             conn.close()
 
+    # View rewrite rules are how one schema's views keep reading another schema's
+    # relations. A view's own rule depends on the view itself, so restricting the
+    # dependent namespace to a *different* schema leaves exactly the outside
+    # readers — normally sibling workspace ``ws_*`` views.
+    _EXTERNAL_DEPENDENTS_SQL = """
+        SELECT DISTINCT dn.nspname, dc.relname, dc.relkind
+        FROM pg_depend d
+        JOIN pg_rewrite rw ON rw.oid = d.objid AND d.classid = 'pg_rewrite'::regclass
+        JOIN pg_class dc ON dc.oid = rw.ev_class
+        JOIN pg_namespace dn ON dn.oid = dc.relnamespace
+        JOIN pg_class rc ON rc.oid = d.refobjid AND d.refclassid = 'pg_class'::regclass
+        JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+        WHERE rn.nspname = %(schema)s AND dn.nspname <> %(schema)s
+        ORDER BY 1, 2
+    """
+
+    _SCHEMA_RELATIONS_SQL = """
+        SELECT c.relname, c.relkind
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+        ORDER BY c.relname
+    """
+
+    # DROP TABLE on a sequence (and vice versa) is an error, so each relkind needs
+    # its own statement. Sequences cannot be LOCK TABLE'd at all.
+    _DROP_KEYWORD_BY_RELKIND = {
+        "r": "TABLE",
+        "p": "TABLE",
+        "f": "FOREIGN TABLE",
+        "v": "VIEW",
+        "m": "MATERIALIZED VIEW",
+        "S": "SEQUENCE",
+    }
+
+    def external_dependents(self, schema_name: str) -> list[dict]:
+        """Objects outside ``schema_name`` whose views read relations inside it."""
+        conn = get_managed_db_connection()
+        try:
+            cursor = conn.cursor()
+            try:
+                return self._external_dependents(cursor, schema_name)
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
+
+    def _external_dependents(self, cursor, schema_name: str) -> list[dict]:
+        cursor.execute(self._EXTERNAL_DEPENDENTS_SQL, {"schema": schema_name})
+        return [
+            {"schema": schema, "name": name, "relkind": relkind}
+            for schema, name, relkind in cursor.fetchall()
+        ]
+
+    def retire_tenant_schema(self, tenant_schema: TenantSchema) -> None:
+        """Drop a tenant schema only if nothing outside it still reads its data.
+
+        Unlike ``teardown`` this never cascades: a sibling workspace whose views
+        still point at this schema must keep its query layer, so the whole
+        retirement is one transaction that
+
+        1. takes ACCESS EXCLUSIVE locks on the schema's relations, which blocks a
+           ``CREATE VIEW`` that would otherwise appear between check and drop,
+        2. re-checks external dependents under those locks and raises
+           ``SchemaStillReferenced`` (dropping nothing) if any remain,
+        3. empties the schema with RESTRICT drops only, retrying until a pass makes
+           no progress — so an in-schema dbt view is dropped before the raw table it
+           reads, and an unexpected dependency fails the transaction instead of
+           silently taking someone else's object with it.
+
+        Role cleanup after the commit is best-effort, as in ``teardown``.
+        """
+        schema_name = tenant_schema.schema_name
+        conn = get_managed_db_transaction()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                psycopg.sql.SQL("SET LOCAL lock_timeout = {}").format(
+                    psycopg.sql.Literal(_RETIRE_LOCK_TIMEOUT)
+                )
+            )
+            cursor.execute(self._SCHEMA_RELATIONS_SQL, (schema_name,))
+            relations = sorted(
+                cursor.fetchall(), key=lambda rel: (rel[1] not in ("v", "m"), rel[0])
+            )
+            for relname, relkind in relations:
+                # LOCK TABLE rejects sequences, materialized views and foreign tables.
+                if relkind not in ("r", "p", "v"):
+                    continue
+                cursor.execute(
+                    psycopg.sql.SQL("LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE").format(
+                        psycopg.sql.Identifier(schema_name),
+                        psycopg.sql.Identifier(relname),
+                    )
+                )
+
+            dependents = self._external_dependents(cursor, schema_name)
+            if dependents:
+                conn.rollback()
+                raise SchemaStillReferenced(schema_name, dependents)
+
+            self._drop_relations_restrict(conn, cursor, schema_name, relations)
+            try:
+                cursor.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} RESTRICT").format(
+                        psycopg.sql.Identifier(schema_name)
+                    )
+                )
+            except psycopg.errors.DependentObjectsStillExist as exc:
+                # Something that is not a relation (a type, function, or a relation
+                # created after the listing) is still in the schema.
+                conn.rollback()
+                raise SchemaStillReferenced(
+                    schema_name,
+                    [],
+                    detail=str(exc),
+                    converges=self._relations_appeared(cursor, schema_name, relations),
+                ) from exc
+            cursor.close()
+            conn.commit()
+        except Exception:
+            if not conn.closed:
+                with contextlib.suppress(Exception):
+                    conn.rollback()
+            raise
+        finally:
+            if not conn.closed:
+                conn.close()
+
+        self._drop_schema_roles(schema_name)
+        logger.info("Retired schema '%s' (no external dependents)", schema_name)
+
+    def _drop_relations_restrict(self, conn, cursor, schema_name: str, relations) -> None:
+        remaining = list(relations)
+        while remaining:
+            blocked: list[tuple[str, str]] = []
+            detail = ""
+            for relname, relkind in remaining:
+                keyword = self._DROP_KEYWORD_BY_RELKIND[relkind]
+                try:
+                    # A savepoint keeps one blocked relation from aborting the
+                    # transaction that still has to drop the others.
+                    with conn.transaction():
+                        cursor.execute(
+                            psycopg.sql.SQL("DROP {} IF EXISTS {}.{} RESTRICT").format(
+                                psycopg.sql.SQL(keyword),
+                                psycopg.sql.Identifier(schema_name),
+                                psycopg.sql.Identifier(relname),
+                            )
+                        )
+                except psycopg.errors.DependentObjectsStillExist as exc:
+                    blocked.append((relname, relkind))
+                    detail = str(exc)
+            if len(blocked) == len(remaining):
+                dependents = self._external_dependents(cursor, schema_name)
+                conn.rollback()
+                raise SchemaStillReferenced(
+                    schema_name,
+                    dependents,
+                    detail=detail,
+                    converges=bool(dependents)
+                    or self._relations_appeared(cursor, schema_name, relations),
+                )
+            remaining = blocked
+
+    def _relations_appeared(self, cursor, schema_name: str, listed) -> bool:
+        """True if relations were created in the schema after it was listed.
+
+        That blocker is transient (a later attempt lists and drops them); a
+        type, function or foreign key that blocks the drop is not.
+        """
+        try:
+            cursor.execute(self._SCHEMA_RELATIONS_SQL, (schema_name,))
+            return bool(set(cursor.fetchall()) - set(listed))
+        except Exception:
+            logger.exception("Could not re-list relations of '%s'", schema_name)
+            return True
+
+    def _drop_schema_roles(self, schema_name: str) -> None:
+        # Best effort all the way down: the schema is already dropped, and an
+        # escaping error would make the caller revert the row to ACTIVE.
+        conn = None
+        try:
+            conn = get_managed_db_connection()
+            cursor = conn.cursor()
+            self._drop_readonly_role(cursor, schema_name)
+            self._drop_dbt_role(cursor, schema_name)
+            cursor.close()
+        except Exception:
+            logger.exception(
+                "Dropping derived roles for schema '%s' failed; the physical schema "
+                "was dropped, the role may be dangling",
+                schema_name,
+            )
+        finally:
+            if conn is not None:
+                conn.close()
+
     def _drop_dbt_role(self, cursor, schema_name: str) -> None:
         """Drop the low-privilege dbt role for a schema (issue #241).
 
@@ -311,7 +584,7 @@ class SchemaManager:
 
     def build_view_schema(self, workspace) -> WorkspaceViewSchema:
         """Publish one coherent physical view schema and its coverage per workspace."""
-        with _serialize_view_build(workspace.id):
+        with _serialize_view_publication(workspace):
             return self._build_view_schema(workspace)
 
     def tenant_ids_for_view(self, view_name: str, tenants) -> tuple[str, ...]:
@@ -344,8 +617,23 @@ class SchemaManager:
         would exceed PostgreSQL's 63-byte identifier limit is digest-fitted rather
         than truncated (SCOUT-DJANGO-3C).
 
+        Every physical statement — plan reads, DROP/CREATE SCHEMA, CREATE VIEW,
+        role creation, grants and the commit marker — runs in ONE managed
+        transaction, so a failure rolls back to the previously published views
+        instead of leaving the workspace unqueryable. Coverage, provenance and the
+        build token are written to the control row only after that commit, and a
+        row that was ACTIVE keeps its state and its last-good metadata for the whole
+        rebuild: its old views stay readable and stay truthfully described.
+
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
+        _assert_publication_owned(workspace)
+        tenants = sorted(
+            workspace.tenants.all().iterator(),
+            key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
+        )
+        _assert_publication_owned(workspace, (tenant.id for tenant in tenants))
+
         # Create/reset the row FIRST so an early validation failure marks it FAILED
         # instead of leaving a resurrected row in PROVISIONING (arch #255 03#1/03#2).
         view_schema_name = self._view_schema_name(workspace.id)
@@ -353,23 +641,23 @@ class SchemaManager:
             workspace=workspace,
             defaults={"schema_name": view_schema_name, "state": SchemaState.PROVISIONING},
         )
-        if vs.schema_name != view_schema_name:
-            vs.schema_name = view_schema_name
-        vs.state = SchemaState.PROVISIONING
-        vs.save(update_fields=["schema_name", "state"])
+        was_active = vs.state == SchemaState.ACTIVE
+        vs.schema_name = view_schema_name
+        entry_fields = ["schema_name"]
+        if was_active:
+            # An ACTIVE row is still serving readable views, so it stays ACTIVE;
+            # a fresh access time keeps expire_inactive_schemas (which PROVISIONING
+            # used to exclude) from tearing it down while this build runs.
+            vs.last_accessed_at = timezone.now()
+            entry_fields.append("last_accessed_at")
+        else:
+            vs.state = SchemaState.PROVISIONING
+            entry_fields.append("state")
+        vs.save(update_fields=entry_fields)
 
+        coverage = {"included_tenants": [], "excluded_tenants": []}
         try:
-            # Callers may have prefetched membership before waiting for the build lock.
-            tenants = sorted(
-                workspace.tenants.all().iterator(),
-                key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
-            )
             if not tenants:
-                vs.tenant_coverage = {
-                    "included_tenants": [],
-                    "excluded_tenants": [],
-                }
-                vs.save(update_fields=["tenant_coverage"])
                 raise ValueError(f"Workspace {workspace.id} has no tenants")
 
             active_schemas = {
@@ -381,11 +669,10 @@ class SchemaManager:
             tenant_schemas: list[tuple[str, Tenant]] = [
                 (active_schemas[tenant.id].schema_name, tenant) for tenant in included_tenants
             ]
-            vs.tenant_coverage = {
+            coverage = {
                 "included_tenants": [self._tenant_coverage_entry(t) for t in included_tenants],
                 "excluded_tenants": [self._tenant_coverage_entry(t) for t in excluded_tenants],
             }
-            vs.save(update_fields=["tenant_coverage"])
 
             if not tenant_schemas:
                 raise ValueError(
@@ -393,14 +680,29 @@ class SchemaManager:
                     "Run a data refresh before building the view schema."
                 )
         except ValueError as exc:
+            fields = ["state", "last_error", "tenant_coverage"]
+            # When the sources are retiring these views can never serve again, and
+            # they would keep the RESTRICT retirement of those schemas blocked.
+            if self._sources_are_retiring(tenants) and self._drop_view_schema_physically(
+                view_schema_name
+            ):
+                vs.physical_build_token = ""
+                fields.append("physical_build_token")
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
-            vs.save(update_fields=["state", "last_error"])
+            vs.tenant_coverage = coverage
+            vs.save(update_fields=fields)
             raise
 
-        conn = get_managed_db_connection()
+        build_token = uuid.uuid4().hex
+        conn = get_managed_db_transaction()
         try:
             cursor = conn.cursor()
+            cursor.execute(
+                psycopg.sql.SQL("SET LOCAL lock_timeout = {}").format(
+                    psycopg.sql.Literal(_PUBLICATION_LOCK_TIMEOUT)
+                )
+            )
 
             if not re.match(r"^ws_[a-f0-9]{16}$", view_schema_name):
                 raise ValueError(f"Invalid view schema name: {view_schema_name!r}")
@@ -448,6 +750,18 @@ class SchemaManager:
                         "tenant_id": str(tenant_obj.id),
                         "source_table_name": table_name,
                     }
+
+            # Lock the sources before touching our own views. An in-place load
+            # holds its raw table exclusively and then cascades into every view
+            # schema reading it; taking the tables first (in one global order) keeps
+            # that from forming a cycle with our DROP SCHEMA below.
+            for schema_name, table_name in sorted({(v[1], v[2]) for v in planned_views}):
+                cursor.execute(
+                    psycopg.sql.SQL("LOCK TABLE {}.{} IN ACCESS SHARE MODE").format(
+                        psycopg.sql.Identifier(schema_name),
+                        psycopg.sql.Identifier(table_name),
+                    )
+                )
 
             # DROP + recreate (not CREATE OR REPLACE VIEW) so a rebuild after an
             # underlying column change never hits "cannot change name of view
@@ -498,29 +812,31 @@ class SchemaManager:
                 )
             )
 
+            self._write_publication_marker(cursor, view_schema_name, build_token)
+
             cursor.close()
+            conn.commit()
         except Exception as exc:
-            # Drop any partial schema before marking FAILED to avoid debris.
-            try:
-                if not conn.closed:
-                    c = conn.cursor()
-                    c.execute(
-                        psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                            psycopg.sql.Identifier(view_schema_name)
-                        )
-                    )
-                    c.close()
-            except Exception:
-                logger.exception(
-                    "Failed to drop partial view schema '%s' during cleanup", view_schema_name
-                )
-            if not conn.closed:
-                conn.close()
+            # Rollback restores the previous schema, views and grants; a DROP here
+            # would destroy exactly the last-good serving layer it just brought back.
+            self._rollback_publication(conn, view_schema_name)
             # Persist the error text so the resume task, MCP get_schema_status, and
             # the status API can surface *why* the query layer is unavailable.
-            vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
-            vs.save(update_fields=["state", "last_error"])
+            # A plan-level ValueError (name collision) fails every retry the same
+            # way; keeping ACTIVE would hide it behind the stale views forever.
+            deterministic = isinstance(exc, ValueError)
+            if was_active and not deterministic and not self._published_views_missing(vs):
+                # The restored views still serve, and coverage/provenance/token still
+                # describe them truthfully — only the error is new.
+                vs.save(update_fields=["last_error"])
+            else:
+                # Either nothing served before, or something outside this build
+                # (an in-place load's DROP ... CASCADE) already removed views the
+                # row still lists; rolling back cannot bring those back.
+                vs.state = SchemaState.FAILED
+                vs.tenant_coverage = coverage
+                vs.save(update_fields=["state", "last_error", "tenant_coverage"])
             raise
         finally:
             if not conn.closed:
@@ -531,10 +847,23 @@ class SchemaManager:
         vs.state = SchemaState.ACTIVE
         vs.last_error = ""
         vs.last_accessed_at = timezone.now()
-        # Publish provenance with ACTIVE, never during plan capture or failed DDL.
-        # Failed rebuilds retain the last-good identities for artifact recovery.
+        # Coverage, provenance and the build token describe what is physically on
+        # disk, so they are published only once that DDL has committed. A failure of
+        # this save leaves the managed marker ahead of the row —
+        # ``reconcile_view_publication`` is what closes that cross-database window.
+        vs.tenant_coverage = coverage
         vs.view_sources = {"version": VIEW_SOURCES_VERSION, "views": planned_sources}
-        vs.save(update_fields=["state", "last_error", "last_accessed_at", "view_sources"])
+        vs.physical_build_token = build_token
+        vs.save(
+            update_fields=[
+                "state",
+                "last_error",
+                "last_accessed_at",
+                "tenant_coverage",
+                "view_sources",
+                "physical_build_token",
+            ]
+        )
 
         logger.info(
             "Built view schema '%s' for workspace '%s' (%d tenants, %d views)",
@@ -544,6 +873,228 @@ class SchemaManager:
             views_created,
         )
         return vs
+
+    @staticmethod
+    def _write_publication_marker(cursor, schema_name: str, build_token: str) -> None:
+        """Stamp the build token on the schema inside the publication transaction.
+
+        COMMENT is a utility statement and takes no bind parameters, hence the
+        composed literal.
+        """
+        payload = json.dumps({"build_token": build_token, "version": _PUBLICATION_MARKER_VERSION})
+        cursor.execute(
+            psycopg.sql.SQL("COMMENT ON SCHEMA {} IS {}").format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Literal(payload),
+            )
+        )
+
+    @staticmethod
+    def _rollback_publication(conn, view_schema_name: str) -> None:
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except Exception:
+            logger.exception("Rolling back the view publication for '%s' failed", view_schema_name)
+
+    @staticmethod
+    def _sources_are_retiring(tenants) -> bool:
+        """True when every schema of these tenants is on its way out (or gone).
+
+        A transient control-plane state (a load in progress, a failed teardown
+        about to revert to ACTIVE) must not cost a workspace its readable views.
+        """
+        return (
+            not TenantSchema.objects.filter(tenant__in=tenants)
+            .exclude(state__in=[SchemaState.TEARDOWN, SchemaState.EXPIRED, SchemaState.FAILED])
+            .exists()
+        )
+
+    def _drop_view_schema_physically(self, view_schema_name: str) -> bool:
+        """Drop a view schema in its own short transaction; True once committed.
+
+        Best-effort: the caller is already failing on a condition the operator has
+        to act on, and a managed-database outage must not replace that message.
+        """
+        try:
+            conn = get_managed_db_transaction()
+        except Exception:
+            logger.exception("Could not connect to drop view schema '%s'", view_schema_name)
+            return False
+        try:
+            cursor = conn.cursor()
+            # Runs under W, T and the view lock: a reader parked on one of these
+            # views must not pin all of them indefinitely.
+            cursor.execute(
+                psycopg.sql.SQL("SET LOCAL lock_timeout = {}").format(
+                    psycopg.sql.Literal(_PUBLICATION_LOCK_TIMEOUT)
+                )
+            )
+            cursor.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(view_schema_name)
+                )
+            )
+            cursor.close()
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to drop view schema '%s'", view_schema_name)
+            self._rollback_publication(conn, view_schema_name)
+            return False
+        finally:
+            if not conn.closed:
+                conn.close()
+        return True
+
+    @staticmethod
+    def _missing_views(cursor, vs) -> list[str] | None:
+        """Recorded views absent from the schema, or None when nothing was recorded.
+
+        A row last built before view provenance existed (``view_sources == {}``)
+        cannot be verified; that is not the same as "published zero views".
+        """
+        recorded = (vs.view_sources or {}).get("views")
+        if recorded is None:
+            return None
+        expected = set(recorded.keys())
+        if not expected:
+            return []
+        cursor.execute(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = %s AND c.relkind = 'v'",
+            (vs.schema_name,),
+        )
+        return sorted(expected - {row[0] for row in cursor.fetchall()})
+
+    def _published_views_missing(self, vs) -> bool:
+        """True unless every view the row records is physically present.
+
+        An unverifiable answer counts as missing: claiming a serving layer we
+        cannot see is worse than reporting it unavailable.
+        """
+        try:
+            conn = get_managed_db_connection()
+        except Exception:
+            logger.exception("Could not verify published views for '%s'", vs.schema_name)
+            return True
+        try:
+            cursor = conn.cursor()
+            try:
+                if not self._schema_exists(cursor, vs.schema_name):
+                    return True
+                missing = self._missing_views(cursor, vs)
+                return missing is None or bool(missing)
+            finally:
+                cursor.close()
+        except Exception:
+            logger.exception("Could not verify published views for '%s'", vs.schema_name)
+            return True
+        finally:
+            conn.close()
+
+    def read_publication_marker(self, schema_name: str) -> str | None:
+        """Return the build token committed on ``schema_name``, or None.
+
+        None means "no committed publication evidence": the schema is absent, has
+        no comment, or carries something this version cannot parse.
+        """
+        conn = get_managed_db_connection()
+        try:
+            cursor = conn.cursor()
+            try:
+                return self._read_publication_marker(cursor, schema_name)
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _read_publication_marker(cursor, schema_name: str) -> str | None:
+        cursor.execute(
+            "SELECT obj_description(n.oid, 'pg_namespace') FROM pg_namespace n "
+            "WHERE n.nspname = %s",
+            (schema_name,),
+        )
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        token = payload.get("build_token")
+        return token if isinstance(token, str) and token else None
+
+    @staticmethod
+    def _schema_exists(cursor, schema_name: str) -> bool:
+        cursor.execute("SELECT 1 FROM pg_namespace WHERE nspname = %s", (schema_name,))
+        return cursor.fetchone() is not None
+
+    def reconcile_view_publication(self, workspace) -> dict:
+        with _serialize_view_publication(workspace):
+            return self._reconcile_view_publication(workspace)
+
+    def _reconcile_view_publication(self, workspace) -> dict:
+        """Reconcile the managed publication marker with the control row.
+
+        The physical publication and the row that describes it commit in different
+        databases, so a worker can die in between. The marker is the authority on
+        what is physically published: when it does not match the row, the recorded
+        coverage/provenance describe views that are not the ones on disk, and the
+        only honest repair is to republish (the build is idempotent). Reports what
+        actually happened — a republish is never described as a rollback.
+        """
+        _assert_publication_owned(workspace)
+        vs = WorkspaceViewSchema.objects.filter(workspace=workspace).first()
+        if vs is None:
+            return {"status": "no_row"}
+
+        conn = get_managed_db_connection()
+        try:
+            cursor = conn.cursor()
+            try:
+                exists = self._schema_exists(cursor, vs.schema_name)
+                marker = self._read_publication_marker(cursor, vs.schema_name) if exists else None
+                missing = self._missing_views(cursor, vs) if exists else []
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
+
+        if vs.state in (SchemaState.TEARDOWN, SchemaState.EXPIRED):
+            # Never resurrect a row that is leaving service; its teardown owns it.
+            return {"status": "retiring"}
+        marker_matches = (marker or "") == (vs.physical_build_token or "")
+        if exists and marker_matches and missing == []:
+            return {"status": "consistent"}
+        if exists and marker_matches:
+            # The marker survives a view being dropped from under it (an in-place
+            # load cascades into every schema reading its raw tables).
+            if vs.state != SchemaState.ACTIVE:
+                return {"status": "consistent"}
+            reason = "views_missing"
+        elif not exists:
+            if vs.state != SchemaState.ACTIVE:
+                return {"status": "no_physical_schema"}
+            reason = "physical_missing"
+        else:
+            reason = "marker_mismatch"
+
+        logger.warning(
+            "View publication for workspace '%s' is out of sync (%s); republishing",
+            workspace.id,
+            reason,
+        )
+        try:
+            self._build_view_schema(workspace)
+        except Exception as exc:
+            # The build already recorded its outcome on the row; report rather
+            # than raise so callers using this as a pre-check still run.
+            logger.exception("Republishing the view schema for workspace '%s' failed", workspace.id)
+            return {"status": "republish_failed", "reason": reason, "error": str(exc)[:500]}
+        return {"status": "republished", "reason": reason}
 
     @staticmethod
     def _tenant_coverage_entry(tenant: Tenant) -> dict[str, str]:
@@ -757,7 +1308,10 @@ class SchemaManager:
         role_name = dbt_role_name(schema_name)
         cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
         if not cursor.fetchone():
-            with contextlib.suppress(psycopg.errors.DuplicateObject):
+            with (
+                contextlib.suppress(psycopg.errors.DuplicateObject),
+                cursor.connection.transaction(),
+            ):
                 cursor.execute(
                     psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
                         psycopg.sql.Identifier(role_name)
@@ -807,8 +1361,13 @@ class SchemaManager:
             (role_name,),
         )
         if not cursor.fetchone():
-            # Another process may create the role between check and create.
-            with contextlib.suppress(psycopg.errors.DuplicateObject):
+            # Another process may create the role between check and create. The
+            # savepoint matters inside the view-publication transaction: a suppressed
+            # error would otherwise leave that whole transaction aborted.
+            with (
+                contextlib.suppress(psycopg.errors.DuplicateObject),
+                cursor.connection.transaction(),
+            ):
                 cursor.execute(
                     psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
                         psycopg.sql.Identifier(role_name)

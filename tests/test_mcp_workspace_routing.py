@@ -10,7 +10,7 @@ async def test_resolve_context_routes_to_workspace():
         mock_wctx.return_value = sentinel
         from mcp_server.server import _resolve_mcp_context
 
-        result = await _resolve_mcp_context("wid-123")
+        result = await _resolve_mcp_context("wid-123", user_id="")
     mock_wctx.assert_called_once_with("wid-123")
     assert result is sentinel
 
@@ -21,4 +21,4 @@ async def test_resolve_context_raises_on_empty_workspace_id():
     from mcp_server.server import _resolve_mcp_context
 
     with pytest.raises(ValueError, match="workspace_id is required"):
-        await _resolve_mcp_context("")
+        await _resolve_mcp_context("", user_id="")
