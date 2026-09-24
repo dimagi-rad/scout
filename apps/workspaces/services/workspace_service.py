@@ -27,15 +27,14 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
     """Add a tenant to a workspace and publish it once it has data.
 
     A tenant that already serves data (loaded for a sibling workspace) only needs
-    this workspace's views rebuilt. One with nothing loaded is loaded first, as
-    ``actor_id``, and the views and Cube are published after that load, so the new
-    source is never published as an empty or missing view. The existing views are
-    left ACTIVE meanwhile: marking them provisioning would take every source's
-    data tools offline for the whole load. A workspace with no ACTIVE views yet
-    (typically going from one source to two) gets them built now, serving the
-    existing sources with the new one excluded, so it is never dark while the
-    new source loads. Uses get_or_create to handle concurrent requests; only a
-    newly created link dispatches work.
+    this workspace's views rebuilt. One with nothing loaded is loaded as
+    ``actor_id``, and that load republishes the views and Cube with it. Until then
+    the views are rebuilt without it but stay ACTIVE (not provisioning, which
+    would take every source's data tools offline for the whole load): the
+    rebuild records the new source under ``excluded_tenants``, so coverage
+    honestly reports it missing instead of the views silently omitting it. Uses
+    get_or_create to handle concurrent requests; only a newly created link
+    dispatches work.
 
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
@@ -50,10 +49,11 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 )
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
             else:
-                if not WorkspaceViewSchema.objects.filter(
-                    workspace=workspace, state=SchemaState.ACTIVE
-                ).exists():
-                    rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+                # Queued first: both take the workspace lock W, and the load holds
+                # it for its whole run, so on a worker with more than one slot a
+                # rebuild dequeued second would wait out the load (or the lock
+                # timeout) before coverage names the missing source.
+                rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
                 intent = capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING)
                 materialize_workspace.defer(
                     workspace_id=str(workspace.id),

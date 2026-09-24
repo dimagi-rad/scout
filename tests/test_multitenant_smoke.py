@@ -88,7 +88,9 @@ def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup)
         )
 
     assert resp.status_code == 202
-    rebuild.assert_not_called()
+    # Views are rebuilt now so coverage names the new source as missing; the
+    # load republishes them with it.
+    rebuild.assert_called_once_with(workspace_id=str(ws.id))
     load.assert_called_once()
     kwargs = load.call_args.kwargs
     assert kwargs["workspace_id"] == str(ws.id)
@@ -108,6 +110,8 @@ def test_adding_an_unloaded_second_source_builds_views_for_the_first_meanwhile(a
     now the workspace, including the source already serving, would be dark for
     the whole load."""
     user, ws, t2 = setup
+    t1 = ws.tenants.get(external_id="smoke-1")
+    TenantSchema.objects.create(tenant=t1, schema_name="smoke_1_live", state=SchemaState.ACTIVE)
 
     with (
         patch(
