@@ -126,7 +126,8 @@ Rules:
   materialization-time metadata, not a verified live value.
 - If the user asks for a count, run `semantic_query` with the relevant
   `dataset.count` measure to get a verified live number, then report that.
-- If semantic queries return `NOT_FOUND` or `VALIDATION_ERROR`,
+- If semantic queries fail, follow their typed `category`, `retryable`, and
+  `recovery_action`; a validation error alone does not prove data is unavailable.
   {unavailable_count_guidance}
   Do NOT cite `row_count` as a consolation answer.
 - Treat `row_count` as advisory only — useful for sizing
@@ -134,9 +135,17 @@ Rules:
 
 ## When the Schema is Broken
 
-If `list_datasets` or `semantic_catalog` reports a dataset but `describe_dataset` or `semantic_query`
-against it returns `NOT_FOUND` or `VALIDATION_ERROR`, the catalog and the data
-have drifted. {schema_drift_guidance}
+When a semantic query fails, use its backend classification:
+- `VALIDATION_ERROR` is a broad envelope, not proof that a source needs reloading.
+- `invalid_query`: fix the query shape, not the data model or persistence layer.
+- `missing_model_dependency`: inspect the named member and propose the smallest model/artifact change; obtain explicit permission before saving model changes.
+- `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation.
+- `permission_required` or `configuration_required`: request the indicated access/operator help; retries cannot grant access or configure Cube.
+- `transient_runtime_failure`: preserve the query/model and use at most one bounded retry if `retryable=true`.
+- Unclassified errors: report the failure rather than guessing which data to rebuild.
+The outcome is guidance, not authorization. Existing workspace roles and approval requirements still apply.
+
+{schema_drift_guidance}
 
 Do NOT:
 
@@ -229,9 +238,9 @@ def _render(**values: str) -> str:
 BASE_SYSTEM_PROMPT = _render(
     query_failure_fix="propose a corrected semantic member or ask to rebuild the data",
     unavailable_count_guidance=(
-        "tell the user the data is unavailable and offer to re-run materialization."
+        "Only offer to re-run materialization when recovery_action is materialization."
     ),
-    schema_drift_guidance="""STOP exploring. Do exactly one of:
+    schema_drift_guidance="""Only when recovery_action is materialization, do exactly one of:
 
 1. If the user has already asked you to refresh or rebuild the data, call
    `run_materialization`.
@@ -252,21 +261,13 @@ HEADLESS_BASE_SYSTEM_PROMPT = _render(
         "rebuild the data and continue in the same run"
     ),
     unavailable_count_guidance=(
-        "run `describe_dataset` on the member's dataset. If it succeeds but the field "
-        "is not listed, fix the member name. If `describe_dataset` itself fails, or the "
-        "field is listed and the query still fails, call `run_materialization` (at most "
-        "once per run) to rebuild the data, then re-run the count in the same run."
+        "Only when recovery_action is materialization, call `run_materialization` "
+        "at most once per run, then re-run the count in the same run."
     ),
-    # describe_dataset reads the catalog, not the physical schema: a field missing from a
-    # listed dataset is a typo, while a failing describe or a listed field whose query
-    # still fails means the catalog or the data is gone.
-    schema_drift_guidance="""STOP exploring beyond one `describe_dataset`
-check on the member's dataset. If it succeeds but the field is not listed, fix the
-member name. If `describe_dataset` itself fails, or the field is listed and
-`semantic_query` still fails, the data is gone: call `run_materialization` to
-rebuild it. It blocks until loading finishes; then continue in the same run. Call
-it at most once per run; if the data is still unreachable afterwards, report that
-and stop.""",
+    schema_drift_guidance="""Only when recovery_action is materialization, call `run_materialization` to rebuild the dataset.
+It blocks until loading finishes; then continue in the same run. Call it at most
+once per run; if the data is still unreachable afterwards, report that and stop.
+Never infer missing data from a failed describe or query alone.""",
 )
 
 READ_ONLY_BASE_SYSTEM_PROMPT = _render(
@@ -275,12 +276,12 @@ READ_ONLY_BASE_SYSTEM_PROMPT = _render(
         "with write access can refresh the data"
     ),
     unavailable_count_guidance=(
-        "tell the user the data is unavailable and that a workspace member with "
-        "write access can refresh it."
+        "Report the typed cause. If a repair is indicated, a workspace member with "
+        "write access must perform the specified repair."
     ),
-    schema_drift_guidance="""STOP exploring. Tell the user the data isn't currently
-queryable. Their workspace role is read-only, so a workspace member with write
-access needs to refresh it. Do not offer to rebuild or re-materialize it yourself.""",
+    schema_drift_guidance="""The user's workspace role is read-only. When a repair is indicated,
+refer it to a workspace member with write access. Do not offer to rebuild or
+re-materialize it yourself; a generic query error does not establish missing data.""",
 )
 
 

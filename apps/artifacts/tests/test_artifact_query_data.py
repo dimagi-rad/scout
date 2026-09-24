@@ -14,6 +14,7 @@ from freezegun import freeze_time
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.artifacts.views import _artifact_query_cache_key
+from apps.semantic.services.query_outcomes import query_readiness_error
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from tests.tenant_access import usable_connection
@@ -106,6 +107,53 @@ async def test_inspector_bounds_concurrent_queries(member_client, workspace, liv
     assert response.status_code == 200
     assert len(response.json()["queries"]) == 9
     assert 2 <= peak <= 4
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_inspector_shares_one_readiness_inspection_across_query_failures(
+    member_client, workspace, live_artifact
+):
+    live_artifact.semantic_queries = [
+        {"name": f"q{i}", "measures": ["visits.count"]} for i in range(9)
+    ]
+    await live_artifact.asave(update_fields=["semantic_queries"])
+    await cache.aclear()
+
+    async def execute(query_workspace, query, *, readiness, **kwargs):
+        return await query_readiness_error(
+            query_workspace,
+            query,
+            "VALIDATION_ERROR",
+            "Serving model unavailable",
+            category="invalid_query",
+            readiness=readiness,
+        )
+
+    with (
+        patch("apps.artifacts.views.run_semantic_query", side_effect=execute) as run,
+        patch(
+            "apps.semantic.services.query_outcomes.artifact_query_surface",
+            new=AsyncMock(
+                return_value={
+                    "queryable": False,
+                    "status": "needs_semantic_rebuild",
+                    "recovery_action": "semantic_rebuild",
+                }
+            ),
+        ) as inspect,
+    ):
+        response = await member_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
+        )
+    assert response.status_code == 200
+    assert run.await_count == 9
+    inspect.assert_awaited_once()
+    assert inspect.await_args.args[0].semantic_queries == [{"measures": ["visits.count"]}] * 9
+    assert len(response.json()["queries"]) == 9
+    assert all(
+        result["error"] == "Serving model unavailable" for result in response.json()["queries"]
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -497,7 +545,7 @@ async def test_semantic_queries_run_concurrently(live_artifact, member_client, m
     started = asyncio.Event()
     in_flight = {"n": 0, "max": 0}
 
-    async def slow_execute(workspace, query_spec, *, user_id):
+    async def slow_execute(workspace, query_spec, *, user_id, readiness):
         in_flight["n"] += 1
         in_flight["max"] = max(in_flight["max"], in_flight["n"])
         # Yield so the other coroutine can start before we return.

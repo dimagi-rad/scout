@@ -6,9 +6,16 @@ from typing import Any
 
 from apps.semantic.services.date_context import DateContextError
 from apps.semantic.services.query import run_semantic_query
+from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.workspaces.models import Workspace
 
-from .graph_doc import expected_result_keys, member_to_key, normalize_doc, validate_doc
+from .graph_doc import (
+    diagnostics_have_errors,
+    expected_result_keys,
+    member_to_key,
+    normalize_doc,
+    validate_doc,
+)
 from .graph_manifest import build_semantic_query_manifest
 from .query_context import resolve_artifact_queries
 
@@ -27,6 +34,8 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
         "entry_count": len(manifest.get("entries", [])),
         "unresolved_count": len(manifest.get("unresolved", [])),
     }
+    query_results = []
+    actual_keys: dict[str, list[str]] = {}
     try:
         resolved, context = resolve_artifact_queries(doc)
     except DateContextError as exc:
@@ -40,6 +49,16 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "queries": [],
             "key_warnings": [],
             "query_context": None,
+            "failures": [
+                {
+                    "query_key": None,
+                    "message": str(exc),
+                    "category": "invalid_document",
+                    "code": "VALIDATION_ERROR",
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
             "summary": "Date context could not be resolved",
         }
     if len(resolved) > MAX_CHECK_QUERIES:
@@ -57,24 +76,54 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "queries": [],
             "key_warnings": [],
             "query_context": context,
+            "failures": [
+                {
+                    "query_key": None,
+                    "message": "Too many queries to validate the complete artifact",
+                    "category": "invalid_document",
+                    "code": "VALIDATION_ERROR",
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
             "summary": "Too many queries to validate the complete artifact",
         }
     entries = resolved
-    query_results = []
-    actual_keys: dict[str, list[str]] = {}
+    if diagnostics_have_errors(diagnostics):
+        return {
+            "success": False,
+            "diagnostics": diagnostics,
+            "manifest": manifest_summary,
+            "queries": [],
+            "key_warnings": [],
+            "failures": [
+                {
+                    "query_key": None,
+                    "message": "Document validation failed; no queries executed.",
+                    "category": "invalid_document",
+                    "code": "VALIDATION_ERROR",
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
+            "summary": "Document validation failed; no queries executed.",
+        }
     workspace = await Workspace.objects.aget(pk=artifact.workspace_id)
-    for entry in entries:
-        query = {key: value for key, value in entry.items() if key != "name"}
+    queries = [{key: value for key, value in entry.items() if key != "name"} for entry in entries]
+    for query in queries:
         query.setdefault("limit", CHECK_ROW_LIMIT)
-        result = await run_semantic_query(workspace, query, user_id=user_id)
+    readiness = QueryReadiness(workspace, queries)
+    for entry, query in zip(entries, queries, strict=True):
+        result = await run_semantic_query(workspace, query, user_id=user_id, readiness=readiness)
         if not result.get("success", True) or result.get("error"):
             error = result.get("error")
-            message = error.get("message") if isinstance(error, dict) else str(error)
+            failure = _query_failure(error)
             query_results.append(
                 {
                     "query_key": entry["name"],
                     "status": "error",
-                    "error": message or "Semantic query failed",
+                    "error": failure["message"],
+                    "failure": failure,
                     "semantic_query": query,
                 }
             )
@@ -102,13 +151,50 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     )
     ok_count = sum(1 for item in query_results if item["status"] == "ok")
     return {
-        "success": not diagnostics and not key_warnings and ok_count == len(query_results),
+        "success": not key_warnings and ok_count == len(query_results),
         "query_context": context,
         "diagnostics": diagnostics,
         "manifest": manifest_summary,
         "queries": query_results,
+        "failures": [
+            {"query_key": query["query_key"], **query["failure"]}
+            for query in query_results
+            if query["status"] == "error"
+        ]
+        + [
+            {
+                "query_key": warning.get("query_key"),
+                "message": warning.get("message", ""),
+                "category": "invalid_document",
+                "code": "RESULT_KEY_MISMATCH",
+                "retryable": False,
+                "recovery_action": None,
+            }
+            for warning in key_warnings
+        ],
         "key_warnings": key_warnings,
         "summary": f"{ok_count}/{len(query_results)} queries ok",
+    }
+
+
+def _query_failure(error):
+    if not isinstance(error, dict):
+        error = {"message": str(error)} if error else {}
+    code = str(error.get("code") or "UNKNOWN")
+    permission_required = code in {
+        "AUTH_ACCESS_DENIED",
+        "AUTH_TOKEN_EXPIRED",
+        "AUTH_CREDENTIAL_MISSING",
+        "WORKSPACE_TENANT_UNREACHABLE",
+    }
+    return {
+        "code": code,
+        "message": str(error.get("message") or "Semantic query failed")[:500],
+        "category": "permission_required"
+        if permission_required
+        else error.get("category", "runtime_failure"),
+        "retryable": not permission_required and error.get("retryable") is True,
+        "recovery_action": None if permission_required else error.get("recovery_action"),
     }
 
 

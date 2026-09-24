@@ -163,6 +163,32 @@ def test_artifact_manager_bounds_data_model_handoff():
     assert summary["data_requirements"] == ["x" * 500] * 8
 
 
+@pytest.mark.parametrize("tool_status", ["checked", "error"])
+@pytest.mark.parametrize("mixed_failure", [False, True])
+def test_failed_check_preserves_model_gap_without_hiding_other_failures(tool_status, mixed_failure):
+    failures = [{"category": "missing_model_dependency", "message": "visits.reviewed is missing"}]
+    if mixed_failure:
+        failures.append({"category": "permission_required", "message": "Access denied"})
+    result = {
+        "status": tool_status,
+        "runtime": {"success": False, "failures": failures},
+    }
+    response = {
+        "status": "needs_data_model",
+        "message": "A reviewed dimension is missing; approval is required before creating it.",
+        "data_requirements": ["Create visits.reviewed only after explicit approval."],
+    }
+    messages = [
+        ToolMessage(name="artifact_write", tool_call_id="check", content=json.dumps(result))
+    ]
+    summary = _summarize_result(messages, json.dumps(response))
+    assert summary["status"] == ("error" if mixed_failure else "needs_data_model")
+    assert summary["data_requirements"] == response["data_requirements"]
+    assert summary["runtime_failures"] == failures
+    if not mixed_failure:
+        assert summary["message"] == response["message"]
+
+
 @pytest.mark.asyncio
 async def test_artifact_manager_tool_preserves_data_preparation_handoff(monkeypatch):
     final = {

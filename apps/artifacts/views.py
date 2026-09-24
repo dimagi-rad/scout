@@ -28,6 +28,7 @@ from apps.artifacts.services.query_context import resolve_artifact_queries
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
 from apps.semantic.services.query import run_semantic_query
+from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceDataRecovery, WorkspaceRole
 from apps.workspaces.services.data_recovery import artifact_data_state
@@ -1009,6 +1010,14 @@ class ArtifactQueryDataView(View):
             )
 
         query_slots = asyncio.Semaphore(ARTIFACT_QUERY_CONCURRENCY)
+        readiness = QueryReadiness(
+            artifact.workspace,
+            [
+                {key: value for key, value in entry.items() if key != "name"}
+                for entry in queries
+                if isinstance(entry, dict)
+            ],
+        )
 
         async def _run_one(i: int, entry: dict) -> dict:
             if not isinstance(entry, dict):
@@ -1021,6 +1030,7 @@ class ArtifactQueryDataView(View):
                         artifact.workspace,
                         query_spec,
                         user_id=str(user.id),
+                        readiness=readiness,
                     )
             except Exception:
                 logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
