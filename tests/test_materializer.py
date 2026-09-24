@@ -1061,10 +1061,14 @@ class TestResumableMaterialization:
                 loader_mocks.get("payments", MagicMock()),
             ),
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
             run = self._setup_run_mock(mock_run_cls, prior_run=prior_run)
+            # Unpatched, the asset query fails on the mock tenant and the swallowed
+            # error would skip the completion path these tests exist to cover.
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             mock_meta.return_value.load.return_value = {}
             conn = MagicMock()
             mock_conn.return_value = conn
