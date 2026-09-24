@@ -1,14 +1,23 @@
 """The explicit verification retry endpoint stays reachable while access is denied."""
 
 import pytest
+from django.core.cache import cache
 from django.test import Client
 from django.utils import timezone
 
 from apps.users.models import TenantMembership
 from apps.workspaces import access
 from apps.workspaces.access import resolve_workspace_access_ex
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.workspaces.services.access_freshness import VERIFICATION_UNAVAILABLE
-from tests.upstream_proofs import make_proof_stale
+from tests.upstream_proofs import grant_fresh_upstream_access, make_proof_stale
+
+
+@pytest.fixture(autouse=True)
+def _clear_retry_cooldowns():
+    cache.clear()
+    yield
+    cache.clear()
 
 
 def _retry(user, workspace):
@@ -148,3 +157,42 @@ def test_a_retry_that_observes_revocation_names_it(user, workspace, tenant, upst
 
     assert response.json()["reason"] == "upstream_access_lost"
     assert response.json()["lost_tenants"] == [tenant.canonical_name]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_granted_retry_with_a_tombstone_stays_throttled(
+    user, workspace, tenant, upstream_provider
+):
+    second = type(tenant).objects.create(
+        provider="commcare", external_id="archived-domain", canonical_name="Archived"
+    )
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+    grant_fresh_upstream_access(user, second)
+    TenantMembership.objects.filter(user=user, tenant=second).update(archived_at=timezone.now())
+    upstream_provider.domains = [tenant.external_id]
+
+    assert _retry(user, workspace).status_code == 200
+    assert _retry(user, workspace).status_code == 200
+    assert len(upstream_provider.requests) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_cached_reason_is_not_replayed_for_another_workspace(
+    user, workspace, tenant, upstream_provider
+):
+    other = Workspace.objects.create(name="Other", created_by=user)
+    WorkspaceMembership.objects.create(workspace=other, user=user, role=WorkspaceRole.MANAGE)
+    other_tenant = type(tenant).objects.create(
+        provider="commcare", external_id="other-domain", canonical_name="Other"
+    )
+    WorkspaceTenant.objects.create(workspace=other, tenant=other_tenant)
+    grant_fresh_upstream_access(user, other_tenant)
+    make_proof_stale(user, other_tenant)
+    TenantMembership.objects.filter(user=user, tenant=tenant).update(archived_at=timezone.now())
+    upstream_provider.domains = []
+
+    first = _retry(user, workspace)
+    second = _retry(user, other)
+
+    assert first.json()["reason"] == "upstream_access_lost"
+    assert second.json()["reason"] == "verification_in_progress"

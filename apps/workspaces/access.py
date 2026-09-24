@@ -114,6 +114,16 @@ def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceA
 CONNECTED_ACCOUNTS_PATH = "/settings/connections"
 RETRY_COOLDOWN_SECONDS = 10
 _RETRY_PENDING = "pending"
+_REPLAYABLE_REASONS = frozenset(
+    {
+        TENANT_ACCESS_LOST,
+        CREDENTIAL_MISSING,
+        CREDENTIAL_EXPIRED,
+        UPSTREAM_ACCESS_LOST,
+        VERIFICATION_UNAVAILABLE,
+        VERIFICATION_IN_PROGRESS,
+    }
+)
 
 _FRESHNESS_MESSAGES = {
     CREDENTIAL_MISSING: (
@@ -370,9 +380,11 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
         if local.granted and (await acheck_freshness(user.pk, tenant_ids)).fresh:
             return local
         replayed = await cache.aget(cooldown_key)
-        if replayed and replayed != _RETRY_PENDING and local.denied_reason != NOT_MEMBER:
+        # The lease is per user but a concluded reason belongs to one workspace.
+        if isinstance(replayed, dict) and replayed.get("workspace") == str(workspace_id):
             return WorkspaceAccess(
-                denied_reason=replayed, lost_tenant_names=local.lost_tenant_names
+                denied_reason=replayed["reason"],
+                lost_tenant_names=tuple(replayed.get("lost", ())),
             )
         return _freshness_denied(VERIFICATION_IN_PROGRESS)
     retry_reason = await averify_membership_history(
@@ -390,10 +402,16 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
         if not final.fresh:
             result = _freshness_denied(final_denial_reason(admission, final))
     # Re-arm after the check: a slow provider can outlast the first window.
-    if result.granted:
-        await cache.adelete(cooldown_key)
-    else:
-        await cache.aset(cooldown_key, result.denied_reason, RETRY_COOLDOWN_SECONDS)
+    # Kept even on success: a tombstoned history can never short-circuit as fresh, so
+    # a granted retry still cost a provider call and must stay throttled.
+    concluded = _RETRY_PENDING
+    if not result.granted and result.denied_reason in _REPLAYABLE_REASONS:
+        concluded = {
+            "workspace": str(workspace_id),
+            "reason": result.denied_reason,
+            "lost": list(result.lost_tenant_names),
+        }
+    await cache.aset(cooldown_key, concluded, RETRY_COOLDOWN_SECONDS)
     return result
 
 
