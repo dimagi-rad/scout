@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,6 +61,7 @@ from apps.transformations.services.executor import run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
+from apps.workspaces.services.load_generations import pipeline_fingerprint
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
@@ -138,6 +140,9 @@ def run_pipeline(
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
+    # The run's fingerprint must describe the config it actually executed, not a
+    # shared registry object someone else could mutate mid-load.
+    pipeline = deepcopy(pipeline)
     observed_connection = tenant_membership.connection
 
     # provision + discover + N sources + transform/skip
@@ -502,12 +507,19 @@ def run_pipeline(
     run.state = MaterializationRun.RunState.TRANSFORMING
     transform_result: dict = {}
 
-    has_assets = TransformationAsset.objects.filter(tenant=tenant_membership.tenant).exists()
+    # Discovery may have generated SYSTEM assets. Fingerprint and execute the same
+    # in-memory snapshot: the fingerprint is this run's receipt for what it built,
+    # and shared-load reuse and promotion accept nothing weaker.
+    asset_snapshot = list(TransformationAsset.objects.filter(tenant=tenant_membership.tenant))
+    load_fingerprint = pipeline_fingerprint(
+        pipeline, tenant_membership.tenant, assets=asset_snapshot
+    )
+    has_assets = bool(asset_snapshot)
     if has_assets:
         report("Running transforms...")
         try:
             transform_result = _run_transform_phase(
-                pipeline, schema_name, tenant=tenant_membership.tenant
+                pipeline, schema_name, tenant=tenant_membership.tenant, assets=asset_snapshot
             )
         except Exception as e:
             logger.exception("Transform phase failed for schema %s", schema_name)
@@ -518,6 +530,7 @@ def run_pipeline(
     # Conditional UPDATE: only transition to COMPLETED if still TRANSFORMING.
     # Preserves a CANCELLED (or FAILED) state written externally during transform.
     final_result = {
+        "load_fingerprint": load_fingerprint,
         "sources": source_results,
         "pipeline": pipeline.name,
         "transforms": transform_result,
@@ -557,6 +570,7 @@ def run_pipeline(
         )
 
     result: dict = {
+        "load_fingerprint": load_fingerprint,
         "status": "completed",
         "run_id": str(run.id),
         "schema": schema_name,
@@ -1149,7 +1163,9 @@ def _write_ocs_participants(
     return total
 
 
-def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None) -> dict:
+def _run_transform_phase(
+    pipeline: PipelineConfig, schema_name: str, tenant=None, assets=None
+) -> dict:
     """Run the transformation pipeline's SYSTEM + TENANT stages for this tenant.
 
     No ``workspace`` is passed because materialization is tenant-scoped: a tenant
@@ -1165,6 +1181,7 @@ def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None
     run = run_transformation_pipeline(
         tenant=tenant,
         schema_name=schema_name,
+        asset_snapshot=assets,
     )
 
     result = {

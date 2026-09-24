@@ -1,4 +1,5 @@
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -540,7 +541,9 @@ class TestRunPipeline:
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
-            mock_asset_cls.objects.filter.return_value.exists.return_value = True
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = [
+                SimpleNamespace(name="asset", scope="tenant", sql_content="select 1", test_yaml="")
+            ]
             mock_transform.side_effect = RuntimeError("dbt compilation error")
 
             result = run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
@@ -586,7 +589,9 @@ class TestRunPipeline:
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
-            mock_asset_cls.objects.filter.return_value.exists.return_value = True
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = [
+                SimpleNamespace(name="asset", scope="tenant", sql_content="select 1", test_yaml="")
+            ]
             mock_transform.return_value = {
                 "run_id": "abc",
                 "status": "tests_failed",
