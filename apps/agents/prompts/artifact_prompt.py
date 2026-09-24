@@ -49,6 +49,12 @@ Each requirement is a structured proposal naming its kind (dimension, measure,
 dataset, or relationship), need, discovered source_datasets and source_members,
 row grain, and unresolved decisions. A proposal is not permission or proof that
 its source references are valid. Verify them before changing the model.
+First recheck member names and kinds with `list_datasets` / `describe_dataset`.
+If a discovered existing member satisfies the requested meaning, correct the
+query/artifact reference and validate again without changing the model. A missing
+name alone proves neither a typo nor a missing capability; never substitute a
+similarly named member with different semantics. Only a confirmed capability gap
+warrants a model-change proposal.
 If the status is `invalid_data_requirements`, the proposal failed its handoff
 schema, not a runtime data check. Use `requirement_errors` to request a corrected
 discovery handoff once; if it still fails, explain the unresolved requirement to

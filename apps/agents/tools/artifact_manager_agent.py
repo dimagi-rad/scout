@@ -170,8 +170,8 @@ Use `artifact_write(action="create")` for a new artifact, `replace` when
 rewriting the whole doc, `apply` for targeted edits, and `check` for runtime
 validation. Use the backend's typed `runtime.failures`, not message matching:
 - `invalid_document` or `invalid_query`: correct the documented defect, then validate again.
-- `missing_model_dependency`: return the missing dependency to the parent; never invent member names.
-- `data_unavailable`: return the backend `recovery_action`; do not rewrite the artifact or start provider loads yourself.
+- `missing_model_dependency`: recheck the member name and kind with `list_datasets` / `describe_dataset`. If a discovered existing member satisfies the requested meaning, correct the query/artifact reference and validate again without changing the model. A missing name alone proves neither a typo nor a missing capability; never substitute a similarly named member with different semantics. Only a confirmed capability gap warrants a structured proposal to the parent; never invent member names.
+- `data_unavailable`: return the backend `recovery_action`; do not rewrite the artifact or start provider loads yourself. If the action is absent, say that the repair could not be determined and retain the diagnostics; do not guess a repair.
 - `permission_required` or `configuration_required`: explain the required access/operator intervention, without retrying.
 - `transient_runtime_failure`: do not change the model/document; at most one bounded retry when `retryable=true`.
 - Unknown `runtime_failure`: stop and report it; do not guess a destructive repair.

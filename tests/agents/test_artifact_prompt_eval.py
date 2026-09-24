@@ -1,6 +1,13 @@
 """Prompt contract checks for semantic graph artifact creation."""
 
+import pytest
+
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
+from apps.agents.prompts.base_system import (
+    BASE_SYSTEM_PROMPT,
+    HEADLESS_BASE_SYSTEM_PROMPT,
+    READ_ONLY_BASE_SYSTEM_PROMPT,
+)
 from apps.agents.tools.artifact_manager_agent import (
     ARTIFACT_MANAGER_SYSTEM_PROMPT,
     NESTED_MCP_TOOL_NAMES,
@@ -73,3 +80,40 @@ def test_provider_neutral_artifacts_have_an_explicit_data_model_handoff():
     assert "reports the same `needs_data_model` gap again" in ARTIFACT_PROMPT_ADDITION
     assert "Do not invent a\n  taxonomy from column names" in CANVAS_MANAGER_SYSTEM_PROMPT
     assert {"list_datasets", "describe_dataset", "semantic_query"} == NESTED_MCP_TOOL_NAMES
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        BASE_SYSTEM_PROMPT,
+        HEADLESS_BASE_SYSTEM_PROMPT,
+        READ_ONLY_BASE_SYSTEM_PROMPT,
+        ARTIFACT_PROMPT_ADDITION,
+        ARTIFACT_MANAGER_SYSTEM_PROMPT,
+    ],
+    ids=["interactive", "headless", "read_only", "artifact_parent", "artifact_manager"],
+)
+def test_missing_member_guidance_checks_catalog_before_model_changes(prompt):
+    prose = " ".join(prompt.split())
+    assert "`list_datasets` / `describe_dataset`" in prose
+    assert "existing member satisfies the requested meaning" in prose
+    assert "validate again without changing the model" in prose
+    assert "neither a typo nor a missing capability" in prose
+    assert "never substitute a similarly named member with different semantics" in prose
+    assert "Only a confirmed capability gap" in prose
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        BASE_SYSTEM_PROMPT,
+        HEADLESS_BASE_SYSTEM_PROMPT,
+        READ_ONLY_BASE_SYSTEM_PROMPT,
+        ARTIFACT_MANAGER_SYSTEM_PROMPT,
+    ],
+)
+def test_unknown_repair_is_not_presented_as_authorized_recovery(prompt):
+    prose = " ".join(prompt.split())
+    assert "repair could not be determined" in prose
+    assert "diagnostics" in prose
+    assert "do not guess" in prose
