@@ -158,7 +158,11 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
     validation = async_to_sync(CubeClient().validate_schema)(content)
-    diagnostics = _diagnostics_from_validation(validation)
+    validation_diagnostics = _diagnostics_from_validation(validation)
+    diagnostics = [
+        *(model.metadata or {}).get("catalog_diagnostics", []),
+        *validation_diagnostics,
+    ]
 
     if not validation.get("valid", False):
         CubeSchema.objects.update_or_create(
@@ -174,7 +178,7 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
         )
         if settings.CUBE_SCHEMA_VALIDATION_REQUIRED:
             raise CubeSchemaBuildError("Generated Cube schema failed validation.")
-        raise CubeSchemaBuildError(_diagnostics_message(diagnostics))
+        raise CubeSchemaBuildError(_diagnostics_message(validation_diagnostics))
 
     with transaction.atomic():
         CubeSchema.objects.filter(
@@ -253,7 +257,10 @@ def _record_build_failure(workspace, model: SemanticModel, exc: Exception) -> No
             status=CubeSchema.Status.ACTIVE,
         ).exists()
         _set_last_build(model, ok=False, error=str(exc))
-        model.diagnostics = [{"level": "error", "message": str(exc)[:500]}]
+        model.diagnostics = [
+            *(model.metadata or {}).get("catalog_diagnostics", []),
+            {"level": "error", "message": str(exc)[:500]},
+        ]
         model.status = SemanticModel.Status.ACTIVE if has_active else SemanticModel.Status.ERROR
         model.save(update_fields=["status", "diagnostics", "metadata", "updated_at"])
     except Exception:

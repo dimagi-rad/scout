@@ -4,29 +4,59 @@ import remarkGfm from "remark-gfm"
 
 import { buildStoryRegistry } from "./blocks"
 import { useDiagnostics, useStoryEngine } from "./hooks"
-import { isRecord, normalizeStoryDoc, runSemanticQuery } from "./runtime"
-import type { ArtifactDetail, StoryBlock, StoryEngineApi, StoryRuntimeContext } from "./types"
+import { ArtifactDateContext, isRecord, normalizeStoryDoc, runSemanticQuery } from "./runtime"
+import type { ArtifactDetail, DateRange, StoryBlock, StoryEngineApi, StoryRuntimeContext } from "./types"
 
 interface ArtifactGraphRendererProps {
   artifact: ArtifactDetail
   workspaceId: string
   dataRevision?: string
   containerRef?: Ref<HTMLDivElement>
+  onDateSourcesChange?: (sources: Record<string, DateRange | null>) => void
 }
 
-export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dataRevision }: ArtifactGraphRendererProps) {
-  const registry = useMemo(() => buildStoryRegistry(), [])
+export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dataRevision, onDateSourcesChange }: ArtifactGraphRendererProps) {
+  const registry = useMemo(() => buildStoryRegistry(artifact.date_context), [artifact.date_context])
   const doc = useMemo(
     () => normalizeStoryDoc(isRecord(artifact.data) ? artifact.data.story_doc : undefined, artifact.title),
     [artifact.data, artifact.title],
   )
   const ctx = useMemo<StoryRuntimeContext>(
     () => ({
-      runQuery: (query) => runSemanticQuery(workspaceId, query),
+      runQuery: (query) => runSemanticQuery(workspaceId, query, artifact.date_context),
     }),
-    [workspaceId],
+    [workspaceId, artifact.date_context],
   )
   const engine = useStoryEngine(registry, ctx, doc)
+  useEffect(() => {
+    if (!engine || !onDateSourcesChange) return
+    let last = ""
+    const publish = () => {
+      const sources: Record<string, DateRange | null> = {}
+      for (const block of doc.blocks) {
+        const port = block.type === "date_filter" ? "value" : block.type === "period_selector" ? "current" : null
+        if (!port) continue
+        const state = engine.getOutput(`${block.id}.${port}`)
+        if (state.status !== "ready") {
+          // An omitted override means "use the saved default" on the server.
+          // Keep failed selections explicit so inspection cannot substitute it.
+          if (state.status === "error" || state.status === "blocked") sources[block.id] = null
+          continue
+        }
+        const value = state.value
+        if (isRecord(value) && typeof value.start === "string" && typeof value.end === "string") {
+          sources[block.id] = { start: value.start, end: value.end }
+        }
+      }
+      const fingerprint = JSON.stringify(sources)
+      if (fingerprint !== last) {
+        last = fingerprint
+        onDateSourcesChange(sources)
+      }
+    }
+    publish()
+    return engine.subscribeAll(publish)
+  }, [engine, doc, onDateSourcesChange])
   const lastPublication = useRef({ engine, dataRevision })
   useEffect(() => {
     if (lastPublication.current.engine === engine && lastPublication.current.dataRevision !== dataRevision) {
@@ -41,51 +71,53 @@ export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dat
   }
 
   return (
-    <div ref={containerRef} data-artifact-story className="h-full overflow-y-auto bg-background">
-      <div data-artifact-story-content className="mx-auto max-w-5xl px-6 py-6">
-        <Diagnostics engine={engine} />
-        {doc.prd && (
-          <div className="mb-5 border-l-2 border-primary/40 pl-3 text-xs text-muted-foreground">
-            <Markdown remarkPlugins={[remarkGfm]}>{doc.prd}</Markdown>
-          </div>
-        )}
-        <div className="space-y-4">
-          {visibleGroups.map((group, index) =>
-            group.blocks.length === 1 ? (
-              <RenderedBlock
-                key={group.blocks[0].id}
-                block={group.blocks[0]}
-                engine={engine}
-                registry={registry}
-              />
-            ) : group.blocks.every((block) => block.type === "stat") ? (
-              <StatGroup
-                key={`${group.key}-${index}`}
-                blocks={group.blocks}
-                engine={engine}
-                groupKey={group.key}
-                registry={registry}
-              />
-            ) : (
-              <div
-                key={`${group.key}-${index}`}
-                className="grid gap-4"
-                data-block-row-group={group.key}
-                style={{
-                  gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${
-                    group.blocks.length >= 3 ? "230px" : "300px"
-                  }), 1fr))`,
-                }}
-              >
-                {group.blocks.map((block) => (
-                  <RenderedBlock key={block.id} block={block} engine={engine} registry={registry} />
-                ))}
-              </div>
-            ),
+    <ArtifactDateContext.Provider value={artifact.date_context}>
+      <div ref={containerRef} data-artifact-story className="h-full overflow-y-auto bg-background">
+        <div data-artifact-story-content className="mx-auto max-w-5xl px-6 py-6">
+          <Diagnostics engine={engine} />
+          {doc.prd && (
+            <div className="mb-5 border-l-2 border-primary/40 pl-3 text-xs text-muted-foreground">
+              <Markdown remarkPlugins={[remarkGfm]}>{doc.prd}</Markdown>
+            </div>
           )}
+          <div className="space-y-4">
+            {visibleGroups.map((group, index) =>
+              group.blocks.length === 1 ? (
+                <RenderedBlock
+                  key={group.blocks[0].id}
+                  block={group.blocks[0]}
+                  engine={engine}
+                  registry={registry}
+                />
+              ) : group.blocks.every((block) => block.type === "stat") ? (
+                <StatGroup
+                  key={`${group.key}-${index}`}
+                  blocks={group.blocks}
+                  engine={engine}
+                  groupKey={group.key}
+                  registry={registry}
+                />
+              ) : (
+                <div
+                  key={`${group.key}-${index}`}
+                  className="grid gap-4"
+                  data-block-row-group={group.key}
+                  style={{
+                    gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${
+                      group.blocks.length >= 3 ? "230px" : "300px"
+                    }), 1fr))`,
+                  }}
+                >
+                  {group.blocks.map((block) => (
+                    <RenderedBlock key={block.id} block={block} engine={engine} registry={registry} />
+                  ))}
+                </div>
+              ),
+            )}
+          </div>
         </div>
       </div>
-    </div>
+    </ArtifactDateContext.Provider>
   )
 }
 

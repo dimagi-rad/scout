@@ -84,3 +84,23 @@ export const MetricsAndComparison: Story = {
     },
   },
 }
+
+export const InvalidDateControls: Story = {
+  args: {
+    artifact: {
+      ...storyArtifact,
+      id: "invalid-date-controls",
+      title: "Date control recovery",
+      semantic_queries: [],
+      data: { story_doc: { blocks: [
+        { id: "title", type: "title", config: { text: "Date control recovery" } },
+        { id: "range", type: "date_filter", config: { default: "last_60_days" } },
+        { id: "period", type: "period_selector", config: { default_range: "this_week" } },
+        { id: "context", type: "section", config: {
+          title: "The rest of the artifact stays readable",
+          body: "These intentionally invalid presets demonstrate a saved artifact that needs repair. No live data is queried, and no substitute date range is used.",
+        } },
+      ] } },
+    },
+  },
+}

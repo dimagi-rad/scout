@@ -45,6 +45,15 @@ class TenantSchema(models.Model):
     refresh_actor_user_id = models.BigIntegerField(null=True, blank=True)
     refresh_membership_id = models.UUIDField(null=True, blank=True)
     refresh_claimed_at = models.DateTimeField(null=True, blank=True)
+    # A workspace-load candidate is PROVISIONING only while its writer holds the
+    # tenant lock, so it is reconciled through that lock rather than a queue-job
+    # binding (unlike the refresh_* request binding above).
+    load_workspace_id = models.UUIDField(null=True, blank=True)
+    load_job_id = models.BigIntegerField(null=True, blank=True)
+    # Resume evidence: a FAILED candidate is resumed only by a load of the same
+    # pending generation whose raw-load configuration still matches.
+    load_generation = models.BigIntegerField(null=True, blank=True)
+    load_config_fingerprint = models.CharField(max_length=64, blank=True, default="", db_default="")
 
     class Meta:
         ordering = ["-last_accessed_at"]
@@ -105,6 +114,52 @@ class MaterializationRun(models.Model):
 
     def __str__(self):
         return f"{self.pipeline} - {self.state}"
+
+
+class TenantLoadGeneration(models.Model):
+    """Bounded per-tenant load-generation ledger for request coalescing.
+
+    ``requested_generation`` advances when a full load is requested and none is
+    joinable; ``published_generation`` advances when a candidate is promoted. A
+    load is pending while ``requested > published``, and joinable while also not
+    yet fetching (``loading < requested``). The published evidence (run, schema,
+    fingerprint) is a positive equivalence check for reuse, never a fallback to
+    whatever run happens to be latest.
+    """
+
+    tenant = models.OneToOneField(
+        "users.Tenant",
+        on_delete=models.CASCADE,
+        related_name="load_generation",
+    )
+    requested_generation = models.BigIntegerField(default=0)
+    published_generation = models.BigIntegerField(default=0)
+    # The generation a writer is fetching right now (0 when none). A refresh
+    # accepted after that fetch started asks for the next generation instead
+    # (see capture_load_intent and end_load_generation for the resume case).
+    loading_generation = models.BigIntegerField(default=0)
+    published_run = models.ForeignKey(
+        MaterializationRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    published_schema = models.ForeignKey(
+        TenantSchema,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    published_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return (
+            f"generation(tenant={self.tenant_id}, requested={self.requested_generation}, "
+            f"published={self.published_generation})"
+        )
 
 
 class WorkspaceDataRecovery(models.Model):
