@@ -197,6 +197,15 @@ def missing_tenants_payload(missing) -> list[dict]:
     return [t.as_dict() | {"remedy": remedy_text(t)} for t in ordered]
 
 
+def needed_text(payload: list[dict]) -> str:
+    """``'Source': remedy; ...`` from :func:`missing_tenants_payload`, never
+    rendering a blank source name."""
+    return "; ".join(
+        f"'{t['tenant_name'] or _PROVIDER_LABELS.get(t['provider'], 'a source')}': {t['remedy']}"
+        for t in payload
+    )
+
+
 def access_denied_body(result: WorkspaceAccess) -> dict:
     """Build the 403 response body for a denied access result.
 
@@ -212,11 +221,7 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
     """
     if result.denied_reason == TENANT_ACCESS_LOST and result.missing_tenants:
         payload = missing_tenants_payload(result.missing_tenants)
-        needed = "; ".join(
-            f"'{t['tenant_name'] or _PROVIDER_LABELS.get(t['provider'], 'a source')}': "
-            f"{t['remedy']}"
-            for t in payload
-        )
+        needed = needed_text(payload)
         rule = (
             "This workspace requires access to every one of its data sources. Still needed"
             if all_of_access_enforced()
@@ -258,7 +263,6 @@ async def _alive_tenant_ids(workspace) -> list:
 
 def _shares_live_tenant(user, tenant_ids) -> bool:
     # Pre-#380 any-of rule: the read gate's fallback while the rollout switch is off.
-    # Member admission still uses it until #561 moves admission to all-of too.
     if not tenant_ids:
         return True
     return TenantMembership.objects.filter(user=user, tenant_id__in=tenant_ids).exists()

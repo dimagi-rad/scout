@@ -24,7 +24,8 @@ _PROVIDER_SOURCE_NOUNS = {
 
 def describe_workspace_sources(workspace) -> str:
     """A human phrase for the upstream data source(s) a workspace draws from,
-    e.g. "the CommCare Connect opportunity 'Malaria Study'"."""
+    e.g. "the CommCare Connect opportunity 'Malaria Study'". Joined with "and":
+    a member needs every one of them (#380)."""
     labels = []
     for wt in workspace.workspace_tenants.select_related("tenant"):
         tenant = wt.tenant
@@ -36,7 +37,7 @@ def describe_workspace_sources(workspace) -> str:
         return "this workspace's data source"
     if len(labels) == 1:
         return labels[0]
-    return ", ".join(labels[:-1]) + " or " + labels[-1]
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
 
 
 def _invite_link(invite) -> str:
@@ -81,8 +82,10 @@ def notify_awaiting_access(invite, invitee, *, notify_manager=True):
     _dispatch(
         f"Action needed to access '{workspace_name}' on Scout",
         (
-            f"You were invited to '{workspace_name}' on Scout, but you don't yet have access "
-            f"to {source}. Ask to be added there — Scout unlocks it automatically once you do.\n"
+            f"You were invited to '{workspace_name}' on Scout, which needs access to "
+            f"{source}. You can't use all of that yet. Ask to be added where you're missing, "
+            f"then connect it in Connected Accounts — Scout unlocks the workspace "
+            f"automatically once you can use every source.\n"
         ),
         [invitee.email],
     )
@@ -91,9 +94,9 @@ def notify_awaiting_access(invite, invitee, *, notify_manager=True):
         _dispatch(
             f"{invitee.email} can't yet access '{workspace_name}'",
             (
-                f"{invitee.email} signed into Scout but doesn't have access to {source}, so they "
-                f"still can't see the data. Grant them access in the source system and it "
-                f"resolves automatically.\n"
+                f"{invitee.email} signed into Scout but can't use all of {source}, so they "
+                f"still can't see the data. Grant them access in the source systems they're "
+                f"missing and it resolves automatically.\n"
             ),
             [inviter.email],
         )

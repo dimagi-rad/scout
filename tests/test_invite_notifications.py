@@ -4,7 +4,6 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
-from apps.users.models import TenantMembership
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.models import (
     Workspace,
@@ -14,6 +13,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.invite_notifications import describe_workspace_sources
+from tests.tenant_access import grant_tenant_access
 
 User = get_user_model()
 
@@ -150,7 +150,7 @@ class TestResolverNotifications:
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
         invitee = User.objects.create_user(email="invitee@example.com", password="pass")
-        TenantMembership.objects.get_or_create(user=invitee, tenant=tenant)
+        grant_tenant_access(invitee, tenant)
         WorkspaceInvite.objects.create(
             workspace=workspace,
             email="invitee@example.com",
