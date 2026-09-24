@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from apps.users.models import TenantMembership
+from apps.workspaces import access_cache
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
 NOT_MEMBER = "not_member"
@@ -166,6 +167,15 @@ def resolve_workspace_access_ex(
     user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
 ) -> WorkspaceAccess:
     """Resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
+    options = (minimum_role,)
+    cached = access_cache.lookup(user, workspace_id, options)
+    if cached is None:
+        cached = _resolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
+        access_cache.store(user, workspace_id, options, cached)
+    return cached
+
+
+def _resolve_workspace_access_ex(user, workspace_id, *, minimum_role: str) -> WorkspaceAccess:
     try:
         wm = WorkspaceMembership.objects.select_related("workspace").get(
             workspace_id=workspace_id, user=user
@@ -186,6 +196,17 @@ async def aresolve_workspace_access_ex(
     user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
 ) -> WorkspaceAccess:
     """Async: resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
+    options = (minimum_role,)
+    cached = access_cache.lookup(user, workspace_id, options)
+    if cached is None:
+        cached = await _aresolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
+        access_cache.store(user, workspace_id, options, cached)
+    return cached
+
+
+async def _aresolve_workspace_access_ex(
+    user, workspace_id, *, minimum_role: str
+) -> WorkspaceAccess:
     try:
         wm = await WorkspaceMembership.objects.select_related("workspace").aget(
             workspace_id=workspace_id, user=user
