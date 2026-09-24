@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
 from django.utils import timezone
 
@@ -358,7 +359,10 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
     candidate = await _failed_workspace_candidate(tenant, workspace)
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager.teardown", side_effect=RuntimeError("busy")),
+        patch(
+            "apps.workspaces.tasks.SchemaManager.teardown",
+            side_effect=psycopg.OperationalError("server closed the connection"),
+        ),
         patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as retry,
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -512,3 +516,19 @@ async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace,
     [(queued,)] = [call.args for call in queue.await_args_list]
     assert queued.id == old.id
     assert queue.await_args.kwargs == {"delay": 15 * 60}
+
+
+async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspace, tenant):
+    candidate = await _failed_workspace_candidate(tenant, workspace)
+
+    with (
+        patch(
+            "apps.workspaces.tasks.SchemaManager.teardown",
+            side_effect=psycopg.errors.UndefinedColumn("no such column"),
+        ),
+        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as retry,
+        pytest.raises(psycopg.errors.UndefinedColumn),
+    ):
+        await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
+
+    retry.assert_not_called()
