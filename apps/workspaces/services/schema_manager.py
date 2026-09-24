@@ -453,20 +453,21 @@ class SchemaManager:
 
             self._drop_relations_restrict(conn, cursor, schema_name, relations)
             try:
-                cursor.execute(
-                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} RESTRICT").format(
-                        psycopg.sql.Identifier(schema_name)
+                # A savepoint keeps the transaction (and its locks) usable, so the
+                # convergence check below sees the same catalog the drop did.
+                with conn.transaction():
+                    cursor.execute(
+                        psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} RESTRICT").format(
+                            psycopg.sql.Identifier(schema_name)
+                        )
                     )
-                )
             except psycopg.errors.DependentObjectsStillExist as exc:
                 # Something that is not a relation (a type, function, or a relation
                 # created after the listing) is still in the schema.
+                converges = self._relations_appeared(cursor, schema_name, relations)
                 conn.rollback()
                 raise SchemaStillReferenced(
-                    schema_name,
-                    [],
-                    detail=str(exc),
-                    converges=self._relations_appeared(cursor, schema_name, relations),
+                    schema_name, [], detail=str(exc), converges=converges
                 ) from exc
             cursor.close()
             conn.commit()
@@ -504,14 +505,15 @@ class SchemaManager:
                     blocked.append((relname, relkind))
                     detail = str(exc)
             if len(blocked) == len(remaining):
+                # Sample while the locks are still held: after the rollback, a
+                # concurrent create or drop could flip the verdict.
                 dependents = self._external_dependents(cursor, schema_name)
+                converges = bool(dependents) or self._relations_appeared(
+                    cursor, schema_name, relations
+                )
                 conn.rollback()
                 raise SchemaStillReferenced(
-                    schema_name,
-                    dependents,
-                    detail=detail,
-                    converges=bool(dependents)
-                    or self._relations_appeared(cursor, schema_name, relations),
+                    schema_name, dependents, detail=detail, converges=converges
                 )
             remaining = blocked
 
@@ -682,7 +684,11 @@ class SchemaManager:
         except ValueError as exc:
             fields = ["state", "last_error", "tenant_coverage"]
             # When the sources are retiring these views can never serve again, and
-            # they would keep the RESTRICT retirement of those schemas blocked.
+            # they would keep the RESTRICT retirement of those schemas blocked. With
+            # no tenants left at all the check is vacuously true on purpose: the old
+            # views still read former sources. view_sources is kept as last-good
+            # provenance for artifact recovery, and the ws_ roles are kept for the
+            # next build (teardown_view_schema is what removes those).
             if self._sources_are_retiring(tenants) and self._drop_view_schema_physically(
                 view_schema_name
             ):
@@ -937,6 +943,12 @@ class SchemaManager:
             )
             cursor.close()
             conn.commit()
+        except psycopg.errors.LockNotAvailable:
+            # The expected outcome of the bounded wait, not an error: a reader is
+            # parked on these views, and retirement will ask again.
+            logger.warning("Dropping view schema '%s' timed out behind a reader", view_schema_name)
+            self._rollback_publication(conn, view_schema_name)
+            return False
         except Exception:
             logger.exception("Failed to drop view schema '%s'", view_schema_name)
             self._rollback_publication(conn, view_schema_name)

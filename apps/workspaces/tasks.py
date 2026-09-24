@@ -1729,6 +1729,14 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
     sibling workspace's views still read the schema; that sibling is asked to
     rebuild and retirement is retried with backoff. Sibling work is only
     deferred, never awaited under T.
+
+    Retirement is best-effort, not a guarantee that expired data stops being
+    readable: if a dependent never moves (its rebuild keeps failing, or it is
+    not a workspace view schema at all), the row stays TEARDOWN, the schema
+    stays physically present, and the dependent keeps reading it. That was
+    chosen over cascading under a live reader. The give-up is logged at ERROR
+    ("giving up retiring schema"), which reaches Sentry, so an operator can
+    move or drop the dependent and re-run the teardown.
     """
     try:
         schema = await TenantSchema.objects.aget(id=schema_id)
@@ -1751,8 +1759,9 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
     try:
         retired = await _retire_under_tenant_lock(schema, attempt)
     except _RetirementNotStarted as exc:
-        # Nothing was dropped and nothing else re-arms a TEARDOWN row. Usually
-        # plain contention (another load holds T), so no traceback.
+        # Nothing was dropped, and neither the TTL sweep (ACTIVE only) nor
+        # provision()'s resurrect branch (EXPIRED only) re-arms a TEARDOWN row.
+        # Usually plain contention (another load holds T), so no traceback.
         logger.warning(
             "teardown_schema: could not start retiring schema %s: %r", schema.id, exc.__cause__
         )
@@ -1778,7 +1787,7 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
             await schema.arefresh_from_db()
         except TenantSchema.DoesNotExist:
             return False  # deleted (e.g. with its tenant) while we waited for T
-        except (DataLockTimeout, DatabaseError, psycopg.OperationalError) as exc:
+        except (DataLockTimeout, DatabaseError, psycopg.Error) as exc:
             raise _RetirementNotStarted from exc
         if schema.state != SchemaState.TEARDOWN:
             return False
@@ -1793,10 +1802,15 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
                 converges=exc.converges,
             )
             return False
-        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
-            # A reader held the relations past the retirement lock timeout, or
-            # locked them in the opposite order; the transaction rolled back and
-            # nothing was dropped, so simply try again later.
+        except (
+            psycopg.errors.LockNotAvailable,
+            psycopg.errors.QueryCanceled,
+            psycopg.errors.DeadlockDetected,
+        ) as exc:
+            # A reader held the relations past the retirement lock timeout (or a
+            # statement_timeout at or below it, 57014), or locked them in the
+            # opposite order; the transaction rolled back and nothing was dropped,
+            # so simply try again later.
             await _retry_retirement(schema, [], attempt, str(exc))
             return False
         except Exception as exc:
@@ -1809,7 +1823,8 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
             )
             if superseded:
                 # A newer ACTIVE schema serves this tenant: reverting would create
-                # a second ACTIVE row, and nothing else re-arms a TEARDOWN row.
+                # a second ACTIVE row. provision() can reclaim only a canonical-named
+                # schema, so a stranded _r_ refresh schema needs this retry.
                 logger.exception(
                     "teardown_schema: retiring superseded schema %s failed; retained", schema.id
                 )
@@ -1877,7 +1892,12 @@ async def _retry_retirement(
         len(dependent_schemas),
         reason,
     )
+    movable = 0
     async for vs in WorkspaceViewSchema.objects.filter(schema_name__in=dependent_schemas):
+        if vs.state == SchemaState.EXPIRED:
+            # Leaving service already; a rebuild would resurrect it as ACTIVE.
+            continue
+        movable += 1
         try:
             if vs.state == SchemaState.TEARDOWN:
                 await teardown_view_schema_task.defer_async(view_schema_id=str(vs.id))
@@ -1885,6 +1905,13 @@ async def _retry_retirement(
                 await rebuild_workspace_view_schema.defer_async(workspace_id=str(vs.workspace_id))
         except Exception:
             logger.exception("Failed to defer dependent rebuild for view schema %s", vs.id)
+    if dependent_schemas and not movable:
+        # Only something we cannot rebuild (e.g. a dbt view in another tenant
+        # schema) reads this schema; retrying for a day would move nothing.
+        await _retry_retirement(
+            schema, [], attempt, f"{reason} (no rebuildable dependent)", converges=False
+        )
+        return
     delay = min(_RETIRE_RETRY_BASE_SECONDS * (2**attempt), _RETIRE_RETRY_MAX_SECONDS)
     await teardown_schema.configure(schedule_in={"seconds": delay}).defer_async(
         schema_id=str(schema.id), attempt=attempt + 1
