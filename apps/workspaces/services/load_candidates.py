@@ -20,7 +20,6 @@ import secrets
 import uuid
 from dataclasses import dataclass
 
-from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
@@ -61,7 +60,7 @@ class OpenedCandidate:
 @dataclass(frozen=True)
 class Promotion:
     promoted: bool
-    retired_schema_ids: tuple = ()
+    retired_schema_ids: tuple[uuid.UUID, ...] = ()
 
 
 def open_workspace_candidate(
@@ -225,7 +224,7 @@ def fail_workspace_candidate(candidate_id, workspace_id, job_id) -> TenantSchema
     """CAS this load's candidate to FAILED, keeping its data for a resume."""
     try:
         schema = TenantSchema.objects.select_related("tenant").get(id=candidate_id)
-    except (TenantSchema.DoesNotExist, ValidationError):
+    except TenantSchema.DoesNotExist:
         return None
     changed = TenantSchema.objects.filter(
         id=schema.id,
