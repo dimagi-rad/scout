@@ -6,7 +6,8 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant, TenantMembership
-from tests.tenant_access import grant_tenant_access, usable_connection
+from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_connection
+from tests.upstream_proofs import ProviderStub
 
 
 @pytest.fixture
@@ -56,6 +57,7 @@ def tenant_membership(db, user, tenant):
     if not created and tm.connection_id is None:
         tm.connection = connection
         tm.save(update_fields=["connection"])
+    record_fresh_proof(tm.connection, tenant)
     return tm
 
 
@@ -77,11 +79,13 @@ def connect_tenant_membership(db):
     connect_tenant = Tenant.objects.create(
         provider="commcare_connect", external_id="1237", canonical_name="Connect Opp 1237"
     )
-    return TenantMembership.objects.create(
+    membership = TenantMembership.objects.create(
         user=connect_user,
         tenant=connect_tenant,
         connection=usable_connection(connect_user, connect_tenant.provider),
     )
+    record_fresh_proof(membership.connection, connect_tenant)
+    return membership
 
 
 @pytest.fixture
@@ -136,3 +140,9 @@ def write_user(db, workspace, tenant):
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ_WRITE)
     grant_tenant_access(u, tenant)
     return u
+
+
+@pytest.fixture
+def upstream_provider(monkeypatch):
+    """Stubbed upstream provider for tests that drive a real access recheck."""
+    return ProviderStub().install(monkeypatch)
