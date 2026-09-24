@@ -312,6 +312,7 @@ class TestCreate:
     def test_create_stays_all_of_with_the_read_switch_off(self, settings, client, user, t1, t2):
         settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
         grant_tenant_access(user, t1)
+        TenantMembership.objects.create(user=user, tenant=t2)
         client.force_login(user)
 
         resp = client.post(
@@ -321,6 +322,7 @@ class TestCreate:
         )
 
         assert resp.status_code == 400
+        assert [t["tenant_name"] for t in resp.json()["missing_tenants"]] == ["Source Two"]
 
     def test_every_requested_source_needs_a_usable_credential(self, client, user, t1, t2):
         grant_tenant_access(user, t1)
