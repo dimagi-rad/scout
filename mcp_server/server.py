@@ -1006,7 +1006,7 @@ async def semantic_query(
         time_dimension: Optional time dimension member, such as "visits.visited_at".
         granularity: Optional time bucket: day, week, month, quarter, or year.
         date_range: Optional {"preset":"last_30_days"} or {"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}. Requires time_dimension; inclusive calendar dates.
-        query_context: Optional reporting context {"timezone":"America/New_York"}; defaults to the server reporting timezone and current clock.
+        query_context: Optional reporting context {"timezone":"America/New_York"}. Chat always resolves presets against the current server clock; use explicit date_range bounds for historical reproduction.
         filters: Optional filters: [{"field": "visits.username", "operator": "equals", "value": "a@example.com"}].
         order_by: Optional ordering: [{"field": "visits.count", "direction": "desc"}].
         limit: Maximum rows, clamped server-side.
@@ -1038,6 +1038,12 @@ async def semantic_query(
             tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
 
+        # Replayed tool results must not pin a later chat turn to an old clock.
+        # Artifact rendering has its own shared-clock API, not this chat tool.
+        if isinstance(query_context, dict):
+            query_context = {
+                key: value for key, value in query_context.items() if key == "timezone"
+            }
         result = await run_semantic_query(
             workspace,
             {

@@ -183,7 +183,7 @@ def validate_date_filter(spec: dict, timezone_name: str | None = None) -> None:
         try:
             if not isinstance(value, str):
                 raise TypeError
-            if "T" in value:
+            if "T" in value or " " in value:
                 instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
             else:
                 instant = datetime.combine(

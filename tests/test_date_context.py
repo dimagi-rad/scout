@@ -154,8 +154,41 @@ async def test_chat_tool_forwards_date_intent(monkeypatch):
     assert result["success"] is True
     assert run.await_args.args[0] is workspace
     assert run.await_args.args[1]["date_range"] == {"preset": "last_30_days"}
-    assert run.await_args.args[1]["query_context"] == CONTEXT
+    assert run.await_args.args[1]["query_context"] == {"timezone": CONTEXT["timezone"]}
     assert run.await_args.kwargs["user_id"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_chat_replayed_context_resolves_presets_at_the_current_clock(monkeypatch):
+    monkeypatch.setattr("mcp_server.envelope._aclose_old_connections", AsyncMock())
+    monkeypatch.setattr(server, "_resolve_accessible_workspace", AsyncMock(return_value=object()))
+    monkeypatch.setattr("django.utils.timezone.now", lambda: datetime(2026, 9, 18, 13, tzinfo=UTC))
+
+    async def execute(workspace, query, **kwargs):
+        return {
+            "semantic_query": resolve_query_dates(query),
+            "rows": [],
+            "columns": [],
+            "row_count": 0,
+        }
+
+    monkeypatch.setattr(server, "run_semantic_query", execute)
+    result = await server.semantic_query(
+        workspace_id="workspace",
+        user_id="user",
+        measures=["sessions.count"],
+        time_dimension="sessions.created_at",
+        date_range={"preset": "last_30_days"},
+        query_context=CONTEXT,
+    )
+    assert result["data"]["semantic_query"]["filters"][0]["values"] == ["2026-08-20", "2026-09-18"]
+
+
+def test_date_filters_preserve_space_separated_iso_timestamps():
+    spec = {"operator": "inDateRange", "values": ["2026-01-01 10:00:00", "2026-01-02 10:00:00"]}
+    validate_date_filter(spec)
+    with pytest.raises(DateContextError, match="start must be on or before"):
+        validate_date_filter({**spec, "values": list(reversed(spec["values"]))})
 
 
 def test_agent_clock_is_runtime_not_model_memory(monkeypatch):
