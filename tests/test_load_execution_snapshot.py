@@ -114,17 +114,27 @@ def test_a_workspace_run_cannot_take_a_snapshot(tenant, workspace):
         run_transformation_pipeline(tenant, "candidate", workspace=workspace, asset_snapshot=[])
 
 
-def test_a_receipt_failure_ends_the_run_failed_not_transforming(tenant):
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [([], MaterializationRun.RunState.FAILED), (["sessions"], MaterializationRun.RunState.PARTIAL)],
+)
+def test_a_receipt_failure_ends_the_run_terminal_not_transforming(tenant, sources, expected):
     """Hashing the implementation can raise; the run must still end terminal, or
-    it stays in an ACTIVE state and the workspace looks mid-refresh forever."""
+    it stays in an ACTIVE state and the workspace looks mid-refresh forever. With
+    sources committed it is PARTIAL, not FAILED as if nothing had loaded."""
     pipeline = PipelineConfig(
-        name="receipt", description="", version="1", provider="ocs", sources=[]
+        name="receipt",
+        description="",
+        version="1",
+        provider="ocs",
+        sources=[SourceConfig(name=name) for name in sources],
     )
     candidate = TenantSchema.objects.create(
         tenant=tenant, schema_name="receipt_candidate", state=SchemaState.PROVISIONING
     )
     with (
         patch("mcp_server.services.materializer._run_discover_phase", return_value={}),
+        patch("mcp_server.services.materializer._load_and_commit_source", return_value=0),
         patch(
             "mcp_server.services.materializer.pipeline_fingerprint",
             side_effect=RuntimeError("implementation path missing"),
@@ -140,5 +150,5 @@ def test_a_receipt_failure_ends_the_run_failed_not_transforming(tenant):
         )
 
     run = MaterializationRun.objects.get(tenant_schema=candidate)
-    assert run.state == MaterializationRun.RunState.FAILED
+    assert run.state == expected
     assert run.completed_at is not None

@@ -103,7 +103,9 @@ def run_transformation_pipeline(
     """Execute system → tenant → workspace; a supplied snapshot is tenant-only.
 
     ``asset_snapshot`` lets a load run exactly the assets it fingerprinted, so a
-    concurrent edit cannot relabel or mix this load's transform stages.
+    concurrent edit cannot relabel or mix this load's transform stages. An asset
+    deleted after the snapshot fails this transform run (its run row cannot
+    reference it); the load itself is unaffected.
     """
     if asset_snapshot is not None and workspace is not None:
         raise ValueError("asset_snapshot is only supported for tenant-scoped runs")

@@ -22,7 +22,7 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import transaction
 
-from apps.transformations.models import TransformationAsset
+from apps.transformations.models import TransformationAsset, TransformationRunStatus
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -157,9 +157,14 @@ def capture_load_intent(tenant_ids, kind: str) -> dict[str, int]:
                     # answers it, even one whose fetch has already started.
                     intent[tenant_id] = generation.requested_generation
                     continue
-            elif pending and generation.loading_generation < generation.requested_generation:
+            elif (
+                kind == INTENT_FULL_REFRESH
+                and pending
+                and generation.loading_generation < generation.requested_generation
+            ):
                 intent[tenant_id] = generation.requested_generation
                 continue
+            # Every arm that is satisfied without a new generation continues above.
             generation.requested_generation += 1
             generation.save(update_fields=["requested_generation", "updated_at"])
             intent[tenant_id] = generation.requested_generation
@@ -199,12 +204,26 @@ def parse_load_intent(value) -> dict[str, int] | None:
     return intent
 
 
+def transforms_publishable(result: dict) -> bool:
+    """Whether a run's transforms allow publishing (and so reusing) its schema.
+
+    Failed data-quality tests still publish: the models were built. Promotion and
+    reuse share this rule so a published generation is never refused for reuse.
+    """
+    transforms = result.get("transforms") or {}
+    if not isinstance(transforms, dict):
+        return False
+    return not transforms.get("error") or transforms.get("status") == (
+        TransformationRunStatus.TESTS_FAILED
+    )
+
+
 def reusable_generation(tenant_id, required: int, fingerprint: str) -> ReuseEvidence | None:
     """Positive equivalence check against the current published generation.
 
     Reuse needs the published generation to satisfy the request, the same
-    fingerprint, a still-ACTIVE promoted schema, and a COMPLETED run without a
-    transform error that is the only non-stale run on that schema (a second run
+    fingerprint, a still-ACTIVE promoted schema, and a COMPLETED, publishable
+    run (``transforms_publishable``) that is the only non-stale run on that schema (a second run
     means an intervening in-place attempt whose outcome is unknown here).
     """
     generation = (
@@ -224,7 +243,7 @@ def reusable_generation(tenant_id, required: int, fingerprint: str) -> ReuseEvid
     result = run.result if isinstance(run.result, dict) else {}
     if result.get("load_fingerprint") != generation.published_fingerprint:
         return None
-    if result.get("transform_error") or (result.get("transforms") or {}).get("error"):
+    if not transforms_publishable(result):
         return None
     other_runs = (
         MaterializationRun.objects.filter(tenant_schema=schema)
