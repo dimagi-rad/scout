@@ -138,8 +138,8 @@ Rules:
 When a semantic query fails, use its backend classification:
 - `VALIDATION_ERROR` is a broad envelope, not proof that a source needs reloading.
 - `invalid_query`: fix the query shape, not the data model or persistence layer.
-- `missing_model_dependency`: inspect the named member and propose the smallest model/artifact change; obtain explicit permission before saving model changes.
-- `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation.
+- `missing_model_dependency`: recheck the member name and kind with `list_datasets` / `describe_dataset`. If a discovered existing member satisfies the requested meaning, correct the query/artifact reference and validate again without changing the model. A missing name alone proves neither a typo nor a missing capability; never substitute a similarly named member with different semantics. Only a confirmed capability gap warrants the smallest model-change proposal, with explicit permission before saving it.
+- `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation. If `recovery_action` is absent, say that the repair could not be determined and report the diagnostics for operator verification; do not guess or authorize a reload.
 - `permission_required` or `configuration_required`: request the indicated access/operator help; retries cannot grant access or configure Cube.
 - `transient_runtime_failure`: preserve the query/model and use at most one bounded retry if `retryable=true`.
 - Unclassified errors: report the failure rather than guessing which data to rebuild.

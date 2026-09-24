@@ -8,11 +8,13 @@ from langgraph.errors import GraphRecursionError
 from apps.agents.subagents.events import reset_subagent_event_queue, set_subagent_event_queue
 from apps.agents.tools.artifact_manager_agent import (
     ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE,
+    _artifact_manager_failure_result,
     _forward_nested_event,
     _SubagentTraceRecorder,
     _summarize_result,
     create_artifact_manager_tool,
 )
+from apps.workspaces.access import tool_write_denied
 
 
 @pytest.mark.asyncio
@@ -116,6 +118,17 @@ def test_artifact_manager_summary_is_compact():
     }
 
 
+def _topic_requirement():
+    return {
+        "kind": "dataset",
+        "need": "Reviewed topics with unmatched messages kept unclassified",
+        "source_datasets": ["raw_messages"],
+        "source_members": ["raw_messages.content", "raw_messages.message_id"],
+        "grain": "One message per tenant and reviewed snapshot",
+        "decisions": ["User must approve classification method and coverage"],
+    }
+
+
 def test_metadata_only_summary_does_not_claim_data_was_verified():
     message = ToolMessage(
         name="artifact_write",
@@ -136,10 +149,7 @@ def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact
     response = {
         "status": "needs_data_model",
         "message": "Topic labels must be saved before this chart can query them.",
-        "data_requirements": [
-            "Derive topic from raw_messages.content using user-approved classification rules.",
-            "Keep message_id as the row key and created_at for date filters.",
-        ],
+        "data_requirements": [_topic_requirement()],
     }
     message = AIMessage(content=json.dumps(response))
 
@@ -152,15 +162,155 @@ def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact
     assert summary["runtime_summary"] == ""
 
 
-def test_artifact_manager_bounds_data_model_handoff():
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        None,
+        [],
+        ["create a dataset"],
+        [{}],
+        [_topic_requirement()] * 9,
+        [{**_topic_requirement(), "need": "x" * 501}],
+        [{**_topic_requirement(), "grain": "  "}],
+        [{**_topic_requirement(), "source_datasets": []}],
+        [{**_topic_requirement(), "kind": "materialize"}],
+        [{**_topic_requirement(), "user_approved": True}],
+    ],
+)
+def test_artifact_manager_rejects_invalid_data_model_handoff(requirements):
     response = {
         "status": "needs_data_model",
-        "data_requirements": [None, {}, "  ", *["x" * 1000] * 12],
+        "data_requirements": requirements,
     }
 
     summary = _summarize_result([], json.dumps(response))
 
-    assert summary["data_requirements"] == ["x" * 500] * 8
+    assert summary["status"] == "invalid_data_requirements"
+    assert "data_requirements" not in summary
+    assert "no model change is authorized" in summary["message"]
+    assert 1 <= len(summary["requirement_errors"]) <= 8
+    assert all(set(error) == {"path", "code", "message"} for error in summary["requirement_errors"])
+    assert all(error["path"] for error in summary["requirement_errors"])
+
+
+def test_invalid_handoff_keeps_bounded_gap_description_and_missing_field_details():
+    summary = _summarize_result(
+        [],
+        json.dumps(
+            {
+                "status": "needs_data_model",
+                "message": "No topic field is available. " + "x" * 1500,
+                "data_requirements": [{}],
+            }
+        ),
+    )
+    assert summary["status"] == "invalid_data_requirements"
+    assert summary["subagent_message"].startswith("No topic field is available.")
+    assert len(summary["subagent_message"]) == 1200
+    assert len(summary["requirement_errors"]) == 6
+    assert "data_requirements" not in summary
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["needs_data_model", "done", [], None],
+    ids=["model_proposal", "false_success", "malformed_status", "missing_status"],
+)
+def test_permission_denial_cannot_be_replaced_by_a_model_proposal(status):
+    denied = tool_write_denied()
+    summary = _summarize_result(
+        [ToolMessage(name="artifact_write", tool_call_id="write", content=json.dumps(denied))],
+        json.dumps(
+            {
+                "status": status,
+                "message": "Create a different model to fix this.",
+                "touched_blocks": ["invented_block"],
+                "data_requirements": [_topic_requirement()],
+            }
+        ),
+    )
+    assert summary["status"] == "error"
+    assert summary["message"] == denied["message"]
+    assert summary["artifact_id"] is None
+    assert summary["artifact_version"] is None
+    assert summary["touched_blocks"] == []
+    assert "data_requirements" not in summary
+    assert "requirement_errors" not in summary
+    assert "subagent_message" not in summary
+    assert summary["runtime_failures"] == [
+        {
+            "code": "FORBIDDEN",
+            "category": "permission_required",
+            "message": denied["message"],
+            "retryable": False,
+            "recovery_action": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [["needs_data_model"], {"status": "needs_data_model"}, 42, [], {}, 0, False, None, " "],
+)
+@pytest.mark.asyncio
+async def test_malformed_status_preserves_typed_failure_summary(status):
+    final_text = json.dumps({"status": status, "data_requirements": [_topic_requirement()]})
+    summary = _summarize_result([], final_text)
+    assert summary["status"] == "error"
+    assert "invalid status" in summary["message"]
+    assert "data_requirements" not in summary
+
+    published = _summarize_result(
+        [
+            ToolMessage(
+                name="artifact_write",
+                tool_call_id="write",
+                content=json.dumps(
+                    {
+                        "status": "created",
+                        "artifact": {"id": "saved", "version": 1},
+                    }
+                ),
+            )
+        ],
+        final_text,
+    )
+    assert published["status"] == "created"
+    assert published["artifact_id"] == "saved"
+    assert "data_requirements" not in published
+
+    failure = await _artifact_manager_failure_result(
+        "parent", _SubagentTraceRecorder(), [], final_text, "The run failed."
+    )
+    assert failure["status"] == "error"
+    assert failure["message"] == "The run failed."
+    assert "data_requirements" not in failure
+    assert any(
+        event["type"] == "data-subagent-status" and event["data"]["phase"] == "failed"
+        for event in failure["subagent_trace"]["events"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requirements", [[_topic_requirement()], [{}]])
+async def test_failed_manager_run_never_returns_an_actionable_model_proposal(requirements):
+    result = await _artifact_manager_failure_result(
+        "parent",
+        _SubagentTraceRecorder(),
+        [],
+        json.dumps(
+            {
+                "status": "needs_data_model",
+                "data_requirements": requirements,
+                "message": "A model change is needed.",
+            }
+        ),
+        "The run failed.",
+    )
+    assert result["status"] == "error"
+    assert "data_requirements" not in result
+    assert "requirement_errors" not in result
+    assert "subagent_message" not in result
 
 
 @pytest.mark.parametrize("tool_status", ["checked", "error"])
@@ -176,7 +326,16 @@ def test_failed_check_preserves_model_gap_without_hiding_other_failures(tool_sta
     response = {
         "status": "needs_data_model",
         "message": "A reviewed dimension is missing; approval is required before creating it.",
-        "data_requirements": ["Create visits.reviewed only after explicit approval."],
+        "data_requirements": [
+            {
+                "kind": "dimension",
+                "source_datasets": ["visits"],
+                "source_members": ["visits.status"],
+                "grain": "One visit",
+                "need": "Create visits.reviewed only after explicit approval.",
+                "decisions": ["User must approve the classification rules"],
+            }
+        ],
     }
     messages = [
         ToolMessage(name="artifact_write", tool_call_id="check", content=json.dumps(result))
@@ -189,12 +348,53 @@ def test_failed_check_preserves_model_gap_without_hiding_other_failures(tool_sta
         assert summary["message"] == response["message"]
 
 
+@pytest.mark.parametrize("tool_status", ["checked", "error"])
+@pytest.mark.parametrize("mixed_failure", [False, True])
+def test_failed_check_preserves_correctable_proposal_only_for_pure_model_gap(
+    tool_status, mixed_failure
+):
+    failures = [{"category": "missing_model_dependency", "message": "visits.reviewed is missing"}]
+    if mixed_failure:
+        failures.append({"category": "permission_required", "message": "Access denied"})
+    messages = [
+        ToolMessage(
+            name="artifact_write",
+            tool_call_id="check",
+            content=json.dumps(
+                {"status": tool_status, "runtime": {"success": False, "failures": failures}}
+            ),
+        )
+    ]
+    summary = _summarize_result(
+        messages,
+        json.dumps(
+            {
+                "status": "needs_data_model",
+                "message": "A reviewed dimension is missing.",
+                "data_requirements": [{}],
+            }
+        ),
+    )
+
+    assert summary["status"] == ("error" if mixed_failure else "invalid_data_requirements")
+    assert "data_requirements" not in summary
+    assert summary["runtime_failures"] == failures
+    if mixed_failure:
+        assert "requirement_errors" not in summary
+        assert "subagent_message" not in summary
+        assert "validation failed" in summary["message"]
+    else:
+        assert len(summary["requirement_errors"]) == 6
+        assert summary["subagent_message"] == "A reviewed dimension is missing."
+        assert "no model change is authorized" in summary["message"]
+
+
 @pytest.mark.asyncio
 async def test_artifact_manager_tool_preserves_data_preparation_handoff(monkeypatch):
     final = {
         "status": "needs_data_model",
         "message": "A reviewed topic field is needed.",
-        "data_requirements": ["Create message_topics at message grain after user approval."],
+        "data_requirements": [_topic_requirement()],
     }
 
     class FakeGraph:

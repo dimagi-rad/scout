@@ -21,9 +21,10 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from apps.agents.graph.state import AgentState
+from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     emit_subagent_event,
@@ -75,7 +76,8 @@ class ArtifactManagerInput(BaseModel):
     subagent_event_queue: Any | None = None
 
 
-ARTIFACT_MANAGER_SYSTEM_PROMPT = """
+ARTIFACT_MANAGER_SYSTEM_PROMPT = (
+    """
 You are Scout's Artifact Manager subagent. Your only job is to create, inspect,
 repair, and validate semantic story artifacts. Be concise and deterministic.
 
@@ -168,8 +170,8 @@ Use `artifact_write(action="create")` for a new artifact, `replace` when
 rewriting the whole doc, `apply` for targeted edits, and `check` for runtime
 validation. Use the backend's typed `runtime.failures`, not message matching:
 - `invalid_document` or `invalid_query`: correct the documented defect, then validate again.
-- `missing_model_dependency`: return the missing dependency to the parent; never invent member names.
-- `data_unavailable`: return the backend `recovery_action`; do not rewrite the artifact or start provider loads yourself.
+- `missing_model_dependency`: recheck the member name and kind with `list_datasets` / `describe_dataset`. If a discovered existing member satisfies the requested meaning, correct the query/artifact reference and validate again without changing the model. A missing name alone proves neither a typo nor a missing capability; never substitute a similarly named member with different semantics. Only a confirmed capability gap warrants a structured proposal to the parent; never invent member names.
+- `data_unavailable`: return the backend `recovery_action`; do not rewrite the artifact or start provider loads yourself. If the action is absent, say that the repair could not be determined and retain the diagnostics; do not guess a repair.
 - `permission_required` or `configuration_required`: explain the required access/operator intervention, without retrying.
 - `transient_runtime_failure`: do not change the model/document; at most one bounded retry when `retryable=true`.
 - Unknown `runtime_failure`: stop and report it; do not guess a destructive repair.
@@ -202,21 +204,27 @@ For `action="apply"`, `ops` supports only these exact shapes:
 Batch related ops into one atomic apply call. Prefer targeted `set` and
 `add_block` ops for revisions so existing blocks remain intact.
 
-If the requested analysis needs a missing derived field (for example, topic
-labels inferred from OCS message content), return `status: "needs_data_model"`
-and `data_requirements`: a short list naming the missing field, discovered
-source dataset/columns, and required grain or classification decision. The
-parent can inspect raw text and, with explicit user approval, delegate the
-model change to `canvas_manager` before returning here. Do not claim raw text
-analysis is impossible, invent topic labels, write SQL, save a placeholder
-dashboard, or keep retrying missing semantic member names. Existing schema or
-query execution errors must follow the typed outcome above, not invent a replacement data model.
+If discovery confirms a missing analytical capability, return
+`status: "needs_data_model"` and structured `data_requirements` matching the
+schema below. Choose dimension, measure, dataset, or relationship from the
+actual data types, row grain, keys, and supported operations, not the provider
+name. Use exact discovered source_datasets/source_members; describe the need,
+grain, and unresolved decisions. Do not invent member names, require a new
+dataset for every field, infer join keys, or save a placeholder artifact.
+Requirements are proposals, never authorization. The parent must verify them
+and obtain explicit user approval before delegating to `canvas_manager`.
+Existing schema or query execution errors must follow the typed outcome above,
+not invent a replacement data model. Keep raw-data inspection and SQL outside
+this subagent.
 
 Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,
 `runtime_summary`, and `message`. Include `data_requirements` only when the
-parent must prepare missing derived fields.
+parent must prepare missing analytical capabilities.
 """
+    + "\nData requirements JSON Schema:\n"
+    + json.dumps(DATA_REQUIREMENTS.json_schema())
+)
 
 
 def create_artifact_manager_tool(
@@ -371,6 +379,9 @@ async def _artifact_manager_failure_result(
     result = _summarize_result(messages, final_text)
     result["status"] = "error"
     result["message"] = message[:1200]
+    result.pop("data_requirements", None)
+    result.pop("requirement_errors", None)
+    result.pop("subagent_message", None)
     await _emit_subagent_event(
         _subagent_error_event(parent_tool_call_id, result["message"]),
         trace,
@@ -804,7 +815,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         diagnostics = list(diagnostics) if isinstance(diagnostics, list) else []
         diagnostics.extend(item for item in runtime["diagnostics"] if item not in diagnostics)
     if isinstance(parsed_final, dict):
-        status = parsed_final.get("status") or artifact_result.get("status") or "done"
+        status = parsed_final.get("status", artifact_result.get("status") or "done")
         message = parsed_final.get("message") or final_text
         touched_blocks = parsed_final.get("touched_blocks") or _touched_blocks_from_artifact_result(
             artifact_result
@@ -813,6 +824,16 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         status = artifact_result.get("status") or "done"
         message = final_text or "Artifact manager completed."
         touched_blocks = _touched_blocks_from_artifact_result(artifact_result)
+    if not isinstance(status, str) or not status.strip():
+        fallback = artifact_result.get("status")
+        if isinstance(fallback, str) and fallback.strip():
+            status = fallback
+            message = (
+                f"Artifact operation returned {fallback}; the manager's final status was invalid."
+            )
+        else:
+            status = "error"
+            message = "Artifact Manager returned an invalid status; no model change is authorized."
     summary = {
         "status": status,
         "artifact_id": artifact.get("id") if isinstance(artifact, dict) else None,
@@ -826,6 +847,31 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         ),
         "message": message[:1200] if isinstance(message, str) else str(message)[:1200],
     }
+    # Access can change after graph creation; a denied write is never a model gap.
+    if artifact_result.get("status") == "denied":
+        denial = artifact_result.get("message")
+        denial = (
+            denial[:1200]
+            if isinstance(denial, str) and denial
+            else "Artifact write access is required."
+        )
+        summary.update(
+            status="error",
+            artifact_id=None,
+            artifact_version=None,
+            touched_blocks=[],
+            message=denial,
+            runtime_failures=[
+                {
+                    "code": "FORBIDDEN",
+                    "category": "permission_required",
+                    "message": denial,
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
+        )
+        return summary
     # Failed writes return a soft-deleted candidate, not a published revision.
     # A failed check, in contrast, still refers to an existing artifact.
     if artifact_result.get("status") == "error":
@@ -862,17 +908,36 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         and parsed_final.get("status") == "needs_data_model"
         and (not artifact_failed or has_model_gap)
     ):
-        requirements = parsed_final.get("data_requirements")
-        if isinstance(requirements, list):
-            summary["data_requirements"] = [
-                item[:500] for item in requirements if isinstance(item, str) and item.strip()
-            ][:8]
-    # A missing-model handoff is not a success claim. Preserve it when all the
-    # typed failures describe that same gap, while retaining other failures as
-    # errors (including mixed access/runtime failures and malformed payloads).
-    model_handoff = (
-        summary["status"] == "needs_data_model"
-        and bool(summary.get("data_requirements"))
+        try:
+            summary["data_requirements"] = validate_data_requirements(
+                parsed_final.get("data_requirements")
+            )
+        except ValidationError as exc:
+            summary["status"] = "invalid_data_requirements"
+            summary["requirement_errors"] = [
+                {
+                    "path": ("/".join(str(part) for part in error["loc"]) or "data_requirements")[
+                        :200
+                    ],
+                    "code": error["type"],
+                    "message": error["msg"][:250],
+                }
+                for error in exc.errors(
+                    include_input=False, include_context=False, include_url=False
+                )[:8]
+            ]
+            gap_description = parsed_final.get("message")
+            if isinstance(gap_description, str) and gap_description.strip():
+                summary["subagent_message"] = gap_description[:1200]
+            summary["message"] = (
+                "Artifact Manager returned an invalid data-model proposal. "
+                "Retry with complete, bounded structured data_requirements; no model change is authorized."
+            )
+    # A missing-model response is not a success claim. Preserve both a valid
+    # handoff and its correctable validation errors when every typed failure
+    # describes that gap. Other runtime failures must still take precedence.
+    model_gap_response = (
+        summary["status"] in {"needs_data_model", "invalid_data_requirements"}
         and isinstance(runtime_failures, list)
         and bool(runtime_failures)
         and all(
@@ -880,8 +945,12 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
             for failure in runtime_failures
         )
     )
-    if artifact_failed and not model_handoff:
+    if artifact_failed and not model_gap_response:
         summary["status"] = "error"
+        # Valid proposals remain context for a real model gap, not authorization
+        # to act before the other typed failures have been resolved.
+        summary.pop("requirement_errors", None)
+        summary.pop("subagent_message", None)
         error_message = artifact_result.get("message")
         summary["message"] = (
             error_message[:1200]
