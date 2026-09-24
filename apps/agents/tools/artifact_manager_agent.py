@@ -803,6 +803,11 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         "runtime_summary": _runtime_summary(runtime),
         "message": message[:1200] if isinstance(message, str) else str(message)[:1200],
     }
+    # Failed writes return a soft-deleted candidate, not a published revision.
+    # A failed check, in contrast, still refers to an existing artifact.
+    if artifact_result.get("status") == "error":
+        summary["artifact_id"] = None
+        summary["artifact_version"] = None
     if isinstance(runtime, dict):
         failures = runtime.get("failures")
         if isinstance(failures, list) and failures:
