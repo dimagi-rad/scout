@@ -17,7 +17,10 @@ from django.test.utils import CaptureQueriesContext
 from apps.workspaces import access_cache
 from apps.workspaces.access import aresolve_workspace_access_ex, resolve_workspace_access_ex
 from apps.workspaces.models import Workspace, WorkspaceRole
+from apps.workspaces.services.access_freshness import VerificationBudget
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
+
+READ_KEY = (WorkspaceRole.READ, VerificationBudget.INTERACTIVE)
 
 
 @pytest.fixture
@@ -39,6 +42,7 @@ def test_repeat_resolution_in_a_scope_costs_no_queries(
 
     assert first.granted
     assert again is first
+    assert access_cache.lookup(user, workspace.id, READ_KEY) is first
 
 
 @pytest.mark.django_db
@@ -131,7 +135,7 @@ async def test_async_middleware_keeps_the_scope_for_a_streamed_body(user, worksp
         pass
 
     assert seen == [True]
-    assert access_cache.lookup(user, workspace.id, (WorkspaceRole.READ,)) is None
+    assert access_cache.lookup(user, workspace.id, READ_KEY) is None
 
 
 @pytest.mark.asyncio
@@ -143,7 +147,7 @@ async def test_async_middleware_closes_the_scope_after_a_plain_response(user, wo
 
     await WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
 
-    assert access_cache.lookup(user, workspace.id, (WorkspaceRole.READ,)) is None
+    assert access_cache.lookup(user, workspace.id, READ_KEY) is None
 
 
 @pytest.mark.django_db

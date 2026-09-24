@@ -53,3 +53,6 @@ CACHES = _build_caches(REDIS_URL)
 
 # Test-only value; must be a valid Fernet key
 DB_CREDENTIAL_KEY = "uHcVl3o7sAzBTV0ECblIGcB4imVnoutulGMF-dNsUoM="
+
+# Tests exercise the enforced gate; fixtures provision genuine fresh proofs.
+UPSTREAM_ACCESS_FRESHNESS_ENFORCED = True

@@ -330,6 +330,11 @@ if SENTRY_DSN:
 TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")
 TASKBADGER_ENVIRONMENT = env("TASKBADGER_ENVIRONMENT", default=DEPLOY_ENVIRONMENT)
 
+# Staged-rollout switch for the five-minute upstream-freshness gate on protected
+# workspace access and background work. It must be enabled together in the API,
+# worker and MCP processes; off keeps local-only authorization.
+UPSTREAM_ACCESS_FRESHNESS_ENFORCED = env.bool("UPSTREAM_ACCESS_FRESHNESS_ENFORCED", default=False)
+
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 

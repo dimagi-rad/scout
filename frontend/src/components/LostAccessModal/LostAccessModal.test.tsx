@@ -122,6 +122,36 @@ describe("LostAccessModal", () => {
   })
 })
 
+describe("LostAccessModal upstream recheck", () => {
+  beforeEach(() => {
+    navigate.mockClear()
+    useAppStore.setState({ domainsStatus: "loaded", domains: [], activeDomainId: null })
+  })
+
+  it("offers an upstream recheck from inside the gate", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined)
+    useAppStore.setState({
+      domains: [ws("skelly", false)],
+      activeDomainId: "skelly",
+      uiActions: { ...useAppStore.getState().uiActions, retryAccessVerification: retry },
+    })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-retry-verification"))
+
+    expect(retry).toHaveBeenCalledWith("skelly")
+  })
+
+  it("shows the retry outcome inside the gate", () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    // Set after the switch: selecting a workspace resets the thread-denial state.
+    useAppStore.setState({ threadsAccessLostMessage: "We couldn't verify your access right now." })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("couldn't verify")
+  })
+})
+
 describe("LostAccessModal with missing sources", () => {
   const partial = {
     ...ws("both", false, "ocs"),

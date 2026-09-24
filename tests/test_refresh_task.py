@@ -31,6 +31,7 @@ from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import refresh_tenant_schema
 from mcp_server.context import load_tenant_context
 from mcp_server.pipeline_registry import PipelineConfig
+from tests.tenant_access import arecord_fresh_proof
 
 
 @pytest.fixture
@@ -542,6 +543,7 @@ async def test_refresh_task_resolves_credential_in_async_context(
     )
     tenant_membership_obj.connection = conn
     await tenant_membership_obj.asave(update_fields=["connection"])
+    await arecord_fresh_proof(conn, await Tenant.objects.aget(id=tenant_membership_obj.tenant_id))
 
     with (
         patch(
