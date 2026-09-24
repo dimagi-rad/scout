@@ -24,6 +24,13 @@ from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
 
+
+async def _denied(user, workspace_id) -> JsonResponse:
+    # Re-resolved only on denial, so a member is told which sources to connect.
+    _workspace, response = await aresolve_workspace(user, workspace_id)
+    return response or JsonResponse({"error": "Workspace not found or access denied."}, status=403)
+
+
 THREAD_TITLE_PREVIEW_CHARS = 200
 
 
@@ -227,7 +234,7 @@ async def thread_detail_view(request, workspace_id, thread_id):
     user = request._authenticated_user
     workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+        return await _denied(user, workspace_id)
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
 
@@ -274,7 +281,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
 
     workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+        return await _denied(user, workspace_id)
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
@@ -307,7 +314,7 @@ async def thread_artifacts_view(request, workspace_id, thread_id):
     user = request._authenticated_user
     workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+        return await _denied(user, workspace_id)
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
@@ -386,7 +393,7 @@ async def thread_viewed_view(request, workspace_id, thread_id):
     user = request._authenticated_user
     workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+        return await _denied(user, workspace_id)
 
     updated = await Thread.objects.filter(
         id=thread_id,

@@ -368,6 +368,57 @@ class TestRemediationWithoutCoverage:
         )
         return user
 
+    def test_last_manager_missing_every_source_can_hand_over_and_leave(
+        self, client, manager, partial_member, other_user
+    ):
+        """No dead end for a shared workspace whose only manager lost everything."""
+        TenantMembership.objects.filter(user=manager).update(archived_at=timezone.now())
+        _join(partial_member, other_user)
+        theirs = WorkspaceMembership.objects.get(workspace=partial_member, user=other_user)
+        mine = WorkspaceMembership.objects.get(workspace=partial_member, user=manager)
+        client.force_login(manager)
+
+        promoted = client.patch(
+            f"/api/workspaces/{partial_member.id}/members/{theirs.id}/",
+            {"role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+        left = client.delete(f"/api/workspaces/{partial_member.id}/members/{mine.id}/")
+
+        assert promoted.status_code == 200
+        assert left.status_code == 204
+        assert WorkspaceMembership.objects.get(pk=theirs.pk).role == WorkspaceRole.MANAGE
+
+    def test_other_role_changes_still_need_coverage(
+        self, client, manager, partial_member, other_user
+    ):
+        _join(partial_member, other_user, role=WorkspaceRole.READ_WRITE)
+        theirs = WorkspaceMembership.objects.get(workspace=partial_member, user=other_user)
+        client.force_login(manager)
+
+        resp = client.patch(
+            f"/api/workspaces/{partial_member.id}/members/{theirs.id}/",
+            {"role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 403
+        assert WorkspaceMembership.objects.get(pk=theirs.pk).role == WorkspaceRole.READ_WRITE
+
+    def test_solo_single_source_workspace_can_be_deleted_once_its_source_is_lost(
+        self, client, user, two_sources
+    ):
+        """The auto-created shape: its only source is gone, so keeping it covers nothing."""
+        ws = _workspace(user, two_sources[0], name="Solo")
+        _join(ws, user, role=WorkspaceRole.MANAGE)
+        grant_tenant_access(user, two_sources[0])
+        TenantMembership.objects.filter(user=user).update(archived_at=timezone.now())
+        client.force_login(user)
+
+        resp = client.delete(f"/api/workspaces/{ws.id}/")
+
+        assert resp.status_code == 204
+
     def test_can_list_and_remove_the_missing_source_and_regain_access(
         self, client, manager, partial_member, two_sources
     ):
@@ -496,3 +547,16 @@ def test_switch_off_list_matches_the_any_of_rule(settings, client, user, partial
 
     TenantMembership.objects.filter(user=user).update(archived_at=timezone.now())
     assert _list_entry(client, partial_member)["has_access"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_thread_detail_denial_names_the_missing_source():
+    user, ws = await sync_to_async(_async_partial_member)("thread-detail@example.com")
+    client = AsyncClient()
+    await client.aforce_login(user)
+
+    resp = await client.get(f"/api/workspaces/{ws.id}/threads/{uuid.uuid4()}/")
+
+    assert resp.status_code == 403
+    assert [t["tenant_name"] for t in resp.json()["missing_tenants"]] == ["Source Two"]

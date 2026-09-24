@@ -1381,6 +1381,8 @@ async def test_partially_covering_requester_is_refused_before_loading(
     assert tenant.canonical_name not in result["error"]
     assert {r["tenant"] for r in result["tenants"]} == {tenant.external_id, other.external_id}
     assert {r["error_code"] for r in result["tenants"]} == {ErrorCode.WORKSPACE_TENANT_UNREACHABLE}
+    covered = next(r for r in result["tenants"] if r["tenant"] == tenant.external_id)
+    assert covered["error"].startswith("not attempted")
 
 
 @pytest.mark.asyncio

@@ -253,8 +253,8 @@ def resolve_workspace_access_ex(
     """Resolve access, exposing the denial reason (see ``WorkspaceAccess``).
 
     ``require_coverage=False`` is only for the few remediation actions that read
-    no tenant data (remove a source, leave, delete the workspace, list its
-    sources). Without it a member who lost a source for good could never get out
+    no tenant data (remove a missing source, leave, hand the manager role to
+    another member, delete a workspace nobody else is in, open its page). Without it a member who lost a source for good could never get out
     of the state, since the fix itself would be refused (ACCESS-CONTRACT §5).
     It applies only while all-of is enforced, so with the rollout switch off every
     endpoint keeps exactly the pre-#380 any-of decision.

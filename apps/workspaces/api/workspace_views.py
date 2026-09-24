@@ -486,20 +486,25 @@ class WorkspaceDetailView(APIView):
             )
         # Deleting destroys every member's content, so without coverage it is a
         # remediation only for a workspace nobody else is in.
-        if (
-            missing_tenants_for_member(request.user, workspace)
-            and workspace.memberships.exclude(user=request.user).exists()
-        ):
+        missing = {t.tenant_id for t in missing_tenants_for_member(request.user, workspace)}
+        if missing and workspace.memberships.exclude(user=request.user).exists():
             return Response(
                 {
                     "error": "You can't delete a shared workspace while you're missing one "
-                    "of its sources. Remove that source or leave the workspace instead."
+                    "of its sources. Remove that source, or make another member a "
+                    "manager and leave."
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Check this is not the user's last workspace covering any tenant
-        tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
+        # Check this is not the user's last workspace covering any tenant. A source
+        # they can no longer use isn't "covered" by keeping this workspace, and
+        # counting it would trap them in a workspace they can't open.
+        tenant_ids = [
+            tid
+            for tid in workspace.workspace_tenants.values_list("tenant_id", flat=True)
+            if str(tid) not in missing
+        ]
         for tid in tenant_ids:
             other_workspaces = Workspace.objects.filter(
                 workspace_tenants__tenant_id=tid,
@@ -658,7 +663,9 @@ class WorkspaceMemberDetailView(APIView):
             return None
 
     def patch(self, request, workspace_id, membership_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
         if membership.role != WorkspaceRole.MANAGE:
@@ -673,6 +680,14 @@ class WorkspaceMemberDetailView(APIView):
         new_role = request.data.get("role")
         if new_role not in WorkspaceRole.values:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Without coverage the only role change is handing over: making another
+        # member a manager, so a last manager who lost a source can then leave.
+        handing_over = new_role == WorkspaceRole.MANAGE and target.user_id != request.user.id
+        if not handing_over:
+            _workspace, _membership, err = resolve_workspace(request, workspace_id)
+            if err:
+                return err
 
         # Prevent demoting the last manager
         if (
