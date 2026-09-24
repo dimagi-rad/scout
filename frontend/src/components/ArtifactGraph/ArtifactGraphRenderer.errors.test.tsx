@@ -36,7 +36,7 @@ describe("artifact semantic-query error presentation", () => {
     fireEvent.change(control, { target: { value: "last_7_days" } })
     expect(await screen.findByTestId("artifact-date-control-error")).toHaveTextContent("Unsupported date preset: last_7_days")
     expect(screen.getByRole("heading", { name: "Readable artifact" })).toBeInTheDocument()
-    expect(onDateSourcesChange).toHaveBeenLastCalledWith({})
+    expect(onDateSourcesChange).toHaveBeenLastCalledWith({ range: null })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 

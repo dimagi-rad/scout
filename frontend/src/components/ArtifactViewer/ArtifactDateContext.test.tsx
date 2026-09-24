@@ -51,7 +51,7 @@ it("uses the server clock and carries changed chart dates into View Data", async
   const post = vi.spyOn(api, "post").mockImplementation(async (url, body) => {
     if (url.endsWith("/query-data/")) {
       const runtime = body as ArtifactQueryContext
-      const value = runtime.sources.range.start === "2026-09-10" ? 5 : 18
+      const value = runtime.sources.range?.start === "2026-09-10" ? 5 : 18
       return { queries: [{ name: "q.sessions", columns: ["sessions.count"], rows: [[value]], row_count: 1 }], static_data: {} }
     }
     const query = body as { filters: Array<{ values: string[] }> }
@@ -77,6 +77,35 @@ it("uses the server clock and carries changed chart dates into View Data", async
   expect(post).toHaveBeenLastCalledWith("/api/workspaces/workspace/artifacts/artifact/query-data/", {
     as_of: context.as_of, timezone: "Asia/Singapore", sources: { range: { start: "2026-09-10", end: "2026-09-16" } },
   })
+})
+
+it("sends an explicit unresolved override when a selected date control fails", async () => {
+  const artifact: ArtifactDetail = {
+    id: "artifact", title: "Sessions", type: "story", code: "", version: 1,
+    semantic_queries: [], date_context: context,
+    data: { story_doc: { schema_version: 1, blocks: [
+      { id: "range", type: "date_filter", config: { label: "Activity window" } },
+      { id: "q", type: "semantic_query", inputs: { date_range: { $ref: "range.value" } }, config: {
+        queries: { sessions: { measures: ["sessions.count"], time_dimension: "sessions.created_at" } },
+      } },
+    ] } },
+  }
+  vi.spyOn(api, "get").mockResolvedValue(artifact)
+  const post = vi.spyOn(api, "post").mockImplementation(async (url, body) => {
+    if (url.endsWith("/query-data/")) {
+      expect((body as ArtifactQueryContext).sources).toEqual({ range: null })
+      throw new Error("Invalid artifact date context")
+    }
+    return { columns: ["sessions.count"], rows: [[18]], row_count: 1 }
+  })
+  render(<ArtifactViewer artifactId="artifact" workspaceId="workspace" />)
+  const control = await screen.findByRole("combobox", { name: "Activity window" })
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+  fireEvent.change(control, { target: { value: "last_90_days" } })
+  expect(await screen.findByTestId("artifact-date-control-error")).toBeInTheDocument()
+  fireEvent.click(screen.getByRole("button", { name: "View Data" }))
+  await waitFor(() => expect(within(screen.getByRole("dialog")).getByText("Invalid artifact date context")).toBeInTheDocument())
+  expect(post).toHaveBeenCalledTimes(2)
 })
 
 it.each(["previous_period", "previous_year"] as const)("keeps %s queries aligned when the comparison window changes", async (comparison) => {

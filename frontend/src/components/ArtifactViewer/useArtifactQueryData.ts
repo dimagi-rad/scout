@@ -4,12 +4,12 @@ import { api } from "@/api/client"
 import type { QueryDataResponse } from "./types"
 import type { ArtifactDetail, ArtifactQueryContext, DateRange } from "@/components/ArtifactGraph/types"
 
-const EMPTY_SOURCES: Record<string, DateRange> = {}
+const EMPTY_SOURCES: Record<string, DateRange | null> = {}
 
 export function useArtifactDateSources(artifact: ArtifactDetail | null) {
   const key = artifact ? `${artifact.id}:${artifact.version}:${artifact.date_context?.as_of ?? ""}` : ""
   const [state, setState] = useState({ key, sources: EMPTY_SOURCES })
-  const update = useCallback((sources: Record<string, DateRange>) => setState({ key, sources }), [key])
+  const update = useCallback((sources: Record<string, DateRange | null>) => setState({ key, sources }), [key])
   return [state.key === key ? state.sources : EMPTY_SOURCES, update] as const
 }
 

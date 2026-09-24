@@ -23,7 +23,7 @@ interface ArtifactCanvasProps {
   error: string | null
   className?: string
   onQueryData?: (queryData: QueryDataResponse) => void
-  onDateSourcesChange?: (sources: Record<string, DateRange>) => void
+  onDateSourcesChange?: (sources: Record<string, DateRange | null>) => void
 }
 
 export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasProps>(

@@ -95,7 +95,7 @@ export interface DateContext {
 export interface ArtifactQueryContext {
   as_of?: string
   timezone?: string
-  sources: Record<string, DateRange>
+  sources: Record<string, DateRange | null>
 }
 
 export interface CompareRanges {

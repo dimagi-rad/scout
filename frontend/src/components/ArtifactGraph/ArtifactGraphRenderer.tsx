@@ -12,7 +12,7 @@ interface ArtifactGraphRendererProps {
   workspaceId: string
   dataRevision?: string
   containerRef?: Ref<HTMLDivElement>
-  onDateSourcesChange?: (sources: Record<string, DateRange>) => void
+  onDateSourcesChange?: (sources: Record<string, DateRange | null>) => void
 }
 
 export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dataRevision, onDateSourcesChange }: ArtifactGraphRendererProps) {
@@ -32,12 +32,17 @@ export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dat
     if (!engine || !onDateSourcesChange) return
     let last = ""
     const publish = () => {
-      const sources: Record<string, DateRange> = {}
+      const sources: Record<string, DateRange | null> = {}
       for (const block of doc.blocks) {
         const port = block.type === "date_filter" ? "value" : block.type === "period_selector" ? "current" : null
         if (!port) continue
         const state = engine.getOutput(`${block.id}.${port}`)
-        if (state.status !== "ready") continue
+        if (state.status !== "ready") {
+          // An omitted override means "use the saved default" on the server.
+          // Keep failed selections explicit so inspection cannot substitute it.
+          if (state.status === "error" || state.status === "blocked") sources[block.id] = null
+          continue
+        }
         const value = state.value
         if (isRecord(value) && typeof value.start === "string" && typeof value.end === "string") {
           sources[block.id] = { start: value.start, end: value.end }
