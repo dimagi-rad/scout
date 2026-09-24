@@ -204,18 +204,26 @@ def parse_load_intent(value) -> dict[str, int] | None:
     return intent
 
 
+_PUBLISHABLE_TRANSFORM_STATUSES = frozenset(
+    {TransformationRunStatus.COMPLETED, TransformationRunStatus.TESTS_FAILED}
+)
+
+
 def transforms_publishable(result: dict) -> bool:
     """Whether a run's transforms allow publishing (and so reusing) its schema.
 
-    Failed data-quality tests still publish: the models were built. Promotion and
-    reuse share this rule so a published generation is never refused for reuse.
+    Decided by the transform run's status, not by whether an error message was
+    recorded (an exception can stringify to ""). No transforms at all publishes;
+    failed data-quality tests still publish, because the models were built.
+    Promotion and reuse share this rule so a published generation is never
+    refused for reuse.
     """
-    transforms = result.get("transforms") or {}
+    transforms = result.get("transforms")
+    if transforms is None or transforms == {}:
+        return True
     if not isinstance(transforms, dict):
         return False
-    return not transforms.get("error") or transforms.get("status") == (
-        TransformationRunStatus.TESTS_FAILED
-    )
+    return transforms.get("status") in _PUBLISHABLE_TRANSFORM_STATUSES
 
 
 def reusable_generation(tenant_id, required: int, fingerprint: str) -> ReuseEvidence | None:

@@ -403,25 +403,7 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                # A resumable source that advanced its cursor has committed rows
-                # even if the source failed overall — treat as PARTIAL so the next
-                # run resumes from the watermark.
-                any_committed = any(
-                    s.get("state") == "completed" or _has_committed_cursor(s)
-                    for s in source_results.values()
-                )
-                final_state = (
-                    MaterializationRun.RunState.PARTIAL
-                    if any_committed
-                    else MaterializationRun.RunState.FAILED
-                )
-                run.state = final_state
-                run.completed_at = datetime.now(UTC)
-                run.result = {
-                    "pipeline": pipeline.name,
-                    "sources": source_results,
-                }
-                run.save(update_fields=["state", "completed_at", "result"])
+                _stamp_load_ended(run, pipeline, source_results)
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
@@ -449,25 +431,14 @@ def run_pipeline(
                 pipeline, tenant_membership.tenant, assets=asset_snapshot
             )
         except Exception as e:
-            # The sources are committed, so the run is PARTIAL (truthful, and
-            # resumable) rather than FAILED as if nothing had loaded.
-            committed = any(
-                s.get("state") == "completed" or _has_committed_cursor(s)
-                for s in source_results.values()
+            # The sources are committed, so this is PARTIAL, not FAILED as if
+            # nothing had loaded.
+            _stamp_load_ended(
+                run,
+                pipeline,
+                source_results,
+                error={"error": _summarize_error(e), "error_code": code_of(e)},
             )
-            run.state = (
-                MaterializationRun.RunState.PARTIAL
-                if committed
-                else MaterializationRun.RunState.FAILED
-            )
-            run.completed_at = datetime.now(UTC)
-            run.result = {
-                "pipeline": pipeline.name,
-                "sources": source_results,
-                "error": _summarize_error(e),
-                "error_code": code_of(e),
-            }
-            run.save(update_fields=["state", "completed_at", "result"])
             raise
 
     except MaterializationCancelled:
@@ -1187,6 +1158,23 @@ def _write_ocs_participants(
             on_page(total, rows_total)
 
     return total
+
+
+def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None = None):
+    """End a run whose load stopped early: PARTIAL if anything committed, else FAILED.
+
+    A resumable source that advanced its cursor has committed rows even if it
+    failed overall, so it counts: PARTIAL lets the next run resume from there.
+    """
+    committed = any(
+        s.get("state") == "completed" or _has_committed_cursor(s) for s in source_results.values()
+    )
+    run.state = (
+        MaterializationRun.RunState.PARTIAL if committed else MaterializationRun.RunState.FAILED
+    )
+    run.completed_at = datetime.now(UTC)
+    run.result = {"pipeline": pipeline.name, "sources": source_results, **(error or {})}
+    run.save(update_fields=["state", "completed_at", "result"])
 
 
 def _run_transform_phase(schema_name: str, tenant=None, assets=None) -> dict:
