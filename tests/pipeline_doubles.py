@@ -9,7 +9,7 @@ from apps.workspaces.models import MaterializationRun
 from apps.workspaces.services.load_generations import pipeline_fingerprint
 
 
-def completed_pipeline_run(membership, credential, pipeline, job_id, target_schema=None, **extra):
+def completed_pipeline_run(membership, credential, pipeline, job_id, target_schema, **extra):
     fingerprint = pipeline_fingerprint(pipeline, membership.tenant)
     run = MaterializationRun.objects.create(
         tenant_schema=target_schema,
