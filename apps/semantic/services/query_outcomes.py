@@ -50,8 +50,9 @@ async def query_readiness_error(workspace, query, code, message, *, category, re
     if surface is None:
         return query_error(code, message, category=category)
     if surface.get("status") == "model_drift":
-        # Batch readiness describes the whole document, not a specific query.
-        return query_error(code, message, category="missing_model_dependency")
+        # This path handles catalog/build failures, not member-resolution errors.
+        # Batch drift cannot prove that this particular query has a missing member.
+        return query_error(code, message, category="data_unavailable")
     if not surface.get("queryable"):
         action = surface.get("recovery_action")
         return query_error(

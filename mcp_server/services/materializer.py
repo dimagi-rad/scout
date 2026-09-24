@@ -62,6 +62,7 @@ from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
+from mcp_server.event_time import normalize_event_time
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
@@ -1184,28 +1185,34 @@ _CASES_INSERT = psql.SQL(
     INSERT INTO {schema}.raw_cases
         (case_id, case_type, case_name, external_id, owner_id,
          date_opened, last_modified, server_last_modified, indexed_on,
-         closed, date_closed, properties, indices)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         closed, date_closed, properties, indices,
+         date_opened_raw, last_modified_raw, server_last_modified_raw, indexed_on_raw, date_closed_raw)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (case_id) DO UPDATE SET
         case_name=EXCLUDED.case_name, owner_id=EXCLUDED.owner_id,
         last_modified=EXCLUDED.last_modified,
         server_last_modified=EXCLUDED.server_last_modified,
         indexed_on=EXCLUDED.indexed_on, closed=EXCLUDED.closed,
         date_closed=EXCLUDED.date_closed, properties=EXCLUDED.properties,
-        indices=EXCLUDED.indices
+        indices=EXCLUDED.indices, last_modified_raw=EXCLUDED.last_modified_raw,
+        server_last_modified_raw=EXCLUDED.server_last_modified_raw,
+        indexed_on_raw=EXCLUDED.indexed_on_raw, date_closed_raw=EXCLUDED.date_closed_raw
     """
 )
 
 _FORMS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_forms
-        (form_id, xmlns, received_on, server_modified_on, app_id, form_data, case_ids)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+        (form_id, xmlns, received_on, server_modified_on, app_id, form_data, case_ids,
+         received_on_raw, server_modified_on_raw)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (form_id) DO UPDATE SET
         received_on=EXCLUDED.received_on,
         server_modified_on=EXCLUDED.server_modified_on,
         form_data=EXCLUDED.form_data,
-        case_ids=EXCLUDED.case_ids
+        case_ids=EXCLUDED.case_ids,
+        received_on_raw=EXCLUDED.received_on_raw,
+        server_modified_on_raw=EXCLUDED.server_modified_on_raw
     """
 )
 
@@ -1230,12 +1237,17 @@ def _write_cases(
             case_name TEXT,
             external_id TEXT,
             owner_id TEXT,
-            date_opened TEXT,
-            last_modified TEXT,
-            server_last_modified TEXT,
-            indexed_on TEXT,
+            date_opened TIMESTAMPTZ,
+            last_modified TIMESTAMPTZ,
+            server_last_modified TIMESTAMPTZ,
+            indexed_on TIMESTAMPTZ,
             closed BOOLEAN DEFAULT FALSE,
-            date_closed TEXT,
+            date_closed TIMESTAMPTZ,
+            date_opened_raw TEXT,
+            last_modified_raw TEXT,
+            server_last_modified_raw TEXT,
+            indexed_on_raw TEXT,
+            date_closed_raw TEXT,
             properties JSONB DEFAULT '{{}}'::jsonb,
             indices JSONB DEFAULT '{{}}'::jsonb
         )
@@ -1258,14 +1270,19 @@ def _write_cases(
                 c.get("case_name", ""),
                 c.get("external_id", ""),
                 c.get("owner_id", ""),
-                c.get("date_opened", ""),
-                c.get("last_modified", ""),
-                c.get("server_last_modified", ""),
-                c.get("indexed_on", ""),
+                normalize_event_time(c.get("date_opened")),
+                normalize_event_time(c.get("last_modified")),
+                normalize_event_time(c.get("server_last_modified")),
+                normalize_event_time(c.get("indexed_on")),
                 c.get("closed", False),
-                c.get("date_closed") or "",
+                normalize_event_time(c.get("date_closed")),
                 json.dumps(c.get("properties", {})),
                 json.dumps(c.get("indices", {})),
+                c.get("date_opened"),
+                c.get("last_modified"),
+                c.get("server_last_modified"),
+                c.get("indexed_on"),
+                c.get("date_closed"),
             )
             for c in page
         ]
@@ -1294,8 +1311,10 @@ def _write_forms(
         CREATE TABLE {schema}.raw_forms (
             form_id TEXT PRIMARY KEY,
             xmlns TEXT,
-            received_on TEXT,
-            server_modified_on TEXT,
+            received_on TIMESTAMPTZ,
+            server_modified_on TIMESTAMPTZ,
+            received_on_raw TEXT,
+            server_modified_on_raw TEXT,
             app_id TEXT,
             form_data JSONB DEFAULT '{{}}'::jsonb,
             case_ids JSONB DEFAULT '[]'::jsonb
@@ -1316,11 +1335,13 @@ def _write_forms(
             (
                 f.get("form_id", ""),
                 f.get("xmlns", ""),
-                f.get("received_on", ""),
-                f.get("server_modified_on", ""),
+                normalize_event_time(f.get("received_on")),
+                normalize_event_time(f.get("server_modified_on")),
                 f.get("app_id", ""),
                 json.dumps(f.get("form_data", {})),
                 json.dumps(f.get("case_ids", [])),
+                f.get("received_on"),
+                f.get("server_modified_on"),
             )
             for f in page
         ]
@@ -1329,6 +1350,35 @@ def _write_forms(
         if on_page is not None:
             on_page(total, rows_total)
 
+    # Keep a distinct association grain; JSONB arrays are not scalar foreign keys.
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_form_cases CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+            CREATE TABLE {schema}.raw_form_cases (
+                form_case_id TEXT PRIMARY KEY,
+                form_id TEXT NOT NULL,
+                case_id TEXT NOT NULL,
+                UNIQUE (form_id, case_id)
+            )
+            """
+        ).format(schema=sid)
+    )
+    cur.execute(
+        psql.SQL(
+            """
+            INSERT INTO {schema}.raw_form_cases (form_case_id, form_id, case_id)
+            SELECT DISTINCT jsonb_build_array(f.form_id, c.value #>> '{{}}')::text,
+                f.form_id, c.value #>> '{{}}'
+            FROM {schema}.raw_forms f
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(f.case_ids) = 'array' THEN f.case_ids ELSE '[]'::jsonb END
+            ) c(value)
+            WHERE jsonb_typeof(c.value) = 'string' AND c.value #>> '{{}}' <> ''
+            """
+        ).format(schema=sid)
+    )
+    cur.execute(psql.SQL("CREATE INDEX ON {}.raw_form_cases (case_id)").format(sid))
     return total
 
 

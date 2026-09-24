@@ -12,6 +12,7 @@ from apps.agents.tools.artifact_manager_agent import _summarize_result
 from apps.artifacts.services import graph_runtime
 from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
 from apps.semantic.services import query_outcomes
+from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.query import run_semantic_query
 
 
@@ -21,7 +22,7 @@ from apps.semantic.services.query import run_semantic_query
     [
         (
             {"status": "model_drift", "queryable": False, "recovery_action": None},
-            "missing_model_dependency",
+            "data_unavailable",
             None,
         ),
         (
@@ -174,6 +175,63 @@ async def test_invalid_document_never_runs_queries(monkeypatch):
     assert result["failures"][0]["message"] == result["summary"]
     assert result["failures"][0]["query_key"] is None
     assert result["manifest"]["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_drift_cannot_turn_a_catalog_outage_into_a_model_edit(monkeypatch):
+    def unavailable(*args):
+        raise SemanticCatalogUnavailable("Catalog unavailable")
+
+    workspace = SimpleNamespace(id="workspace")
+    monkeypatch.setattr(graph_runtime.Workspace.objects, "aget", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        "apps.semantic.services.query._compile_semantic_query_for_async",
+        unavailable,
+    )
+    inspect = AsyncMock(return_value={"status": "model_drift", "queryable": False})
+    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    artifact = SimpleNamespace(
+        workspace_id="workspace",
+        data={
+            "story_doc": {
+                "schema_version": 1,
+                "blocks": [
+                    {
+                        "id": "q",
+                        "type": "semantic_query",
+                        "config": {
+                            "queries": {
+                                "valid": {"measures": ["visits.count"]},
+                                "stale": {"measures": ["visits.deleted"]},
+                            }
+                        },
+                    }
+                ],
+            }
+        },
+    )
+    runtime = await graph_runtime.check_graph_artifact(artifact)
+    assert {failure["category"] for failure in runtime["failures"]} == {"data_unavailable"}
+    inspect.assert_awaited_once()
+    summary = _summarize_result(
+        [
+            ToolMessage(
+                name="artifact_write",
+                tool_call_id="check",
+                content=json.dumps(
+                    {
+                        "status": "checked",
+                        "runtime": runtime,
+                    }
+                ),
+            )
+        ],
+        json.dumps(
+            {"status": "needs_data_model", "data_requirements": ["Invent a replacement field"]}
+        ),
+    )
+    assert summary["status"] == "error"
+    assert "data_requirements" not in summary
 
 
 @pytest.mark.parametrize("failures", [None, {}, "failure", 42])

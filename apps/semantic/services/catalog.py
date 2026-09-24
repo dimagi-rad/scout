@@ -41,6 +41,7 @@ from apps.workspaces.services.view_sources import (
     validate_published_views,
 )
 from mcp_server.context import load_workspace_context
+from mcp_server.event_time import SOURCE_TIME_COLUMNS, event_time_metadata, event_time_sql
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
     pipeline_describe_table,
@@ -68,6 +69,7 @@ class PhysicalTable:
     materialized_at: str | None = None
     primary_key: str = ""
     source_tenant_ids: tuple[str, ...] = ()
+    source_table_name: str = ""
 
 
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_]+")
@@ -236,7 +238,11 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
 
     ts = None
     if not is_view_schema:
-        ts = await TenantSchema.objects.filter(schema_name=schema_name).afirst()
+        ts = (
+            await TenantSchema.objects.select_related("tenant")
+            .filter(schema_name=schema_name)
+            .afirst()
+        )
 
     if ts is None:
         # A multi-tenant ws_* view schema (or a schema with no TenantSchema row)
@@ -282,6 +288,31 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
             pipeline_config,
         )
         columns = (detail or {}).get("columns", [])
+        owner = (
+            ts.tenant
+            if ts is not None
+            else next(
+                (
+                    tenant
+                    for tenant in tenants
+                    if sources and str(tenant.id) == sources[table_name].tenant_id
+                ),
+                None,
+            )
+        )
+        source_table = sources[table_name].source_table_name if sources else table_name
+        time_columns = (
+            SOURCE_TIME_COLUMNS.get(owner.provider, {}).get(source_table, set()) if owner else set()
+        )
+        columns = [
+            {
+                **column,
+                "event_time": event_time_metadata(owner.provider),
+            }
+            if column.get("name") in time_columns
+            else column
+            for column in columns
+        ]
         physical_tables.append(
             PhysicalTable(
                 name=table_name,
@@ -298,6 +329,13 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                     else (sources[table_name].tenant_id,)
                     if sources is not None
                     else SchemaManager().tenant_ids_for_view(table_name, tenants)
+                ),
+                source_table_name=(
+                    table_name
+                    if ts is not None
+                    else sources[table_name].source_table_name
+                    if sources is not None
+                    else ""
                 ),
             )
         )
@@ -373,7 +411,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         raise SemanticCatalogUnavailable("No queryable datasets are available.")
 
     with transaction.atomic():
-        model, _ = SemanticModel.objects.select_for_update().get_or_create(
+        model, created = SemanticModel.objects.select_for_update().get_or_create(
             workspace=workspace,
             defaults={"name": f"{workspace.name} Semantic Model"},
         )
@@ -409,6 +447,11 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                         "materialized_at": table.materialized_at,
                         "row_count_verified": False,
                         **(
+                            {"source_table_name": table.source_table_name}
+                            if table.source_table_name
+                            else {}
+                        ),
+                        **(
                             {"source_tenant_ids": list(table.source_tenant_ids)}
                             if table.source_tenant_ids
                             else {}
@@ -430,10 +473,13 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         ).exclude(id__in=existing_physical_dataset_ids).update(is_visible=False)
 
         diagnostics = _sync_custom_datasets(model, workspace, schema_name)
-        _sync_relationships(model, workspace)
+        diagnostics.extend(_sync_relationships(model, workspace))
         model.status = SemanticModel.Status.ACTIVE
         model.diagnostics = diagnostics
-        model.save(update_fields=["status", "diagnostics", "updated_at"])
+        model.metadata = {**(model.metadata or {}), "catalog_diagnostics": diagnostics}
+        if not created:
+            model.version += 1
+        model.save(update_fields=["version", "status", "diagnostics", "metadata", "updated_at"])
         return model
 
 
@@ -566,6 +612,25 @@ def _relationship_endpoints(rel, datasets_by_table: dict[str, list[SemanticDatas
     views (``<prefix>__<table>``) prefix-for-prefix so tenant A's visits only
     join tenant A's users.
     """
+    scoped: dict[tuple[str, str], list[SemanticDataset]] = {}
+    legacy: dict[str, list[SemanticDataset]] = {}
+    for table_name, datasets in datasets_by_table.items():
+        for dataset in datasets:
+            metadata = dataset.metadata or {}
+            if "source_table_name" in metadata:
+                owners = metadata.get("source_tenant_ids", [])
+                if len(owners) == 1:
+                    scoped.setdefault((owners[0], metadata["source_table_name"]), []).append(
+                        dataset
+                    )
+            else:
+                legacy.setdefault(table_name, []).append(dataset)
+    for (owner, source_table), from_datasets in scoped.items():
+        if source_table == rel.from_table:
+            for from_dataset in from_datasets:
+                for to_dataset in scoped.get((owner, rel.to_table), []):
+                    yield from_dataset, to_dataset
+    datasets_by_table = legacy
     for from_dataset in datasets_by_table.get(rel.from_table, []):
         for to_dataset in datasets_by_table.get(rel.to_table, []):
             yield from_dataset, to_dataset
@@ -579,7 +644,7 @@ def _relationship_endpoints(rel, datasets_by_table: dict[str, list[SemanticDatas
                 yield from_dataset, to_dataset
 
 
-def _sync_relationships(model: SemanticModel, workspace) -> None:
+def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]:
     """Derive dataset relationships from the pipelines' declared table links.
 
     Pipeline YAMLs declare physical foreign-key-ish links (from_table/from_column
@@ -596,8 +661,18 @@ def _sync_relationships(model: SemanticModel, workspace) -> None:
             is_visible=True,
         ).prefetch_related("fields")
     )
+    diagnostics = []
     datasets_by_table: dict[str, list[SemanticDataset]] = {}
     for dataset in datasets:
+        metadata = dataset.metadata or {}
+        if "source_table_name" in metadata and len(metadata.get("source_tenant_ids", [])) != 1:
+            diagnostics.append(
+                {
+                    "level": "warning",
+                    "code": "relationship_source_provenance",
+                    "message": f"Dataset '{dataset.name}' has ambiguous source ownership; generated joins were omitted.",
+                }
+            )
         datasets_by_table.setdefault(dataset.table_name, []).append(dataset)
 
     def visible_field(dataset: SemanticDataset, column: str):
@@ -608,31 +683,83 @@ def _sync_relationships(model: SemanticModel, workspace) -> None:
         )
 
     active_names: set[str] = set()
+    curated_names = {
+        name
+        for name, metadata in SemanticRelationship.objects.filter(workspace=workspace).values_list(
+            "name", "metadata"
+        )
+        if not (metadata or {}).get("generated")
+    }
     for pipeline in get_registry().list():
         for rel in pipeline.relationships:
             for from_dataset, to_dataset in _relationship_endpoints(rel, datasets_by_table):
-                from_field = visible_field(from_dataset, rel.from_column)
-                to_field = visible_field(to_dataset, rel.to_column)
-                if from_field is None or to_field is None:
+                pairs = [
+                    (visible_field(from_dataset, source), visible_field(to_dataset, target))
+                    for source, target in rel.key_pairs
+                ]
+                if any(source is None or target is None for source, target in pairs):
                     continue
                 name = semantic_name(f"{from_dataset.name}_{rel.from_column}_to_{to_dataset.name}")
-                relationship_type = (
-                    SemanticRelationship.RelationshipType.ONE_TO_ONE
-                    if rel.from_column == from_dataset.primary_key
-                    else SemanticRelationship.RelationshipType.MANY_TO_ONE
-                )
+                if name in curated_names:
+                    continue
+                if any(
+                    not _relationship_key_type(source.data_type)
+                    or _relationship_key_type(source.data_type)
+                    != _relationship_key_type(target.data_type)
+                    or (source.metadata or {}).get("cube_sql")
+                    or (target.metadata or {}).get("cube_sql")
+                    for source, target in pairs
+                ):
+                    diagnostics.append(
+                        {
+                            "level": "warning",
+                            "code": "relationship_key_type",
+                            "message": f"Relationship '{name}' requires compatible physical scalar keys; arrays/objects require a bridge and calculated keys must be modeled explicitly.",
+                        }
+                    )
+                    continue
+                predicates = [
+                    f"{{{from_dataset.name}.{source.name}}} = {{{to_dataset.name}.{target.name}}}"
+                    for source, target in pairs
+                ]
+                if rel.require_unique_target:
+                    # An incomplete API identity is useful only when it resolves to one row.
+                    columns = ", ".join(
+                        _quoted_identifier(target.expression) for _, target in pairs
+                    )
+                    members = ", ".join(
+                        f"{{{to_dataset.name}.{target.name}}}" for _, target in pairs
+                    )
+                    predicates.append(
+                        f"({members}) IN (SELECT {columns} FROM {_quoted_identifier(to_dataset.table_name)} "  # noqa: S608
+                        f"GROUP BY {columns} HAVING COUNT(*) = 1)"
+                    )
+                    predicates.extend(
+                        f"{{{from_dataset.name}.{source.name}}} <> ''"
+                        for source, _ in pairs
+                        if _relationship_key_type(source.data_type) == "string"
+                    )
                 SemanticRelationship.objects.update_or_create(
                     workspace=workspace,
                     name=name,
                     defaults={
                         "from_dataset": from_dataset,
                         "to_dataset": to_dataset,
-                        "relationship_type": relationship_type,
-                        "join_expression": (
-                            f"{{{from_dataset.name}.{from_field.name}}} = "
-                            f"{{{to_dataset.name}.{to_field.name}}}"
-                        ),
-                        "metadata": {"generated": True, "description": rel.description},
+                        "relationship_type": rel.relationship_type,
+                        "join_expression": " AND ".join(predicates),
+                        "metadata": {
+                            "generated": True,
+                            "description": rel.description,
+                            "key_pairs": rel.key_pairs,
+                            "key_scope": (
+                                "source_tenant"
+                                if "source_table_name" in (from_dataset.metadata or {})
+                                else "table_name"
+                                if from_dataset.table_name == rel.from_table
+                                else "view_prefix"
+                            ),
+                            "require_unique_target": rel.require_unique_target,
+                        },
                     },
                 )
                 active_names.add(name)
@@ -641,6 +768,24 @@ def _sync_relationships(model: SemanticModel, workspace) -> None:
         workspace=workspace,
         metadata__generated=True,
     ).exclude(name__in=active_names).delete()
+    return diagnostics
+
+
+def _quoted_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _relationship_key_type(data_type: str) -> str | None:
+    value = data_type.lower()
+    if value in _NUMERIC_TYPES:
+        return "number"
+    if value in {"text", "character varying", "varchar", "character", "char", "uuid"}:
+        return "uuid" if value == "uuid" else "string"
+    if value in {"boolean", "bool"}:
+        return "boolean"
+    if value in {"date", "timestamp without time zone", "timestamp with time zone"}:
+        return value
+    return None
 
 
 def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annotation) -> None:
@@ -686,9 +831,15 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
         field_name = semantic_name(column_name)
         data_type = column.get("type") or column.get("data_type") or ""
         description = column_notes.get(column_name) or column.get("description", "")
+        event_time = column.get("event_time")
+        text_event_time = bool(event_time) and data_type.lower() in {
+            "text",
+            "character varying",
+            "varchar",
+        }
         field_type = (
             SemanticField.FieldType.TIME_DIMENSION
-            if _is_time(data_type)
+            if _is_time(data_type) or text_event_time
             else SemanticField.FieldType.DIMENSION
         )
         upsert_field(
@@ -697,7 +848,7 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                 "label": _humanize_name(column_name),
                 "description": description,
                 "field_type": field_type,
-                "data_type": data_type,
+                "data_type": "timestamp with time zone" if text_event_time else data_type,
                 "expression": column_name,
                 "measure_type": "",
                 "is_visible": True,
@@ -705,6 +856,8 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                     "source_column": column_name,
                     "nullable": column.get("nullable"),
                     "default": column.get("default"),
+                    **({"event_time": event_time} if event_time else {}),
+                    **({"cube_sql": event_time_sql(column_name)} if text_event_time else {}),
                     **(
                         {}
                         if _is_identifier_column(column_name, dataset)
