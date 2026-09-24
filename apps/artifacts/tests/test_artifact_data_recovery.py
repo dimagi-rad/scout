@@ -308,10 +308,12 @@ async def test_recovery_worker_records_success(recovery_setup):
     assert result["status"] == "completed"
     assert recovery.state == WorkspaceDataRecovery.State.COMPLETED
     assert recovery.procrastinate_job_id == 913
+    # A repair reconciles missing sources; it does not force a fresh reload.
     materialize.assert_awaited_once_with(
         str(recovery_setup.workspace.id),
         str(recovery_setup.user.id),
         913,
+        intent_kind="reconcile_missing",
     )
 
 

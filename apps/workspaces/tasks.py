@@ -70,6 +70,24 @@ from apps.workspaces.services.data_operation import (
     workspace_data_lock,
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
+from apps.workspaces.services.load_candidates import (
+    abandoned_workspace_candidates,
+    fail_workspace_candidate,
+    open_workspace_candidate,
+    promote_candidate_schema,
+    settle_orphaned_workspace_candidates,
+)
+from apps.workspaces.services.load_generations import (
+    INTENT_FULL_REFRESH,
+    INTENT_RECONCILE_MISSING,
+    begin_load_generation,
+    capture_load_intent,
+    end_load_generation,
+    parse_load_intent,
+    pipeline_fingerprint,
+    raw_load_fingerprint,
+    reusable_generation,
+)
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
@@ -600,19 +618,57 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
     }
 
 
+async def _workspace_tenant_ids(workspace_id) -> list:
+    return [
+        tenant_id
+        async for tenant_id in WorkspaceTenant.objects.filter(
+            workspace_id=workspace_id
+        ).values_list("tenant_id", flat=True)
+    ]
+
+
 def serialized_workspace_materialization(function):
-    """Serialize a user load and recheck authority on both sides of the lock wait."""
+    """Capture load intent, then take W and the sorted tenant locks T*.
+
+    Authority is rechecked after every wait. The intent is captured before the W
+    wait (or arrives from the queue), so two requests queued behind one lock join
+    the same load. T* covers every tenant of the workspace at once: a tenant added
+    after the locks are taken is reported, never loaded outside T.
+    """
 
     @wraps(function)
-    async def wrapped(workspace_id, user_id="", *args, **kwargs):
+    async def wrapped(
+        workspace_id,
+        user_id="",
+        *args,
+        load_intent=None,
+        intent_kind: str = INTENT_FULL_REFRESH,
+        **kwargs,
+    ):
         denial = await _materialization_write_denial(workspace_id, user_id)
         if denial is not None:
             return denial
+        intent = parse_load_intent(load_intent)
+        if intent is None:
+            tenant_ids = await _workspace_tenant_ids(workspace_id)
+            intent = await _to_thread_fresh_db(capture_load_intent, tenant_ids, intent_kind)
         async with workspace_data_lock(workspace_id):
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
                 return denial
-            return await function(workspace_id, user_id, *args, **kwargs)
+            tenant_ids = await _workspace_tenant_ids(workspace_id)
+            async with tenant_data_lock(tenant_ids):
+                denial = await _materialization_write_denial(workspace_id, user_id)
+                if denial is not None:
+                    return denial
+                return await function(
+                    workspace_id,
+                    user_id,
+                    *args,
+                    load_intent=intent,
+                    locked_tenant_ids=frozenset(str(t) for t in tenant_ids),
+                    **kwargs,
+                )
 
     return wrapped
 
@@ -622,6 +678,9 @@ async def materialize_workspace_core(
     workspace_id: str,
     user_id: str = "",
     job_id: int | None = None,
+    *,
+    load_intent: dict[str, int] | None = None,
+    locked_tenant_ids: frozenset[str] | None = None,
 ) -> dict:
     """Run materialization for all tenants in a workspace and rebuild view schemas.
 
@@ -685,6 +744,7 @@ async def materialize_workspace_core(
 
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+    load_intent = load_intent or {}
 
     for index, tm in enumerate(memberships):
         # The wrapper checked before the first tenant. A long load can outlive a
@@ -716,8 +776,20 @@ async def materialize_workspace_core(
                     )
                 )
                 continue
-        attempted_tenant_ids.add(str(tm.tenant_id))
         tenant_id = tm.tenant.external_id
+        if locked_tenant_ids is not None and str(tm.tenant_id) not in locked_tenant_ids:
+            # Added after the tenant locks were taken; loading it now would run
+            # outside T. Report it truthfully and let a re-run cover it.
+            tenant_results.append(
+                _preflight_failure(
+                    tm.tenant,
+                    "This source was added while the load was starting and was not "
+                    "loaded. Run the load again to include it.",
+                    ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+                )
+            )
+            continue
+        attempted_tenant_ids.add(str(tm.tenant_id))
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
         if pipeline_name is None:
             tenant_results.append(
@@ -749,13 +821,39 @@ async def materialize_workspace_core(
             continue
 
         pipeline_config = registry.get(pipeline_name)
+        required = load_intent.get(str(tm.tenant_id))
+        evidence = None
+        if required is not None:
+            fingerprint = await _to_thread_fresh_db(
+                pipeline_fingerprint, pipeline_config, tm.tenant
+            )
+            evidence = await _to_thread_fresh_db(
+                reusable_generation, tm.tenant_id, required, fingerprint
+            )
+        if evidence is not None:
+            # An equivalent load completed while this request waited. The requester
+            # authorized and resolved its own credential above, and still publishes
+            # its own views and Cube below; its status says what really happened.
+            successful_attempted_tenant_ids.add(str(tm.tenant_id))
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "provider": tm.tenant.provider,
+                    "success": True,
+                    "reused_generation": evidence.generation,
+                    "result": {
+                        "status": "completed",
+                        "reused": True,
+                        "run_id": str(evidence.run.id),
+                        "schema": evidence.schema.schema_name,
+                        "pipeline": pipeline_config.name,
+                    },
+                }
+            )
+            continue
         try:
-            result = await run_data_thread(
-                _run_pipeline_with_progress,
-                tm,
-                credential,
-                pipeline_config,
-                job_id,
+            result = await _load_workspace_candidate(
+                workspace, tm, credential, pipeline_config, job_id
             )
             successful_attempted_tenant_ids.add(str(tm.tenant_id))
             tenant_results.append(
@@ -1002,6 +1100,7 @@ async def materialize_workspace(
     context,
     workspace_id: str,
     user_id: str = "",
+    load_intent: dict | None = None,
 ) -> dict:
     """Procrastinate task: run materialization for a workspace, then ALWAYS
     defer the chat-resume task so an interactive user is never left with a
@@ -1014,7 +1113,9 @@ async def materialize_workspace(
     job_id = context.job.id
     preflight_failures = None
     try:
-        result = await materialize_workspace_core(workspace_id, user_id, job_id)
+        result = await materialize_workspace_core(
+            workspace_id, user_id, job_id, load_intent=load_intent
+        )
         preflight_failures = [
             {
                 "tenant_id": entry["tenant_id"],
@@ -1159,6 +1260,7 @@ def _run_pipeline_with_progress(
     credential: dict,
     pipeline_config,
     job_id: int,
+    target_schema=None,
 ) -> dict:
     """Synchronous entry point invoked under ``asyncio.to_thread``.
 
@@ -1186,7 +1288,169 @@ def _run_pipeline_with_progress(
         pipeline_config,
         progress_updater=updater,
         procrastinate_job_id=job_id,
+        target_schema=target_schema,
+        defer_schema_promotion=target_schema is not None,
     )
+
+
+# Old ACTIVE schemas are retired after a delay so in-flight queries can drain;
+# retirement itself then waits for dependent sibling views to move.
+_RETIRE_AFTER = timedelta(minutes=30)
+
+
+async def _retire_schemas(schema_ids) -> None:
+    for schema_id in schema_ids:
+        await teardown_schema.configure(
+            schedule_in={"seconds": int(_RETIRE_AFTER.total_seconds())},
+        ).defer_async(schema_id=str(schema_id))
+
+
+async def _load_workspace_candidate(
+    workspace, tm, credential: dict, pipeline_config, job_id: int | None
+) -> dict:
+    """Load one tenant into a candidate and promote it; the caller holds W and T.
+
+    The serving schema is never written, so a failed or cancelled load leaves
+    last-good data readable for every workspace sharing the tenant. A failed
+    candidate keeps its data: the next load of the same pending generation with
+    the same raw-load configuration resumes it, and any other failed candidate
+    is dropped by a bounded-retry cleanup.
+    """
+    await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tm.tenant_id)
+    generation = await _to_thread_fresh_db(begin_load_generation, tm.tenant_id)
+    config = raw_load_fingerprint(pipeline_config)
+    opened = await _to_thread_fresh_db(
+        open_workspace_candidate,
+        tm.tenant,
+        workspace_id=workspace.id,
+        job_id=job_id,
+        generation=generation,
+        config_fingerprint=config,
+    )
+    candidate = opened.schema
+    await _defer_abandoned_candidate_drops(tm.tenant_id, keep_id=candidate.id)
+    if opened.resumed:
+        logger.info(
+            "Resuming failed candidate '%s' for tenant %s (generation %d)",
+            candidate.schema_name,
+            tm.tenant_id,
+            generation,
+        )
+    try:
+        await run_data_thread(SchemaManager().create_physical_schema, candidate)
+        result = await run_data_thread(
+            _run_pipeline_with_progress, tm, credential, pipeline_config, job_id, candidate
+        )
+    except asyncio.CancelledError:
+        await _drain(
+            _fail_workspace_candidate(candidate, workspace.id, job_id, generation), candidate
+        )
+        raise
+    except BaseException:
+        await _fail_workspace_candidate(candidate, workspace.id, job_id, generation)
+        raise
+    promotion = await _to_thread_fresh_db(
+        promote_candidate_schema,
+        candidate.id,
+        accessed_at=timezone.now(),
+        workspace_id=workspace.id,
+        workspace_job_id=job_id,
+        loading_generation=generation,
+        run_id=result.get("run_id") if isinstance(result, dict) else None,
+        fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
+    )
+    if not promotion.promoted:
+        await _fail_workspace_candidate(candidate, workspace.id, job_id, generation)
+        raise RuntimeError(
+            "The load finished without a complete, owned result to publish; "
+            "the previous data is still being served. Run the load again."
+        )
+    await _retire_schemas(promotion.retired_schema_ids)
+    if isinstance(result, dict) and opened.resumed:
+        result = {**result, "resumed": True}
+    return result
+
+
+async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation: int) -> None:
+    # The physical schema is kept: it is this generation's resume point, and the
+    # generation stays pending (not loading) so a retry joins and resumes it.
+    await _to_thread_fresh_db(fail_workspace_candidate, candidate.id, workspace_id, job_id)
+    await _to_thread_fresh_db(end_load_generation, candidate.tenant_id, generation)
+
+
+async def _drain(operation, candidate) -> None:
+    """Finish candidate cleanup before propagating worker cancellation."""
+    cleanup = asyncio.create_task(operation)
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            if cleanup.cancelled():
+                return
+            continue
+        except Exception:
+            logger.exception(
+                "Cancellation cleanup failed for candidate '%s'", candidate.schema_name
+            )
+        return
+
+
+async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
+    abandoned = await _to_thread_fresh_db(
+        abandoned_workspace_candidates, tenant_id, keep_id=keep_id
+    )
+    for schema in abandoned:
+        try:
+            await drop_abandoned_candidate.defer_async(schema_id=str(schema.id))
+        except Exception:
+            logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
+
+
+_CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
+_CANDIDATE_DROP_RETRY_MAX_SECONDS = 3600
+_CANDIDATE_DROP_MAX_ATTEMPTS = 10
+
+
+@task
+async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
+    """Drop the partial data of a failed candidate no load will resume.
+
+    Holds T so a writer cannot be resuming this candidate while it is dropped.
+    A failed drop is retried with backoff and then left for an operator.
+    """
+    schema = await TenantSchema.objects.filter(id=schema_id).afirst()
+    if schema is None:
+        return
+    try:
+        async with tenant_data_lock([schema.tenant_id]):
+            await schema.arefresh_from_db()
+            if schema.state != SchemaState.FAILED or schema.load_workspace_id is None:
+                return
+            await run_data_thread(SchemaManager().teardown, schema)
+            await (
+                MaterializationRun.objects.filter(tenant_schema=schema)
+                .exclude(state=MaterializationRun.RunState.STALE)
+                .aupdate(state=MaterializationRun.RunState.STALE)
+            )
+            schema.state = SchemaState.EXPIRED
+            await schema.asave(update_fields=["state"])
+    except TenantSchema.DoesNotExist:
+        return
+    except Exception as exc:
+        if attempt + 1 >= _CANDIDATE_DROP_MAX_ATTEMPTS:
+            logger.exception(
+                "Giving up dropping abandoned candidate %s after attempt %d", schema_id, attempt + 1
+            )
+            return
+        logger.warning(
+            "Dropping abandoned candidate %s failed (attempt %d): %s", schema_id, attempt + 1, exc
+        )
+        delay = min(
+            _CANDIDATE_DROP_RETRY_BASE_SECONDS * (2**attempt), _CANDIDATE_DROP_RETRY_MAX_SECONDS
+        )
+        await drop_abandoned_candidate.configure(schedule_in={"seconds": delay}).defer_async(
+            schema_id=str(schema_id), attempt=attempt + 1
+        )
 
 
 def _refresh_denial_result(reason: str) -> dict:
@@ -1226,7 +1490,9 @@ async def _drop_claimed_refresh_schema_and_fail(schema, job_id: int) -> None:
 async def _drop_failed_refresh_schema(schema_id) -> None:
     # FAILED is terminal for a refresh candidate: it is never served and nothing
     # moves it back, so its physical schema can be dropped without a claim.
-    schema = await TenantSchema.objects.filter(id=schema_id, state=SchemaState.FAILED).afirst()
+    schema = await TenantSchema.objects.filter(
+        id=schema_id, state=SchemaState.FAILED, load_workspace_id__isnull=True
+    ).afirst()
     if schema is None:
         return
     await asyncio.to_thread(SchemaManager().teardown, schema)
@@ -1625,6 +1891,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                     str(recovery.workspace_id),
                     str(recovery.requested_by_id),
                     context.job.id,
+                    intent_kind=INTENT_RECONCILE_MISSING,
                 )
             elif action == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD:
                 result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))
