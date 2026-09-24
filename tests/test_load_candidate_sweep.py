@@ -216,3 +216,34 @@ async def test_a_drop_never_waits_on_a_loading_tenant(tenant, workspace):
     retry.assert_called_once()
     await candidate.arefresh_from_db()
     assert candidate.state == SchemaState.FAILED
+
+
+async def test_a_drop_skips_a_candidate_whose_owner_changed_since_it_was_queued(tenant, workspace):
+    """A resume rewrites the owner even when it fails before starting a run."""
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
+    judged_on = await sync_to_async(candidate_last_attempt_at)(candidate.id)
+    await TenantSchema.objects.filter(id=candidate.id).aupdate(load_job_id=99)
+
+    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+        await workspaces_tasks.drop_abandoned_candidate(
+            schema_id=str(candidate.id), last_attempt_at=judged_on.isoformat(), load_job_id=1
+        )
+
+    teardown.assert_not_called()
+
+
+async def test_a_busy_tenant_requeues_the_drop_without_spending_its_retries(tenant, workspace):
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
+
+    async def drop_while_loading():
+        with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as retry:
+            retry.return_value.defer_async = AsyncMock(side_effect=AlreadyEnqueued("queued"))
+            # A drop the sweep queued meanwhile covers this one: no error.
+            await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=4)
+        return retry
+
+    async with tenant_data_lock([tenant.id]):
+        retry = await asyncio.wait_for(asyncio.create_task(drop_while_loading()), 10)
+
+    assert retry.call_args.kwargs["schedule_in"] == {"seconds": 15 * 60}
+    assert retry.return_value.defer_async.await_args.kwargs["attempt"] == 4

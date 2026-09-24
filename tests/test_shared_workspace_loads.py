@@ -377,7 +377,7 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
             queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
         )
         retry.return_value.defer_async.assert_awaited_once_with(
-            schema_id=str(candidate.id), attempt=3, last_attempt_at=""
+            schema_id=str(candidate.id), attempt=3, last_attempt_at="", load_job_id=None
         )
 
         retry.reset_mock()

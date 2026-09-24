@@ -1489,7 +1489,11 @@ async def _queue_candidate_drop(schema, *, delay: int = 0) -> None:
     schedule = {"schedule_in": {"seconds": delay}} if delay else {}
     await drop_abandoned_candidate.configure(
         queueing_lock=_drop_lock(schema.id), **schedule
-    ).defer_async(schema_id=str(schema.id), last_attempt_at=schema.last_attempt_at.isoformat())
+    ).defer_async(
+        schema_id=str(schema.id),
+        last_attempt_at=schema.last_attempt_at.isoformat(),
+        load_job_id=schema.load_job_id,
+    )
 
 
 _CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
@@ -1514,16 +1518,17 @@ _CANDIDATE_DROP_MAX_ATTEMPTS = 10
 
 @task
 async def drop_abandoned_candidate(
-    schema_id: str, attempt: int = 0, last_attempt_at: str = ""
+    schema_id: str, attempt: int = 0, last_attempt_at: str = "", load_job_id: int | None = None
 ) -> None:
     """Drop the partial data of a failed candidate no load will resume.
 
     Holds T so a writer cannot be resuming this candidate while it is dropped,
     but never waits for it: a load can hold T for hours, so a busy tenant is
-    retried later like a failed drop. ``last_attempt_at`` is the attempt the
-    candidate was judged abandoned on; if a load has resumed it since (and
-    failed again), it is the pending generation's resume point and is kept. A
-    failed drop is retried with backoff and then left for an operator.
+    simply re-queued. ``last_attempt_at`` and ``load_job_id`` pin the attempt
+    the candidate was judged abandoned on; if a load has resumed it since (a
+    resume rewrites the owner, and a new run moves the attempt time), it is the
+    pending generation's resume point and is kept. A failed drop is retried
+    with backoff; after the last attempt the next sweep queues a fresh one.
     """
     schema = await TenantSchema.objects.filter(id=schema_id).afirst()
     if schema is None:
@@ -1534,6 +1539,8 @@ async def drop_abandoned_candidate(
                 raise _TenantBusy(f"tenant {schema.tenant_id} is being loaded")
             await schema.arefresh_from_db()
             if schema.state != SchemaState.FAILED or schema.load_workspace_id is None:
+                return
+            if load_job_id is not None and schema.load_job_id != load_job_id:
                 return
             if last_attempt_at:
                 current = await _to_thread_fresh_db(candidate_last_attempt_at, schema.id)
@@ -1549,12 +1556,21 @@ async def drop_abandoned_candidate(
             await schema.asave(update_fields=["state"])
     except TenantSchema.DoesNotExist:
         return
+    except _TenantBusy:
+        # Normal while a load runs: re-queue at a fixed delay without spending
+        # the retry budget, which is for drops that actually failed.
+        await _requeue_candidate_drop(
+            schema_id, _CANDIDATE_DROP_DELAY_SECONDS, attempt, last_attempt_at, load_job_id
+        )
     except _CANDIDATE_DROP_RETRYABLE as exc:
         # A query bug (ProgrammingError and friends) is deliberately absent: it
         # must surface, not be retried as contention.
         if attempt + 1 >= _CANDIDATE_DROP_MAX_ATTEMPTS:
             logger.exception(
-                "Giving up dropping abandoned candidate %s after attempt %d", schema_id, attempt + 1
+                "Giving up dropping abandoned candidate %s after attempt %d; the next "
+                "sweep queues it again",
+                schema_id,
+                attempt + 1,
             )
             return
         logger.warning(
@@ -1563,13 +1579,23 @@ async def drop_abandoned_candidate(
         delay = min(
             _CANDIDATE_DROP_RETRY_BASE_SECONDS * (2**attempt), _CANDIDATE_DROP_RETRY_MAX_SECONDS
         )
-        # The running job holds no queueing lock once doing, so the retry can
-        # take it; that keeps the sweep from stacking a second chain.
+        await _requeue_candidate_drop(schema_id, delay, attempt + 1, last_attempt_at, load_job_id)
+
+
+async def _requeue_candidate_drop(schema_id, delay, attempt, last_attempt_at, load_job_id):
+    # The running job holds no queueing lock once doing, so the re-queue can take
+    # it; a drop the sweep queued meanwhile already covers this one.
+    try:
         await drop_abandoned_candidate.configure(
             schedule_in={"seconds": delay}, queueing_lock=_drop_lock(schema_id)
         ).defer_async(
-            schema_id=str(schema_id), attempt=attempt + 1, last_attempt_at=last_attempt_at
+            schema_id=str(schema_id),
+            attempt=attempt,
+            last_attempt_at=last_attempt_at,
+            load_job_id=load_job_id,
         )
+    except AlreadyEnqueued:
+        return
 
 
 # How long a failed candidate of the still-pending generation waits for a retry
