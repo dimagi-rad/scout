@@ -119,11 +119,12 @@ class MaterializationRun(models.Model):
 class TenantLoadGeneration(models.Model):
     """Bounded per-tenant load-generation ledger for request coalescing.
 
-    ``requested_generation`` advances when a full load is requested while none is
-    pending; ``published_generation`` advances when a candidate is promoted. A
-    load is pending while ``requested > published``. The published evidence (run,
-    schema, fingerprint) is a positive equivalence check for reuse, never a
-    fallback to whatever run happens to be latest.
+    ``requested_generation`` advances when a full load is requested and none is
+    joinable; ``published_generation`` advances when a candidate is promoted. A
+    load is pending while ``requested > published``, and joinable while also not
+    yet fetching (``loading < requested``). The published evidence (run, schema,
+    fingerprint) is a positive equivalence check for reuse, never a fallback to
+    whatever run happens to be latest.
     """
 
     tenant = models.OneToOneField(
@@ -134,7 +135,8 @@ class TenantLoadGeneration(models.Model):
     requested_generation = models.BigIntegerField(default=0)
     published_generation = models.BigIntegerField(default=0)
     # The generation a writer is fetching right now (0 when none). A refresh
-    # accepted after its fetch started must not be answered by it.
+    # accepted after that fetch started asks for the next generation instead
+    # (see capture_load_intent and end_load_generation for the resume case).
     loading_generation = models.BigIntegerField(default=0)
     published_run = models.ForeignKey(
         MaterializationRun,

@@ -151,8 +151,13 @@ def capture_load_intent(tenant_ids, kind: str) -> dict[str, int]:
                 generation.requested_generation > generation.published_generation
                 and generation.loading_generation < generation.requested_generation
             )
+            pending = generation.requested_generation > generation.published_generation
             if kind == INTENT_RECONCILE_MISSING and generation.published_generation >= 1:
                 intent[tenant_id] = generation.published_generation
+            elif kind == INTENT_RECONCILE_MISSING and pending:
+                # Reconciliation needs data, not freshness: any in-flight load answers
+                # it, even one whose fetch has already started.
+                intent[tenant_id] = generation.requested_generation
             elif joinable:
                 intent[tenant_id] = generation.requested_generation
             else:
@@ -186,10 +191,11 @@ def parse_load_intent(value) -> dict[str, int] | None:
         if not isinstance(tenant_id, str) or type(generation) is not int or generation < 1:
             return None
         try:
-            uuid.UUID(tenant_id)
+            canonical = str(uuid.UUID(tenant_id))
         except ValueError:
             return None
-        intent[tenant_id] = generation
+        # Normalized, so a braced or bare-hex spelling still matches str(tenant.id).
+        intent[canonical] = generation
     return intent
 
 
@@ -236,7 +242,11 @@ def begin_load_generation(tenant_id) -> int:
 
     Called under the tenant lock right before fetching. From now until the load
     ends, a new refresh request asks for the next generation instead of joining.
-    Any loading marker already set is stale: T is exclusive, so its writer died.
+    Any loading marker already set is stale here (T is exclusive, so its writer
+    died), but capture_load_intent reads the marker without T and cannot tell: a
+    writer that dies before end_load_generation costs one extra generation, and
+    its FAILED candidate is then abandoned rather than resumed. Every exit that
+    doesn't publish must therefore call end_load_generation.
     """
     with transaction.atomic():
         generation = _locked_generation(tenant_id)
@@ -251,7 +261,10 @@ def end_load_generation(tenant_id, loading_generation: int) -> None:
     """Clear the loading marker after a load that did not publish.
 
     The generation stays pending, so a retry joins it and can resume its
-    candidate rather than being pushed to a fresh generation.
+    candidate rather than being pushed to a fresh generation. A request accepted
+    after the failure joins too, and is then answered by that resumed candidate:
+    every source is re-fetched on resume (resumable ones from their last cursor),
+    so the only staleness is in-place edits behind a cursor, the #187 caveat.
     """
     TenantLoadGeneration.objects.filter(
         tenant_id=tenant_id, loading_generation=loading_generation
@@ -276,6 +289,7 @@ def resumable_candidate(tenant_id, generation: int, config_fingerprint: str) -> 
             load_generation=generation,
             load_config_fingerprint=config_fingerprint,
         )
+        # id only makes the tie-break deterministic; it isn't "newest".
         .order_by("-created_at", "-id")
         .first()
     )

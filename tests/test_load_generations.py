@@ -290,3 +290,17 @@ def test_resume_prefers_the_newest_matching_candidate(tenant, pipeline):
     )
 
     assert resumable_candidate(tenant.id, 2, config) == newest
+
+
+def test_reconcile_missing_joins_a_first_load_already_fetching(tenant):
+    assert capture_load_intent([tenant.id], INTENT_FULL_REFRESH) == {str(tenant.id): 1}
+    assert begin_load_generation(tenant.id) == 1
+
+    # Nothing is published yet, but the running load will answer reconciliation.
+    assert capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING) == {str(tenant.id): 1}
+    assert TenantLoadGeneration.objects.get(tenant=tenant).requested_generation == 1
+
+
+def test_intent_keys_are_normalized_tenant_uuids(tenant):
+    braced = "{" + str(tenant.id).upper() + "}"
+    assert parse_load_intent({braced: 1}) == {str(tenant.id): 1}
