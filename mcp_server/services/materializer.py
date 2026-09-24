@@ -436,6 +436,16 @@ def run_pipeline(
             logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
         current_source = None
 
+        # Discovery may have generated SYSTEM assets. Fingerprint and execute the
+        # same in-memory snapshot: the fingerprint is this run's receipt for what
+        # it built, and shared-load reuse and promotion accept nothing weaker.
+        # Computed inside this try so a failure (e.g. hashing the source tree)
+        # still ends the run FAILED instead of stranding it in TRANSFORMING.
+        asset_snapshot = list(TransformationAsset.objects.filter(tenant=tenant_membership.tenant))
+        load_fingerprint = pipeline_fingerprint(
+            pipeline, tenant_membership.tenant, assets=asset_snapshot
+        )
+
     except MaterializationCancelled:
         # State is already CANCELLED (set by the canceller before raising via
         # progress_updater). Stamp completed_at so the caller distinguishes
@@ -507,19 +517,11 @@ def run_pipeline(
     run.state = MaterializationRun.RunState.TRANSFORMING
     transform_result: dict = {}
 
-    # Discovery may have generated SYSTEM assets. Fingerprint and execute the same
-    # in-memory snapshot: the fingerprint is this run's receipt for what it built,
-    # and shared-load reuse and promotion accept nothing weaker.
-    asset_snapshot = list(TransformationAsset.objects.filter(tenant=tenant_membership.tenant))
-    load_fingerprint = pipeline_fingerprint(
-        pipeline, tenant_membership.tenant, assets=asset_snapshot
-    )
-    has_assets = bool(asset_snapshot)
-    if has_assets:
+    if asset_snapshot:
         report("Running transforms...")
         try:
             transform_result = _run_transform_phase(
-                pipeline, schema_name, tenant=tenant_membership.tenant, assets=asset_snapshot
+                schema_name, tenant=tenant_membership.tenant, assets=asset_snapshot
             )
         except Exception as e:
             logger.exception("Transform phase failed for schema %s", schema_name)
@@ -1163,9 +1165,7 @@ def _write_ocs_participants(
     return total
 
 
-def _run_transform_phase(
-    pipeline: PipelineConfig, schema_name: str, tenant=None, assets=None
-) -> dict:
+def _run_transform_phase(schema_name: str, tenant=None, assets=None) -> dict:
     """Run the transformation pipeline's SYSTEM + TENANT stages for this tenant.
 
     No ``workspace`` is passed because materialization is tenant-scoped: a tenant
