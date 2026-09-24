@@ -67,6 +67,11 @@ def _completed_run(schema, *, job_id=JOB, result=None, state=None):
 
 
 def _promote(candidate, workspace, generation, run, *, job_id=JOB, fingerprint=FINGERPRINT):
+    with sync_tenant_data_lock([candidate.tenant_id]):
+        return _promote_holding_t(candidate, workspace, generation, run, job_id, fingerprint)
+
+
+def _promote_holding_t(candidate, workspace, generation, run, job_id, fingerprint):
     return promote_candidate_schema(
         candidate.id,
         accessed_at=timezone.now(),
@@ -205,7 +210,14 @@ def test_promotion_rejects_superseded_generation_or_foreign_owner(tenant, worksp
     candidate = _open(tenant, workspace, generation=generation, job_id=42).schema
     run = _completed_run(candidate, job_id=42)
 
-    outcome = promote_candidate_schema(
+    with sync_tenant_data_lock([tenant.id]):
+        outcome = _promote_directly(candidate, workspace, generation, run, mismatch)
+
+    assert not outcome.promoted
+
+
+def _promote_directly(candidate, workspace, generation, run, mismatch):
+    return promote_candidate_schema(
         candidate.id,
         accessed_at=timezone.now(),
         workspace_id=uuid.uuid4() if mismatch == "other_workspace" else workspace.id,
@@ -214,8 +226,6 @@ def test_promotion_rejects_superseded_generation_or_foreign_owner(tenant, worksp
         run_id=run.id,
         fingerprint=FINGERPRINT,
     )
-
-    assert not outcome.promoted
 
 
 def test_only_the_owning_load_can_fail_its_candidate(tenant, workspace):
@@ -407,3 +417,28 @@ def test_an_unbridged_thread_is_told_so_rather_than_that_t_is_missing(tenant):
 
     with pytest.raises(LockOrderError, match="run_data_thread"):
         asyncio.run(holder())
+
+
+def test_a_workspace_promotion_requires_t(tenant, workspace):
+    generation = begin_load_generation(tenant.id)
+    candidate = _open(tenant, workspace, generation=generation).schema
+    run = _completed_run(candidate)
+
+    with pytest.raises(LockOrderError):
+        _promote_holding_t(candidate, workspace, generation, run, JOB, FINGERPRINT)
+
+
+def test_abandoned_candidates_can_no_longer_be_resumed(tenant, workspace):
+    """Once handed to cleanup, a candidate must not be resumed into a schema the
+    cleanup may already have dropped, even if the config later reverts."""
+    generation = begin_load_generation(tenant.id)
+    first = _open(tenant, workspace, generation=generation, job_id=1).schema
+    fail_workspace_candidate(first.id, workspace.id, 1)
+    other = _open(tenant, workspace, generation=generation, job_id=2, config="raw-config-b")
+    assert [c.id for c in _abandoned(tenant, other.schema.id)] == [first.id]
+    fail_workspace_candidate(other.schema.id, workspace.id, 2)
+
+    reverted = _open(tenant, workspace, generation=generation, job_id=3)
+
+    assert not reverted.resumed
+    assert reverted.schema.id != first.id
