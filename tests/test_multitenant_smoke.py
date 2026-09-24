@@ -11,6 +11,7 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
 from tests.tenant_access import usable_connection
 
@@ -69,6 +70,9 @@ def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup)
     """A new source is loaded first; the load then publishes the views and Cube,
     so it is never published as a missing source."""
     user, ws, t2 = setup
+    view = WorkspaceViewSchema.objects.create(
+        workspace=ws, schema_name="ws_smoke_view", state=SchemaState.ACTIVE
+    )
 
     with (
         patch(
@@ -90,6 +94,9 @@ def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup)
     assert kwargs["workspace_id"] == str(ws.id)
     assert kwargs["user_id"] == str(user.id)
     assert kwargs["only_unserved"] is True
+    # The existing views keep serving the other sources for the whole load.
+    view.refresh_from_db()
+    assert view.state == SchemaState.ACTIVE
     # No chat thread waits on this dispatch, so there is no ThreadJob to resume.
     assert kwargs["notify_thread"] is False
     assert kwargs["load_intent"] == {str(t2.id): 1}

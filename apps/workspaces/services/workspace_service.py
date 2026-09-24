@@ -29,8 +29,10 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
     A tenant that already serves data (loaded for a sibling workspace) only needs
     this workspace's views rebuilt. One with nothing loaded is loaded first, as
     ``actor_id``, and the views and Cube are published after that load, so the new
-    source is never published as an empty or missing view. Uses get_or_create to
-    handle concurrent requests; only a newly created link dispatches work.
+    source is never published as an empty or missing view. The existing views are
+    left ACTIVE meanwhile: marking them provisioning would take every source's
+    data tools offline for the whole load. Uses get_or_create to handle
+    concurrent requests; only a newly created link dispatches work.
 
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
@@ -38,11 +40,11 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
     with transaction.atomic():
         wt, created = WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
         if created:
-            WorkspaceViewSchema.objects.filter(workspace=workspace).update(
-                state=SchemaState.PROVISIONING
-            )
             serving = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).exists()
             if serving or actor_id is None:
+                WorkspaceViewSchema.objects.filter(workspace=workspace).update(
+                    state=SchemaState.PROVISIONING
+                )
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
             else:
                 intent = capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING)
@@ -105,8 +107,6 @@ async def touch_workspace_schemas(workspace) -> None:
     so without this they expire and their DROP CASCADE destroys the views inside
     the still-ACTIVE view schema.
     """
-    from apps.workspaces.models import TenantSchema
-
     tenant_count = await workspace.workspace_tenants.acount()
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()

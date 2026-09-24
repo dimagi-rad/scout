@@ -1196,8 +1196,8 @@ async def materialize_workspace(
     ``notify_thread=False`` is for dispatches no chat thread waits on (adding a
     source), which have no ThreadJob to resume. ``only_unserved`` loads (a new
     source) publish the views themselves, so if the run stops before
-    publishing, a plain view rebuild is queued instead: the views were marked
-    provisioning when the source was added and nothing else would rebuild them.
+    publishing, a plain view rebuild is queued instead: nothing else would add
+    the new source to the views, even as a missing one.
     """
     job_id = context.job.id
     preflight_failures = None

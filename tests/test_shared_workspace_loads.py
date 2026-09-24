@@ -516,8 +516,8 @@ async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, 
 async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_views(
     outcome, rebuilds
 ):
-    """The views were marked provisioning when the source was added; if the load
-    exits before publishing them, nothing else would rebuild them."""
+    """If the new-source load exits before publishing, nothing else would add the
+    new source to the views."""
     core = (
         AsyncMock(side_effect=outcome)
         if isinstance(outcome, Exception)
