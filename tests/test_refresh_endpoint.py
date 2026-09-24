@@ -168,13 +168,12 @@ def test_refresh_status_no_schema_returns_unavailable(manage_client, workspace):
     assert resp.data["state"] == "unavailable"
 
 
-def _add_source(workspace, user, external_id, *, grant=True):
+def _add_source(workspace, user, external_id):
     extra = Tenant.objects.create(
         provider="commcare", external_id=external_id, canonical_name=external_id
     )
     WorkspaceTenant.objects.create(workspace=workspace, tenant=extra)
-    if grant:
-        grant_tenant_access(user, extra)
+    grant_tenant_access(user, extra)
     return extra
 
 
@@ -223,6 +222,10 @@ def test_refresh_reports_each_source_that_could_not_start(
     by_tenant = {t["tenant_id"]: t for t in resp.data["tenants"]}
     assert by_tenant[str(tenant.id)]["status"] == "provisioning"
     assert by_tenant[str(busy.id)]["status"] == "in_progress"
+    # Each source carries its own schema id; none is promoted to the top level.
+    assert "schema_id" not in resp.data
+    assert by_tenant[str(tenant.id)]["schema_id"]
+    assert not any({"body", "http_status"} & set(t) for t in resp.data["tenants"])
 
 
 @pytest.mark.django_db
@@ -240,3 +243,50 @@ def test_refresh_status_reports_each_source_and_never_hides_a_failure(
         str(tenant.id): SchemaState.ACTIVE,
         str(failed.id): SchemaState.FAILED,
     }
+
+
+@pytest.mark.django_db
+def test_a_refresh_where_no_source_could_start_is_a_conflict(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    second = _add_source(workspace, user, "second-busy")
+    for source in (tenant, second):
+        TenantSchema.objects.create(
+            tenant=source,
+            schema_name=f"busy_{source.external_id}",
+            state=SchemaState.PROVISIONING,
+            load_workspace_id=workspace.id,
+        )
+
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 409
+    defer.assert_not_called()
+    assert resp.data["status"] == "not_started"
+    assert {t["status"] for t in resp.data["tenants"]} == {"in_progress"}
+    assert "code" not in resp.data
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("states", "aggregate"),
+    [
+        ((SchemaState.PROVISIONING, SchemaState.FAILED), SchemaState.FAILED),
+        ((SchemaState.ACTIVE, SchemaState.EXPIRED), SchemaState.EXPIRED),
+        ((SchemaState.EXPIRED, SchemaState.ACTIVE), SchemaState.EXPIRED),
+    ],
+)
+def test_refresh_status_aggregate_is_deterministic_and_matches_its_error(
+    manage_client, workspace, tenant, user, states, aggregate
+):
+    second = _add_source(workspace, user, "second-status")
+    for source, state in zip((tenant, second), states, strict=True):
+        TenantSchema.objects.create(
+            tenant=source, schema_name=f"s_{source.external_id}", state=state
+        )
+
+    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
+
+    assert resp.data["state"] == aggregate
+    assert (resp.data["error"] is not None) == (aggregate == SchemaState.FAILED)
