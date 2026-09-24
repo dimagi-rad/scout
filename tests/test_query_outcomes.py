@@ -219,6 +219,21 @@ def test_static_artifact_failure_cannot_be_overridden_by_model_output(claimed_st
     assert "data_requirements" not in summary
 
 
+@pytest.mark.parametrize("status,artifact_id", [("error", None), ("checked", "existing")])
+def test_failed_write_never_exposes_a_soft_deleted_candidate(status, artifact_id):
+    result = {
+        "status": status,
+        "artifact": {"id": "existing", "version": 2},
+        "runtime": {"success": False, "failures": [{"category": "missing_model_dependency"}]},
+    }
+    messages = [
+        ToolMessage(name="artifact_write", tool_call_id="write", content=json.dumps(result))
+    ]
+    summary = _summarize_result(messages, json.dumps({"status": "error"}))
+    assert summary["artifact_id"] == artifact_id
+    assert summary["artifact_version"] == (2 if artifact_id else None)
+
+
 @pytest.mark.asyncio
 async def test_failed_readiness_inspection_is_cached_and_logged_once(monkeypatch, caplog):
     inspect = AsyncMock(side_effect=RuntimeError("Unavailable"))
