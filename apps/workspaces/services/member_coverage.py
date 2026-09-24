@@ -2,11 +2,10 @@
 
 The read gate (``apps.workspaces.access``) denies a member who cannot use one of
 the workspace's tenants; these checks refuse the membership or source change that
-would create that state in the first place. They are strictly all-of regardless
-of the read gate's rollout switch, so while the switch is off a partially covering
-user is no longer admitted (they get an awaiting-access invite instead of any-of
-access). That is deliberate: every gap admitted now is a member the flip takes
-dark later (#381).
+would create that state in the first place. By default they follow the read
+gate's rollout switch: while it is off, admission keeps the pre-#380 any-of rule,
+so merging changes nothing. ``ADMISSION_ALWAYS_ALL_OF`` makes admission strict
+ahead of the flip instead, which stops new gaps accumulating before it.
 
 Final checks and mutations run under a lock on the workspace row, shared by every
 admission mutation here, so a concurrent member add and source add cannot each pass
@@ -20,7 +19,12 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
-from apps.workspaces.access import _workspace_tenants
+from apps.users.models import TenantMembership
+from apps.workspaces.access import (
+    _workspace_tenants,
+    all_of_access_enforced,
+    missing_workspace_tenants,
+)
 from apps.workspaces.models import (
     Workspace,
     WorkspaceInviteStatus,
@@ -43,17 +47,51 @@ class MembersLackTenant(Exception):
         self.gaps = gaps
 
 
+# Product decision pending (#561): True admits only fully covering users even
+# while the read switch is off; False keeps admission on the switch.
+ADMISSION_ALWAYS_ALL_OF = False
+
+
+def admission_all_of() -> bool:
+    return ADMISSION_ALWAYS_ALL_OF or all_of_access_enforced()
+
+
+def requester_gaps(user, tenants) -> tuple[MissingTenant, ...]:
+    """Tenants among ``tenants`` a requester may not attach, under the admission rule.
+
+    Any-of admission only ever asked for a live membership on each tenant, so
+    that is all it checks; all-of asks for a usable credential.
+    """
+    tenants = list(tenants)
+    if not admission_all_of():
+        live = set(
+            TenantMembership.objects.filter(user=user, tenant__in=tenants).values_list(
+                "tenant_id", flat=True
+            )
+        )
+        tenants = [t for t in tenants if t.pk not in live]
+    return tuple(member_coverage_gaps(user.pk, tenants).values()) if tenants else ()
+
+
 def _lock(workspace) -> None:
     Workspace.objects.select_for_update().only("pk").get(pk=workspace.pk)
 
 
 def missing_for_user(user, workspace) -> tuple[MissingTenant, ...]:
-    """Workspace tenants ``user`` cannot use with their own credential."""
-    return tuple(member_coverage_gaps(user.pk, _workspace_tenants(workspace)).values())
+    """Workspace tenants keeping ``user`` out under the admission rule."""
+    tenants = _workspace_tenants(workspace)
+    if not admission_all_of():
+        return missing_workspace_tenants(user, tenants)
+    return tuple(member_coverage_gaps(user.pk, tenants).values())
 
 
 def members_lacking_tenant(workspace, tenant) -> list[tuple]:
-    """Current members who cannot use ``tenant``, as ``(user, MissingTenant)``."""
+    """Current members who cannot use ``tenant``, as ``(user, MissingTenant)``.
+
+    Any-of admission never consulted other members, so it finds none.
+    """
+    if not admission_all_of():
+        return []
     members = [
         m.user
         for m in WorkspaceMembership.objects.filter(workspace=workspace)

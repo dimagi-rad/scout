@@ -27,7 +27,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services import invite_notifications
+from apps.workspaces.services import invite_notifications, member_coverage
 from apps.workspaces.services.credential_coverage import CoverageRecovery
 from apps.workspaces.services.invite_notifications import describe_workspace_sources
 from apps.workspaces.services.member_coverage import (
@@ -91,6 +91,22 @@ class TestSourceAdd:
         return client.post(
             f"/api/workspaces/{ws.id}/tenants/", {"tenant_id": str(tenant.id)}, format="json"
         )
+
+    @pytest.mark.parametrize(("strict", "status"), [(False, 202), (True, 409)])
+    def test_switch_off_source_add_follows_the_strictness_setting(
+        self, settings, monkeypatch, client, user, t1, t2, strict, status
+    ):
+        settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+        monkeypatch.setattr(member_coverage, "ADMISSION_ALWAYS_ALL_OF", strict)
+        ws = _workspace(user, t1)
+        _member(ws, "brian@example.com", t1)
+        grant_tenant_access(user, t2)
+        client.force_login(user)
+
+        with patch(REFRESH, side_effect=_no_refresh):
+            resp = self._post(client, ws, t2)
+
+        assert resp.status_code == status
 
     def test_readding_an_attached_source_does_no_member_refresh(self, client, user, t1):
         ws = _workspace(user, t1)
@@ -225,8 +241,14 @@ class TestDirectAdd:
         assert not WorkspaceMembership.objects.filter(workspace=ws, user=target).exists()
         assert refresh.call_args.args[1] == ["commcare"]
 
-    def test_admission_stays_all_of_with_the_read_switch_off(self, settings, client, user, t1, t2):
+    @pytest.mark.parametrize(
+        ("strict", "expected"), [(False, "member"), (True, "invite_awaiting_access")]
+    )
+    def test_switch_off_admission_follows_the_strictness_setting(
+        self, settings, monkeypatch, client, user, t1, t2, strict, expected
+    ):
         settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+        monkeypatch.setattr(member_coverage, "ADMISSION_ALWAYS_ALL_OF", strict)
         ws = _workspace(user, t1, t2)
         target = User.objects.create_user(email="partial@example.com", password="pass")
         grant_tenant_access(target, t1)
@@ -235,7 +257,7 @@ class TestDirectAdd:
         with patch(REFRESH, side_effect=_no_refresh):
             resp = self._add(client, ws, target.email)
 
-        assert resp.json()["result"] == "invite_awaiting_access"
+        assert resp.json()["result"] == expected
 
     def test_full_coverage_target_becomes_a_member(self, client, user, t1, t2):
         ws = _workspace(user, t1, t2)
@@ -315,8 +337,13 @@ class TestInviteResolution:
 
 @pytest.mark.django_db
 class TestCreate:
-    def test_create_stays_all_of_with_the_read_switch_off(self, settings, client, user, t1, t2):
+    @pytest.mark.parametrize(("strict", "status"), [(False, 201), (True, 400)])
+    def test_switch_off_create_follows_the_strictness_setting(
+        self, settings, monkeypatch, client, user, t1, t2, strict, status
+    ):
+        # A live but unusable membership: enough for any-of, not for all-of.
         settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+        monkeypatch.setattr(member_coverage, "ADMISSION_ALWAYS_ALL_OF", strict)
         grant_tenant_access(user, t1)
         TenantMembership.objects.create(user=user, tenant=t2)
         client.force_login(user)
@@ -327,8 +354,7 @@ class TestCreate:
             format="json",
         )
 
-        assert resp.status_code == 400
-        assert [t["tenant_name"] for t in resp.json()["missing_tenants"]] == ["Source Two"]
+        assert resp.status_code == status
 
     def test_every_requested_source_needs_a_usable_credential(self, client, user, t1, t2):
         grant_tenant_access(user, t1)

@@ -47,7 +47,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
     default_invite_expiry,
 )
-from apps.workspaces.services.credential_coverage import CoverageRecovery, member_coverage_gaps
+from apps.workspaces.services.credential_coverage import CoverageRecovery
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     send_pending_invite_email,
@@ -58,6 +58,7 @@ from apps.workspaces.services.member_coverage import (
     admit_covered_member,
     members_lacking_tenant,
     missing_for_user,
+    requester_gaps,
 )
 from apps.workspaces.services.workspace_service import remove_workspace_tenant
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
@@ -424,7 +425,7 @@ class WorkspaceListView(APIView):
                 )
 
         selected = list(Tenant.objects.filter(id__in=tenant_ids))
-        missing = tuple(member_coverage_gaps(request.user.pk, selected).values())
+        missing = requester_gaps(request.user, selected)
         if missing:
             return Response(
                 {
@@ -975,7 +976,7 @@ class WorkspaceTenantView(APIView):
             )
 
         # Validate the requesting user can use this tenant (always, before idempotency check)
-        requester_missing = tuple(member_coverage_gaps(request.user.pk, [tenant]).values())
+        requester_missing = requester_gaps(request.user, [tenant])
         if requester_missing and requester_missing[0].recovery == CoverageRecovery.CONNECT_SOURCE:
             # No relationship with this source at all: don't describe it to them.
             return Response(
