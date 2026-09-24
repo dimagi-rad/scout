@@ -21,12 +21,8 @@ from tests.upstream_proofs import (
 
 
 @pytest.fixture(autouse=True)
-def _no_candidate_ddl():
-    with (
-        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema", return_value=None),
-        patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None),
-    ):
-        yield
+def _no_candidate_ddl(no_candidate_ddl):
+    """Shared stub: see tests.pipeline_doubles.no_candidate_ddl."""
 
 
 def _registry():
