@@ -434,7 +434,7 @@ class TestMemberAdd:
         refresh picks it up and the add succeeds without them reconnecting."""
         User.objects.create_user(email="late@example.com", password="pass")
 
-        async def fake_refresh(target, providers):
+        async def fake_refresh(target, providers, **_kwargs):
             # simulate the resolver discovering the newly-granted access
             await TenantMembership.objects.acreate(
                 user=target,
@@ -461,7 +461,7 @@ class TestMemberAdd:
         awaiting_access invite, not a hard error."""
         User.objects.create_user(email="noaccess@example.com", password="pass")
 
-        async def fake_refresh(target, providers):
+        async def fake_refresh(target, providers, **_kwargs):
             return True  # a token existed, but no new membership resulted
 
         mocker.patch(

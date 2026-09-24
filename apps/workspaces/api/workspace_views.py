@@ -150,12 +150,16 @@ MEMBER_REFRESH_CONCURRENCY = 4
 MEMBER_REFRESH_BUDGET = 2 * SHARE_REFRESH_TIMEOUT
 
 
-async def _arefresh_members_for_provider(users, provider) -> None:
+async def _arefresh_members_for_provider(users, provider) -> bool:
     """Best-effort rediscovery with each user's own, still-valid identities.
 
     Advisory only: the locked coverage check decides, so one member's failure
     must neither fail the request nor stop the others. Tokens are not renewed:
     a manager's click must never mark another member's credential as failed.
+    What the rediscovery *observes* is still authoritative about that member's
+    own credential (a revocation archives it, as their next read would).
+
+    Returns False if the time budget cut some members' rediscovery short.
     """
     gate = asyncio.Semaphore(MEMBER_REFRESH_CONCURRENCY)
 
@@ -174,6 +178,7 @@ async def _arefresh_members_for_provider(users, provider) -> None:
             provider,
             len(users),
         )
+    complete = all(task.done() and not task.cancelled() for task in tasks)
     for user, task in zip(users, tasks, strict=True):
         result = task.exception() if task.done() and not task.cancelled() else None
         if isinstance(result, Exception):
@@ -183,6 +188,7 @@ async def _arefresh_members_for_provider(users, provider) -> None:
                 provider,
                 exc_info=result,
             )
+    return complete
 
 
 def _member_label(user) -> str:
@@ -190,16 +196,23 @@ def _member_label(user) -> str:
     return f"{name} <{user.email}>" if name else user.email
 
 
-def _members_lack_source_body(tenant, gaps) -> dict:
+def _members_lack_source_body(tenant, gaps, *, recheck_complete=True) -> dict:
     names = ", ".join(_member_label(user) for user, _missing in gaps)
+    unchecked = (
+        ""
+        if recheck_complete
+        else " Scout ran out of time rechecking some members upstream, so retrying may help."
+    )
     return {
         "error": (
             f"Can't add '{tenant.canonical_name}': {names} can't use it with their own "
             "account yet, and every member must be able to use every source. They can "
             "connect it in Connected Accounts once they have access to it; otherwise "
             "remove them from this workspace or create a separate workspace for this source."
+            + unchecked
         ),
         "reason": "members_lack_source",
+        "recheck_complete": recheck_complete,
         "members": [
             {
                 "user_id": str(user.id),
@@ -719,7 +732,7 @@ class WorkspaceMemberListView(APIView):
             # after their last Scout login. Refresh their memberships server-side
             # using their own token, then re-check — no manual reconnect needed.
             providers = sorted({t.provider for t in gaps})
-            async_to_sync(_arefresh_target_for_workspace)(target, providers)
+            async_to_sync(_arefresh_target_for_workspace)(target, providers, renew_tokens=False)
 
         # Every member must cover every source (#381), so a target still missing
         # one after the refresh gets an invite that awaits it rather than a hard
@@ -1028,15 +1041,17 @@ class WorkspaceTenantView(APIView):
         # so someone granted access upstream since their last login is not refused.
         already_added = WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
         lacking = [] if already_added else members_lacking_tenant(workspace, tenant)
+        recheck_complete = True
         if lacking:
-            async_to_sync(_arefresh_members_for_provider)(
+            recheck_complete = async_to_sync(_arefresh_members_for_provider)(
                 [user for user, _missing in lacking], tenant.provider
             )
         try:
             wt, created = add_tenant_covered_by_members(workspace, tenant)
         except MembersLackTenant as refused:
             return Response(
-                _members_lack_source_body(tenant, refused.gaps), status=status.HTTP_409_CONFLICT
+                _members_lack_source_body(tenant, refused.gaps, recheck_complete=recheck_complete),
+                status=status.HTTP_409_CONFLICT,
             )
         if not created:
             return Response(

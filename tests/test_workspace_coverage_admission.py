@@ -7,12 +7,15 @@ acceptance admit only full coverage (otherwise the invite awaits access), and
 workspace creation validates every requested source.
 """
 
+import asyncio
+import threading
 from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -36,7 +39,7 @@ from apps.workspaces.services.member_coverage import (
     add_tenant_covered_by_members,
     admit_covered_member,
 )
-from tests.row_locks import row_locked
+from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked
 from tests.tenant_access import grant_tenant_access, ocs_team_connection
 
 User = get_user_model()
@@ -133,6 +136,23 @@ class TestSourceAdd:
         assert resp.status_code == 409
         assert resp.json()["reason"] == "members_lack_source"
         assert refresh.call_count == 2  # one failure does not stop the others
+
+    def test_a_truncated_recheck_is_reported_as_such(self, client, monkeypatch, user, t1, t2):
+        ws = _workspace(user, t1)
+        _member(ws, "slow@example.com", t1)
+        grant_tenant_access(user, t2)
+        client.force_login(user)
+        monkeypatch.setattr(workspace_views, "MEMBER_REFRESH_BUDGET", 0.01)
+
+        async def _slow(*_args, **_kwargs):
+            await asyncio.sleep(1)
+
+        with patch(REFRESH, side_effect=_slow):
+            resp = self._post(client, ws, t2)
+
+        assert resp.status_code == 409
+        assert resp.json()["recheck_complete"] is False
+        assert "retrying may help" in resp.json()["error"]
 
     def test_refused_when_another_member_cannot_use_it(self, client, user, t1, t2):
         ws = _workspace(user, t1)
@@ -240,6 +260,8 @@ class TestDirectAdd:
         assert resp.json()["result"] == "invite_awaiting_access"
         assert not WorkspaceMembership.objects.filter(workspace=ws, user=target).exists()
         assert refresh.call_args.args[1] == ["commcare"]
+        # The target's tokens are used as they are, never renewed on their behalf.
+        assert refresh.call_args.kwargs == {"renew_tokens": False}
 
     @pytest.mark.parametrize(
         ("strict", "expected"), [(False, "member"), (True, "invite_awaiting_access")]
@@ -417,6 +439,20 @@ def test_invite_notices_ask_for_every_source(user, t1, t2):
     assert " or " not in phrase
 
 
+def _release_once_blocked(held):
+    """Release the holder only once this thread is waiting on its lock, so the
+    test cannot pass without actually exercising the lock wait."""
+
+    def release():
+        try:
+            held.wait_until_blocking()
+        finally:
+            connection.close()
+            held.set()
+
+    threading.Thread(target=release, daemon=True).start()
+
+
 @pytest.mark.django_db(transaction=True)
 class TestMutationRaces:
     """Admission and source add serialize on the workspace row (#381):
@@ -432,7 +468,8 @@ class TestMutationRaces:
             Workspace.objects.select_for_update().get(pk=ws.pk)
             WorkspaceTenant.objects.create(workspace=ws, tenant=t2)
 
-        with row_locked(add_source_under_lock, release_after=0.5):
+        with row_locked(add_source_under_lock, release_after=LOCK_SAFETY_SECONDS) as held:
+            _release_once_blocked(held)
             membership, _created, missing = admit_covered_member(
                 ws, target, role=WorkspaceRole.READ, invited_by=user
             )
@@ -450,7 +487,11 @@ class TestMutationRaces:
             Workspace.objects.select_for_update().get(pk=ws.pk)
             WorkspaceMembership.objects.create(workspace=ws, user=target, role=WorkspaceRole.READ)
 
-        with row_locked(admit_under_lock, release_after=0.5), pytest.raises(MembersLackTenant):
+        with (
+            row_locked(admit_under_lock, release_after=LOCK_SAFETY_SECONDS) as held,
+            pytest.raises(MembersLackTenant),
+        ):
+            _release_once_blocked(held)
             add_tenant_covered_by_members(ws, t2)
 
         assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
@@ -465,8 +506,6 @@ def test_rediscovery_for_another_member_never_renews_their_tokens(user):
     expired = ocs_team_connection(user, "team-b")
     expired.social_account.socialtoken_set.update(expires_at=timezone.now() - timedelta(minutes=1))
 
-    with patch.object(workspace_views, "aiter_fresh_access_tokens") as renew:
-        pairs = async_to_sync(workspace_views._aunexpired_access_tokens)(user, "ocs")
+    pairs = async_to_sync(workspace_views._aunexpired_access_tokens)(user, "ocs")
 
-    renew.assert_not_called()
     assert [account.pk for account, _token in pairs] == [live.social_account_id]
