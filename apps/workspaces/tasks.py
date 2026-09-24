@@ -1414,15 +1414,13 @@ async def _load_workspace_candidate(
                 "The load finished without a complete, owned result to publish; "
                 "the previous data is still being served. Run the load again."
             )
-    except asyncio.CancelledError:
+    except BaseException:
+        # Includes a promotion that raised: it rolled back, so the candidate is
+        # still PROVISIONING and the generation still marked loading. Drained, so
+        # an abort landing during this cleanup cannot strand either.
         await _drain(
             _fail_workspace_candidate(candidate, workspace.id, owner, generation), candidate
         )
-        raise
-    except BaseException:
-        # Includes a promotion that raised: it rolled back, so the candidate is
-        # still PROVISIONING and the generation still marked loading.
-        await _fail_workspace_candidate(candidate, workspace.id, owner, generation)
         raise
     if isinstance(result, dict) and opened.resumed:
         result = {**result, "resumed": True}
@@ -1436,8 +1434,12 @@ async def _end_load(tenant_id, generation: int) -> None:
 async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation: int) -> None:
     # The physical schema is kept: it is this generation's resume point, and the
     # generation stays pending (not loading) so a retry joins and resumes it.
-    await _to_thread_fresh_db(fail_workspace_candidate, candidate.id, workspace_id, job_id)
-    await _to_thread_fresh_db(end_load_generation, candidate.tenant_id, generation)
+    try:
+        await _to_thread_fresh_db(fail_workspace_candidate, candidate.id, workspace_id, job_id)
+    finally:
+        # Even if the CAS failed (often the same outage that failed the load),
+        # a stuck marker would stop retries joining and resuming this generation.
+        await _to_thread_fresh_db(end_load_generation, candidate.tenant_id, generation)
 
 
 async def _drain(operation, subject) -> None:
@@ -1473,6 +1475,13 @@ async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
 
 
 _CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
+_CANDIDATE_DROP_RETRYABLE = (
+    DataLockTimeout,
+    psycopg.OperationalError,
+    psycopg.InterfaceError,
+    DjangoOperationalError,
+    DjangoInterfaceError,
+)
 _CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
 _CANDIDATE_DROP_RETRY_MAX_SECONDS = 3600
 _CANDIDATE_DROP_MAX_ATTEMPTS = 10
@@ -1503,7 +1512,9 @@ async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
             await schema.asave(update_fields=["state"])
     except TenantSchema.DoesNotExist:
         return
-    except Exception as exc:
+    except _CANDIDATE_DROP_RETRYABLE as exc:
+        # A query bug (ProgrammingError and friends) is deliberately absent: it
+        # must surface, not be retried as contention.
         if attempt + 1 >= _CANDIDATE_DROP_MAX_ATTEMPTS:
             logger.exception(
                 "Giving up dropping abandoned candidate %s after attempt %d", schema_id, attempt + 1
