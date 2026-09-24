@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { AlertTriangle, RotateCw, XCircle } from "lucide-react"
 import { jobsApi, type RecentTermination } from "@/api/jobs"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 
 interface Props {
   termination: RecentTermination
@@ -26,6 +27,7 @@ export function MaterializationFailure({
 }: Props) {
   const [retryState, setRetryState] = useState<"idle" | "pending" | "error">("idle")
   const isCancelled = termination.state === "cancelled"
+  const { canWrite } = useWorkspaceRole(workspaceId)
 
   const handleRetry = async () => {
     if (retryState === "pending") return
@@ -73,7 +75,7 @@ export function MaterializationFailure({
             </div>
           )}
         </div>
-        {termination.retry_available && (
+        {termination.retry_available && canWrite && (
           <button
             type="button"
             onClick={handleRetry}

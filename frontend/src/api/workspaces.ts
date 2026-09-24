@@ -8,6 +8,16 @@ export interface WorkspaceListTenant {
   provider: string
 }
 
+export interface MissingTenant {
+  tenant_id: string
+  tenant_name: string
+  provider: string
+  recovery: "connect_source" | "access_removed" | "reconnect" | "connect_team" | "legacy_team_unknown"
+  team_slug?: string
+  team_name?: string
+  remedy: string
+}
+
 export type SchemaStatus = "available" | "provisioning" | "unavailable" | "failed"
 
 // Workspace list item — lighter shape returned by GET /api/workspaces/
@@ -18,10 +28,15 @@ export interface WorkspaceListItem {
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
   tenants: WorkspaceListTenant[]
-  // Live upstream access. The server returns every membership (so orphaned
-  // workspaces stay addressable by URL) and flags the ones the user has lost
-  // tenant access to. Absent on older cached payloads — treat missing as true.
+  // Live upstream access, by whatever rule the server enforces. The server
+  // returns every membership (so orphaned workspaces stay addressable by URL)
+  // and flags the inaccessible ones. Absent on older cached payloads — treat
+  // missing as true.
   has_access?: boolean
+  // The sources keeping the user out, each with a server-written remedy. Shape
+  // of MissingTenant.as_dict() plus "remedy" (apps/workspaces/access.py, #551);
+  // absent until that ships.
+  missing_tenants?: MissingTenant[]
   member_count: number
   // Recorded tenant/view schema state; does not certify semantic query readiness.
   schema_status: SchemaStatus
@@ -137,6 +152,9 @@ export const workspaceApi = {
 
   getDetail: (workspaceId: string) =>
     api.get<WorkspaceDetail>(`/api/workspaces/${workspaceId}/`),
+
+  retryAccessVerification: (workspaceId: string) =>
+    api.post<{ has_access: true }>(`/api/workspaces/${workspaceId}/access/verify/`, {}),
 
   create: (name: string, tenantIds: string[] = []) =>
     api.post<{ id: string; name: string }>("/api/workspaces/", {

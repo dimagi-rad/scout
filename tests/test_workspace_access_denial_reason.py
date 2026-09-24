@@ -18,6 +18,7 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
+from tests.tenant_access import grant_tenant_access
 
 User = get_user_model()
 
@@ -150,7 +151,7 @@ def test_member_with_live_tenant_is_granted():
     ws = Workspace.objects.create(name="Live WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
-    TenantMembership.objects.create(user=user, tenant=tenant)
+    grant_tenant_access(user, tenant)
 
     result = resolve_workspace_access_ex(user, ws.id)
 

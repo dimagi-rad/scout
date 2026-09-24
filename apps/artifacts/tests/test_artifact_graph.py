@@ -2,6 +2,7 @@ from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
@@ -10,11 +11,15 @@ from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactSemanticQuery, ArtifactType
 from apps.artifacts.services.graph_doc import GraphDocError, apply_ops, validate_doc
-from apps.artifacts.services.graph_manifest import sync_artifact_semantic_query_manifest
+from apps.artifacts.services.graph_manifest import (
+    semantic_query_summary,
+    sync_artifact_semantic_query_manifest,
+)
 from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.chat.models import Thread, ThreadArtifact
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.tenant_access import usable_connection
 
 
 @pytest.fixture
@@ -32,7 +37,11 @@ def workspace(db):
 @pytest.fixture
 def member_user(db, workspace):
     user = User.objects.create_user(email="graph@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant=workspace.tenant)
+    TenantMembership.objects.create(
+        user=user,
+        tenant=workspace.tenant,
+        connection=usable_connection(user, workspace.tenant.provider),
+    )
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user
 
@@ -236,7 +245,8 @@ async def test_graph_manager_description_only_edit(
     assert latest.description == description
     assert latest.data["story_doc"] == original.data["story_doc"]
     assert latest.version == 2
-    assert result["runtime"]["success"] is True
+    assert result["runtime"] is None
+    assert result["runtime_validation"] == "not_required_metadata_only"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -281,7 +291,7 @@ async def test_graph_manager_rejects_missing_or_invalid_description_edit(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["apply", "replace"])
-async def test_graph_manager_failed_description_edit_preserves_original(
+async def test_graph_manager_failed_document_edit_preserves_original(
     graph_tools, static_story_doc, action
 ):
     write = graph_tools["artifact_write"]
@@ -299,7 +309,13 @@ async def test_graph_manager_failed_description_edit_preserves_original(
         "description": "Must not be published",
     }
     if action == "replace":
-        edit["story_doc"] = static_story_doc
+        revised = deepcopy(static_story_doc)
+        revised["blocks"][0]["config"]["body"] = "Changed document"
+        edit["story_doc"] = revised
+    else:
+        edit["ops"] = [
+            {"op": "set", "target": "block/intro/config/body", "value": "Changed document"}
+        ]
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
         new=AsyncMock(return_value={"success": False, "summary": "Runtime failure"}),
@@ -314,6 +330,62 @@ async def test_graph_manager_failed_description_edit_preserves_original(
     assert (
         await Artifact.all_objects.filter(parent_artifact=original, is_deleted=True).acount() == 1
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["apply", "replace"])
+@pytest.mark.parametrize("description", ["New description", ""])
+async def test_metadata_edit_does_not_query_unavailable_data(
+    graph_tools, workspace, member_user, action, description
+):
+    doc = graph_doc()
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        artifact_type=ArtifactType.STORY,
+        title=doc["name"],
+        description="Original description",
+        data={"story_doc": doc},
+    )
+    edit = {"action": action, "artifact_id": str(original.id), "description": description}
+    if action == "replace":
+        edit["story_doc"] = doc
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(side_effect=AssertionError("Metadata edits must not contact Cube")),
+    ) as check:
+        result = await graph_tools["artifact_write"].ainvoke(edit)
+
+    check.assert_not_awaited()
+    assert result["status"] == ("updated" if action == "apply" else "replaced")
+    assert result["runtime"] is None  # Do not claim a fresh successful data check.
+    assert result["runtime_validation"] == "not_required_metadata_only"
+    latest = await Artifact.objects.aget(id=result["artifact"]["id"])
+    assert latest.data == original.data
+    assert latest.description == description
+    assert latest.parent_artifact_id == original.id
+    assert latest.version == original.version + 1
+    assert await latest.semantic_query_records.acount() > 0
+    await original.arefresh_from_db()
+    assert original.description == "Original description"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_metadata_edit_cannot_skip_static_document_validation(graph_tools, workspace):
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        artifact_type=ArtifactType.STORY,
+        title="Invalid old artifact",
+        data={"story_doc": {"schema_version": 1, "name": "Invalid", "blocks": []}},
+    )
+    result = await graph_tools["artifact_write"].ainvoke(
+        {"action": "apply", "artifact_id": str(original.id), "description": "Description"}
+    )
+    assert result["status"] == "error"
+    assert result["diagnostics"]
+    assert await Artifact.all_objects.acount() == 1
 
 
 def test_graph_doc_rejects_empty_blocks():
@@ -679,6 +751,92 @@ async def test_semantic_query_dependency_api_paginates(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_semantic_query_dependency_api_is_read_only_for_viewers(
+    workspace, member_user, member_client, invalid
+):
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=member_user).aupdate(
+        role=WorkspaceRole.READ
+    )
+    doc = graph_doc()
+    queries = doc["blocks"][1]["config"]["queries"]
+    # Mixed case diverges between Python and most DB collations, pinning DB ordering.
+    queries["Zeta"] = deepcopy(queries["visits_by_day"])
+    queries["alpha"] = deepcopy(queries["visits_by_day"])
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    original_queries = deepcopy(artifact.semantic_queries)
+    original_manifest = deepcopy(artifact.semantic_query_manifest)
+    rows = [row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact)]
+    original_rows = [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ]
+    if invalid:
+        # A drifted catalog: re-syncing would persist an empty semantic_queries.
+        for query in queries.values():
+            del query["time_dimension"]
+        await Artifact.objects.filter(pk=artifact.pk).aupdate(data={"story_doc": doc})
+
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/?limit=2"
+    response = await member_client.get(url)
+
+    assert response.status_code == 200
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_queries == original_queries
+    assert artifact.semantic_query_manifest == original_manifest
+    assert [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ] == original_rows
+    payload = response.json()
+    assert payload["pagination"] == {
+        "limit": 2,
+        "offset": 0,
+        "count": 2,
+        "total_count": 3,
+        "has_more": True,
+    }
+    returned = payload["semantic_queries"]
+    assert [r["query_key"] for r in returned] == [row.query_key for row in rows[:2]]
+    if invalid:
+        assert {r["validation_status"] for r in returned} == {"invalid"}
+        assert payload["manifest"]["unresolved_count"] > 0
+    else:
+        assert returned == [semantic_query_summary(row) for row in rows[:2]]
+        assert payload["manifest"]["entry_count"] == 3
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_semantic_query_dependency_api_does_not_create_cache(
+    workspace, member_user, member_client
+):
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Uncached",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": graph_doc()},
+    )
+
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/"
+    response = await member_client.get(url)
+
+    assert response.status_code == 200
+    assert response.json()["semantic_queries"][0]["query_key"] == "q.visits_by_day"
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_query_manifest == {}
+    assert artifact.semantic_queries == []
+    assert not await ArtifactSemanticQuery.objects.filter(artifact=artifact).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_graph_manager_creates_story_and_generic_tool_rejects_story(workspace, member_user):
     graph_tool = next(
         item
@@ -857,6 +1015,8 @@ async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
         if item.name == "artifact_write"
     )
 
+    replacement = graph_doc()
+    replacement["blocks"][1]["config"]["queries"]["visits_by_day"]["limit"] = 99
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
         new=AsyncMock(return_value={"success": False, "summary": "0/1 queries ok"}),
@@ -865,7 +1025,8 @@ async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
             {
                 "action": "replace",
                 "artifact_id": str(original.id),
-                "story_doc": graph_doc(),
+                "story_doc": replacement,
+                "run_check": False,
             }
         )
 
@@ -1014,3 +1175,133 @@ async def test_check_graph_artifact_loads_workspace_in_async_context(workspace, 
 
     assert result["summary"] == "1/1 queries ok"
     assert query.await_args.args[0].id == workspace.id
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_read_dependency_inspection_does_not_rewrite_artifact(
+    workspace, member_user, invalid
+):
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=member_user).aupdate(
+        role=WorkspaceRole.READ
+    )
+    thread = await Thread.objects.acreate(workspace=workspace, user=member_user, title="Inspect")
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": graph_doc()},
+    )
+    await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    original_queries = deepcopy(artifact.semantic_queries)
+    original_manifest = deepcopy(artifact.semantic_query_manifest)
+    original_rows = [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ]
+    if invalid:
+        doc = graph_doc()
+        del doc["blocks"][1]["config"]["queries"]["visits_by_day"]["time_dimension"]
+        await Artifact.objects.filter(pk=artifact.pk).aupdate(data={"story_doc": doc})
+    tools = {t.name: t for t in create_artifact_graph_tools(workspace, member_user, str(thread.id))}
+
+    result = await tools["get_artifact_semantic_queries"].ainvoke(
+        {"artifact_id": str(artifact.id), "limit": 1}
+    )
+
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_queries == original_queries
+    assert artifact.semantic_query_manifest == original_manifest
+    assert [
+        row async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact).values()
+    ] == original_rows
+    assert result["pagination"] == {"limit": 1, "offset": 0, "total_count": 1, "has_more": False}
+    record = result["semantic_queries"][0]
+    assert record["query_key"] == "q.visits_by_day"
+    assert record["validation_status"] == ("invalid" if invalid else "valid")
+    assert record["id"] == (None if invalid else str(original_rows[0]["id"]))
+    assert record["created_at"] == (None if invalid else original_rows[0]["created_at"].isoformat())
+    assert await ThreadArtifact.objects.filter(
+        thread=thread, artifact=artifact, source="mentioned"
+    ).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_read_dependency_inspection_paginates_without_creating_cache(workspace, member_user):
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=member_user).aupdate(
+        role=WorkspaceRole.READ
+    )
+    doc = graph_doc()
+    queries = doc["blocks"][1]["config"]["queries"]
+    queries["aaa"] = deepcopy(queries["visits_by_day"])
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Uncached",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    tool = next(
+        t
+        for t in create_artifact_graph_tools(workspace, member_user)
+        if t.name == "get_artifact_semantic_queries"
+    )
+    first = await tool.ainvoke({"artifact_id": str(artifact.id), "limit": 1})
+    second = await tool.ainvoke({"artifact_id": str(artifact.id), "limit": 1, "offset": 1})
+    empty = await tool.ainvoke({"artifact_id": str(artifact.id), "offset": 2})
+    assert first["semantic_queries"][0]["query_key"] == "q.aaa"
+    assert first["pagination"]["has_more"] is True
+    assert second["semantic_queries"][0]["query_key"] == "q.visits_by_day"
+    assert second["pagination"]["has_more"] is False
+    assert empty["semantic_queries"] == []
+    for result in (first, second):
+        record = result["semantic_queries"][0]
+        assert (
+            record["id"] is None and record["created_at"] is None and record["updated_at"] is None
+        )
+        assert record["query_payload"]["measures"] == ["visits.count"]
+        assert result["pagination"]["total_count"] == 2
+    await artifact.arefresh_from_db()
+    assert artifact.semantic_query_manifest == {}
+    assert artifact.semantic_queries == []
+    assert not await ArtifactSemanticQuery.objects.filter(artifact=artifact).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_dependency_tool_and_api_page_in_the_same_order(
+    workspace, member_user, member_client
+):
+    doc = graph_doc()
+    queries = doc["blocks"][1]["config"]["queries"]
+    # Mixed case sorts differently under Python and most DB collations.
+    queries["Zeta"] = deepcopy(queries["visits_by_day"])
+    queries["alpha"] = deepcopy(queries["visits_by_day"])
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    persisted = [
+        row.query_key async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact)
+    ]
+    tool = next(
+        t
+        for t in create_artifact_graph_tools(workspace, member_user)
+        if t.name == "get_artifact_semantic_queries"
+    )
+
+    from_tool = await tool.ainvoke({"artifact_id": str(artifact.id)})
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/"
+    response = await member_client.get(url)
+    assert response.status_code == 200
+    from_api = response.json()
+
+    tool_keys = [r["query_key"] for r in from_tool["semantic_queries"]]
+    assert tool_keys == [r["query_key"] for r in from_api["semantic_queries"]]
+    assert tool_keys == persisted

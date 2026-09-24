@@ -97,7 +97,7 @@ describe("LostAccessModal", () => {
   it("lets a disconnected user reach connection management without another workspace", async () => {
     useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
     renderModal()
-    await userEvent.click(screen.getByRole("button", { name: "Manage connections" }))
+    await userEvent.click(screen.getByRole("button", { name: "Open Connected Accounts" }))
     expect(navigate).toHaveBeenCalledWith("/settings/connections")
   })
 
@@ -106,4 +106,115 @@ describe("LostAccessModal", () => {
     renderModal(path)
     expect(screen.queryByTestId("lost-access-modal")).not.toBeInTheDocument()
   })
+
+  it("links to the workspace's own page, where the user can leave or remove a source", async () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-workspace-settings"))
+
+    expect(navigate).toHaveBeenCalledWith(expect.stringMatching(/\/workspaces\/.*skelly$/))
+  })
+
+  it("does not cover the active workspace's own page", () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    render(
+      <MemoryRouter initialEntries={["/workspaces/skelly/skelly"]}>
+        <LostAccessModal />
+      </MemoryRouter>,
+    )
+
+    expect(screen.queryByTestId("lost-access-modal")).toBeNull()
+  })
+
+  it("offers Connected Accounts even without a missing-source list", async () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-connections"))
+
+    expect(navigate).toHaveBeenCalledWith("/settings/connections")
+  })
+})
+
+describe("LostAccessModal upstream recheck", () => {
+  beforeEach(() => {
+    navigate.mockClear()
+    useAppStore.setState({ domainsStatus: "loaded", domains: [], activeDomainId: null })
+  })
+
+  it("offers an upstream recheck from inside the gate", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined)
+    useAppStore.setState({
+      domains: [ws("skelly", false)],
+      activeDomainId: "skelly",
+      uiActions: { ...useAppStore.getState().uiActions, retryAccessVerification: retry },
+    })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-retry-verification"))
+
+    expect(retry).toHaveBeenCalledWith("skelly")
+  })
+
+  it("shows the retry outcome inside the gate", () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    // Set after the switch: selecting a workspace resets the thread-denial state.
+    useAppStore.setState({ threadsAccessLostMessage: "We couldn't verify your access right now." })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("couldn't verify")
+  })
+})
+
+describe("LostAccessModal with missing sources", () => {
+  const partial = {
+    ...ws("both", false, "ocs"),
+    missing_tenants: [
+      {
+        tenant_id: "t-bot-b",
+        tenant_name: "Bot B",
+        provider: "ocs",
+        recovery: "connect_team" as const,
+        team_slug: "team-b",
+        team_name: "Team B",
+        remedy: "connect Open Chat Studio team 'Team B' in Connected Accounts",
+      },
+    ],
+  }
+
+  beforeEach(() => {
+    navigate.mockClear()
+    useAppStore.setState({ domainsStatus: "loaded", domains: [partial], activeDomainId: "both" })
+  })
+
+  it("names each missing source with its remedy", () => {
+    renderModal()
+
+    expect(screen.getByText(/can’t open “both” yet/)).toBeInTheDocument()
+    expect(screen.getByTestId("lost-access-missing-t-bot-b")).toHaveTextContent(
+      "Bot B: connect Open Chat Studio team 'Team B' in Connected Accounts",
+    )
+  })
+
+  it("links to Connected Accounts", async () => {
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-connections"))
+
+    expect(navigate).toHaveBeenCalledWith("/settings/connections")
+  })
+
+  it.each(["/settings/connections", "/settings/connections/"])(
+    "does not cover Connected Accounts (%s), where the user fixes it",
+    (path) => {
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <LostAccessModal />
+        </MemoryRouter>,
+      )
+
+      expect(screen.queryByTestId("lost-access-modal")).toBeNull()
+    },
+  )
 })

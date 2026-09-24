@@ -40,6 +40,7 @@ from apps.workspaces.services.data_operation import workspace_data_lock
 from apps.workspaces.services.data_recovery import artifact_data_state
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import reconcile_workspace_data_recovery, recover_workspace_data
+from tests.tenant_access import usable_connection
 
 pytestmark = [pytest.mark.django_db(transaction=True)]
 
@@ -57,7 +58,9 @@ def required_setup():
     ]
     for tenant in tenants:
         WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-        TenantMembership.objects.create(user=user, tenant=tenant)
+        TenantMembership.objects.create(
+            user=user, tenant=tenant, connection=usable_connection(user, tenant.provider)
+        )
     schema_a = TenantSchema.objects.create(
         tenant=tenants[0], schema_name="required_source_a", state=SchemaState.ACTIVE
     )
@@ -487,6 +490,70 @@ async def test_worker_reassesses_exact_artifact_after_waiting_for_workspace_lock
         result = await asyncio.wait_for(worker, timeout=2)
     assert result["status"] == "completed"
     assert result["result"]["status"] == "already_recovered"
+    load.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_worker_denies_write_after_wait_downgrade(required_setup):
+    setup = required_setup
+    recovery = await make_recovery(setup)
+
+    async def wait_then_downgrade(_workspace_id):
+        await WorkspaceMembership.objects.filter(
+            workspace=setup.workspace, user=setup.user
+        ).aupdate(role=WorkspaceRole.READ)
+
+    with (
+        patch(
+            "apps.workspaces.tasks._await_in_progress_materializations",
+            new=AsyncMock(side_effect=wait_then_downgrade),
+        ),
+        patch("apps.workspaces.tasks.recovery_query_surface", new=AsyncMock()) as inspect,
+        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_semantic_model_core", new=AsyncMock()
+        ) as rebuild_semantic,
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.func", new=AsyncMock()
+        ) as rebuild_view,
+    ):
+        result = await recover_workspace_data.func(task_context(), str(recovery.id))
+
+    await recovery.arefresh_from_db()
+    assert result["status"] == recovery.state == WorkspaceDataRecovery.State.FAILED
+    assert "read-write or manage" in result["error"].lower()
+    inspect.assert_not_awaited()
+    load.assert_not_awaited()
+    rebuild_semantic.assert_not_awaited()
+    rebuild_view.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_worker_reports_lost_tenant_access_after_wait(required_setup):
+    setup = required_setup
+    recovery = await make_recovery(setup)
+
+    async def wait_then_lose_tenant_access(_workspace_id):
+        await TenantMembership.objects.filter(user=setup.user).adelete()
+
+    with (
+        patch(
+            "apps.workspaces.tasks._await_in_progress_materializations",
+            new=AsyncMock(side_effect=wait_then_lose_tenant_access),
+        ),
+        patch("apps.workspaces.tasks.recovery_query_surface", new=AsyncMock()) as inspect,
+        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+    ):
+        result = await recover_workspace_data.func(task_context(), str(recovery.id))
+
+    await recovery.arefresh_from_db()
+    assert result["status"] == recovery.state == WorkspaceDataRecovery.State.FAILED
+    assert "Source-A, Source-B" in result["error"]
+    assert "If they disconnected it, they should reconnect it" in result["error"]
+    assert "Settings → Connections" in result["error"]
+    assert "access was removed in the provider, an admin there must restore it" in result["error"]
+    assert "read-write or manage" not in result["error"].lower()
+    inspect.assert_not_awaited()
     load.assert_not_awaited()
 
 

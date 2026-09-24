@@ -185,5 +185,15 @@ Rules:
   lower-level graph artifact tools directly from the parent agent.
 """
 
+ARTIFACT_READ_ONLY_PROMPT_ADDITION = """
+## Artifacts And Semantic Graphs
 
-__all__ = ["ARTIFACT_PROMPT_ADDITION"]
+You can inspect existing semantic story artifacts with
+`artifact_graph_overview` and `get_artifact_semantic_queries`. This user's
+workspace role is read-only, so you cannot create, revise, publish, or save an
+artifact for them. Explain that a read-write workspace role is required when a
+request would change shared artifact content.
+"""
+
+
+__all__ = ["ARTIFACT_PROMPT_ADDITION", "ARTIFACT_READ_ONLY_PROMPT_ADDITION"]

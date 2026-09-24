@@ -9,6 +9,7 @@ from django.http import JsonResponse
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.decorators import async_login_required
+from apps.workspaces.access import access_denied_body, aresolve_workspace_access_ex
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
 from apps.workspaces.tasks import materialize_workspace
@@ -31,8 +32,10 @@ async def materialization_cancel_view(request, workspace_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
+    # Stopping work only reduces protected activity, so it stays reachable while
+    # upstream verification is failing (recovery mode: membership and role only).
     workspace, err = await aresolve_workspace(
-        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE, verification=None
     )
     if err is not None:
         return err
@@ -79,6 +82,27 @@ async def materialization_cancel_view(request, workspace_id):
     # Only truly-orphan runs (no ThreadJob anywhere); other users'/workspaces'
     # tracked runs are skipped.
     orphan_job_ids = job_ids - all_tracked_job_ids
+    # Orphan runs may belong to other workspaces sharing a tenant schema, so killing
+    # them needs verified access, not the recovery-mode check that admitted this call.
+    # That recheck's latency is accepted: it only runs when orphans exist.
+    orphan_denial = None
+    skipped_unverified_runs = 0
+    if orphan_job_ids:
+        verified = await aresolve_workspace_access_ex(
+            user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+        if not verified.granted:
+            logger.info(
+                "materialization_cancel_view: skipping %d orphan run(s); verified access "
+                "denied (%s)",
+                len(orphan_job_ids),
+                verified.denied_reason,
+            )
+            orphan_denial = verified
+            skipped_unverified_runs = sum(
+                1 for r in active_runs if r.procrastinate_job_id in orphan_job_ids
+            )
+            orphan_job_ids = set()
     if orphan_job_ids:
         logger.info(
             "materialization_cancel_view: %d orphan run(s) without ThreadJob — "
@@ -104,9 +128,15 @@ async def materialization_cancel_view(request, workspace_id):
                     exc_info=True,
                 )
 
-    if total == 0:
+    if total == 0 and orphan_denial is not None and not tjs:
+        # Runs are still active; "nothing to cancel" would be false.
+        return JsonResponse(access_denied_body(orphan_denial), status=403)
+    if total == 0 and orphan_denial is None:
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
-    return JsonResponse({"status": "cancelled", "runs_cancelled": total})
+    body = {"status": "cancelled", "runs_cancelled": total}
+    if orphan_denial is not None:
+        body["skipped_unverified_runs"] = skipped_unverified_runs
+    return JsonResponse(body)
 
 
 @async_login_required

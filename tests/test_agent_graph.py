@@ -81,7 +81,7 @@ class TestTeardownSchemaUnbound:
         from apps.agents.graph.base import _build_tools
 
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
-        tools = _build_tools(workspace, None, [])
+        tools = _build_tools(workspace, None, [], write_capable=True)
         tool_names = {t.name for t in tools}
 
         assert "artifact_manager" in tool_names
@@ -96,7 +96,7 @@ class TestTeardownSchemaUnbound:
 
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
         schemas = _llm_tool_schemas(
-            _build_tools(workspace, None, []),
+            _build_tools(workspace, None, [], write_capable=True),
             hidden_params=list(INJECTED_TOOL_PARAMS),
         )
         artifact_schema = next(
@@ -134,7 +134,9 @@ class TestHeadlessMode:
         ]
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
 
-        headless = _build_tools(workspace, None, mcp_tools, interactive=False, job_id=7)
+        headless = _build_tools(
+            workspace, None, mcp_tools, interactive=False, job_id=7, write_capable=True
+        )
         rm = [t for t in headless if t.name == "run_materialization"]
         assert len(rm) == 1, "exactly one run_materialization tool"
         # The headless tool replaces the MCP one (different object identity).
@@ -148,7 +150,7 @@ class TestHeadlessMode:
         mcp_tools = [self._fake_mcp_tool("semantic_query"), mcp_rm]
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
 
-        interactive = _build_tools(workspace, None, mcp_tools, interactive=True)
+        interactive = _build_tools(workspace, None, mcp_tools, interactive=True, write_capable=True)
         rm = [t for t in interactive if t.name == "run_materialization"]
         assert rm == [mcp_rm], "interactive path keeps the original MCP tool untouched"
 
@@ -198,7 +200,7 @@ class TestSystemPrompt:
         from apps.agents.graph.base import _build_system_prompt
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
-        prompt = "\n".join(await _build_system_prompt(workspace, user))
+        prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))
 
         assert "Data Availability" in prompt
         # Schema context is now pre-fetched; no instruction to call get_schema_status
@@ -218,7 +220,7 @@ class TestSystemPrompt:
         from apps.agents.graph.base import _build_system_prompt
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
-        prompt = "\n".join(await _build_system_prompt(workspace, user))
+        prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))
 
         # Agent must know to run materialization when no data exists
         assert "No data has been loaded yet" in prompt or "loading" in prompt.lower()

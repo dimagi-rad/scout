@@ -38,6 +38,10 @@ CREDENTIAL_GUIDANCE: dict[str, str] = {
         "reconnecting alone cannot restore those permissions. A workspace admin "
         "can help remove a source you no longer need."
     ),
+    ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE: (
+        "access could not be confirmed with the provider just now — nothing was "
+        "removed; retry shortly."
+    ),
 }
 
 # A plain Retry cannot repair these prerequisites. Transient refresh failures

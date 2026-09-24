@@ -20,6 +20,8 @@ from apps.artifacts.services.graph_doc import (
 )
 from apps.artifacts.services.graph_manifest import (
     build_semantic_query_manifest,
+    manifest_entry_summary,
+    sort_manifest_entries,
     sync_artifact_semantic_query_manifest,
 )
 from apps.artifacts.services.graph_runtime import check_graph_artifact
@@ -76,8 +78,8 @@ class ArtifactWriteInput(BaseModel):
     run_check: bool = Field(
         default=True,
         description=(
-            "Deprecated. Runtime validation always runs for create, replace, "
-            "and apply before publishing."
+            "Deprecated and ignored. New artifacts and document changes require runtime "
+            "validation. Metadata-only edits preserve the document without rerunning queries."
         ),
     )
 
@@ -133,25 +135,36 @@ def create_artifact_graph_tools(
             workspace,
             source=ThreadArtifact.Source.MENTIONED,
         )
-        await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+        # Inspection derives the current dependencies without rewriting shared
+        # live-query metadata or repairing its persisted dependency cache.
+        manifest = build_semantic_query_manifest(story_doc_from_artifact_data(artifact.data))
         clean_limit = max(1, min(int(limit or 50), 100))
         clean_offset = max(0, int(offset or 0))
-        queryset = ArtifactSemanticQuery.objects.filter(artifact=artifact).order_by("query_key")
-        total_count = await queryset.acount()
-        rows = await sync_to_async(list, thread_sensitive=True)(
-            queryset[clean_offset : clean_offset + clean_limit]
+        # The collation sort is a raw cursor, which Django has no async form of.
+        entries = await sync_to_async(sort_manifest_entries, thread_sensitive=True)(
+            manifest["entries"]
         )
+        total_count = len(entries)
+        page = entries[clean_offset : clean_offset + clean_limit]
+        persisted = {
+            row.query_key: row
+            async for row in ArtifactSemanticQuery.objects.filter(
+                artifact=artifact, query_key__in=[entry["key"] for entry in page]
+            )
+        }
         return {
             "status": "ok",
             "artifact": _artifact_summary(artifact),
-            "semantic_queries": [_semantic_query_record(row) for row in rows],
+            "semantic_queries": [
+                _derived_semantic_query_record(entry, persisted.get(entry["key"])) for entry in page
+            ],
             "pagination": {
                 "limit": clean_limit,
                 "offset": clean_offset,
                 "total_count": total_count,
-                "has_more": clean_offset + len(rows) < total_count,
+                "has_more": clean_offset + len(page) < total_count,
             },
-            "manifest": _manifest_summary(artifact.semantic_query_manifest or {}),
+            "manifest": _manifest_summary(manifest),
         }
 
     @tool(args_schema=ArtifactWriteInput)
@@ -420,7 +433,10 @@ async def _write_result(
     previous: Artifact | None = None,
 ) -> dict[str, Any]:
     runtime = None
-    if run_check and artifact.workspace_id:
+    # Compare persisted content, not the requested action or agent-supplied
+    # flags: a replace/apply can include a description AND a query change.
+    metadata_only = previous is not None and artifact.data == previous.data
+    if run_check and artifact.workspace_id and not metadata_only:
         runtime = await check_graph_artifact(artifact, user_id=str(user.id) if user else "")
     if runtime and runtime.get("success") is False:
         await ThreadArtifact.objects.filter(artifact=artifact).adelete()
@@ -441,6 +457,13 @@ async def _write_result(
         "diagnostics": diagnostics,
         "manifest": _manifest_summary(artifact.semantic_query_manifest or {}),
         "runtime": runtime,
+        "runtime_validation": (
+            "not_required_metadata_only"
+            if metadata_only
+            else "performed"
+            if runtime is not None
+            else "skipped"
+        ),
         "render_url": f"/api/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}/data/",
     }
 
@@ -506,21 +529,21 @@ def _manifest_summary(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _semantic_query_record(row: ArtifactSemanticQuery) -> dict[str, Any]:
+def _derived_semantic_query_record(
+    entry: dict[str, Any], persisted: ArtifactSemanticQuery | None
+) -> dict[str, Any]:
+    record = manifest_entry_summary(entry)
+    # A derived or stale entry has no persisted identity/timestamps. Retain
+    # existing metadata only when that row describes exactly this dependency.
+    if persisted is not None and any(
+        getattr(persisted, field) != value for field, value in record.items()
+    ):
+        persisted = None
     return {
-        "id": str(row.id),
-        "query_key": row.query_key,
-        "query_hash": row.query_hash,
-        "query_type": row.query_type,
-        "query_payload": row.query_payload,
-        "members": row.members,
-        "datasets": row.datasets,
-        "dependencies": row.dependencies,
-        "block_locations": row.block_locations,
-        "validation_status": row.validation_status,
-        "unresolved_references": row.unresolved_references,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        **record,
+        "id": str(persisted.id) if persisted else None,
+        "created_at": persisted.created_at.isoformat() if persisted else None,
+        "updated_at": persisted.updated_at.isoformat() if persisted else None,
     }
 
 

@@ -1,11 +1,11 @@
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
-import { Button } from "@/components/ui/button"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 
 /** Distinct provider labels for a workspace, e.g. "CommCare" or "CommCare, Open Chat Studio". */
 function providerLabels(tenants: { provider: string }[]): string {
@@ -14,10 +14,11 @@ function providerLabels(tenants: { provider: string }[]): string {
 }
 
 /**
- * A hard, non-dismissible gate shown when the active workspace is one the user
- * has lost upstream access to. The backend already refuses its data (403), so
- * the page behind is dead; this makes that legible and the only way out is to
- * pick a workspace the user can still access. Reachable only via a stale
+ * A hard, non-dismissible gate shown when the active workspace needs a source
+ * the user cannot use. The backend already refuses its data (403), so the page
+ * behind is dead; this links to Connected Accounts, where the user can connect
+ * or reconnect what is missing (naming each source when the server lists them,
+ * #380), or lets the user pick a workspace they can still access. Reachable only via a stale
  * default or a deep link — the switcher and default-pick avoid orphans.
  */
 export function LostAccessModal() {
@@ -28,17 +29,28 @@ export function LostAccessModal() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
+  const retryOutcome = useAppStore((s) => s.threadsAccessLostMessage)
+  const [verifyingId, setVerifyingId] = useState<string | null>(null)
 
   const active = domains.find((d) => d.id === activeDomainId)
   const accessible = useMemo(() => domains.filter(workspaceHasAccess), [domains])
 
+  // Connected Accounts and the workspace's own page (remove a source, leave,
+  // delete) are where the user fixes this, so the gate must not cover them.
+  const path = location.pathname.replace(/\/+$/, "")
+  const onRecoveryPage =
+    path.endsWith(CONNECTIONS_PATH) ||
+    (activeDomainId !== null && path.startsWith("/workspaces/") && path.endsWith(`/${activeDomainId}`))
+
   // Only gate once the list has actually loaded and resolved to an orphan —
   // never during the initial load, or we'd flash the modal before we know.
-  if (domainsStatus !== "loaded" || !active || workspaceHasAccess(active)) return null
-  // Connection management is user-scoped and must remain reachable for recovery.
-  if (location.pathname.replace(/\/$/, "") === "/settings/connections") return null
+  if (domainsStatus !== "loaded" || !active || workspaceHasAccess(active) || onRecoveryPage) {
+    return null
+  }
 
   const source = providerLabels(active.tenants ?? [])
+  const missing = active.missing_tenants ?? []
 
   function goTo(ws: (typeof domains)[number]) {
     setActiveDomain(ws.id)
@@ -60,32 +72,83 @@ export function LostAccessModal() {
             <AlertTriangle className="h-5 w-5" aria-hidden />
           </span>
           <h2 id="lost-access-title" className="text-lg font-semibold">
-            You’ve lost access to “{active.display_name}”
+            {missing.length > 0
+              ? `You can’t open “${active.display_name}” yet`
+              : `You’ve lost access to “${active.display_name}”`}
           </h2>
         </div>
 
-        <p className="text-sm text-muted-foreground">
-          {source ? (
-            <>
-              This is a <span className="font-medium text-foreground">{source}</span> workspace.
-              Scout no longer has an active connection to its data. Check your connection
-              and your access on {source}.
-            </>
-          ) : (
-            <>
-              Scout no longer has an active connection to this workspace’s data.
-            </>
-          )}
-        </p>
+        {missing.length > 0 ? (
+          <div className="text-sm text-muted-foreground">
+            <p>This workspace needs access to every one of its data sources. Still needed:</p>
+            <ul className="mt-2 space-y-1" data-testid="lost-access-missing">
+              {missing.map((t) => (
+                <li key={t.tenant_id} data-testid={`lost-access-missing-${t.tenant_id}`}>
+                  <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2">Access returns automatically once that is fixed.</p>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            {source ? (
+              <>
+                This is a <span className="font-medium text-foreground">{source}</span> workspace.
+                Scout no longer has an active connection to its data. Check your connection
+                and your access on {source}.
+              </>
+            ) : (
+              <>
+                Scout no longer has an active connection to this workspace’s data.
+              </>
+            )}
+          </p>
+        )}
+
+        {retryOutcome && (
+          <p className="mt-3 text-sm text-muted-foreground" data-testid="lost-access-retry-outcome">
+            {retryOutcome}
+          </p>
+        )}
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            data-testid="lost-access-connections"
+            onClick={() => navigate(CONNECTIONS_PATH)}
+            className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            Open Connected Accounts
+          </button>
+          <button
+            type="button"
+            disabled={verifyingId === active.id}
+            onClick={() => {
+              const workspaceId = active.id
+              setVerifyingId(workspaceId)
+              void retryAccessVerification(workspaceId).finally(() =>
+                setVerifyingId((current) => (current === workspaceId ? null : current)),
+              )
+            }}
+            className="rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+            data-testid="lost-access-retry-verification"
+          >
+            {verifyingId === active.id ? "Verifying…" : "Retry verification"}
+          </button>
+          <button
+            data-testid="lost-access-workspace-settings"
+            onClick={() => navigate(workspacePath(active))}
+            className="rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            Leave or edit this workspace
+          </button>
+        </div>
 
         <p className="mt-3 text-sm text-muted-foreground">
           If you disconnected your account, reconnect it in Connections. If your provider
           removed or restricted your access, ask a provider admin to restore it;
           reconnecting alone won’t restore those permissions.
         </p>
-        <Button className="mt-4" onClick={() => navigate("/settings/connections")} data-testid="lost-access-connections">
-          Manage connections
-        </Button>
 
         {accessible.length > 0 ? (
           <div className="mt-5">

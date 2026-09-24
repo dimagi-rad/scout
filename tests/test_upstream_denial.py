@@ -14,7 +14,10 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.users.services.upstream_denial import arecord_upstream_denial
+from apps.users.services.upstream_denial import (
+    arecord_upstream_denial,
+    record_validated_upstream_denial,
+)
 
 
 async def identity(user, provider="commcare_connect", scope=""):
@@ -351,3 +354,35 @@ async def test_new_complete_discovery_restores_listed_membership_after_tenant_de
     await conn.arefresh_from_db()
     assert conn.upstream_denied_at == denial_fence
     assert httpx_mock.get_request().headers["Authorization"] == f"Bearer {token.token}"
+
+
+@pytest.mark.django_db
+def test_connection_wide_denial_archives_alias_tenants_but_not_connect(user):
+    """A connection-wide denial covers the tenants verification can claim.
+
+    Claims match tenants on the canonical provider, so an alias tenant must be
+    archived too; a Connect tenant on the same CommCare connection is a different
+    provider and must survive, which a provider__startswith filter would break.
+    """
+    conn = TenantConnection.objects.create(
+        user=user, provider="commcare", credential_type=TenantConnection.API_KEY
+    )
+    memberships = {
+        provider: TenantMembership.objects.create(
+            user=user,
+            connection=conn,
+            tenant=Tenant.objects.create(
+                provider=provider, external_id=f"{provider}-id", canonical_name=provider
+            ),
+        )
+        for provider in ("commcare", "commcare-custom", "commcare_connect")
+    }
+
+    archived = record_validated_upstream_denial(conn, code=ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    assert archived == 2
+    for membership in memberships.values():
+        membership.refresh_from_db()
+    assert memberships["commcare"].archived_at is not None
+    assert memberships["commcare-custom"].archived_at is not None
+    assert memberships["commcare_connect"].archived_at is None

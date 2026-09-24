@@ -21,6 +21,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.tenant_access import ausable_connection, usable_connection
 
 User = get_user_model()
 
@@ -482,7 +483,11 @@ class TestArtifactDataView:
         )
         other_workspace = Workspace.objects.create(name="Other Domain", created_by=other_user)
         WorkspaceTenant.objects.create(workspace=other_workspace, tenant=other_tenant)
-        TenantMembership.objects.create(user=other_user, tenant=other_tenant)
+        TenantMembership.objects.create(
+            user=other_user,
+            tenant=other_tenant,
+            connection=usable_connection(other_user, other_tenant.provider),
+        )
         WorkspaceMembership.objects.create(
             workspace=other_workspace, user=other_user, role=WorkspaceRole.MANAGE
         )
@@ -744,8 +749,10 @@ class TestArtifactQueryDataRouting:
                 provider="commcare", external_id=ext, canonical_name=ext
             )
             await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
-        # user needs a live TenantMembership for one tenant to pass the access gate
-        await TenantMembership.objects.acreate(user=user, tenant=t)
+            # the all-of access gate needs a usable credential for every tenant
+            await TenantMembership.objects.acreate(
+                user=user, tenant=t, connection=await ausable_connection(user, t.provider)
+            )
         art = await Artifact.objects.acreate(
             workspace=ws,
             created_by=user,

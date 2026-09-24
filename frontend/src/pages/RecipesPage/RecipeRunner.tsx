@@ -20,6 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
+import { localIsoDate } from "@/lib/localDate"
 import type { Recipe, RecipeVariable, RecipeRun } from "@/store/recipeSlice"
 
 interface RecipeRunnerProps {
@@ -38,7 +39,7 @@ function getDefaultValue(variable: RecipeVariable): string {
     case "number":
       return "0"
     case "date":
-      return new Date().toISOString().split("T")[0]
+      return localIsoDate(new Date())
     case "select":
       return variable.options?.[0] ?? ""
     default:

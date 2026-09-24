@@ -1,0 +1,93 @@
+import { act, renderHook } from "@testing-library/react"
+import { afterEach, describe, expect, it } from "vitest"
+
+import { ApiError } from "@/api/client"
+import type { TenantMembership } from "@/store/domainSlice"
+import { useAppStore } from "@/store/store"
+import { READ_ONLY_DENIAL, useWorkspaceRole, writeErrorMessage } from "./useWorkspaceRole"
+
+function workspace(id: string, role: TenantMembership["role"]) {
+  return { id, role } as TenantMembership
+}
+
+afterEach(() => useAppStore.setState({ domains: [], activeDomainId: null }))
+
+describe("useWorkspaceRole", () => {
+  it("reads the active workspace role by default", () => {
+    useAppStore.setState({
+      domains: [workspace("ws-read", "read"), workspace("ws-manage", "manage")],
+      activeDomainId: "ws-read",
+    })
+    const { result } = renderHook(() => useWorkspaceRole())
+    expect(result.current).toEqual({ role: "read", canWrite: false })
+
+    act(() => useAppStore.setState({ activeDomainId: "ws-manage" }))
+    expect(result.current).toEqual({ role: "manage", canWrite: true })
+  })
+
+  it("reads an explicit workspace over the active one", () => {
+    useAppStore.setState({
+      domains: [workspace("ws-read", "read"), workspace("ws-rw", "read_write")],
+      activeDomainId: "ws-read",
+    })
+    const { result } = renderHook(() => useWorkspaceRole("ws-rw"))
+    expect(result.current).toEqual({ role: "read_write", canWrite: true })
+  })
+
+  it("stays writable while the role is unknown so the server remains the gate", () => {
+    const { result } = renderHook(() => useWorkspaceRole("ws-missing"))
+    expect(result.current).toEqual({ role: null, canWrite: true })
+  })
+})
+
+describe("writeErrorMessage", () => {
+  const generic = new ApiError(403, "Workspace not found or access denied.", {
+    error: "Workspace not found or access denied.",
+  })
+
+  it("explains the generic 403 as read-only when the user is a read member", () => {
+    expect(writeErrorMessage(generic, "Try again.", false)).toBe(READ_ONLY_DENIAL)
+  })
+
+  it("recognises endpoints that name the role requirement", () => {
+    const named = new ApiError(403, "Read-write or manage role required to annotate tables.")
+    expect(writeErrorMessage(named, "Try again.", true)).toBe(READ_ONLY_DENIAL)
+  })
+
+  it("surfaces other 403 messages verbatim for writers", () => {
+    expect(writeErrorMessage(generic, "Try again.", true)).toBe(generic.message)
+  })
+
+  it("keeps lost-upstream-access copy even for read members", () => {
+    const lost = new ApiError(403, "You no longer have access to: Alpha.", {
+      error: "You no longer have access to: Alpha.",
+      reason: "tenant_access_lost",
+      lost_tenants: ["Alpha"],
+    })
+    expect(writeErrorMessage(lost, "Try again.", false)).toBe(lost.message)
+  })
+
+  it("keeps a specific server reason for read members", () => {
+    const owner = new ApiError(403, "Only the thread owner can change sharing.", {
+      error: "Only the thread owner can change sharing.",
+    })
+    expect(writeErrorMessage(owner, "Try again.", false)).toBe(owner.message)
+  })
+
+  it("keeps the fallback for a 403 without a JSON message such as a CSRF failure", () => {
+    expect(writeErrorMessage(new ApiError(403, "Forbidden"), "Try again.", true)).toBe(
+      "Try again.",
+    )
+  })
+
+  it("keeps retry advice for a read member's CSRF failure", () => {
+    expect(writeErrorMessage(new ApiError(403, "Forbidden"), "Try again.", false)).toBe(
+      "Try again.",
+    )
+  })
+
+  it("keeps the fallback for non-permission failures", () => {
+    expect(writeErrorMessage(new ApiError(500, "boom"), "Try again.", false)).toBe("Try again.")
+    expect(writeErrorMessage(new Error("offline"), "Try again.", false)).toBe("Try again.")
+  })
+})

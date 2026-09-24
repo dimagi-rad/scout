@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import threading
 import time
 from datetime import timedelta
 from unittest import mock
@@ -31,19 +29,10 @@ from apps.users.services.token_refresh import (
     refresh_oauth_token_result,
     refresh_oauth_token_result_sync,
 )
+from tests.clocks import ManualClock
+from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked, user_row
 
 URL = "https://provider.example/o/token/"
-
-
-def _hold_user_lock(user_id, acquired, release):
-    try:
-        with transaction.atomic():
-            user_model = TenantConnection._meta.get_field("user").remote_field.model
-            user_model.objects.select_for_update().get(pk=user_id)
-            acquired.set()
-            assert release.wait(timeout=10)
-    finally:
-        django_connection.close()
 
 
 @pytest.fixture
@@ -322,8 +311,10 @@ async def test_malformed_refresh_response_never_mutates_token(
 ):
     token, _connection = oauth_identity
 
-    with pytest.raises(TokenRefreshError):
+    with pytest.raises(TokenRefreshError) as caught:
         await _refresh(mode, token, httpx_mock, requests_mock, payload)
+    assert caught.type is TokenRefreshError
+    assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
 
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "old-access"
@@ -372,28 +363,28 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
     oauth_identity, mode, httpx_mock, requests_mock
 ):
     token, connection = oauth_identity
-    # 1s leaves preflight room for a fresh executor thread and a new PostgreSQL
-    # connection, so only the persist phase can exhaust the budget; the holder outlasts
-    # it so the lock cannot free early and let the write through.
-    deadline = time.monotonic() + 1.0
+    # Frozen, so a slow runner cannot spend the end-to-end budget before persist (each
+    # statement still gets the real 1s timeout). The persist lock wait is then bounded
+    # by that lock_timeout; the holder outlasts it, so the write cannot slip in.
+    clock = ManualClock()
+    deadline = clock() + 1.0
     payload = {"access_token": "late-access", "refresh_token": "late-refresh"}
     if mode == "async":
         httpx_mock.add_response(url=URL, json=payload)
-        operation = refresh_oauth_token_result(token, URL, deadline=deadline)
+        operation = refresh_oauth_token_result(token, URL, deadline=deadline, clock=clock)
     else:
         requests_mock.post(URL, json=payload)
-        operation = sync_to_async(refresh_oauth_token_result_sync)(token, URL, deadline=deadline)
+        operation = sync_to_async(refresh_oauth_token_result_sync)(
+            token, URL, deadline=deadline, clock=clock
+        )
 
-    with _user_row_locked(connection.user_id, hold_seconds=4.0):
-        started = time.monotonic()
+    with _user_row_locked(connection.user_id) as release:
         # The provider already rotated the grant, so the stored token is dead: reconnect.
         with pytest.raises(TokenRefreshRejected):
             await operation
-        elapsed = time.monotonic() - started
+        held_at_return = not release.is_set()
 
-    # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
-    # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
-    assert elapsed < 4
+    assert held_at_return
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "old-access"
     assert persisted.token_secret == "old-refresh"
@@ -406,25 +397,25 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
     oauth_identity, mode, httpx_mock, requests_mock
 ):
     token, connection = oauth_identity
-    # The holder must outlast the budget, or the lock frees before it can expire and
-    # the marker gets written after all. 1s gives preflight -- a fresh executor thread
-    # and a new PostgreSQL connection -- room to finish inside its own re-armed slice.
+    # Frozen, so no phase can run out of budget before the marker's lock wait, which
+    # is bounded by the real lock_timeout derived from it. The holder must outlast
+    # that, or the lock frees before it can expire and the marker gets written.
+    clock = ManualClock()
     if mode == "async":
         httpx_mock.add_response(url=URL, status_code=503)
-        operation = refresh_oauth_token_result(token, URL, db_timeout=1.0)
+        operation = refresh_oauth_token_result(token, URL, db_timeout=1.0, clock=clock)
     else:
         requests_mock.post(URL, status_code=503)
-        operation = sync_to_async(refresh_oauth_token_result_sync)(token, URL, db_timeout=1.0)
+        operation = sync_to_async(refresh_oauth_token_result_sync)(
+            token, URL, db_timeout=1.0, clock=clock
+        )
 
-    with _user_row_locked(connection.user_id, hold_seconds=4.0):
-        started = time.monotonic()
+    with _user_row_locked(connection.user_id) as release:
         with pytest.raises(TokenRefreshUnavailable):
             await operation
-        elapsed = time.monotonic() - started
+        held_at_return = not release.is_set()
 
-    # Generous: a broken deadline is caught by the raises/row assertions, not the clock.
-    # A tight bound only measures CI load (sync_to_async hand-off, a fresh PG connection).
-    assert elapsed < 4
+    assert held_at_return
     await connection.arefresh_from_db()
     assert connection.oauth_refresh_failure_fingerprint == ""
 
@@ -454,6 +445,39 @@ async def test_invalid_stable_binding_fails_before_provider_rotation(
         monkeypatch.setattr(token_refresh.requests, "post", unexpected)
         with pytest.raises(TokenRefreshError, match="reconnect"):
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_account_deleted_before_preflight_is_a_classified_refresh_error(
+    oauth_identity, mode, monkeypatch
+):
+    """The disconnect race must reach callers as TokenRefreshError, not DoesNotExist.
+
+    Consumers catch only TokenRefreshError, so a raw ObjectDoesNotExist escaping
+    preflight would be a 500 rather than a reconnect prompt.
+    """
+    token, _connection = oauth_identity
+    await SocialAccount.objects.filter(pk=token.account_id).adelete()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a vanished account must not consume an upstream refresh grant")
+
+    if mode == "async":
+
+        async def unexpected_async(*args, **kwargs):
+            unexpected()
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", unexpected_async)
+        with pytest.raises(TokenRefreshError, match="reconnect") as excinfo:
+            await refresh_oauth_token_result(token, URL)
+    else:
+        monkeypatch.setattr(token_refresh.requests, "post", unexpected)
+        with pytest.raises(TokenRefreshError, match="reconnect") as excinfo:
+            await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+    assert type(excinfo.value) is TokenRefreshError
+    assert isinstance(excinfo.value.__cause__, SocialAccount.DoesNotExist)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -809,22 +833,15 @@ def _stubbed_provider(payload=None):
         yield calls
 
 
-@contextlib.contextmanager
-def _user_row_locked(user_id, hold_seconds=8.0):
+# These entry points take no clock, so the forwarded deadline is real time. It only has
+# to be far below the worker default and the holder's hold to prove it was forwarded,
+# and far above runner noise so preflight cannot exhaust it first.
+FORWARDED_DEADLINE_SECONDS = 2.0
+
+
+def _user_row_locked(user_id, hold_seconds=LOCK_SAFETY_SECONDS):
     """Hold a competing lock on the User row the refresh must take."""
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_user_lock, args=(user_id, acquired, release))
-    locker.start()
-    timer = threading.Timer(hold_seconds, release.set)
-    timer.start()
-    try:
-        assert acquired.wait(5), "lock holder never acquired the row"
-        yield
-    finally:
-        release.set()
-        timer.cancel()
-        locker.join(5)
+    return row_locked(user_row(user_id), release_after=hold_seconds, acquire_timeout=5)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -836,17 +853,16 @@ def test_providers_view_bounds_its_refresh_wait(oauth_identity, user, client, mo
     """
     token, connection = oauth_identity
     token.app.sites.add(Site.objects.get(pk=settings.SITE_ID))
-    monkeypatch.setattr(token_refresh, "INTERACTIVE_DB_DEADLINE", 0.3)
+    monkeypatch.setattr(token_refresh, "INTERACTIVE_DB_DEADLINE", FORWARDED_DEADLINE_SECONDS)
     client.force_login(user)
 
-    with _stubbed_provider() as calls, _user_row_locked(connection.user_id):
-        started = time.monotonic()
+    with _stubbed_provider() as calls, _user_row_locked(connection.user_id) as release:
         response = client.get("/api/auth/providers/")
-        elapsed = time.monotonic() - started
+        held_at_return = not release.is_set()
 
     assert calls, "the provider must be stubbed, never actually called"
     assert response.status_code == 200
-    assert elapsed < 4, f"providers_view waited {elapsed:.1f}s on a locked row"
+    assert held_at_return, "providers_view waited out the lock holder"
     entries = {p["id"]: p for p in response.json()["providers"]}
     assert entries["commcare"]["status"] != "connected"
 
@@ -860,17 +876,16 @@ async def test_proactive_resolution_bounds_its_refresh_wait(oauth_identity, monk
     the outcome must be the retryable code, not a reconnect prompt.
     """
     token, connection = oauth_identity
-    monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", 0.3)
+    monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", FORWARDED_DEADLINE_SECONDS)
 
-    with _stubbed_provider() as calls, _user_row_locked(connection.user_id):
-        started = time.monotonic()
+    with _stubbed_provider() as calls, _user_row_locked(connection.user_id) as release:
         with pytest.raises(CredentialResolutionError) as caught:
             await credential_resolver._aresolve_oauth_credential(token, "commcare")
-        elapsed = time.monotonic() - started
+        held_at_return = not release.is_set()
 
     assert calls, "the provider must be stubbed, never actually called"
     assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
-    assert elapsed < 4, f"resolution waited {elapsed:.1f}s on a locked row"
+    assert held_at_return, "resolution waited out the lock holder"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -880,18 +895,17 @@ def test_midrun_refresher_bounds_its_refresh_wait(oauth_identity, monkeypatch, r
     Fails if credential_resolver stops forwarding WORKER_DB_DEADLINE.
     """
     token, connection = oauth_identity
-    monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", 0.3)
+    monkeypatch.setattr(credential_resolver, "WORKER_DB_DEADLINE", FORWARDED_DEADLINE_SECONDS)
     stub = requests_mock.post(URL, json={"access_token": "new-access"})
     refresher = credential_resolver._make_token_refresher(token, URL)
 
-    with _user_row_locked(connection.user_id):
-        started = time.monotonic()
+    with _user_row_locked(connection.user_id) as release:
         with pytest.raises(TokenRefreshDeadlineExceeded):
             refresher()
-        elapsed = time.monotonic() - started
+        held_at_return = not release.is_set()
 
     assert stub.called, "the provider must be stubbed, never actually called"
-    assert elapsed < 4, f"mid-run refresh waited {elapsed:.1f}s on a locked row"
+    assert held_at_return, "mid-run refresh waited out the lock holder"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -921,27 +935,32 @@ async def test_a_slow_failing_provider_does_not_starve_the_failure_marker(
     marker with an exhausted deadline, so the failure was recorded nowhere.
     """
     token, connection = oauth_identity
+    # The provider "takes" twice db_timeout on a manual clock, so the database phases
+    # themselves are never timed against a loaded runner.
+    clock = ManualClock()
 
     if mode == "async":
 
         async def slow_error(self, url, *args, **kwargs):
-            await asyncio.sleep(0.4)
+            clock.advance(0.4)
             return httpx.Response(503, json={}, request=httpx.Request("POST", url))
 
         with mock.patch.object(httpx.AsyncClient, "post", slow_error):
             with pytest.raises(TokenRefreshUnavailable):
-                await refresh_oauth_token_result(token, URL, db_timeout=0.2)
+                await refresh_oauth_token_result(token, URL, db_timeout=0.2, clock=clock)
     else:
         requests_mock.post(URL, status_code=503)
         original = token_refresh.requests.post
 
         def slow_error(*args, **kwargs):
-            time.sleep(0.4)
+            clock.advance(0.4)
             return original(*args, **kwargs)
 
         with mock.patch.object(token_refresh.requests, "post", slow_error):
             with pytest.raises(TokenRefreshUnavailable):
-                await sync_to_async(refresh_oauth_token_result_sync)(token, URL, db_timeout=0.2)
+                await sync_to_async(refresh_oauth_token_result_sync)(
+                    token, URL, db_timeout=0.2, clock=clock
+                )
 
     await connection.arefresh_from_db()
     assert connection.oauth_refresh_failure_fingerprint != ""
@@ -960,30 +979,29 @@ async def test_slow_provider_does_not_spend_the_budget_meant_for_the_write(
     """
     token, _connection = oauth_identity
     payload = {"access_token": "new-access", "refresh_token": "rotated-refresh"}
-
-    def slow_then_respond(*args, **kwargs):
-        time.sleep(0.4)
-        return payload
+    # The provider "takes" twice db_timeout on a manual clock; a real sleep also timed
+    # the persist phase itself against the runner and failed under load.
+    clock = ManualClock()
 
     if mode == "async":
 
         async def slow_post(self, url, *args, **kwargs):
-            await asyncio.sleep(0.4)
+            clock.advance(0.4)
             return httpx.Response(200, json=payload, request=httpx.Request("POST", url))
 
         with mock.patch.object(httpx.AsyncClient, "post", slow_post):
-            result = await refresh_oauth_token_result(token, URL, db_timeout=0.2)
+            result = await refresh_oauth_token_result(token, URL, db_timeout=0.2, clock=clock)
     else:
         requests_mock.post(URL, json=payload)
         original = token_refresh.requests.post
 
         def slow_sync_post(*args, **kwargs):
-            time.sleep(0.4)
+            clock.advance(0.4)
             return original(*args, **kwargs)
 
         with mock.patch.object(token_refresh.requests, "post", slow_sync_post):
             result = await sync_to_async(refresh_oauth_token_result_sync)(
-                token, URL, db_timeout=0.2
+                token, URL, db_timeout=0.2, clock=clock
             )
 
     assert result.status == TokenRefreshStatus.APPLIED

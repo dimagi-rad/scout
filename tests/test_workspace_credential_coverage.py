@@ -12,6 +12,7 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.credential_resolver import (
@@ -563,8 +564,9 @@ def test_non_ocs_oauth_scope_matches_runtime_in_sync_and_async_audits(
     if expected_gap:
         assert sync_readiness[0].usable is False
         assert sync_readiness[0].gap.code == expected_gap
-        with pytest.raises(CredentialResolutionError):
+        with pytest.raises(CredentialResolutionError) as caught:
             async_to_sync(aresolve_credential)(membership)
+        assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
     else:
         assert sync_readiness[0].usable is True
         assert sync_readiness[0].gap is None

@@ -194,8 +194,10 @@ async def cancel_job_view(request, workspace_id, thread_job_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
+    # Stopping work only reduces protected activity, so it stays reachable while
+    # upstream verification is failing (recovery mode: membership and role only).
     workspace, err = await aresolve_workspace(
-        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE, verification=None
     )
     if err is not None:
         return err

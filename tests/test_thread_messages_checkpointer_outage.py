@@ -24,6 +24,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from tests.tenant_access import ausable_connection
 
 User = get_user_model()
 
@@ -35,7 +36,9 @@ async def _make_owned_thread():
         external_id="t-ckpt", provider="commcare", canonical_name="Ckpt Tenant"
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    tm = await TenantMembership.objects.acreate(user=user, tenant=tenant)  # noqa: F841
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
