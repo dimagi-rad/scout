@@ -192,6 +192,7 @@ def test_refresh_covers_every_source_of_a_multi_source_workspace(
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
 
     assert resp.status_code == 202
+    assert resp.data["status"] == "provisioning"
     assert defer.call_count == 2
     assert {t["tenant_id"] for t in resp.data["tenants"]} == {str(tenant.id), str(second.id)}
     assert all(t["status"] == "provisioning" for t in resp.data["tenants"])
@@ -218,6 +219,8 @@ def test_refresh_reports_each_source_that_could_not_start(
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
 
     assert resp.status_code == 202
+    # Some sources were not refreshed, and the top level says so.
+    assert resp.data["status"] == "partial"
     defer.assert_called_once()
     by_tenant = {t["tenant_id"]: t for t in resp.data["tenants"]}
     assert by_tenant[str(tenant.id)]["status"] == "provisioning"
@@ -266,6 +269,8 @@ def test_a_refresh_where_no_source_could_start_is_a_conflict(
     assert resp.data["status"] == "not_started"
     assert {t["status"] for t in resp.data["tenants"]} == {"in_progress"}
     assert "code" not in resp.data
+    # The shared reason is the message clients show.
+    assert resp.data["error"] == "A refresh is already in progress."
 
 
 @pytest.mark.django_db

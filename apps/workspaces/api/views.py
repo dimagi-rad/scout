@@ -527,14 +527,24 @@ class RefreshSchemaView(APIView):
                     status=status.HTTP_202_ACCEPTED,
                 )
             return Response(only.body, status=only.http_status)
-        started = any(o.public["status"] == "provisioning" for o in outcomes)
+        refused = [o for o in outcomes if o.public["status"] != "provisioning"]
+        started = len(refused) < len(outcomes)
         # No top-level schema_id: each source reports its own in tenants[].
+        # "partial" keeps a 202 but tells clients some sources were not refreshed.
         body = {
-            "status": "provisioning" if started else "not_started",
+            "status": ("partial" if refused else "provisioning") if started else "not_started",
             "tenants": [o.public for o in outcomes],
         }
         if started:
             return Response(body, status=status.HTTP_202_ACCEPTED)
+        # Clients show the top-level error; without it a refusal reads as "Conflict".
+        reasons = {o.body["error"] for o in refused}
+        body["error"] = (
+            reasons.pop()
+            if len(reasons) == 1
+            else "No source could be refreshed: "
+            + "; ".join(f"{o.public['tenant_name']}: {o.body['error']}" for o in refused)
+        )
         codes = {o.body.get("code") for o in outcomes} - {None}
         if ErrorCode.REFRESH_RECOVERY_REQUIRED in codes:
             body["code"] = ErrorCode.REFRESH_RECOVERY_REQUIRED
