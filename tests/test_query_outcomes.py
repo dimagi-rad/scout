@@ -11,6 +11,7 @@ from langchain_core.messages import ToolMessage
 from apps.agents.tools.artifact_manager_agent import _summarize_result
 from apps.artifacts.services import graph_runtime
 from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
+from apps.semantic.services import query as query_service
 from apps.semantic.services import query_outcomes
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.query import run_semantic_query
@@ -87,6 +88,61 @@ async def test_readiness_failure_does_not_guess_a_repair(monkeypatch):
     )
     assert result["error"]["message"] == "Original"
     assert result["error"]["recovery_action"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "surface,category,action",
+    [
+        ({"status": "ready", "queryable": True}, "invalid_query", None),
+        (
+            {
+                "status": "needs_semantic_rebuild",
+                "queryable": False,
+                "recovery_action": "semantic_rebuild",
+            },
+            "data_unavailable",
+            "semantic_rebuild",
+        ),
+        (
+            {
+                "status": "needs_materialization",
+                "queryable": False,
+                "recovery_action": "materialization",
+            },
+            "data_unavailable",
+            "materialization",
+        ),
+        ({"status": "model_drift", "queryable": False}, "data_unavailable", None),
+    ],
+)
+async def test_cube_rejection_checks_serving_readiness_without_inventing_model_gaps(
+    monkeypatch, surface, category, action
+):
+    workspace = SimpleNamespace(id="workspace")
+    query = {"measures": ["visits.count"]}
+    monkeypatch.setattr(
+        query_service,
+        "_compile_semantic_query_for_async",
+        lambda *args: {
+            "model": object(),
+            "cube_schema": object(),
+            "cube_query": {},
+        },
+    )
+    monkeypatch.setattr(query_service, "load_workspace_context", AsyncMock(return_value=object()))
+    monkeypatch.setattr(query_service, "build_cube_security_context", lambda *args, **kwargs: {})
+    execute = AsyncMock(side_effect=query_service.CubeQueryError("Member not found: visits.count"))
+    monkeypatch.setattr(query_service, "CubeClient", lambda: SimpleNamespace(execute_query=execute))
+    inspect = AsyncMock(return_value=surface)
+    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    result = await run_semantic_query(workspace, query)
+    execute.assert_awaited_once()
+    inspect.assert_awaited_once()
+    assert inspect.await_args.args[0].semantic_queries == [query]
+    assert result["error"]["category"] == category
+    assert result["error"]["recovery_action"] == action
+    assert result["error"]["retryable"] is False
 
 
 @pytest.mark.django_db(transaction=True)
