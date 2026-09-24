@@ -182,7 +182,10 @@ async def test_namespaced_views_keep_their_declared_source_identity(
         assert "not evidence" in identity["label_policy"]
     if legacy:
         assert identity == await workspace_table_identity(
-            workspace.id, "identity_views", "fitted_name", tables[0].columns
+            workspace.id,
+            SimpleNamespace(schema_name="identity_views"),
+            "fitted_name",
+            tables[0].columns,
         )
     elif described:
         assert identity["version"] == 2
@@ -190,9 +193,9 @@ async def test_namespaced_views_keep_their_declared_source_identity(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mapping", ["valid", "legacy", "unlisted", "other_tenant"])
+@pytest.mark.parametrize("mapping", ["valid", "legacy", "unlisted", "other_tenant", "stale"])
 async def test_mcp_view_identity_uses_only_authorized_publication_provenance(
-    workspace, tenant, mapping
+    workspace, tenant, mapping, monkeypatch
 ):
     await Tenant.objects.filter(pk=tenant.pk).aupdate(provider="ocs")
     sources = {
@@ -207,6 +210,12 @@ async def test_mcp_view_identity_uses_only_authorized_publication_provenance(
         sources["views"] = {}
     elif mapping == "other_tenant":
         sources["views"]["fitted_name"]["tenant_id"] = "not-in-workspace"
+    published = [{"name": "fitted_name"}]
+    if mapping == "stale":
+        published.append({"name": "new_view_not_in_prior_map"})
+    monkeypatch.setattr(
+        "mcp_server.services.metadata.workspace_list_tables", AsyncMock(return_value=published)
+    )
     await WorkspaceViewSchema.objects.acreate(
         workspace=workspace,
         schema_name="identity_views",
@@ -218,7 +227,7 @@ async def test_mcp_view_identity_uses_only_authorized_publication_provenance(
         for name in ["message_id", "session_id", "snapshot_revision", "message_version"]
     ]
     identity = await workspace_table_identity(
-        workspace.id, "identity_views", "fitted_name", columns
+        workspace.id, SimpleNamespace(schema_name="identity_views"), "fitted_name", columns
     )
     if mapping == "valid":
         assert identity["kind"] == "snapshot_local"

@@ -311,7 +311,7 @@ async def describe_table(
 
         if pipeline_config is None:
             identity = await workspace_table_identity(
-                workspace_id, ctx.schema_name, table_name, table["columns"]
+                workspace_id, ctx, table_name, table["columns"]
             )
             if identity:
                 table["identity"] = identity

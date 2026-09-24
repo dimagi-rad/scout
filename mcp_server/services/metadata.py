@@ -17,7 +17,11 @@ from django.db import models
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
 from apps.workspaces.models import MaterializationRun, SchemaState, WorkspaceViewSchema
-from apps.workspaces.services.view_sources import ViewSourcesError, parse_view_sources
+from apps.workspaces.services.view_sources import (
+    ViewSourcesError,
+    parse_view_sources,
+    validate_published_views,
+)
 from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
@@ -285,13 +289,13 @@ async def pipeline_describe_table(
 
 
 async def workspace_table_identity(
-    workspace_id: UUID | str, schema_name: str, table_name: str, columns: list[dict]
+    workspace_id: UUID | str, ctx: QueryContext, table_name: str, columns: list[dict]
 ) -> dict | None:
     """Resolve a view's source from publication provenance, never its fitted name."""
     unknown = unverified_source_identity()
     view_schema = (
         await WorkspaceViewSchema.objects.filter(
-            workspace_id=workspace_id, schema_name=schema_name, state=SchemaState.ACTIVE
+            workspace_id=workspace_id, schema_name=ctx.schema_name, state=SchemaState.ACTIVE
         )
         .select_related("workspace")
         .afirst()
@@ -301,6 +305,9 @@ async def workspace_table_identity(
     tenants = {str(tenant.id): tenant async for tenant in view_schema.workspace.tenants.all()}
     try:
         sources = parse_view_sources(view_schema.view_sources, set(tenants))
+        if sources is not None:
+            published = await workspace_list_tables(ctx)
+            validate_published_views(sources, {table["name"] for table in published})
     except ViewSourcesError:
         logger.warning(
             "Unverified source identity for workspace %s table %s: invalid view provenance",
