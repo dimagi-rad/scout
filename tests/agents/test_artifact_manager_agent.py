@@ -194,6 +194,30 @@ def test_invalid_handoff_keeps_bounded_gap_description_and_missing_field_details
     assert "data_requirements" not in summary
 
 
+@pytest.mark.parametrize(
+    "status",
+    [["needs_data_model"], {"status": "needs_data_model"}, 42, [], {}, 0, False, None, " "],
+)
+@pytest.mark.asyncio
+async def test_malformed_status_preserves_typed_failure_summary(status):
+    final_text = json.dumps({"status": status, "data_requirements": [_topic_requirement()]})
+    summary = _summarize_result([], final_text)
+    assert summary["status"] == "error"
+    assert "invalid status" in summary["message"]
+    assert "data_requirements" not in summary
+
+    failure = await _artifact_manager_failure_result(
+        "parent", _SubagentTraceRecorder(), [], final_text, "The run failed."
+    )
+    assert failure["status"] == "error"
+    assert failure["message"] == "The run failed."
+    assert "data_requirements" not in failure
+    assert any(
+        event["type"] == "data-subagent-status" and event["data"]["phase"] == "failed"
+        for event in failure["subagent_trace"]["events"]
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("requirements", [[_topic_requirement()], [{}]])
 async def test_failed_manager_run_never_returns_an_actionable_model_proposal(requirements):

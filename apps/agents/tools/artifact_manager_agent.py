@@ -796,7 +796,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     if diagnostics is None and isinstance(runtime, dict):
         diagnostics = runtime.get("diagnostics")
     if isinstance(parsed_final, dict):
-        status = parsed_final.get("status") or artifact_result.get("status") or "done"
+        status = parsed_final.get("status", artifact_result.get("status") or "done")
         message = parsed_final.get("message") or final_text
         touched_blocks = parsed_final.get("touched_blocks") or _touched_blocks_from_artifact_result(
             artifact_result
@@ -805,6 +805,9 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         status = artifact_result.get("status") or "done"
         message = final_text or "Artifact manager completed."
         touched_blocks = _touched_blocks_from_artifact_result(artifact_result)
+    if not isinstance(status, str) or not status.strip():
+        status = "error"
+        message = "Artifact Manager returned an invalid status; no model change is authorized."
     summary = {
         "status": status,
         "artifact_id": artifact.get("id") if isinstance(artifact, dict) else None,
@@ -875,6 +878,8 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     )
     if artifact_failed and not model_gap_response:
         summary["status"] = "error"
+        # Valid proposals remain context for a real model gap, not authorization
+        # to act before the other typed failures have been resolved.
         summary.pop("requirement_errors", None)
         summary.pop("subagent_message", None)
         error_message = artifact_result.get("message")
