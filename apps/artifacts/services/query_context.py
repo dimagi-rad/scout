@@ -46,7 +46,9 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
             f"Unknown date-control blocks: {', '.join(sorted(map(str, unknown)))}."
         )
     sources = {}
-    for key, block in blocks.items():
+
+    def resolve_source(key):
+        block = blocks[key]
         config = block.get("config") or {}
         if block["type"] == "date_filter":
             value = overrides.get(key, {"preset": config.get("default", DEFAULT_PRESET)})
@@ -76,9 +78,15 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
         if ("$ref" in binding) == ("value" in binding):
             raise DateContextError(f"Invalid {port} binding.")
         if "$ref" in binding:
-            if not isinstance(binding["$ref"], str) or binding["$ref"] not in sources:
-                raise DateContextError(f"Unresolved date binding: {binding['$ref']}.")
-            return sources[binding["$ref"]]
+            ref = binding["$ref"]
+            if not isinstance(ref, str):
+                raise DateContextError(f"Unresolved date binding: {ref}.")
+            key, _, _port = ref.rpartition(".")
+            if ref not in sources and key in blocks:
+                resolve_source(key)
+            if ref not in sources:
+                raise DateContextError(f"Unresolved date binding: {ref}.")
+            return sources[ref]
         return binding["value"]
 
     queries = []

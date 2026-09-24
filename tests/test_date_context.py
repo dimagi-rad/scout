@@ -241,6 +241,19 @@ def test_literal_date_binding_requires_a_time_dimension_at_write_time():
     assert any(d["code"] == "query_window_without_time_dimension" for d in validate_doc(doc))
 
 
+def test_unused_invalid_date_control_does_not_block_unrelated_inspector_queries():
+    doc = story()
+    doc["blocks"].append(
+        {"id": "unused", "type": "date_filter", "config": {"default": "last_60_days"}}
+    )
+    expected, _ = resolve_artifact_queries(story(), CONTEXT)
+    actual, _ = resolve_artifact_queries(doc, CONTEXT)
+    assert actual == expected
+    doc["blocks"][1]["inputs"]["date_range"] = {"$ref": "unused.value"}
+    with pytest.raises(DateContextError, match="Unsupported date preset"):
+        resolve_artifact_queries(doc, CONTEXT)
+
+
 @pytest.mark.asyncio
 async def test_chat_tool_forwards_date_intent(monkeypatch):
     workspace = object()
