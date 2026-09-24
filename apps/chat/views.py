@@ -22,14 +22,14 @@ from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.helpers import (
-    _resolve_workspace_and_membership,
+    _resolve_chat_access,
     async_login_required,
     repair_dangling_tool_calls,
 )
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
-from apps.workspaces.access import access_denied_body, aresolve_workspace_access_ex
+from apps.workspaces.access import access_denied_body
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
 
 logger = logging.getLogger(__name__)
@@ -116,11 +116,10 @@ async def chat_view(request):
 
     # Resolve workspace and verify access. The multi-tenant flag is determined
     # in a single DB read inside _resolve_workspace_and_membership to avoid TOCTOU.
-    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, workspace_id)
+    access, tm, is_multi_tenant = await _resolve_chat_access(user, workspace_id)
+    workspace = access.workspace
     if workspace is None:
-        # Re-resolved only on denial, to tell a member which sources to connect.
-        denied = await aresolve_workspace_access_ex(user, workspace_id)
-        return JsonResponse(access_denied_body(denied), status=403)
+        return JsonResponse(access_denied_body(access), status=403)
 
     if tm is None and not is_multi_tenant:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)

@@ -11,7 +11,7 @@ from apps.users.decorators import (  # noqa: F401 — re-exported for backwards 
     login_required_json,
 )
 from apps.users.models import TenantMembership
-from apps.workspaces.access import aresolve_workspace_access
+from apps.workspaces.access import aresolve_workspace_access_ex
 
 logger = logging.getLogger(__name__)
 
@@ -104,18 +104,26 @@ async def _resolve_workspace_and_membership(user, workspace_id):
     - (workspace, None, True): multi-tenant workspace (access already verified)
     - (workspace, tm, False): single-tenant workspace with the live TenantMembership
     """
-    workspace, _wm = await aresolve_workspace_access(user, workspace_id)
+    access, tm, is_multi_tenant = await _resolve_chat_access(user, workspace_id)
+    return access.workspace, tm, is_multi_tenant
+
+
+async def _resolve_chat_access(user, workspace_id):
+    """``_resolve_workspace_and_membership`` returning the full ``WorkspaceAccess``,
+    so a denial can be explained without resolving (and verifying upstream) again."""
+    access = await aresolve_workspace_access_ex(user, workspace_id)
+    workspace = access.workspace
     if workspace is None:
-        return None, None, False
+        return access, None, False
 
     is_multi_tenant = await workspace.workspace_tenants.acount() > 1
     if is_multi_tenant:
         # The authorizer already confirmed the user covers every tenant of this
         # workspace, so multi-tenant access is no longer WorkspaceMembership-only.
-        return workspace, None, True
+        return access, None, True
 
     tenant = await workspace.tenants.afirst()
     if tenant is None:
-        return workspace, None, False
+        return access, None, False
     tm = await TenantMembership.objects.filter(user=user, tenant=tenant).afirst()  # live-only
-    return workspace, tm, False
+    return access, tm, False
