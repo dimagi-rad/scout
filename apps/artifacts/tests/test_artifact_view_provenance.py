@@ -227,9 +227,16 @@ async def test_expiry_partial_rebuild_and_correct_source_restore(published_sourc
 
     await TenantSchema.objects.filter(pk=setup.schemas[0].pk).aupdate(state=SchemaState.TEARDOWN)
     await _assert_recovery(setup)
-    await teardown_schema.func(str(setup.schemas[0].id))
+    # Retirement is refused while these views still read the schema: the
+    # last-good views keep serving and their provenance stays intact.
+    with patch("apps.workspaces.tasks.teardown_schema.configure") as retry:
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema.func(str(setup.schemas[0].id))
+    retry.return_value.defer_async.assert_awaited_once()
     await setup.view.arefresh_from_db()
-    assert setup.view.state == SchemaState.FAILED
+    await setup.schemas[0].arefresh_from_db()
+    assert setup.view.state == SchemaState.ACTIVE
+    assert setup.schemas[0].state == SchemaState.TEARDOWN
     assert setup.view.view_sources["views"][setup.dataset.table_name] == expected_source
     await _assert_recovery(setup)
 
@@ -250,6 +257,10 @@ async def test_expiry_partial_rebuild_and_correct_source_restore(published_sourc
     assert setup.dataset.is_visible is failed_catalog
     assert setup.dataset.metadata["source_tenant_ids"] == [str(setup.tenants[0].id)]
     await _assert_recovery(setup)
+    # The views moved, so the retried retirement now drops the schema.
+    await teardown_schema.func(str(setup.schemas[0].id), attempt=1)
+    await setup.schemas[0].arefresh_from_db()
+    assert setup.schemas[0].state == SchemaState.EXPIRED
 
     # Restore only A's exact source record/name; B's source remains unchanged.
     restored = await sync_to_async(SchemaManager().provision)(setup.tenants[0])
