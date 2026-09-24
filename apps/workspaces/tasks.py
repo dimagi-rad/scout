@@ -42,7 +42,6 @@ from apps.workspaces.access import (
     TENANT_ACCESS_LOST,
     WorkspaceAccess,
     aresolve_workspace_access_ex,
-    remedy_text,
 )
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
@@ -549,17 +548,11 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         )
     ]
     if access is not None and access.denied_reason == TENANT_ACCESS_LOST:
-        # Even a MANAGE member cannot fix this by changing roles. Reuse the
-        # unreachable-tenant guidance so the resume prompt and the run summary
-        # give the same per-source remedy as the pre-gate no-membership path.
+        # Even a MANAGE member cannot fix this by changing roles. Every tenant
+        # gets a recorded not-run entry (the resume path reads one per tenant),
+        # and the remedy comes once, from the code's guidance, as it did before.
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
-        remedies = {t.tenant_id: remedy_text(t) for t in access.missing_tenants}
-        results = [
-            _preflight_failure(t, f"Can't use '{t.canonical_name}': {remedies[str(t.pk)]}.", code)
-            for t in tenants
-            if str(t.pk) in remedies
-        ]
-        _set_tenant_display_names(results)
+        results = _unreachable_tenant_results(tenants)
         error = "The requesting user can't use these data sources: " + (
             ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
         )

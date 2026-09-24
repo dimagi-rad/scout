@@ -1376,7 +1376,8 @@ async def test_partially_covering_requester_is_refused_before_loading(
     workspace, tenant, tenant_membership_obj, user
 ):
     """Under all-of access (#380) a requester missing a tenant never reaches the
-    loader, so #364's partial load cannot start; only the missing tenant is named."""
+    loader, so #364's partial load cannot start. Every tenant keeps a recorded
+    not-run entry for the resume path; the summary names the missing one."""
     other = await _add_second_tenant(workspace)
 
     result, cube = await _materialize_as(
@@ -1385,11 +1386,11 @@ async def test_partially_covering_requester_is_refused_before_loading(
 
     cube.assert_not_called()
     assert result["status"] == "denied"
-    assert "Connected Accounts" in result["tenants"][0]["error"]
     assert result["all_succeeded"] is False
-    assert [(r["tenant"], r["error_code"]) for r in result["tenants"]] == [
-        (other.external_id, ErrorCode.WORKSPACE_TENANT_UNREACHABLE)
-    ]
+    assert other.canonical_name in result["error"]
+    assert tenant.canonical_name not in result["error"]
+    assert {r["tenant"] for r in result["tenants"]} == {tenant.external_id, other.external_id}
+    assert {r["error_code"] for r in result["tenants"]} == {ErrorCode.WORKSPACE_TENANT_UNREACHABLE}
 
 
 @pytest.mark.asyncio
