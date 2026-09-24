@@ -21,6 +21,7 @@ from apps.workspaces.models import (
     TenantLoadGeneration,
     TenantSchema,
 )
+from apps.workspaces.services import load_candidates
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     tenant_data_lock,
@@ -247,3 +248,26 @@ async def test_a_busy_tenant_requeues_the_drop_without_spending_its_retries(tena
 
     assert retry.call_args.kwargs["schedule_in"] == {"seconds": 15 * 60}
     assert retry.return_value.defer_async.await_args.kwargs["attempt"] == 4
+
+
+async def test_a_writer_queued_drop_that_is_already_queued_is_not_an_error(tenant, workspace):
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
+    [listed] = await sync_to_async(_listed_with_last_attempt)(candidate.id)
+
+    with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as configure:
+        configure.return_value.defer.side_effect = AlreadyEnqueued("queued")
+        await sync_to_async(workspaces_tasks._queue_candidate_drop_sync)(listed, delay=900)
+
+    assert configure.call_args.kwargs == {
+        "queueing_lock": f"drop_abandoned_candidate:{candidate.id}",
+        "schedule_in": {"seconds": 900},
+    }
+
+
+def _listed_with_last_attempt(schema_id):
+    return list(_failed_workspace_candidates_for(schema_id))
+
+
+def _failed_workspace_candidates_for(schema_id):
+    tenant_id = TenantSchema.objects.get(id=schema_id).tenant_id
+    return load_candidates._failed_workspace_candidates(tenant_id).filter(id=schema_id)

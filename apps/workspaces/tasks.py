@@ -1370,7 +1370,8 @@ async def _load_workspace_candidate(
     """
     # The candidate owner; a job-less load (the agent's blocking tool) gets a token.
     owner = load_owner_token(job_id)
-    config = raw_load_fingerprint(pipeline_config)
+    # Off the loop: the first call hashes the implementation source tree.
+    config = await asyncio.to_thread(raw_load_fingerprint, pipeline_config)
     await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tm.tenant_id)
     generation = await _to_thread_fresh_db(begin_load_generation, tm.tenant_id)
     try:
@@ -1449,51 +1450,77 @@ async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation:
 
 
 async def _drain(operation, subject) -> None:
-    """Finish cleanup before propagating worker cancellation, even if aborted again."""
+    """Finish cleanup before propagating worker cancellation, even if aborted again.
+
+    An abort that lands during cleanup is re-raised once cleanup is done, so a
+    caller handling an ordinary error still stops instead of moving on.
+    """
     cleanup = asyncio.create_task(operation)
+    aborted = False
     while True:
         try:
             await asyncio.shield(cleanup)
         except asyncio.CancelledError:
+            aborted = True
             if cleanup.cancelled():
-                return
+                break
             continue
         except Exception:
             logger.exception(
                 "Cancellation cleanup failed for '%s'", getattr(subject, "schema_name", subject)
             )
-        return
+        break
+    if aborted:
+        raise asyncio.CancelledError
 
 
 async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
-    abandoned = await _to_thread_fresh_db(
-        abandoned_workspace_candidates, tenant_id, keep_id=keep_id
-    )
-    for schema in abandoned:
-        try:
+    await _to_thread_fresh_db(_abandon_and_queue_drops, tenant_id, keep_id)
+
+
+def _abandon_and_queue_drops(tenant_id, keep_id) -> None:
+    """Take abandoned candidates out of resume and queue their drops in one commit.
+
+    Clearing the resume evidence without a queued drop would strand the schema:
+    nothing else would ever drop a FAILED candidate no load can resume.
+    """
+    with transaction.atomic():
+        for schema in abandoned_workspace_candidates(tenant_id, keep_id=keep_id):
             # Delayed: this writer holds T until its whole load publishes, and the
             # drop needs T, so an immediate job would only find it busy.
-            await _queue_candidate_drop(schema, delay=_CANDIDATE_DROP_DELAY_SECONDS)
-        except AlreadyEnqueued:
-            continue
-        except Exception:
-            logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
+            _queue_candidate_drop_sync(schema, delay=_CANDIDATE_DROP_DELAY_SECONDS)
 
 
 def _drop_lock(schema_id) -> str:
     return f"drop_abandoned_candidate:{schema_id}"
 
 
-async def _queue_candidate_drop(schema, *, delay: int = 0) -> None:
-    """Queue one drop per candidate, pinned to the attempt it was judged on."""
+def _drop_job(schema, delay: int):
+    """One drop per candidate, pinned to the attempt it was judged on."""
     schedule = {"schedule_in": {"seconds": delay}} if delay else {}
-    await drop_abandoned_candidate.configure(
-        queueing_lock=_drop_lock(schema.id), **schedule
-    ).defer_async(
-        schema_id=str(schema.id),
-        last_attempt_at=schema.last_attempt_at.isoformat(),
-        load_job_id=schema.load_job_id,
-    )
+    job = drop_abandoned_candidate.configure(queueing_lock=_drop_lock(schema.id), **schedule)
+    args = {
+        "schema_id": str(schema.id),
+        "last_attempt_at": schema.last_attempt_at.isoformat(),
+        "load_job_id": schema.load_job_id,
+    }
+    return job, args
+
+
+async def _queue_candidate_drop(schema, *, delay: int = 0) -> None:
+    job, args = _drop_job(schema, delay)
+    await job.defer_async(**args)
+
+
+def _queue_candidate_drop_sync(schema, *, delay: int = 0) -> None:
+    """Queue inside the caller's transaction; an already-queued drop covers it."""
+    job, args = _drop_job(schema, delay)
+    try:
+        # Savepoint: the queueing-lock violation must not abort the outer commit.
+        with transaction.atomic():
+            job.defer(**args)
+    except AlreadyEnqueued:
+        return
 
 
 _CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
@@ -1501,6 +1528,23 @@ _CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
 
 class _TenantBusy(Exception):
     """A writer holds the tenant's T; the drop is retried later rather than waiting."""
+
+
+async def _recovery_intent(workspace) -> str:
+    """What a data-restore repair must ask of the tenants' loads.
+
+    Missing data is reconciled: whatever is already published satisfies it. But
+    the same repair is offered when data is present and its latest load did not
+    complete, and reconciling would reuse that same published generation and
+    change nothing, so that case asks for a fresh load.
+    """
+    view = await WorkspaceViewSchema.objects.filter(
+        workspace=workspace, state=SchemaState.ACTIVE
+    ).afirst()
+    coverage = view.tenant_coverage if view is not None else None
+    if await _included_tenant_snapshot_state(workspace, coverage) == "unsafe":
+        return INTENT_FULL_REFRESH
+    return INTENT_RECONCILE_MISSING
 
 
 _CANDIDATE_DROP_RETRYABLE = (
@@ -2095,7 +2139,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                     str(recovery.workspace_id),
                     str(recovery.requested_by_id),
                     context.job.id,
-                    intent_kind=INTENT_RECONCILE_MISSING,
+                    intent_kind=await _recovery_intent(recovery.workspace),
                 )
             elif action == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD:
                 result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))

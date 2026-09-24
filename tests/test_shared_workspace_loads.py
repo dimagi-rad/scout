@@ -83,7 +83,7 @@ async def _loads(pipeline: _Pipeline):
         ),
         patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
-        patch("apps.workspaces.tasks._queue_candidate_drop", new_callable=AsyncMock) as drop,
+        patch("apps.workspaces.tasks._queue_candidate_drop_sync") as drop,
     ):
         retire.return_value.defer_async = AsyncMock(return_value=1)
         yield drop
@@ -205,7 +205,7 @@ async def test_a_failed_load_keeps_last_good_serving_and_the_retry_resumes_its_c
     assert first_candidate == second_candidate
     [active] = await _active_schemas(tenant)
     assert active.id == first_candidate
-    drop.assert_not_awaited()
+    drop.assert_not_called()
 
 
 async def test_a_resumed_generation_is_reused_by_a_request_that_joined_it(workspace, tenant, user):
@@ -258,9 +258,9 @@ async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old
     assert retried["all_succeeded"] is True
     first_candidate, second_candidate = (call[1] for call in pipeline.calls)
     assert first_candidate != second_candidate
-    [(queued,), _] = drop.await_args
+    [(queued,), _] = drop.call_args
     assert queued.id == first_candidate
-    drop.assert_awaited_once()
+    drop.assert_called_once()
 
 
 async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
@@ -518,9 +518,9 @@ async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace,
         queue.reset_mock()
         await _run(workspace, user)
 
-    [(queued,)] = [call.args for call in queue.await_args_list]
+    [(queued,)] = [call.args for call in queue.call_args_list]
     assert queued.id == old.id
-    assert queue.await_args.kwargs == {"delay": 15 * 60}
+    assert queue.call_args.kwargs == {"delay": 15 * 60}
 
 
 async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspace, tenant):
@@ -593,3 +593,74 @@ async def test_an_abort_while_queuing_drops_still_settles_the_candidate(workspac
     assert candidate.state == SchemaState.FAILED
     ledger = await TenantLoadGeneration.objects.aget(tenant=tenant)
     assert ledger.loading_generation == 0
+
+
+async def test_abandoning_a_candidate_is_undone_if_its_drop_cannot_be_queued(
+    workspace, tenant, user
+):
+    """Clearing the resume evidence without a queued drop would strand the schema."""
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user)
+        old = await TenantSchema.objects.acreate(
+            tenant=tenant,
+            schema_name="old_generation_candidate",
+            state=SchemaState.FAILED,
+            load_workspace_id=workspace.id,
+            load_generation=1,
+            load_config_fingerprint="old",
+        )
+        with patch(
+            "apps.workspaces.tasks._queue_candidate_drop_sync",
+            side_effect=RuntimeError("queue unavailable"),
+        ):
+            await _run(workspace, user)
+
+    await old.arefresh_from_db()
+    assert old.load_config_fingerprint == "old"
+
+
+@pytest.mark.parametrize(("latest", "intent"), [("failed", "full_refresh"), ("completed", None)])
+async def test_a_restore_repair_reloads_when_the_latest_load_did_not_complete(
+    workspace, tenant, user, latest, intent
+):
+    """Restore is offered both for missing data and for data whose latest load
+    failed; reconciling would reuse the published generation and change nothing."""
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="served", state=SchemaState.ACTIVE
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=latest,
+        result={"sources": {}},
+    )
+
+    chosen = await workspaces_tasks._recovery_intent(workspace)
+
+    assert chosen == (intent or "reconcile_missing")
+
+
+async def test_an_abort_during_failure_cleanup_still_stops_the_run():
+    """A cancellation landing while an ordinary failure is being cleaned up must
+    propagate once cleanup is done, not be swallowed."""
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def cleanup():
+        started.set()
+        await finish.wait()
+
+    async def fail_and_clean():
+        try:
+            raise RuntimeError("provider timed out")
+        except RuntimeError:
+            await workspaces_tasks._drain(cleanup(), "tenant x")
+            raise
+
+    task = asyncio.create_task(fail_and_clean())
+    await started.wait()
+    task.cancel()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
