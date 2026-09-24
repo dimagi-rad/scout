@@ -11,13 +11,14 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.users.models import Tenant, TenantMembership
 from apps.users.signals import resolve_pending_invites_on_login
+from apps.workspaces.api import workspace_views
 from apps.workspaces.models import (
     Workspace,
     WorkspaceInvite,
@@ -36,7 +37,7 @@ from apps.workspaces.services.member_coverage import (
     admit_covered_member,
 )
 from tests.row_locks import row_locked
-from tests.tenant_access import grant_tenant_access
+from tests.tenant_access import grant_tenant_access, ocs_team_connection
 
 User = get_user_model()
 
@@ -108,10 +109,14 @@ class TestSourceAdd:
         grant_tenant_access(user, t2)
         client.force_login(user)
 
-        with patch(REFRESH, side_effect=RuntimeError("provider down")):
+        _member(ws, "carol@example.com", t1)
+
+        with patch(REFRESH, side_effect=RuntimeError("provider down")) as refresh:
             resp = self._post(client, ws, t2)
 
         assert resp.status_code == 409
+        assert resp.json()["reason"] == "members_lack_source"
+        assert refresh.call_count == 2  # one failure does not stop the others
 
     def test_refused_when_another_member_cannot_use_it(self, client, user, t1, t2):
         ws = _workspace(user, t1)
@@ -133,6 +138,7 @@ class TestSourceAdd:
         assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
         refresh.assert_called_once()
         assert refresh.call_args.args[1] == ["commcare"]
+        assert refresh.call_args.kwargs == {"renew_tokens": False}
 
     def test_member_refreshed_into_coverage_lets_the_add_through(self, client, user, t1, t2):
         ws = _workspace(user, t1)
@@ -140,7 +146,7 @@ class TestSourceAdd:
         grant_tenant_access(user, t2)
         client.force_login(user)
 
-        async def _grant(target, _providers):
+        async def _grant(target, _providers, **_kwargs):
             await sync_to_async(grant_tenant_access)(target, t2)
             return True
 
@@ -422,3 +428,19 @@ class TestMutationRaces:
             add_tenant_covered_by_members(ws, t2)
 
         assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
+
+
+@pytest.mark.django_db
+def test_rediscovery_for_another_member_never_renews_their_tokens(user):
+    """A manager's source add rediscovers other members with their tokens as-is.
+    Renewing someone else's token could record a refresh failure on a transient
+    provider error and take away access they have now."""
+    live = ocs_team_connection(user, "team-a")
+    expired = ocs_team_connection(user, "team-b")
+    expired.social_account.socialtoken_set.update(expires_at=timezone.now() - timedelta(minutes=1))
+
+    with patch.object(workspace_views, "aiter_fresh_access_tokens") as renew:
+        pairs = async_to_sync(workspace_views._aunexpired_access_tokens)(user, "ocs")
+
+    renew.assert_not_called()
+    assert [account.pk for account, _token in pairs] == [live.social_account_id]

@@ -110,11 +110,12 @@ def missing_tenants_payload(missing) -> list[dict]:
     return [t.as_dict() | {"remedy": remedy_text(t)} for t in ordered]
 
 
-def needed_text(missing) -> str:
-    """``'Source': remedy; ...`` for a message, never rendering a blank source name."""
+def needed_text(payload: list[dict]) -> str:
+    """``'Source': remedy; ...`` from :func:`missing_tenants_payload`, never
+    rendering a blank source name."""
     return "; ".join(
         f"'{t['tenant_name'] or _PROVIDER_LABELS.get(t['provider'], 'a source')}': {t['remedy']}"
-        for t in missing_tenants_payload(missing)
+        for t in payload
     )
 
 
@@ -133,7 +134,7 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
     """
     if result.denied_reason == TENANT_ACCESS_LOST and result.missing_tenants:
         payload = missing_tenants_payload(result.missing_tenants)
-        needed = needed_text(result.missing_tenants)
+        needed = needed_text(payload)
         rule = (
             "This workspace requires access to every one of its data sources. Still needed"
             if all_of_access_enforced()

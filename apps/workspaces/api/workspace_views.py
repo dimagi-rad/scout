@@ -17,7 +17,10 @@ from rest_framework.views import APIView
 
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
-from apps.users.services.credential_resolver import aiter_fresh_access_tokens
+from apps.users.services.credential_resolver import (
+    aiter_fresh_access_tokens,
+    aiter_social_tokens,
+)
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -44,7 +47,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
     default_invite_expiry,
 )
-from apps.workspaces.services.credential_coverage import member_coverage_gaps
+from apps.workspaces.services.credential_coverage import CoverageRecovery, member_coverage_gaps
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     send_pending_invite_email,
@@ -82,7 +85,22 @@ _PROVIDER_RESOLVERS = {
 }
 
 
-async def _arefresh_target_for_workspace(target, providers) -> bool:
+async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
+    """``(identity, access token)`` pairs usable as-is, without renewing any.
+
+    For refreshes a *different* user triggers: renewing someone else's token can
+    record a refresh failure on a transient provider error, which would take away
+    access they currently have.
+    """
+    now = timezone.now()
+    return [
+        (token.account, token.token)
+        for token in await aiter_social_tokens(user, provider)
+        if token.token and token.expires_at is not None and token.expires_at > now
+    ]
+
+
+async def _arefresh_target_for_workspace(target, providers, *, renew_tokens=True) -> bool:
     """Best-effort, bounded server-side refresh of *target*'s memberships for the
     workspace's tenant providers, using the target's OWN (refresh-aware) token.
 
@@ -101,7 +119,12 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
-        for account, token in await aiter_fresh_access_tokens(target, provider):
+        tokens = (
+            await aiter_fresh_access_tokens(target, provider)
+            if renew_tokens
+            else await _aunexpired_access_tokens(target, provider)
+        )
+        for account, token in tokens:
             tried = True
             try:
                 await asyncio.wait_for(
@@ -122,22 +145,36 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
 # Bounds the provider fan-out and keeps queued refreshes from spending their
 # timeout waiting on the (serialized) persistence legs of the ones ahead.
 MEMBER_REFRESH_CONCURRENCY = 4
+# Whole fan-out, so a large workspace can't hold a sync worker indefinitely.
+MEMBER_REFRESH_BUDGET = 2 * SHARE_REFRESH_TIMEOUT
 
 
 async def _arefresh_members_for_provider(users, provider) -> None:
-    """Best-effort refresh of each user's own identities for ``provider``.
+    """Best-effort rediscovery with each user's own, still-valid identities.
 
     Advisory only: the locked coverage check decides, so one member's failure
-    must neither fail the request nor stop the others.
+    must neither fail the request nor stop the others. Tokens are not renewed:
+    a manager's click must never mark another member's credential as failed.
     """
     gate = asyncio.Semaphore(MEMBER_REFRESH_CONCURRENCY)
 
     async def refresh(user):
         async with gate:
-            await _arefresh_target_for_workspace(user, [provider])
+            await _arefresh_target_for_workspace(user, [provider], renew_tokens=False)
 
-    results = await asyncio.gather(*(refresh(user) for user in users), return_exceptions=True)
-    for user, result in zip(users, results, strict=True):
+    tasks = [asyncio.ensure_future(refresh(user)) for user in users]
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), timeout=MEMBER_REFRESH_BUDGET
+        )
+    except TimeoutError:
+        logger.warning(
+            "Source-add refresh ran out of time for provider=%s (%d members)",
+            provider,
+            len(users),
+        )
+    for user, task in zip(users, tasks, strict=True):
+        result = task.exception() if task.done() and not task.cancelled() else None
         if isinstance(result, Exception):
             logger.warning(
                 "Source-add refresh failed for member=%s provider=%s",
@@ -393,7 +430,7 @@ class WorkspaceListView(APIView):
                 {
                     "error": (
                         "You can't use every selected source with your own account yet. "
-                        f"Still needed — {needed_text(missing)}."
+                        f"Still needed — {needed_text(missing_tenants_payload(missing))}."
                     ),
                     "missing_tenants": missing_tenants_payload(missing),
                 },
@@ -846,7 +883,7 @@ def _awaiting_invite_message(invite, user) -> str:
         )
     return (
         f"You were invited to '{invite.workspace.name}', which needs access to every one "
-        f"of its data sources. Still needed — {needed_text(missing)}. It unlocks "
+        f"of its data sources. Still needed — {needed_text(missing_tenants_payload(missing))}. It unlocks "
         "automatically once you have them."
     )
 
@@ -939,6 +976,12 @@ class WorkspaceTenantView(APIView):
 
         # Validate the requesting user can use this tenant (always, before idempotency check)
         requester_missing = tuple(member_coverage_gaps(request.user.pk, [tenant]).values())
+        if requester_missing and requester_missing[0].recovery == CoverageRecovery.CONNECT_SOURCE:
+            # No relationship with this source at all: don't describe it to them.
+            return Response(
+                {"error": "You do not have access to this tenant."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if requester_missing:
             return Response(
                 {
