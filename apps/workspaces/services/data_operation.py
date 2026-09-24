@@ -131,6 +131,9 @@ def assert_tenant_lock_held(tenant_id) -> None:
         current = _sync_lock_owner()
     else:
         current = asyncio.current_task()
+    # A thread reached without run_data_thread sees its task's locks but not its
+    # ownership; say so rather than claiming T is not held.
+    _refuse_unbridged_thread(current, owner, keys)
     if owner is None or owner is not current or tenant_lock_key(tenant_id) not in keys:
         raise LockOrderError("This candidate operation requires holding the tenant lock T")
 

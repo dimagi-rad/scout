@@ -1,5 +1,6 @@
 """Candidate lifecycle for shared-tenant loads: open, resume, promote, fail, settle."""
 
+import asyncio
 import uuid
 
 import pytest
@@ -11,7 +12,11 @@ from apps.workspaces.models import (
     TenantLoadGeneration,
     TenantSchema,
 )
-from apps.workspaces.services.data_operation import LockOrderError, sync_tenant_data_lock
+from apps.workspaces.services.data_operation import (
+    LockOrderError,
+    sync_tenant_data_lock,
+    tenant_data_lock,
+)
 from apps.workspaces.services.load_candidates import (
     abandoned_workspace_candidates,
     fail_workspace_candidate,
@@ -264,9 +269,18 @@ def test_a_load_still_publishes_after_a_refresh_asked_for_the_next_generation(te
 
 def test_a_load_without_a_job_id_cannot_prove_ownership(tenant, workspace):
     """None == None must not stand in for ownership: it would accept any job-less
-    run on the schema, including another attempt's."""
+    run on the schema, including another attempt's. Opening refuses it outright;
+    promotion refuses it too, for a row that somehow carries no owner."""
     generation = begin_load_generation(tenant.id)
-    candidate = _open(tenant, workspace, generation=generation, job_id=None).schema
+    with pytest.raises(ValueError, match="load_owner_token"):
+        _open(tenant, workspace, generation=generation, job_id=None)
+    candidate = TenantSchema.objects.create(
+        tenant=tenant,
+        schema_name="ownerless_candidate",
+        state=SchemaState.PROVISIONING,
+        load_workspace_id=workspace.id,
+        load_generation=generation,
+    )
     run = _completed_run(candidate, job_id=None)
 
     assert not _promote(candidate, workspace, generation, run, job_id=None).promoted
@@ -383,3 +397,13 @@ def test_a_dead_writers_active_run_is_settled_failed_and_superseded_on_publish(t
 def test_a_none_keep_id_is_refused_rather_than_abandoning_everything(tenant):
     with pytest.raises(ValueError, match="keep_id is required"):
         abandoned_workspace_candidates(tenant.id, keep_id=None)
+
+
+def test_an_unbridged_thread_is_told_so_rather_than_that_t_is_missing(tenant):
+    async def holder():
+        async with tenant_data_lock([tenant.id]):
+            # A bare to_thread copies the context but not the ownership bridge.
+            await asyncio.to_thread(settle_orphaned_workspace_candidates, tenant.id)
+
+    with pytest.raises(LockOrderError, match="run_data_thread"):
+        asyncio.run(holder())
