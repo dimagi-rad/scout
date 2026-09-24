@@ -42,8 +42,10 @@ export function normalizeStoryDoc(value: unknown, fallbackName: string): StoryDo
 export function resolvePresetRange(preset: string | undefined, clock: Date | DateContext = new Date()): DateRange {
   preset ??= "last_30_days"
   if (!(clock instanceof Date)) {
-    const range = clock.presets[preset]
-    if (!range) throw new Error(`Unsupported date preset: ${preset}`)
+    const range = Object.hasOwn(clock.presets, preset) ? clock.presets[preset] : undefined
+    if (!range || typeof range.start !== "string" || typeof range.end !== "string") {
+      throw new Error(`Unsupported date preset: ${preset}`)
+    }
     return { start: range.start, end: range.end, preset }
   }
   const today = clock

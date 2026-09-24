@@ -101,6 +101,10 @@ export class StoryEngine implements StoryEngineApi {
       }
 
       if (carried) {
+        if (previous.configError) {
+          node.configError = previous.configError
+          this.diagnostics.push({ severity: "error", blockId: node.id, message: node.configError })
+        }
         node.lastSnapshot = previous.lastSnapshot
         node.lastOk = previous.lastOk
         for (const port of node.ports.outputs) {

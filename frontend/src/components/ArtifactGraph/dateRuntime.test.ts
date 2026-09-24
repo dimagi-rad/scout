@@ -17,6 +17,12 @@ describe("deterministic calendar dates", () => {
     expect(previousPeriod({ start: "2026-03-03", end: "2026-03-09" })).toEqual({ start: "2026-02-24", end: "2026-03-02", preset: "previous_period" })
     expect(comparisonPeriod({ start: "2024-02-29", end: "2024-03-02" }, "previous_year")).toEqual({ start: "2023-02-28", end: "2023-03-02", preset: "previous_year" })
   })
+  it.each(["constructor", "toString", "valueOf", "__proto__"])("rejects inherited server preset %s", (preset) => {
+    const context: DateContext = {
+      as_of: "2026-09-24T12:00:00Z", timezone: "UTC", today: "2026-09-24", presets: {},
+    }
+    expect(() => resolvePresetRange(preset, context)).toThrow("Unsupported date preset")
+  })
   it("calculates missing comparison metadata from the selected bounds", () => {
     const range = { start: "2026-03-03", end: "2026-03-09", preset: "last_7_days" }
     const context: DateContext = {

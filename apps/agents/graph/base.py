@@ -947,6 +947,7 @@ async def build_agent_graph(
         canvas_write=canvas_write,
         write_capable=write_capable,
     )
+    volatile_prompt += agent_date_context()
     logger.debug(
         "System prompt assembled: %d stable + %d volatile chars for workspace %s",
         len(stable_prompt),
@@ -956,7 +957,6 @@ async def build_agent_graph(
 
     base_tool_node = ToolNode(tools)
     tool_node = _make_injecting_tool_node(base_tool_node, injections)
-    volatile_prompt += agent_date_context()
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
         """Prepend the system prompt and invoke the LLM.

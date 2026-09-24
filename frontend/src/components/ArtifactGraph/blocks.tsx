@@ -351,7 +351,9 @@ function PeriodSelectorComponent({ block, config, engine }: BlockComponentProps)
 }
 
 function DateControlStatus({ state }: { state: OutputState }) {
-  if (state.status !== "error" && state.status !== "blocked") return null
+  if (state.status !== "error" && state.status !== "blocked") {
+    return <div aria-busy="true" data-testid="artifact-date-control-loading" className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">Loading date control…</div>
+  }
   return (
     <div role="alert" data-testid="artifact-date-control-error" className="rounded-xl border border-border bg-card p-4 text-sm text-card-foreground">
       <p className="font-medium">Date control needs updating</p>

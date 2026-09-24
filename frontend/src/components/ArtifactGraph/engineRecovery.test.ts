@@ -21,6 +21,10 @@ describe("StoryEngine recovery refresh", () => {
       expect.objectContaining({ blockId: "range", message: expect.stringContaining("Unsupported date preset") }),
     ]))
     expect(runQuery).not.toHaveBeenCalled()
+    const diagnostics = engine.getDiagnostics()
+    engine.loadDoc(doc)
+    expect(engine.getOutput("range.value").status).toBe("error")
+    expect(engine.getDiagnostics()).toEqual(diagnostics)
     doc.blocks[0].config.default = "last_7_days"
     engine.loadDoc(doc)
     await vi.waitFor(() => expect(engine.getOutput("q.visits").status).toBe("ready"))

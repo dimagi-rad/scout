@@ -79,9 +79,7 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
             if not isinstance(binding["$ref"], str) or binding["$ref"] not in sources:
                 raise DateContextError(f"Unresolved date binding: {binding['$ref']}.")
             return sources[binding["$ref"]]
-        if "value" in binding:
-            return binding["value"]
-        raise DateContextError(f"Invalid {port} binding.")
+        return binding["value"]
 
     queries = []
     for entry in collect_query_specs(doc):
