@@ -144,11 +144,11 @@ export function LostAccessModal() {
           </button>
         </div>
 
-        <p className="mt-3 text-sm text-muted-foreground">
-          If you disconnected your account, reconnect it in Connections. If your provider
+        {missing.length === 0 && <p className="mt-3 text-sm text-muted-foreground">
+          If you disconnected your account, reconnect it in Connected Accounts. If your provider
           removed or restricted your access, ask a provider admin to restore it;
           reconnecting alone won’t restore those permissions.
-        </p>
+        </p>}
 
         {accessible.length > 0 ? (
           <div className="mt-5">

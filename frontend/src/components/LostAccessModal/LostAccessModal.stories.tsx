@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 import { LostAccessModal } from "./LostAccessModal"
 
 const meta = {
@@ -28,7 +29,7 @@ const meta = {
     <MemoryRouter initialEntries={["/workspaces/recovery-demo/chat"]}>
       <Story />
       <Routes>
-        <Route path="/settings/connections" element={
+        <Route path={CONNECTIONS_PATH} element={
           <main className="p-6">
             <h1 className="text-2xl font-semibold">Connected Accounts</h1>
             <p className="mt-3 text-sm text-muted-foreground">

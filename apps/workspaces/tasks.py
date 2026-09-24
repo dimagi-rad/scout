@@ -2848,8 +2848,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         missing_data_guidance = (
             f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
             "Verify current access and account credentials before refreshing their data. "
-            "If you cannot access a source, ask someone with access to refresh it. "
-            "Then recheck the workspace query layer and semantic model; do not claim recovery until verified."
+            "If you cannot access a source, ask someone with access to refresh it."
         )
         if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             missing_data_guidance += (
@@ -2861,6 +2860,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         body = (
             f"{SYSTEM_RESUME_MARKER} The runs reported completion, but the current data "
             f"and query surface are unavailable. {missing_data_guidance} "
+            "Then recheck the workspace query layer and semantic model; do not claim recovery until verified. "
             f"Query layer error: {view_schema_error or semantic_error}. Per-tenant: {summary}"
         )
     elif view_schema_failed:

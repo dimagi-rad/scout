@@ -195,6 +195,7 @@ describe("LostAccessModal with missing sources", () => {
     expect(screen.getByTestId("lost-access-missing-t-bot-b")).toHaveTextContent(
       "Bot B: connect Open Chat Studio team 'Team B' in Connected Accounts",
     )
+    expect(screen.queryByText(/If you disconnected your account/)).not.toBeInTheDocument()
   })
 
   it("links to Connected Accounts", async () => {

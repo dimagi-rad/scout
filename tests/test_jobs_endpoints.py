@@ -71,6 +71,7 @@ def test_retry_policy_uses_codes_at_every_failure_surface(code, retry, surface):
 @pytest.mark.parametrize(
     "sources,phase,started,retry",
     [
+        ({}, "materialization", False, False),
         (
             {"sessions": {"state": "failed", "error_code": ErrorCode.CONNECTION_ERROR}},
             "materialization",
@@ -102,7 +103,7 @@ def test_retry_keeps_partial_recovery_and_failed_followups_available(
         failure_phase=phase,
         started_at=timezone.now() if started else None,
         materialization_preflight_failures=[
-            {"tenant": "unreachable", "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE}
+            {"tenant": "blocked", "error_code": ErrorCode.AUTH_ACCESS_DENIED}
         ],
     )
     assert _termination_to_dict(job, [{"sources": sources}])["retry_available"] is retry
@@ -162,9 +163,7 @@ async def test_retry_policy_loads_run_results_and_preflight_failures_by_job():
             state=ThreadJob.State.FAILED,
             failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
             completed_at=timezone.now(),
-            materialization_preflight_failures=[
-                {"error_code": str(ErrorCode.AUTH_CREDENTIAL_MISSING)}
-            ]
+            materialization_preflight_failures=[{"error_code": str(ErrorCode.AUTH_ACCESS_DENIED)}]
             if job_id == 7003
             else [],
         )
@@ -192,7 +191,7 @@ async def test_retry_policy_loads_run_results_and_preflight_failures_by_job():
         item["tool_call_id"]: item["retry_available"]
         for item in response.json()["recent_terminations"]
     }
-    assert flags == {"7001": True, "7002": True, "7003": True, "7004": True}
+    assert flags == {"7001": True, "7002": True, "7003": False, "7004": True}
 
 
 @pytest.mark.asyncio

@@ -83,8 +83,19 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
         retry_available = False
     elif _needs_materialization_retry_check(job):
         failures = summary_failures([*job.materialization_preflight_failures, *run_results])
-        retry_available = not failures or any(
-            f.code not in BLOCKS_IMMEDIATE_RETRY for f in failures
+        completed_source = any(
+            isinstance(result, dict)
+            and isinstance(result.get("sources"), dict)
+            and any(
+                isinstance(source, dict) and source.get("state") == "completed"
+                for source in result["sources"].values()
+            )
+            for result in run_results
+        )
+        retry_available = (
+            completed_source
+            or not failures
+            or any(f.code not in BLOCKS_IMMEDIATE_RETRY for f in failures)
         )
     return {
         "thread_job_id": str(job.id),
