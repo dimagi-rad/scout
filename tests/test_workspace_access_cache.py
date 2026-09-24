@@ -14,8 +14,13 @@ from django.http import HttpResponse, StreamingHttpResponse
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext
 
+from apps.workspaces import access as access_module
 from apps.workspaces import access_cache
-from apps.workspaces.access import aresolve_workspace_access_ex, resolve_workspace_access_ex
+from apps.workspaces.access import (
+    WorkspaceAccess,
+    aresolve_workspace_access_ex,
+    resolve_workspace_access_ex,
+)
 from apps.workspaces.models import Workspace, WorkspaceRole
 from apps.workspaces.services.access_freshness import VerificationBudget
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
@@ -56,7 +61,9 @@ def test_no_scope_means_no_caching(user, workspace):
 
 
 @pytest.mark.django_db
-def test_user_role_and_workspace_are_all_part_of_the_key(scope, user, workspace, read_user):
+def test_user_role_and_workspace_are_all_part_of_the_key(
+    scope, user, workspace, read_user, other_user
+):
     other = Workspace.objects.create(name="Other", created_by=user)
 
     assert resolve_workspace_access_ex(read_user, workspace.id).granted
@@ -65,6 +72,30 @@ def test_user_role_and_workspace_are_all_part_of_the_key(scope, user, workspace,
     ).granted
     assert resolve_workspace_access_ex(user, workspace.id).granted
     assert not resolve_workspace_access_ex(read_user, other.id).granted
+    # A granted decision for one user never answers for another.
+    assert not resolve_workspace_access_ex(other_user, workspace.id).granted
+
+
+@pytest.mark.django_db
+def test_verification_budget_is_part_of_the_key(scope, user, workspace, monkeypatch):
+    """A recovery-metadata decision (no freshness) must never stand in for a
+    protected-data one, or a stale proof would read as fresh."""
+    assert resolve_workspace_access_ex(user, workspace.id, verification=None).granted
+    denied = WorkspaceAccess(denied_reason="verification_unavailable")
+    monkeypatch.setattr(access_module, "_resolve_workspace_access_ex", lambda *a, **k: denied)
+
+    assert resolve_workspace_access_ex(user, workspace.id) is denied
+
+
+@pytest.mark.django_db
+def test_retryable_denials_are_not_cached(scope, user, workspace, monkeypatch):
+    denied = WorkspaceAccess(denied_reason="verification_unavailable")
+    assert denied.retryable
+    monkeypatch.setattr(access_module, "_resolve_workspace_access_ex", lambda *a, **k: denied)
+    resolve_workspace_access_ex(user, workspace.id)
+    monkeypatch.undo()
+
+    assert resolve_workspace_access_ex(user, workspace.id).granted
 
 
 @pytest.mark.django_db

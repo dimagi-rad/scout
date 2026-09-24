@@ -313,7 +313,8 @@ def resolve_workspace_access_ex(
     ``verification`` selects the upstream-freshness budget for protected data;
     ``None`` is the recovery-metadata mode, which needs membership but must stay
     reachable while upstream verification is failing. Repeats within one request
-    reuse the decision (``access_cache``).
+    reuse the decision (``access_cache``), except a retryable freshness denial,
+    which must be free to succeed on the very next check.
     """
     options = (minimum_role, verification)
     cached = access_cache.lookup(user, workspace_id, options)
@@ -321,7 +322,8 @@ def resolve_workspace_access_ex(
         cached = _resolve_workspace_access_ex(
             user, workspace_id, minimum_role=minimum_role, verification=verification
         )
-        access_cache.store(user, workspace_id, options, cached)
+        if not cached.retryable:
+            access_cache.store(user, workspace_id, options, cached)
     return cached
 
 
@@ -355,7 +357,8 @@ async def aresolve_workspace_access_ex(
         cached = await _aresolve_workspace_access_ex(
             user, workspace_id, minimum_role=minimum_role, verification=verification
         )
-        access_cache.store(user, workspace_id, options, cached)
+        if not cached.retryable:
+            access_cache.store(user, workspace_id, options, cached)
     return cached
 
 
