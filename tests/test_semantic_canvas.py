@@ -1566,7 +1566,13 @@ def test_build_tools_gates_canvas_manager_on_write_role(workspace, user):
     writable = {
         t.name
         for t in _build_tools(
-            workspace, user, [], conversation_id="t1", interactive=True, canvas_write=True
+            workspace,
+            user,
+            [],
+            conversation_id="t1",
+            interactive=True,
+            canvas_write=True,
+            write_capable=True,
         )
     }
     assert {"canvas_read", "canvas_manager"} <= writable
@@ -1574,7 +1580,13 @@ def test_build_tools_gates_canvas_manager_on_write_role(workspace, user):
     readonly = {
         t.name
         for t in _build_tools(
-            workspace, user, [], conversation_id="t1", interactive=True, canvas_write=False
+            workspace,
+            user,
+            [],
+            conversation_id="t1",
+            interactive=True,
+            canvas_write=False,
+            write_capable=True,
         )
     }
     assert "canvas_read" in readonly

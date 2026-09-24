@@ -76,7 +76,7 @@ async def test_teardown_logs_successful_drop(active_schema, caplog):
         patch("apps.workspaces.tasks.SchemaManager") as MockManager,
         caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"),
     ):
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
     msgs = [r.getMessage() for r in caplog.records]
@@ -109,7 +109,7 @@ async def test_teardown_logs_dependent_view_schema_failure_count(
         patch("apps.workspaces.tasks.SchemaManager") as MockManager,
         caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"),
     ):
-        MockManager.return_value.teardown.return_value = None
+        MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
     msgs = [r.getMessage() for r in caplog.records]

@@ -27,7 +27,7 @@ from apps.common.identifiers import view_name
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, ensure_semantic_model
 from apps.semantic.services.cube_schema import build_and_promote_cube_schema
-from apps.users.models import Tenant, TenantMembership, User
+from apps.users.models import Tenant, User
 from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
@@ -42,6 +42,7 @@ from apps.workspaces.tasks import rebuild_workspace_view_schema, teardown_schema
 from mcp_server.context import load_workspace_context
 from mcp_server.services.pool import close_all_pools
 from mcp_server.services.query import _execute_async_parameterized
+from tests.tenant_access import grant_tenant_access
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -104,7 +105,7 @@ async def published_sources(settings, monkeypatch):
         ]
         for tenant in tenants:
             WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-            TenantMembership.objects.bulk_create([TenantMembership(user=user, tenant=tenant)])
+            grant_tenant_access(user, tenant)
             schema = manager.provision(tenant)
             owned_schemas.append(schema)
             _create_table(settings.MANAGED_DATABASE_URL, schema.schema_name)
@@ -227,9 +228,18 @@ async def test_expiry_partial_rebuild_and_correct_source_restore(published_sourc
 
     await TenantSchema.objects.filter(pk=setup.schemas[0].pk).aupdate(state=SchemaState.TEARDOWN)
     await _assert_recovery(setup)
-    await teardown_schema.func(str(setup.schemas[0].id))
+    # Retirement is refused while these views still read the schema: the
+    # last-good views keep serving and their provenance stays intact.
+    with patch("apps.workspaces.tasks.teardown_schema.configure") as retry:
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema.func(str(setup.schemas[0].id))
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(setup.schemas[0].id), attempt=1
+    )
     await setup.view.arefresh_from_db()
-    assert setup.view.state == SchemaState.FAILED
+    await setup.schemas[0].arefresh_from_db()
+    assert setup.view.state == SchemaState.ACTIVE
+    assert setup.schemas[0].state == SchemaState.TEARDOWN
     assert setup.view.view_sources["views"][setup.dataset.table_name] == expected_source
     await _assert_recovery(setup)
 
@@ -250,6 +260,10 @@ async def test_expiry_partial_rebuild_and_correct_source_restore(published_sourc
     assert setup.dataset.is_visible is failed_catalog
     assert setup.dataset.metadata["source_tenant_ids"] == [str(setup.tenants[0].id)]
     await _assert_recovery(setup)
+    # The views moved, so the retried retirement now drops the schema.
+    await teardown_schema.func(str(setup.schemas[0].id), attempt=1)
+    await setup.schemas[0].arefresh_from_db()
+    assert setup.schemas[0].state == SchemaState.EXPIRED
 
     # Restore only A's exact source record/name; B's source remains unchanged.
     restored = await sync_to_async(SchemaManager().provision)(setup.tenants[0])
@@ -290,7 +304,10 @@ async def test_failed_ddl_preserves_last_good_source_map(published_sources):
         with pytest.raises(RuntimeError, match="post-DDL"):
             await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
     await setup.view.arefresh_from_db()
-    assert setup.view.state == SchemaState.FAILED
+    # The publication rolled back, so the last-good views keep serving: the row
+    # stays ACTIVE with its prior provenance and only records why the rebuild failed.
+    assert setup.view.state == SchemaState.ACTIVE
+    assert "post-DDL" in setup.view.last_error
     assert setup.view.view_sources == original
     view = await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
     assert len(view.view_sources["views"]) == len(original["views"]) + 1

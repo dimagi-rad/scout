@@ -57,6 +57,7 @@ export function createAppStore() {
       activeArtifactId: null,
       dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, selectedTable: null,
       threads: [], threadsStatus: "idle", threadsAccessLostMessage: null,
+      threadsAccessRetryable: false,
       datasetCatalog: null, datasetStatus: "idle", datasetError: null,
       selectedDataset: null, selectedDatasetStatus: "idle", selectedDatasetError: null,
       recipes: [], recipeStatus: "idle", recipeError: null, currentRecipe: null, recipeRuns: [],

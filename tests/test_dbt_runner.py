@@ -1,5 +1,11 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+from dbt.cli.flags import Flags
+from dbt.cli.main import cli
+
+from mcp_server.services.dbt_runner import run_dbt, run_dbt_test
+
 
 class TestGenerateProfilesYml:
     def test_generates_valid_yaml(self, tmp_path):
@@ -245,3 +251,29 @@ class TestRunDbt:
             run_dbt(str(tmp_path), str(tmp_path), ["stg_cases"])
 
         assert lock_was_held == [True]
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda d: run_dbt(d, d, ["stg_cases"]),
+        lambda d: run_dbt_test(d, d, ["stg_cases"]),
+    ],
+    ids=["run", "test"],
+)
+def test_dbt_invocations_disable_usage_telemetry(invoke, tmp_path, monkeypatch):
+    """Production hosts don't set DO_NOT_TRACK, so the runner must opt out itself."""
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("DBT_SEND_ANONYMOUS_USAGE_STATS", raising=False)
+    mock_runner = MagicMock()
+    mock_runner.invoke.return_value = MagicMock(success=True, result=[])
+
+    with patch("mcp_server.services.dbt_runner.dbtRunner", return_value=mock_runner):
+        invoke(str(tmp_path))
+
+    # Resolve the args with dbt's own CLI so a misplaced or renamed flag fails here.
+    args = mock_runner.invoke.call_args[0][0]
+    parent = cli.make_context("dbt", list(args))
+    command = cli.commands[args[0]]
+    flags = Flags(command.make_context(args[0], list(args[1:]), parent=parent))
+    assert flags.SEND_ANONYMOUS_USAGE_STATS is False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 import uuid
@@ -10,8 +11,6 @@ from types import SimpleNamespace
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
-from django.db import connection as django_connection
-from django.db import transaction
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
@@ -45,6 +44,54 @@ from apps.users.services.token_refresh import (
     TokenRefreshStatus,
     credential_fingerprint,
 )
+from tests.clocks import ManualClock, ShiftedClock
+from tests.row_locks import LOCK_SAFETY_SECONDS, HeldRow, arow_locked, control_row, user_row
+
+
+def _observing_sleep():
+    """A sleep for a waiting request that reports when it first waits.
+
+    The waiter tests release the winner only once the second request is actually
+    polling the in-flight claim. A fixed sleep let it start after the winner had
+    finished on a loaded runner, so it made its own provider call instead.
+    """
+    waiting = asyncio.Event()
+
+    async def sleep(seconds):
+        waiting.set()
+        await asyncio.sleep(seconds)
+
+    return waiting, sleep
+
+
+async def _release_once_waiting(waiting, release):
+    # Release in a finally: if the second request never waits, the winner must not be
+    # left parked on the event, burying the real failure under teardown noise.
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+    finally:
+        release.set()
+
+
+async def _drain_overdue_work():
+    """Wait for ORM work the service abandoned at its deadline to finish.
+
+    Deterministic replacement for a fixed sleep: overdue tasks stay in the
+    supervised set until they complete, and a late-result cleanup is added to it
+    before the task it follows is reported done -- because ``_supervise`` creates
+    the follow-up synchronously inside its done-callback. Deferring that would make
+    this return early and the tests race again.
+    """
+    loop = asyncio.get_running_loop()
+    async with asyncio.timeout(10):
+        # Only this test's loop: a task stranded on an earlier test's closed loop
+        # would never finish.
+        while pending := [
+            task
+            for task in access_verification_service._SUPERVISED_OPERATIONS
+            if task.get_loop() is loop
+        ]:
+            await asyncio.wait(pending)
 
 
 @pytest.fixture
@@ -57,27 +104,6 @@ def api_connection(user, tenant):
     )
     membership = TenantMembership.objects.create(user=user, tenant=tenant, connection=connection)
     return connection, membership
-
-
-def _hold_user_lock(user_id, acquired, release):
-    try:
-        with transaction.atomic():
-            user_model = TenantConnection._meta.get_field("user").remote_field.model
-            user_model.objects.select_for_update().get(pk=user_id)
-            acquired.set()
-            assert release.wait(timeout=10)
-    finally:
-        django_connection.close()
-
-
-def _hold_control_lock(connection_id, acquired, release):
-    try:
-        with transaction.atomic():
-            VerificationControl.objects.select_for_update().get(connection_id=connection_id)
-            acquired.set()
-            assert release.wait(timeout=10)
-    finally:
-        django_connection.close()
 
 
 @pytest.mark.asyncio
@@ -117,16 +143,19 @@ async def test_oauth_refresh_holds_network_slot_until_cancelled_request_stops(mo
 
     monkeypatch.setattr(access_verification_service, "_load_claim_token", load_token)
     monkeypatch.setattr(access_verification_service, "refresh_oauth_token_result", blocking_refresh)
-    deadline = time.monotonic() + (0.1 if finish == "deadline" else 5)
+    # Frozen, so the budget cannot run out before the refresh starts; the deadline
+    # variant is then ended by the real asyncio timeout derived from the remainder.
+    clock = ManualClock()
+    deadline = clock() + (0.1 if finish == "deadline" else 5)
     operation = asyncio.create_task(
         access_verification_service._refresh_claim_if_needed(
             claim,
             deadline=deadline,
-            clock=time.monotonic,
+            clock=clock,
             limiter=limiter,
         )
     )
-    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+    await asyncio.wait_for(refresh_started.wait(), timeout=5)
     waiter = asyncio.create_task(wait_for_network_slot())
     if finish == "cancellation":
         operation.cancel()
@@ -188,11 +217,13 @@ async def test_disjoint_concurrent_requests_share_one_provider_call(user, tenant
         verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
     )
     await asyncio.wait_for(started.wait(), timeout=2)
+    waiting, observing_sleep = _observing_sleep()
     second = asyncio.create_task(
-        verify_connection_access(user.id, connection.id, {other.id}, provider_verifier=provider)
+        verify_connection_access(
+            user.id, connection.id, {other.id}, provider_verifier=provider, sleep=observing_sleep
+        )
     )
-    await asyncio.sleep(0.05)
-    release.set()
+    await _release_once_waiting(waiting, release)
     results = await asyncio.gather(first, second)
 
     assert {result.status for result in results} == {AccessVerificationStatus.VERIFIED}
@@ -604,11 +635,13 @@ async def test_waiter_converges_on_durable_unavailable_result_without_second_cal
         verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
     )
     await asyncio.wait_for(started.wait(), timeout=2)
+    waiting, observing_sleep = _observing_sleep()
     second = asyncio.create_task(
-        verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+        verify_connection_access(
+            user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=observing_sleep
+        )
     )
-    await asyncio.sleep(0.05)
-    release.set()
+    await _release_once_waiting(waiting, release)
     results = await asyncio.gather(first, second)
 
     assert {result.status for result in results} == {AccessVerificationStatus.UNAVAILABLE}
@@ -653,11 +686,13 @@ async def test_disjoint_waiter_observes_connection_attempt_failure(
         verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
     )
     await asyncio.wait_for(started.wait(), timeout=2)
+    waiting, observing_sleep = _observing_sleep()
     waiter = asyncio.create_task(
-        verify_connection_access(user.id, connection.id, {other.id}, provider_verifier=provider)
+        verify_connection_access(
+            user.id, connection.id, {other.id}, provider_verifier=provider, sleep=observing_sleep
+        )
     )
-    await asyncio.sleep(0.05)
-    release.set()
+    await _release_once_waiting(waiting, release)
     results = await asyncio.gather(winner, waiter)
 
     assert [result.status for result in results] == [expected_status, expected_status]
@@ -695,11 +730,13 @@ async def test_omitted_waiter_reverifies_rather_than_reading_a_receipt_that_skip
         verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
     )
     await asyncio.wait_for(started.wait(), timeout=2)
+    waiting, observing_sleep = _observing_sleep()
     waiter = asyncio.create_task(
-        verify_connection_access(user.id, connection.id, {omitted.id}, provider_verifier=provider)
+        verify_connection_access(
+            user.id, connection.id, {omitted.id}, provider_verifier=provider, sleep=observing_sleep
+        )
     )
-    await asyncio.sleep(0.05)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.VERIFIED
@@ -734,11 +771,13 @@ async def test_disjoint_waiter_observes_credential_rejection_without_second_disc
         verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
     )
     await asyncio.wait_for(started.wait(), timeout=2)
+    waiting, observing_sleep = _observing_sleep()
     waiter = asyncio.create_task(
-        verify_connection_access(user.id, connection.id, {other.id}, provider_verifier=provider)
+        verify_connection_access(
+            user.id, connection.id, {other.id}, provider_verifier=provider, sleep=observing_sleep
+        )
     )
-    await asyncio.sleep(0.05)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.DENIED
@@ -795,27 +834,14 @@ async def test_cancellation_during_initial_claim_drains_and_releases_lease(
     user, tenant, api_connection
 ):
     connection, _membership = api_connection
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
-    locker.start()
-    # Release in a finally: an assertion failing before release.set() would otherwise
-    # leave _hold_user_lock holding SELECT FOR UPDATE on the user row for its full 10s
-    # timeout, and under transaction=True the teardown TRUNCATE blocks behind it --
-    # turning one failure into a cascade across neighbouring tests.
-    try:
-        assert await asyncio.to_thread(acquired.wait, 2)
-
+    async with arow_locked(user_row(user.id)) as release:
         task = asyncio.create_task(verify_connection_access(user.id, connection.id, {tenant.id}))
-        await asyncio.sleep(0.05)
+        await release.await_blocking()
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-    finally:
-        release.set()
-        await asyncio.to_thread(locker.join, 2)
-    await asyncio.sleep(0.05)
+    await _drain_overdue_work()
 
     control = await VerificationControl.objects.filter(connection=connection).afirst()
     assert control is None or control.lease_token is None
@@ -886,20 +912,24 @@ async def test_queued_claim_crossing_deadline_cannot_leave_late_lease(user, tena
 
     blocker = asyncio.create_task(sync_to_async(occupy_thread_sensitive_executor)())
     assert await asyncio.to_thread(executor_started.wait, 2)
-    started = time.monotonic()
+    # The claim is queued behind the blocker, which is only released below, so the
+    # asyncio timeout is the only way this can return; the timer is a safety net.
+    timer = threading.Timer(LOCK_SAFETY_SECONDS, executor_release.set)
+    timer.start()
     result = await verify_connection_access(
         user.id,
         connection.id,
         {tenant.id},
-        deadline=started + 0.1,
+        deadline=time.monotonic() + 0.1,
     )
-    elapsed = time.monotonic() - started
+    blocker_still_held_at_return = not executor_release.is_set()
     executor_release.set()
+    timer.cancel()
     await blocker
-    await asyncio.sleep(0.05)
+    await _drain_overdue_work()
 
     assert result.status == AccessVerificationStatus.UNAVAILABLE
-    assert elapsed < 0.25
+    assert blocker_still_held_at_return
     assert not await VerificationControl.objects.filter(connection=connection).aexists()
 
 
@@ -915,32 +945,37 @@ async def test_queued_result_mapping_cannot_publish_after_deadline(user, tenant,
         executor_started.set()
         assert executor_release.wait(timeout=10)
 
+    # The claim gets a full budget; the provider spends all but a sliver of it, so
+    # only the queued mapping can hit the deadline. A wall-clock budget let a slow
+    # claim run out first and never reach the mapping at all.
+    clock = ShiftedClock()
+    deadline = clock() + 10
+
     async def provider(*args, **kwargs):
         nonlocal blocker
         blocker = asyncio.create_task(sync_to_async(occupy_thread_sensitive_executor)())
         assert await asyncio.to_thread(executor_started.wait, 2)
+        clock.jump_to(deadline - 0.1)
         return ProviderVerificationResult.complete({tenant.external_id})
 
-    timer = threading.Timer(0.5, executor_release.set)
+    timer = threading.Timer(LOCK_SAFETY_SECONDS, executor_release.set)
     timer.start()
-    started = time.monotonic()
     result = await verify_connection_access(
         user.id,
         connection.id,
         {tenant.id},
-        deadline=started + 0.1,
+        deadline=deadline,
         provider_verifier=provider,
+        clock=clock,
     )
-    elapsed = time.monotonic() - started
     blocker_still_held_at_return = not executor_release.is_set()
     executor_release.set()
-    if blocker is not None:
-        await blocker
-    await asyncio.sleep(0.1)
     timer.cancel()
+    assert blocker is not None, "the provider never ran"
+    await blocker
+    await _drain_overdue_work()
 
     assert result.status == AccessVerificationStatus.UNAVAILABLE
-    assert elapsed < 0.3
     assert blocker_still_held_at_return
     assert not await UpstreamAccessProof.objects.filter(
         connection=connection, tenant=tenant
@@ -965,25 +1000,17 @@ async def test_cancellation_cleanup_is_bounded_when_control_is_locked(user, tena
     await asyncio.wait_for(provider_started.wait(), timeout=2)
     control = await VerificationControl.objects.aget(connection=connection)
     owned_lease = control.lease_token
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_control_lock, args=(connection.id, acquired, release))
-    locker.start()
-    assert await asyncio.to_thread(acquired.wait, 2)
-    timer = threading.Timer(0.5, release.set)
-    timer.start()
+    async with arow_locked(
+        control_row(connection.id), release_after=LOCK_SAFETY_SECONDS
+    ) as release:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        blocker_still_held_at_return = not release.is_set()
+        # Let the overdue release finish (it hits its own lock_timeout) while the row is
+        # still held; released first, it could clear the lease late and race the check.
+        await _drain_overdue_work()
 
-    started = time.monotonic()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    elapsed = time.monotonic() - started
-    blocker_still_held_at_return = not release.is_set()
-    release.set()
-    await asyncio.to_thread(locker.join, 2)
-    timer.cancel()
-
-    assert elapsed < 0.2
     assert blocker_still_held_at_return
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.lease_token == owned_lease
@@ -992,39 +1019,52 @@ async def test_cancellation_cleanup_is_bounded_when_control_is_locked(user, tena
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_publication_lock_wait_crossing_deadline_cannot_publish_success(
-    user, tenant, api_connection
+    user, tenant, api_connection, monkeypatch
 ):
     connection, _membership = api_connection
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = None
+    release = HeldRow()
+    # The lock is taken mid-verification, so its context outlives the provider call.
+    locks = contextlib.AsyncExitStack()
+    # Claim and mapping get a full budget; it is cut to a sliver exactly as publication
+    # starts, with the row locked. A wall-clock budget let a slow claim spend it all
+    # first, so publication was never reached (production deploy run 35899425781).
+    clock = ShiftedClock()
+    deadline = clock() + 10
+    publication_started_with_lock_held = False
+    original_publish = access_verification_service.apublish_verification_receipt
 
     async def provider(*args, **kwargs):
-        nonlocal locker
-        locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
-        locker.start()
-        assert await asyncio.to_thread(acquired.wait, 2)
+        await locks.enter_async_context(
+            arow_locked(user_row(user.id), release=release, release_after=LOCK_SAFETY_SECONDS)
+        )
         return ProviderVerificationResult.complete({tenant.external_id})
 
-    timer = threading.Timer(0.5, release.set)
-    timer.start()
-    started = time.monotonic()
-    result = await verify_connection_access(
-        user.id,
-        connection.id,
-        {tenant.id},
-        deadline=time.monotonic() + 0.15,
-        provider_verifier=provider,
-    )
-    elapsed = time.monotonic() - started
-    blocker_still_held_at_return = not release.is_set()
-    release.set()
-    if locker is not None:
-        await asyncio.to_thread(locker.join, 2)
-    timer.cancel()
+    def publish_with_budget_nearly_spent(*args, **kwargs):
+        nonlocal publication_started_with_lock_held
+        publication_started_with_lock_held = not release.is_set()
+        clock.jump_to(deadline - 0.2)
+        return original_publish(*args, **kwargs)
 
+    monkeypatch.setattr(
+        access_verification_service,
+        "apublish_verification_receipt",
+        publish_with_budget_nearly_spent,
+    )
+    async with locks:
+        result = await verify_connection_access(
+            user.id,
+            connection.id,
+            {tenant.id},
+            deadline=deadline,
+            provider_verifier=provider,
+            clock=clock,
+        )
+        blocker_still_held_at_return = not release.is_set()
+        # Overdue publication must settle (TIMED_OUT) before the row frees up.
+        await _drain_overdue_work()
+
+    assert publication_started_with_lock_held
     assert result.status == AccessVerificationStatus.UNAVAILABLE
-    assert elapsed < 0.3
     assert blocker_still_held_at_return
     assert not await UpstreamAccessProof.objects.filter(
         connection=connection, tenant=tenant
@@ -1106,11 +1146,13 @@ async def test_covered_waiter_reads_a_complete_receipt_as_verified(user, tenant,
         verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
     )
     await asyncio.wait_for(started.wait(), timeout=2)
+    waiting, observing_sleep = _observing_sleep()
     waiter = asyncio.create_task(
-        verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+        verify_connection_access(
+            user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=observing_sleep
+        )
     )
-    await asyncio.sleep(0.05)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.VERIFIED
@@ -1145,11 +1187,13 @@ async def test_denied_waiter_reads_a_tenant_denied_receipt_as_denied(user, tenan
         verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
     )
     await asyncio.wait_for(started.wait(), timeout=2)
+    waiting, observing_sleep = _observing_sleep()
     waiter = asyncio.create_task(
-        verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+        verify_connection_access(
+            user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=observing_sleep
+        )
     )
-    await asyncio.sleep(0.05)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.DENIED
@@ -1285,7 +1329,9 @@ async def test_alias_provider_tenant_denial_is_attributed_not_lost(user):
     alias = await Tenant.objects.acreate(
         provider="commcare-custom", external_id="alias", canonical_name="Alias"
     )
-    await TenantMembership.objects.acreate(user=user, tenant=alias, connection=connection)
+    membership = await TenantMembership.objects.acreate(
+        user=user, tenant=alias, connection=connection
+    )
 
     async def provider(*args, **kwargs):
         return ProviderVerificationResult.tenant_denied("alias", ErrorCode.AUTH_ACCESS_DENIED)
@@ -1301,6 +1347,10 @@ async def test_alias_provider_tenant_denial_is_attributed_not_lost(user):
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.last_attempt_outcome == VerificationOutcome.TENANT_DENIED.value
     assert str(alias.id) in control.last_attempt_tenant_ids
+    # The denial must also stick: an exact provider match in the denial writer
+    # would leave the alias membership live after upstream refused it.
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is not None
 
 
 @pytest.mark.django_db(transaction=True)

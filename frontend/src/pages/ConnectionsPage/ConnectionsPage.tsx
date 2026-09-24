@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { api } from "@/api/client"
 import { BASE_PATH } from "@/config"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -53,7 +54,7 @@ function teamLabelFor(conn: ApiKeyConnection): string {
 }
 
 function connectUrlFor(provider: OAuthProvider): string {
-  return `${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}/settings/connections`
+  return `${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}${CONNECTIONS_PATH}`
 }
 
 type DialogState =

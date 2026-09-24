@@ -1,4 +1,4 @@
-import { Search, Pencil, Trash2 } from "lucide-react"
+import { Eye, Search, Pencil, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -18,6 +18,7 @@ interface KnowledgeListProps {
   onSearchChange: (search: string) => void
   onEdit: (item: KnowledgeItem) => void
   onDelete: (item: KnowledgeItem) => void
+  canWrite?: boolean
 }
 
 const typeFilters: { value: KnowledgeType | null; label: string }[] = [
@@ -55,6 +56,7 @@ export function KnowledgeList({
   onSearchChange,
   onEdit,
   onDelete,
+  canWrite = true,
 }: KnowledgeListProps) {
   return (
     <div className="space-y-4">
@@ -160,19 +162,27 @@ export function KnowledgeList({
                     variant="ghost"
                     size="sm"
                     onClick={() => onEdit(item)}
+                    data-testid={`knowledge-edit-${item.id}`}
                   >
-                    <Pencil className="mr-1 h-4 w-4" />
-                    Edit
+                    {canWrite ? (
+                      <Pencil className="mr-1 h-4 w-4" />
+                    ) : (
+                      <Eye className="mr-1 h-4 w-4" />
+                    )}
+                    {canWrite ? "Edit" : "View"}
                   </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onDelete(item)}
-                    className="text-destructive hover:text-destructive"
-                  >
-                    <Trash2 className="mr-1 h-4 w-4" />
-                    Delete
-                  </Button>
+                  {canWrite && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onDelete(item)}
+                      className="text-destructive hover:text-destructive"
+                      data-testid={`knowledge-delete-${item.id}`}
+                    >
+                      <Trash2 className="mr-1 h-4 w-4" />
+                      Delete
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>

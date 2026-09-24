@@ -11,7 +11,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     buildPrompt: (args) => {
       const base =
         "Create a reusable recipe from this conversation using the save_as_recipe tool. " +
-        "Analyze our conversation, extract the key steps, identify values that should become variables for reuse, and save it as a recipe."
+        "Analyze our conversation, extract the key steps, identify values that should become variables for reuse, and save it as a recipe. " +
+        "If the save_as_recipe tool is not available to you, do not attempt to save the recipe; explain that saving recipes " +
+        "requires write access to this workspace."
       return args ? `${base}\n\n${args}` : base
     },
   },
@@ -20,7 +22,10 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Pull the latest data from connected accounts",
     buildPrompt: (args) => {
       const base =
-        "Refresh data from the workspace's connected accounts. Respect the current materialization status: " +
+        "Refresh data from the workspace's connected accounts. " +
+        "If the run_materialization tool is not available to you, do not attempt a refresh; explain that a workspace member " +
+        "with write access needs to run it, and end this turn. " +
+        "Respect the current materialization status: " +
         "if a refresh is already in progress, do not start another one; explain that it is running and end this turn. " +
         "Otherwise call run_materialization once and report its actual result. " +
         "If the result is started, acknowledge that the background job has started and end this turn; " +

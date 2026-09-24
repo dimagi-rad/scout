@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api, ApiError } from "@/api/client"
+import type { TenantMembership } from "@/store/domainSlice"
+import { useAppStore } from "@/store/store"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import type { CanvasCommitReport, CanvasProjection } from "./canvasApi"
 
@@ -299,5 +301,23 @@ describe("Canvas read and mutation ordering", () => {
     view.unmount()
     act(() => retiredPoll())
     expect(api.get).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("Canvas for read-only members", () => {
+  afterEach(() => useAppStore.setState({ domains: [] }))
+
+  it("replaces Save all with a read-only hint", async () => {
+    useAppStore.setState({
+      domains: [{ id: "workspace-a", role: "read" } as TenantMembership],
+    })
+    vi.mocked(api.get).mockResolvedValueOnce(projection("thread-a", "A draft"))
+    render(panel("workspace-a", "thread-a"))
+
+    await screen.findByText("A draft")
+    expect(screen.queryByTestId("canvas-commit-button")).not.toBeInTheDocument()
+    expect(screen.getByTestId("canvas-readonly-hint")).toHaveTextContent("Read-only access")
+    expect(screen.queryByTestId("canvas-revert-shared_dataset")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("canvas-remove-shared_dataset")).not.toBeInTheDocument()
   })
 })

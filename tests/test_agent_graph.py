@@ -200,7 +200,7 @@ class TestSystemPrompt:
         from apps.agents.graph.base import _build_system_prompt
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
-        prompt = "\n".join(await _build_system_prompt(workspace, user))
+        prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))
 
         assert "Data Availability" in prompt
         # Schema context is now pre-fetched; no instruction to call get_schema_status
@@ -220,7 +220,7 @@ class TestSystemPrompt:
         from apps.agents.graph.base import _build_system_prompt
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
-        prompt = "\n".join(await _build_system_prompt(workspace, user))
+        prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))
 
         # Agent must know to run materialization when no data exists
         assert "No data has been loaded yet" in prompt or "loading" in prompt.lower()

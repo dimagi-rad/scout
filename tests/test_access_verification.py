@@ -1,7 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from uuid import uuid4
 
@@ -36,6 +36,8 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
+from tests.clocks import ManualClock
+from tests.row_locks import LOCK_SAFETY_SECONDS, HeldRow, control_row, row_locked, user_row
 
 
 @dataclass(frozen=True)
@@ -90,27 +92,6 @@ def _ocs_connection(user, tenant, *, account_user=None, account_provider="ocs", 
         provider_metadata={"team_slug": scope},
     )
     return conn, membership
-
-
-def _hold_user_lock(user_id, acquired, release):
-    try:
-        with transaction.atomic():
-            user = TenantConnection._meta.get_field("user").remote_field.model
-            user.objects.select_for_update().get(pk=user_id)
-            acquired.set()
-            assert release.wait(timeout=10)
-    finally:
-        connection.close()
-
-
-def _hold_control_lock(connection_id, acquired, release):
-    try:
-        with transaction.atomic():
-            VerificationControl.objects.select_for_update().get(connection_id=connection_id)
-            acquired.set()
-            assert release.wait(timeout=10)
-    finally:
-        connection.close()
 
 
 @pytest.mark.django_db
@@ -237,27 +218,23 @@ def test_disjoint_requests_elect_one_connection_winner(user, tenant, verificatio
 @pytest.mark.django_db(transaction=True)
 def test_claim_user_lock_wait_stops_at_deadline(user, tenant, verification_connection):
     conn, _membership = verification_connection
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
-    locker.start()
-    assert acquired.wait(timeout=2)
-    timer = threading.Timer(0.4, release.set)
-    timer.start()
-
-    started = time.monotonic()
-    claim = claim_verification(
-        user.id,
-        conn.id,
-        {tenant.id},
-        deadline=started + 0.1,
-    )
-    elapsed = time.monotonic() - started
-    locker.join(timeout=2)
-    timer.cancel()
+    # A frozen clock guarantees the claim reaches the lock with budget left, so the
+    # only thing that can stop it is the lock_timeout derived from that budget. The
+    # holder's release is a safety net far beyond it: returning while the lock is
+    # still held proves the wait was bounded, with no wall-clock assertion.
+    clock = ManualClock()
+    with row_locked(user_row(user.id), release_after=LOCK_SAFETY_SECONDS) as release:
+        claim = claim_verification(
+            user.id,
+            conn.id,
+            {tenant.id},
+            deadline=clock() + 0.1,
+            clock=clock,
+        )
+        held_at_return = not release.is_set()
 
     assert claim.status == ClaimStatus.DEADLINE
-    assert elapsed < 0.3
+    assert held_at_return
     assert not VerificationControl.objects.filter(connection=conn).exists()
 
 
@@ -277,27 +254,19 @@ def test_rebase_user_lock_wait_stops_at_deadline(user):
         refresh_token=token.token_secret,
         expires_at=token.expires_at,
     )
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_user_lock, args=(user.id, acquired, release))
-    locker.start()
-    assert acquired.wait(timeout=2)
-    timer = threading.Timer(0.4, release.set)
-    timer.start()
-
-    started = time.monotonic()
-    with pytest.raises(VerificationDeadlineExceeded):
-        rebase_verification_claim(
-            claim,
-            persisted,
-            deadline=started + 0.1,
-        )
-    elapsed = time.monotonic() - started
-    locker.join(timeout=2)
-    timer.cancel()
+    clock = ManualClock()
+    with row_locked(user_row(user.id), release_after=LOCK_SAFETY_SECONDS) as release:
+        with pytest.raises(VerificationDeadlineExceeded):
+            rebase_verification_claim(
+                claim,
+                persisted,
+                deadline=clock() + 0.1,
+                clock=clock,
+            )
+        held_at_return = not release.is_set()
     release_verification(claim)
 
-    assert elapsed < 0.3
+    assert held_at_return
     assert VerificationControl.objects.get(connection=conn).lease_token is None
 
 
@@ -305,25 +274,12 @@ def test_rebase_user_lock_wait_stops_at_deadline(user):
 def test_release_is_bounded_when_control_row_is_locked(user, tenant, verification_connection):
     conn, _membership = verification_connection
     claim = claim_verification(user.id, conn.id, {tenant.id})
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
-    locker.start()
-    # Release in a finally: a failed assertion here would otherwise leave the locker
-    # holding its row lock for its full 10s, stalling this transactional test's
-    # teardown truncate and cascading into neighbouring tests.
-    try:
-        assert acquired.wait(timeout=2)
-
-        started = time.monotonic()
+    # The holder releases only when this block exits, so an unbounded wait could not
+    # return False here: it would block until the holder's hold limit and then succeed.
+    with row_locked(control_row(conn.id)):
         released = release_verification(claim)
-        elapsed = time.monotonic() - started
 
         assert released is False
-        assert elapsed < 0.2
-    finally:
-        release.set()
-        locker.join(timeout=2)
     assert VerificationControl.objects.get(connection=conn).lease_token == claim.lease_token
     assert release_verification(claim) is True
 
@@ -354,15 +310,13 @@ def test_claim_recomputes_remaining_deadline_before_control_lock(
         verified_at=timezone.now() - timedelta(minutes=6),
         credential_fingerprint=snapshot_credential(conn).observation.credential_fingerprint,
     )
-    acquired = threading.Event()
-    release = threading.Event()
-    locker = threading.Thread(target=_hold_control_lock, args=(conn.id, acquired, release))
-    locker.start()
-    timer = threading.Timer(0.5, release.set)
-    timer.start()
-    try:
-        assert acquired.wait(timeout=2)
-
+    # The budget is spent by advancing a frozen clock, not by sleeping, so where it
+    # runs out is exact. Only the recompute before the control lock turns the small
+    # remainder into a lock_timeout; a stale timeout would outlast the holder's safety
+    # release, the claim would then take the lock, and the status would be CLAIMED.
+    clock = ManualClock()
+    deadline = clock() + 10
+    with row_locked(control_row(conn.id), release_after=LOCK_SAFETY_SECONDS) as release:
         events = []
         original_configure = access_verification._configure_transaction_deadline
         original_fresh = access_verification.proof_is_fresh
@@ -372,7 +326,7 @@ def test_claim_recomputes_remaining_deadline_before_control_lock(
             return original_configure(*args, **kwargs)
 
         def delayed_fresh(*args, **kwargs):
-            time.sleep(0.08)
+            clock.now = deadline - 0.1
             events.append("budget-spent")
             return original_fresh(*args, **kwargs)
 
@@ -380,28 +334,22 @@ def test_claim_recomputes_remaining_deadline_before_control_lock(
             access_verification, "_configure_transaction_deadline", recording_configure
         )
         monkeypatch.setattr(access_verification, "proof_is_fresh", delayed_fresh)
-        started = time.monotonic()
         claim = claim_verification(
             user.id,
             conn.id,
             {tenant.id},
-            deadline=started + 0.15,
+            deadline=deadline,
+            clock=clock,
         )
-        elapsed = time.monotonic() - started
-    finally:
-        release.set()
-        locker.join(timeout=2)
-        timer.cancel()
+        held_at_return = not release.is_set()
 
     assert claim.status == ClaimStatus.DEADLINE
     # The guard: the deadline must be recomputed after the budget was spent and before
     # the control lock. Without that recompute the lock would inherit the stale, larger
-    # timeout computed back at the proofs query. Asserting on ordering rather than wall
-    # clock keeps this deterministic on a loaded runner.
+    # timeout computed back at the proofs query.
     assert "budget-spent" in events
     assert "configure" in events[events.index("budget-spent") :]
-    # Loose bound: it only has to prove we did not block for the locker's full hold.
-    assert elapsed < 0.45
+    assert held_at_return
     assert VerificationControl.objects.get(connection=conn).lease_token is None
 
 
@@ -493,21 +441,21 @@ def test_freshness_clock_is_sampled_after_lock_wait(
     base = timezone.now()
     first = claim_verification(user.id, conn.id, {tenant.id}, now=base)
     publish_verification(first, VerificationResult.complete({tenant.id}), now=base)
-    acquired = threading.Event()
-    release = threading.Event()
+    release = HeldRow()
     monkeypatch.setattr(
         "apps.users.services.access_verification.timezone.now",
         lambda: base + (timedelta(minutes=5) if release.is_set() else timedelta(minutes=4)),
     )
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        holder = executor.submit(_hold_user_lock, user.id, acquired, release)
-        assert acquired.wait(timeout=10)
+    # The executor is outermost so the lock is released before it waits on the waiter.
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        row_locked(user_row(user.id), release=release, acquire_timeout=10),
+    ):
         waiter = executor.submit(claim_verification, user.id, conn.id, {tenant.id})
-        time.sleep(0.1)
+        release.wait_until_blocking()
         assert not waiter.done()
         release.set()
-        holder.result(timeout=10)
         result = waiter.result(timeout=10)
 
     assert result.status == ClaimStatus.CLAIMED
@@ -520,8 +468,7 @@ def test_publication_clock_is_sampled_after_lock_wait(
     conn, _membership = verification_connection
     base = timezone.now()
     claim = claim_verification(user.id, conn.id, {tenant.id}, now=base)
-    acquired = threading.Event()
-    release = threading.Event()
+    release = HeldRow()
     monkeypatch.setattr(
         "apps.users.services.access_verification.timezone.now",
         lambda: (
@@ -529,16 +476,17 @@ def test_publication_clock_is_sampled_after_lock_wait(
         ),
     )
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        holder = executor.submit(_hold_user_lock, user.id, acquired, release)
-        assert acquired.wait(timeout=10)
+    # The executor is outermost so the lock is released before it waits on the waiter.
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        row_locked(user_row(user.id), release=release, acquire_timeout=10),
+    ):
         waiter = executor.submit(
             publish_verification, claim, VerificationResult.complete({tenant.id})
         )
-        time.sleep(0.1)
+        release.wait_until_blocking()
         assert not waiter.done()
         release.set()
-        holder.result(timeout=10)
         status = waiter.result(timeout=10)
 
     assert status == PublicationStatus.REJECTED
@@ -1030,26 +978,39 @@ def test_verification_restores_timeouts_inside_outer_transaction(user, operation
             cursor.execute(
                 "SELECT set_config('lock_timeout', '3s', true), set_config('statement_timeout', '4s', true)"
             )
-        deadline = time.monotonic() + 0.5
+        # Frozen, so the whole-operation budget cannot run out on a slow runner; each
+        # statement still gets the real 500ms timeouts, which is what must be restored.
+        clock = ManualClock()
+        deadline = clock() + 0.5
         if operation == "claim":
             assert (
-                claim_verification(user.id, conn.id, {tenant.id}, deadline=deadline).status
+                claim_verification(
+                    user.id, conn.id, {tenant.id}, deadline=deadline, clock=clock
+                ).status
                 == ClaimStatus.CLAIMED
             )
         elif operation == "publish":
             assert (
                 publish_verification(
-                    claim, VerificationResult.complete({tenant.id}), deadline=deadline
+                    claim,
+                    VerificationResult.complete({tenant.id}),
+                    deadline=deadline,
+                    clock=clock,
                 )
                 == PublicationStatus.PUBLISHED
             )
         elif operation == "release":
             assert release_verification(claim)
         elif operation == "rebase":
-            assert rebase_verification_claim(claim, persisted, deadline=deadline) is not None
+            assert (
+                rebase_verification_claim(claim, persisted, deadline=deadline, clock=clock)
+                is not None
+            )
         else:
             assert (
-                claim_verification(user.id, uuid4(), {tenant.id}, deadline=deadline).status
+                claim_verification(
+                    user.id, uuid4(), {tenant.id}, deadline=deadline, clock=clock
+                ).status
                 == ClaimStatus.DENIED
             )
         with connection.cursor() as cursor:
@@ -1278,4 +1239,68 @@ def test_tenant_denied_receipt_covers_only_the_denied_tenant(user, verification_
     )
     assert not access_verification.attempt_receipt_matches(
         receipt, control.last_attempt_lease_token, claim.observation, {sibling.id}
+    )
+
+
+def _receipt(outcome, observation, tenant_ids, lease_token):
+    return access_verification.VerificationAttemptReceipt(
+        lease_token=lease_token,
+        outcome=outcome,
+        error_code="",
+        observation_hash=access_verification._observation_hash(observation),
+        tenant_ids=frozenset(str(tenant_id) for tenant_id in tenant_ids),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("outcome", "reusable_for_uncovered"),
+    [
+        (VerificationOutcome.COMPLETE, False),
+        (VerificationOutcome.TENANT_DENIED, False),
+        (VerificationOutcome.CREDENTIAL_REJECTED, True),
+        (VerificationOutcome.UNAVAILABLE, True),
+        (VerificationOutcome.INDETERMINATE, True),
+    ],
+)
+def test_receipt_scope_gate_applies_only_to_tenant_scoped_outcomes(
+    verification_connection, outcome, reusable_for_uncovered
+):
+    """The matcher owns the whole scope policy, in both directions.
+
+    A tenant-scoped verdict must not vouch for a tenant it never covered, while a
+    connection-level verdict must, or a waiter asking about other tenants on the same
+    failed connection would force a second upstream call.
+    """
+    conn, membership = verification_connection
+    observation = snapshot_credential(conn).observation
+    lease = uuid4()
+    uncovered = uuid4()
+    receipt = _receipt(outcome, observation, {membership.tenant_id}, lease)
+
+    matches = access_verification.attempt_receipt_matches
+    assert matches(receipt, lease, observation, {membership.tenant_id})
+    assert matches(receipt, lease, observation, {uncovered}) is reusable_for_uncovered
+    assert (
+        matches(receipt, lease, observation, {membership.tenant_id, uncovered})
+        is reusable_for_uncovered
+    )
+    # The scope exemption must not weaken the lease and observation gates.
+    assert not matches(receipt, uuid4(), observation, {uncovered})
+    assert not matches(
+        receipt, lease, replace(observation, credential_fingerprint="rotated"), {uncovered}
+    )
+    assert not matches(receipt, lease, observation, set())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", list(VerificationOutcome))
+def test_unscoped_legacy_receipt_matches_nothing_for_any_outcome(verification_connection, outcome):
+    conn, membership = verification_connection
+    observation = snapshot_credential(conn).observation
+    lease = uuid4()
+    receipt = _receipt(outcome, observation, (), lease)
+
+    assert not access_verification.attempt_receipt_matches(
+        receipt, lease, observation, {membership.tenant_id}
     )

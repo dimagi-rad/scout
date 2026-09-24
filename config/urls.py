@@ -10,6 +10,7 @@ from apps.chat.thread_views import public_thread_view
 from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
 from apps.recipes.api.views import PublicRecipeRunView
+from apps.workspaces.api.access_views import workspace_access_verify_view
 from apps.workspaces.api.workspace_views import (
     MyInvitesView,
     WorkspaceDetailView,
@@ -80,6 +81,7 @@ workspace_urlpatterns = [
     ),
     path("tenants/", WorkspaceTenantView.as_view(), name="workspace_tenants"),
     path("tenants/<uuid:wt_id>/", WorkspaceTenantView.as_view(), name="workspace_tenant_detail"),
+    path("access/verify/", workspace_access_verify_view, name="workspace_access_verify"),
 ]
 
 urlpatterns = [
