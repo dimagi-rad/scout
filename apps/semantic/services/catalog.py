@@ -308,7 +308,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                     source_identity(
                         source_provider, source.source_table_name if source else table_name, columns
                     )
-                    if source_provider is not None
+                    if source_provider is not None and detail is not None
                     else unverified_source_identity()
                 ),
                 materialized_row_count=entry.get("materialized_row_count"),

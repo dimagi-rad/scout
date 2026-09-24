@@ -142,8 +142,9 @@ def test_identity_contract_survives_semantic_catalog_serialization(workspace, mo
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("described", [False, True])
 async def test_namespaced_views_keep_their_declared_source_identity(
-    workspace, tenant, monkeypatch, legacy
+    workspace, tenant, monkeypatch, legacy, described
 ):
     await Tenant.objects.filter(pk=tenant.pk).aupdate(provider="ocs")
     await WorkspaceViewSchema.objects.acreate(
@@ -167,19 +168,23 @@ async def test_namespaced_views_keep_their_declared_source_identity(
                 {"name": name, "type": "text"}
                 for name in ["message_id", "snapshot_revision", "message_version"]
             ]
-        },
+        }
+        if described
+        else None,
         "pipeline_table_primary_keys": {},
     }.items():
         monkeypatch.setattr(catalog, attribute, AsyncMock(return_value=value))
     _, tables = await catalog._load_physical_tables_async(workspace)
     identity = tables[0].identity
-    if legacy:
+    if legacy or not described:
         assert identity["kind"] == "unknown"
         assert identity["safe_for_reviewed_labels"] is False
+        assert "not evidence" in identity["label_policy"]
+    if legacy:
         assert identity == await workspace_table_identity(
             workspace.id, "identity_views", "fitted_name", tables[0].columns
         )
-    else:
+    elif described:
         assert identity["version"] == 2
 
 
