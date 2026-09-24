@@ -264,7 +264,7 @@ HEADLESS_BASE_SYSTEM_PROMPT = _render(
         "Only when recovery_action is materialization, call `run_materialization` "
         "at most once per run, then re-run the count in the same run."
     ),
-    schema_drift_guidance="""Only when recovery_action is materialization, call `run_materialization` to rebuild it.
+    schema_drift_guidance="""Only when recovery_action is materialization, call `run_materialization` to rebuild the dataset.
 It blocks until loading finishes; then continue in the same run. Call it at most
 once per run; if the data is still unreachable afterwards, report that and stop.
 Never infer missing data from a failed describe or query alone.""",
@@ -279,7 +279,7 @@ READ_ONLY_BASE_SYSTEM_PROMPT = _render(
         "Report the typed cause. If a repair is indicated, a workspace member with "
         "write access must perform the specified repair."
     ),
-    schema_drift_guidance="""Their workspace role is read-only. When a repair is indicated,
+    schema_drift_guidance="""The user's workspace role is read-only. When a repair is indicated,
 refer it to a workspace member with write access. Do not offer to rebuild or
 re-materialize it yourself; a generic query error does not establish missing data.""",
 )
