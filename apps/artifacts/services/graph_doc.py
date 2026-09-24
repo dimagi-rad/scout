@@ -12,6 +12,15 @@ import copy
 import re
 from typing import Any
 
+from apps.semantic.services.date_context import (
+    COMPARISONS,
+    DEFAULT_COMPARISON,
+    DEFAULT_PRESET,
+    PRESETS,
+    DateContextError,
+    validate_date_filter,
+)
+
 CURRENT_SCHEMA_VERSION = 1
 
 KNOWN_BLOCK_TYPES = {
@@ -492,7 +501,7 @@ def collect_query_specs(doc: Any) -> list[dict[str, Any]]:
                                 "block_id": block_id,
                                 "block_type": block_type,
                                 "path": f"blocks.{block_id}.config.queries.{name}",
-                                "date_range_bound": _has_input_ref(block, "date_range"),
+                                "date_range_bound": _has_input_binding(block, "date_range"),
                                 "compare_bound": bool(config.get("compare")),
                             }
                         )
@@ -506,7 +515,7 @@ def collect_query_specs(doc: Any) -> list[dict[str, Any]]:
                     "block_id": block_id,
                     "block_type": block_type,
                     "path": f"blocks.{block_id}.config.query",
-                    "date_range_bound": _has_input_ref(block, "date_range"),
+                    "date_range_bound": _has_input_binding(block, "date_range"),
                     "compare_bound": False,
                 }
             )
@@ -671,6 +680,29 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
     block_type = block["type"]
     config = block.get("config") or {}
     diagnostics: list[dict[str, Any]] = []
+    if block_type in {"date_filter", "period_selector"}:
+        preset = config.get(
+            "default" if block_type == "date_filter" else "default_range", DEFAULT_PRESET
+        )
+        if preset not in PRESETS:
+            diagnostics.append(
+                problem(
+                    f"Unsupported date preset {preset!r}. Use one of: {', '.join(PRESETS)}",
+                    block_id=block_id,
+                    code="date_preset",
+                )
+            )
+        if (
+            block_type == "period_selector"
+            and config.get("default_comparison", DEFAULT_COMPARISON) not in COMPARISONS
+        ):
+            diagnostics.append(
+                problem(
+                    f"Unsupported comparison preset {config.get('default_comparison')!r}. Use one of: {', '.join(COMPARISONS)}",
+                    block_id=block_id,
+                    code="date_comparison",
+                )
+            )
     if block_type == "semantic_query":
         queries = config.get("queries")
         if not isinstance(queries, dict) or not queries:
@@ -690,7 +722,15 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             )
         else:
-            require_time = bool(config.get("compare")) or _has_input_ref(block, "date_range")
+            require_time = bool(config.get("compare")) or _has_input_binding(block, "date_range")
+            if config.get("compare") and "date_range" in (block.get("inputs") or {}):
+                diagnostics.append(
+                    problem(
+                        "A comparison query cannot also bind date_range.",
+                        block_id=block_id,
+                        code="ambiguous_date_bindings",
+                    )
+                )
             for name, query in queries.items():
                 diagnostics.extend(
                     query_diagnostics(
@@ -706,7 +746,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 config["query"],
                 block_id=block_id,
                 path="config.query",
-                require_time_dimension=_has_input_ref(block, "date_range"),
+                require_time_dimension=_has_input_binding(block, "date_range"),
             )
         )
     if block_type == "graph" and "recharts" in config:
@@ -1209,6 +1249,10 @@ def _filter_diagnostics(
                     code="query_filter_member_key",
                 )
             )
+        try:
+            validate_date_filter(item)
+        except DateContextError as exc:
+            diagnostics.append(problem(str(exc), block_id=block_id, code="date_filter_value"))
     return diagnostics
 
 
@@ -1254,9 +1298,9 @@ def _string_list(value: Any) -> list[str] | None:
     return value
 
 
-def _has_input_ref(block: dict[str, Any], input_name: str) -> bool:
+def _has_input_binding(block: dict[str, Any], input_name: str) -> bool:
     binding = (block.get("inputs") or {}).get(input_name)
-    return isinstance(binding, dict) and "$ref" in binding
+    return isinstance(binding, dict) and ("$ref" in binding or "value" in binding)
 
 
 def _apply_op(doc: dict[str, Any], op: dict[str, Any]) -> None:
