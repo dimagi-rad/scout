@@ -14,7 +14,9 @@ import psycopg.errors
 import sentry_sdk
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, close_old_connections, transaction
+from django.db import InterfaceError as DjangoInterfaceError
+from django.db import OperationalError as DjangoOperationalError
+from django.db import close_old_connections, transaction
 from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
@@ -1736,7 +1738,9 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
     stays physically present, and the dependent keeps reading it. That was
     chosen over cascading under a live reader. The give-up is logged at ERROR
     ("giving up retiring schema"), which reaches Sentry, so an operator can
-    move or drop the dependent and re-run the teardown.
+    move or drop the dependent and re-run the teardown. (A later provision()
+    of a canonical-named schema may also reclaim the row as ACTIVE; an ``_r_``
+    refresh schema is never reclaimed.)
     """
     try:
         schema = await TenantSchema.objects.aget(id=schema_id)
@@ -1744,8 +1748,8 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
         logger.exception("teardown_schema: schema %s not found", schema_id)
         return
 
-    # State CAS (arch #237, finding 03#0): provision() resurrects EXPIRED/TEARDOWN
-    # rows to ACTIVE (2026-06-10 incident-b fix). If that raced ahead of this queued
+    # State CAS (arch #237, finding 03#0): provision() resurrects EXPIRED rows, and
+    # reclaims a canonical-named TEARDOWN row, as ACTIVE (2026-06-10 incident-b fix). If that raced ahead of this queued
     # teardown the re-provisioned data must be preserved — abort unless still TEARDOWN.
     if schema.state != SchemaState.TEARDOWN:
         logger.info(
@@ -1759,8 +1763,8 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
     try:
         retired = await _retire_under_tenant_lock(schema, attempt)
     except _RetirementNotStarted as exc:
-        # Nothing was dropped, and neither the TTL sweep (ACTIVE only) nor
-        # provision()'s resurrect branch (EXPIRED only) re-arms a TEARDOWN row.
+        # Nothing was dropped. The TTL sweep never re-arms a TEARDOWN row, and
+        # provision() reclaims only a canonical-named one, so retry here.
         # Usually plain contention (another load holds T), so no traceback.
         logger.warning(
             "teardown_schema: could not start retiring schema %s: %r", schema.id, exc.__cause__
@@ -1789,12 +1793,15 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
             return False  # deleted (e.g. with its tenant) while we waited for T
         except (
             DataLockTimeout,
-            DatabaseError,
+            # Unreachable or closed sessions, from the raw lock session or the
+            # ORM (Django wraps psycopg's InterfaceError outside DatabaseError).
             psycopg.OperationalError,
             psycopg.InterfaceError,
+            DjangoOperationalError,
+            DjangoInterfaceError,
         ) as exc:
-            # Unreachable or closed sessions only: a query bug (ProgrammingError
-            # and friends) must surface, not be retried as contention.
+            # A query bug (ProgrammingError and friends) is deliberately absent:
+            # it must surface, not be retried as contention.
             raise _RetirementNotStarted from exc
         if schema.state != SchemaState.TEARDOWN:
             return False
@@ -1899,9 +1906,9 @@ async def _retry_retirement(
         len(dependent_schemas),
         reason,
     )
-    movable = 0
+    known = 0
     async for vs in WorkspaceViewSchema.objects.filter(schema_name__in=dependent_schemas):
-        movable += 1
+        known += 1
         if vs.state == SchemaState.EXPIRED:
             # Its views were dropped after our attempt looked, so a plain retry
             # converges; a rebuild would only resurrect it as ACTIVE.
@@ -1913,11 +1920,15 @@ async def _retry_retirement(
                 await rebuild_workspace_view_schema.defer_async(workspace_id=str(vs.workspace_id))
         except Exception:
             logger.exception("Failed to defer dependent rebuild for view schema %s", vs.id)
-    if dependent_schemas and not movable:
+    if dependent_schemas and not known:
         # Only something we cannot rebuild (e.g. a dbt view in another tenant
         # schema) reads this schema; retrying for a day would move nothing.
         await _retry_retirement(
-            schema, [], attempt, f"{reason} (no rebuildable dependent)", converges=False
+            schema,
+            [],
+            attempt,
+            f"{reason} (no dependent is a workspace view schema)",
+            converges=False,
         )
         return
     delay = min(_RETIRE_RETRY_BASE_SECONDS * (2**attempt), _RETIRE_RETRY_MAX_SECONDS)

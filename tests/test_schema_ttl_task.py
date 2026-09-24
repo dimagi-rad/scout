@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import psycopg.errors
 import pytest
 from asgiref.sync import sync_to_async
+from django.db import InterfaceError as DjangoInterfaceError
+from django.db import ProgrammingError as DjangoProgrammingError
 from django.utils import timezone
 
 from apps.users.models import Tenant
@@ -875,3 +877,48 @@ async def test_an_interface_error_taking_t_reschedules_instead_of_crashing(activ
     retry.return_value.defer_async.assert_awaited_once_with(
         schema_id=str(active_schema.id), attempt=1
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_dropped_orm_connection_while_waiting_for_t_reschedules(active_schema):
+    """After up to 30 minutes waiting for T, the ORM connection may be dead; Django
+    raises its own InterfaceError, which sits outside DatabaseError."""
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch.object(
+            TenantSchema,
+            "arefresh_from_db",
+            AsyncMock(side_effect=DjangoInterfaceError("connection already closed")),
+        ),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_orm_query_bug_while_re_reading_the_row_surfaces(active_schema):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch.object(
+            TenantSchema,
+            "arefresh_from_db",
+            AsyncMock(side_effect=DjangoProgrammingError("column does not exist")),
+        ),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        pytest.raises(DjangoProgrammingError),
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_not_awaited()
