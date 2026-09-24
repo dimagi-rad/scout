@@ -661,8 +661,8 @@ class WorkspaceMemberListView(APIView):
     def get(self, request, workspace_id):
         # The only source of the membership ids that leaving and handing over the
         # manager role need, so reachable without coverage; but then it names only
-        # the caller, and other rows carry just their id and role.
-        workspace, _membership, err = resolve_workspace(
+        # the caller, and only a manager (who can hand over) sees others' id and role.
+        workspace, membership, err = resolve_workspace(
             request, workspace_id, require_coverage=False
         )
         if err:
@@ -670,6 +670,8 @@ class WorkspaceMemberListView(APIView):
         covered = not missing_tenants_for_member(request.user, workspace)
 
         memberships = WorkspaceMembership.objects.filter(workspace=workspace).select_related("user")
+        if not covered and membership.role != WorkspaceRole.MANAGE:
+            memberships = memberships.filter(user=request.user)
         members = [
             {
                 "id": str(m.id),
@@ -1087,8 +1089,10 @@ class WorkspaceTenantView(APIView):
             )
 
         # Without coverage a manager may only remove a source they are missing;
-        # removing one they can't read either would change the workspace for
-        # members who still have full access.
+        # removing one they can still read would change the workspace for members
+        # with full access. Removing the missing one is allowed even when shared:
+        # it is how they regain access, and a covered manager could do the same,
+        # unlike deleting the whole workspace.
         missing = {t.tenant_id for t in missing_tenants_for_member(request.user, workspace)}
         if missing and str(wt.tenant_id) not in missing:
             return Response(

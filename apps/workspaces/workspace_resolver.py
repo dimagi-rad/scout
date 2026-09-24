@@ -16,6 +16,7 @@ from apps.workspaces.access import (
     resolve_workspace_access_ex,
 )
 from apps.workspaces.models import WorkspaceRole
+from apps.workspaces.services.access_freshness import VerificationBudget
 
 
 def resolve_workspace_drf(
@@ -52,12 +53,20 @@ def resolve_workspace(user, workspace_id, *, minimum_role: str = WorkspaceRole.R
     return result.workspace, None
 
 
-async def aresolve_workspace(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
+async def aresolve_workspace(
+    user,
+    workspace_id,
+    *,
+    minimum_role: str = WorkspaceRole.READ,
+    verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
+):
     """Resolve Workspace for async non-DRF views.
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.
     """
-    result = await aresolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
+    result = await aresolve_workspace_access_ex(
+        user, workspace_id, minimum_role=minimum_role, verification=verification
+    )
     if not result.granted:
         return None, JsonResponse(access_denied_body(result), status=403)
     return result.workspace, None

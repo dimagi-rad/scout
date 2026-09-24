@@ -158,6 +158,10 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
         "Ask an admin on the affected provider to restore access, or remove that "
         "data source from the workspace."
     ),
+    ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE: (
+        "access could not be confirmed with the provider just now — nothing was "
+        "removed; retry shortly."
+    ),
     ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
         "in this workspace but not connected to your account, so this run did not "
         "refresh it — connect that account "
@@ -578,14 +582,15 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         # and the remedy comes once, from the code's guidance, as it did before.
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         missing = {t.tenant_id for t in access.missing_tenants}
-        # Covered tenants get no error code: the code's guidance ("connect that
-        # account") is for the missing ones only.
+        # Covered tenants get their own code: the unreachable code's guidance
+        # ("connect that account") is for the missing ones only.
         results = [
             _preflight_failure(t, _unreachable_tenant_error(t), code)
             if str(t.pk) in missing
             else _preflight_failure(
                 t,
                 "not attempted: the requesting user can't use every data source of this workspace",
+                ErrorCode.WORKSPACE_TENANT_SKIPPED,
             )
             for t in tenants
         ]
@@ -593,6 +598,11 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         error = "The requesting user can't use these data sources: " + (
             ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
         )
+    elif access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
+        code = FRESHNESS_ERROR_CODES[access.denied_reason]
+        error = access_denied_body(access)["error"]
+        results = [_preflight_failure(tenant, error, code) for tenant in tenants]
+        _set_tenant_display_names(results)
     else:
         code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
         results = [_preflight_failure(tenant, _ROLE_DENIED_MESSAGE, code) for tenant in tenants]
@@ -691,7 +701,36 @@ async def materialize_workspace_core(
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
 
-    for tm in memberships:
+    for index, tm in enumerate(memberships):
+        # The wrapper checked before the first tenant. A long load can outlive a
+        # five-minute proof, so each later tenant re-checks before protected work.
+        if index:
+            denial = await _materialization_write_denial(workspace_id, user_id)
+            if denial is not None:
+                pending = memberships[index:]
+                attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
+                denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
+                tenant_results.extend(
+                    denied_by_tenant.get(str(later.tenant_id))
+                    or _preflight_failure(later.tenant, denial["error"], denial["error_code"])
+                    for later in pending
+                )
+                # Only source loads stop here. The derived view and Cube rebuilds below
+                # read already-published tenant data and keep other members' views
+                # consistent; the Cube gate treats these skipped tenants as failed.
+                break
+            # The workspace can stay accessible through another tenant after this
+            # recheck archived this one, so the membership itself must still be live.
+            if not await TenantMembership.objects.filter(id=tm.id).aexists():
+                attempted_tenant_ids.add(str(tm.tenant_id))
+                tenant_results.append(
+                    _preflight_failure(
+                        tm.tenant,
+                        "Access to this source was removed upstream during the run.",
+                        ErrorCode.AUTH_ACCESS_DENIED,
+                    )
+                )
+                continue
         attempted_tenant_ids.add(str(tm.tenant_id))
         tenant_id = tm.tenant.external_id
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
@@ -1661,6 +1700,8 @@ def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
             "Connections; if their access was removed in the provider, an admin there "
             "must restore it."
         )
+    if access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
+        return f"The requesting user's access could not be confirmed: {access_denied_body(access)['error']}"
     return _ROLE_DENIED_MESSAGE
 
 
@@ -1669,6 +1710,21 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
     if result.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
         # A role denial is not a source failure; don't label it as one.
         return str(result.get("error") or _ROLE_DENIED_MESSAGE)[:1000]
+    freshness_codes = set(FRESHNESS_ERROR_CODES.values())
+    if result.get("status") == "denied" and result.get("error_code") in freshness_codes:
+        # A requester whose access could not be confirmed is not a failed source.
+        return str(result["error"])[:1000]
+    failed = [
+        tenant
+        for tenant in result.get("tenants") or []
+        if isinstance(tenant, dict) and tenant.get("success") is not True
+    ]
+    unverified = ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
+    if failed and all(tenant.get("error_code") == unverified for tenant in failed):
+        # A mid-run checkpoint denial skips the remaining tenants without a
+        # run-level status. The credential codes it can also carry are genuine
+        # source remedies, so only the verification-only code is re-labelled.
+        return str(failed[0].get("error") or "")[:1000]
     # A failed source commonly causes a downstream Cube *skip*, not a Cube
     # failure. Show the source remedy first; never infer auth advice by parsing
     # human/provider error text, or conflate missing credentials with a 403.

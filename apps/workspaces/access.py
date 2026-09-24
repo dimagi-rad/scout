@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from django.conf import settings
+from django.core.cache import cache
 
 from apps.users.models import PROVIDER_CHOICES, TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
@@ -48,10 +49,12 @@ from apps.workspaces.services.access_freshness import (
     UPSTREAM_ACCESS_LOST,
     VERIFICATION_IN_PROGRESS,
     VERIFICATION_UNAVAILABLE,
+    UpstreamAdmission,
     VerificationBudget,
     aadmit_upstream,
     acheck_freshness,
     admit_upstream,
+    averify_membership_history,
     check_freshness,
     final_denial_reason,
     freshness_enforced,
@@ -131,6 +134,18 @@ def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceA
 
 
 CONNECTED_ACCOUNTS_PATH = "/settings/connections"
+RETRY_COOLDOWN_SECONDS = 10
+_RETRY_PENDING = "pending"
+_REPLAYABLE_REASONS = frozenset(
+    {
+        TENANT_ACCESS_LOST,
+        CREDENTIAL_MISSING,
+        CREDENTIAL_EXPIRED,
+        UPSTREAM_ACCESS_LOST,
+        VERIFICATION_UNAVAILABLE,
+        VERIFICATION_IN_PROGRESS,
+    }
+)
 
 _FRESHNESS_MESSAGES = {
     CREDENTIAL_MISSING: (
@@ -453,6 +468,75 @@ async def aresolve_workspace_access_ex(
         return _attribute_observed_denial(result, admission)
     final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
     return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
+
+
+async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
+    """Explicit member-initiated recheck, reachable while protected access is denied.
+
+    Only membership is required up front — a member whose tenant was archived by a
+    revocation still qualifies — and only the caller's own connections are checked.
+    The final decision is read back from the database rather than inferred from the
+    provider answer, so a concurrent change cannot be reported as restored access.
+    """
+    local = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
+    if local.denied_reason == NOT_MEMBER:
+        return local
+    workspace = local.workspace
+    if workspace is None:
+        try:
+            membership = await WorkspaceMembership.objects.select_related("workspace").aget(
+                workspace_id=workspace_id, user=user
+            )
+        except WorkspaceMembership.DoesNotExist:
+            return WorkspaceAccess(denied_reason=NOT_MEMBER)
+        workspace = membership.workspace
+    tenant_ids = await _alive_tenant_ids(workspace)
+    if not tenant_ids or not freshness_enforced():
+        return local
+    # Keyed on the user: the protected resource is their connections, which any of
+    # their workspaces could otherwise re-trigger. A tombstoned history can never
+    # short-circuit as fresh, so without this every retry is a provider round-trip.
+    cooldown_key = f"access-verify-retry:{user.pk}"
+    if not await cache.aadd(cooldown_key, _RETRY_PENDING, RETRY_COOLDOWN_SECONDS):
+        if local.granted and (await acheck_freshness(user.pk, tenant_ids)).fresh:
+            return local
+        replayed = await cache.aget(cooldown_key)
+        # The lease is per user but a concluded reason belongs to one workspace.
+        if isinstance(replayed, dict) and replayed.get("workspace") == str(workspace_id):
+            return WorkspaceAccess(
+                denied_reason=replayed["reason"],
+                missing_tenants=tuple(
+                    MissingTenant(**{**t, "recovery": CoverageRecovery(t["recovery"])})
+                    for t in replayed.get("missing", ())
+                ),
+            )
+        return _freshness_denied(VERIFICATION_IN_PROGRESS)
+    retry_reason = await averify_membership_history(
+        user.pk, tenant_ids, budget=VerificationBudget.INTERACTIVE
+    )
+    admission = UpstreamAdmission(admitted=False, rechecked=True, reason=retry_reason)
+    result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
+    if not result.granted:
+        if retry_reason in RETRYABLE_REASONS:
+            result = _freshness_denied(retry_reason)
+        else:
+            result = _attribute_observed_denial(result, admission)
+    else:
+        final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
+        if not final.fresh:
+            result = _freshness_denied(final_denial_reason(admission, final))
+    # Re-arm after the check: a slow provider can outlast the first window.
+    # Kept even on success: a tombstoned history can never short-circuit as fresh, so
+    # a granted retry still cost a provider call and must stay throttled.
+    concluded = _RETRY_PENDING
+    if not result.granted and result.denied_reason in _REPLAYABLE_REASONS:
+        concluded = {
+            "workspace": str(workspace_id),
+            "reason": result.denied_reason,
+            "missing": [t.as_dict() for t in result.missing_tenants],
+        }
+    await cache.aset(cooldown_key, concluded, RETRY_COOLDOWN_SECONDS)
+    return result
 
 
 def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
