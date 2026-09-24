@@ -81,6 +81,9 @@ class ErrorCode(StrEnum):
     # malformed queue job), so a new refresh stays blocked until an operator
     # reconciles it. Retrying does not help.
     REFRESH_RECOVERY_REQUIRED = "REFRESH_RECOVERY_REQUIRED"
+    # The workspace's sources changed while a load was starting; running it
+    # again covers the new ones. Carries no access or credential advice.
+    WORKSPACE_SOURCES_CHANGED = "WORKSPACE_SOURCES_CHANGED"
 
     # Upstream access could not be re-verified within the job's budget (provider
     # outage, timeout, or another verification still running). Memberships are

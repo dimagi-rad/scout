@@ -793,12 +793,14 @@ async def materialize_workspace_core(
             # Added after the tenant locks were taken; loading it now would run
             # outside T. Report it truthfully and let a re-run cover it.
             tenant_results.append(
-                # No error code: every code carries advice (e.g. reconnect an
-                # account) that would contradict "run it again".
+                # Its own code: the access codes carry advice (reconnect an
+                # account) that would contradict "run it again", and no code at
+                # all reads as INTERNAL_ERROR on resume.
                 _preflight_failure(
                     tm.tenant,
                     "This source was added while the load was starting and was not "
                     "loaded. Run the load again to include it.",
+                    ErrorCode.WORKSPACE_SOURCES_CHANGED,
                 )
             )
             continue

@@ -15,6 +15,7 @@ import psycopg
 import pytest
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.users.models import Tenant
 from apps.workspaces import tasks as workspaces_tasks
@@ -63,6 +64,11 @@ class _Pipeline:
         return completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
 
 
+@pytest.fixture(autouse=True)
+def _no_candidate_ddl(no_candidate_ddl):
+    """Shared stub: see tests.pipeline_doubles.no_candidate_ddl."""
+
+
 @asynccontextmanager
 async def _loads(pipeline: _Pipeline):
     with (
@@ -71,8 +77,6 @@ async def _loads(pipeline: _Pipeline):
             "apps.workspaces.tasks.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema", return_value=None),
-        patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None),
         patch(
             "apps.workspaces.tasks.build_and_promote_cube_schema",
             return_value=MagicMock(id="cube", content_hash="hash"),
@@ -286,6 +290,7 @@ async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
     late_entry = next(e for e in result["tenants"] if e.get("tenant_id") == str(late.id))
     assert late_entry["success"] is False
     assert "added while the load was starting" in late_entry["error"]
+    assert late_entry["error_code"] == ErrorCode.WORKSPACE_SOURCES_CHANGED
 
 
 async def test_workspaces_locking_shared_tenants_in_opposite_order_do_not_deadlock(user):
