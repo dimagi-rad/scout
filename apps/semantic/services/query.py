@@ -135,10 +135,16 @@ async def run_semantic_query(
             retryable=True,
         )
     except CubeQueryError as exc:
-        return query_error(
+        # Compilation used the semantic catalog; Cube may be serving an older
+        # publication. Readiness, not the error's wording, decides whether that
+        # mismatch warrants rebuilding. A ready surface remains invalid_query.
+        return await query_readiness_error(
+            workspace,
+            query_spec,
             VALIDATION_ERROR,
             f"Cube query execution failed: {exc}",
             category="invalid_query",
+            readiness=readiness,
         )
     except Exception as exc:
         return query_error(

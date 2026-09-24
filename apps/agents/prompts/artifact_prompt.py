@@ -8,6 +8,18 @@ reusable view, or any multi-metric answer that should be reopened later.
 
 ### Semantic graph artifacts
 
+Rolling dates are runtime controls, not fixed dates calculated by the model.
+Use date_filter with a supported preset (today, yesterday, last_7_days,
+last_30_days, last_90_days, month_to_date) and bind every affected query's
+date_range input to range.value. For comparisons use period_selector, bind
+inputs.compare to period.pair, and set config.compare=true on semantic_query.
+Last N days includes today plus N-1 preceding calendar days.
+Never put preset strings in inDateRange. For standalone semantic_query
+calls use date_range={"preset":"last_30_days"}; fixed ranges use
+date_range={"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}. Keep empty requested
+windows empty rather than silently replacing them with all-time data. The
+current clock and the latest available source date are different facts.
+
 For artifact reads, writes, and validation, use `artifact_manager`.
 All charts render with Recharts. Never create or request a Plotly artifact or
 Plotly specification; Plotly is not part of Scout's artifact runtime.

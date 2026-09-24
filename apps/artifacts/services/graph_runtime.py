@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from apps.semantic.services.date_context import DateContextError
 from apps.semantic.services.query import run_semantic_query
 from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.workspaces.models import Workspace
@@ -16,6 +17,7 @@ from .graph_doc import (
     validate_doc,
 )
 from .graph_manifest import build_semantic_query_manifest
+from .query_context import resolve_artifact_queries
 
 CHECK_ROW_LIMIT = 50
 MAX_CHECK_QUERIES = 25
@@ -32,9 +34,61 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
         "entry_count": len(manifest.get("entries", [])),
         "unresolved_count": len(manifest.get("unresolved", [])),
     }
-    entries = manifest.get("entries", [])[:MAX_CHECK_QUERIES]
     query_results = []
     actual_keys: dict[str, list[str]] = {}
+    try:
+        resolved, context = resolve_artifact_queries(doc)
+    except DateContextError as exc:
+        return {
+            "success": False,
+            "diagnostics": [
+                *diagnostics,
+                {"severity": "error", "code": "date_context", "message": str(exc)},
+            ],
+            "manifest": manifest_summary,
+            "queries": [],
+            "key_warnings": [],
+            "query_context": None,
+            "failures": [
+                {
+                    "query_key": None,
+                    "message": str(exc),
+                    "category": "invalid_document",
+                    "code": "VALIDATION_ERROR",
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
+            "summary": "Date context could not be resolved",
+        }
+    if len(resolved) > MAX_CHECK_QUERIES:
+        return {
+            "success": False,
+            "diagnostics": [
+                *diagnostics,
+                {
+                    "severity": "error",
+                    "code": "query_check_limit",
+                    "message": f"Runtime checks support at most {MAX_CHECK_QUERIES} queries, including both comparison periods; this artifact resolves to {len(resolved)}.",
+                },
+            ],
+            "manifest": manifest_summary,
+            "queries": [],
+            "key_warnings": [],
+            "query_context": context,
+            "failures": [
+                {
+                    "query_key": None,
+                    "message": "Too many queries to validate the complete artifact",
+                    "category": "invalid_document",
+                    "code": "VALIDATION_ERROR",
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
+            "summary": "Too many queries to validate the complete artifact",
+        }
+    entries = resolved
     if diagnostics_have_errors(diagnostics):
         return {
             "success": False,
@@ -55,17 +109,18 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "summary": "Document validation failed; no queries executed.",
         }
     workspace = await Workspace.objects.aget(pk=artifact.workspace_id)
-    readiness = QueryReadiness(workspace, [entry.get("query") or {} for entry in entries])
-    for entry in entries:
-        query = dict(entry.get("query") or {})
+    queries = [{key: value for key, value in entry.items() if key != "name"} for entry in entries]
+    for query in queries:
         query.setdefault("limit", CHECK_ROW_LIMIT)
+    readiness = QueryReadiness(workspace, queries)
+    for entry, query in zip(entries, queries, strict=True):
         result = await run_semantic_query(workspace, query, user_id=user_id, readiness=readiness)
         if not result.get("success", True) or result.get("error"):
             error = result.get("error")
             failure = _query_failure(error)
             query_results.append(
                 {
-                    "query_key": entry["key"],
+                    "query_key": entry["name"],
                     "status": "error",
                     "error": failure["message"],
                     "failure": failure,
@@ -74,10 +129,10 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             )
             continue
         row_keys = _row_keys(result.get("columns", []), result.get("rows", []), query)
-        actual_keys[entry["key"]] = sorted(row_keys)
+        actual_keys[entry["name"]] = sorted(row_keys)
         query_results.append(
             {
-                "query_key": entry["key"],
+                "query_key": entry["name"],
                 "status": "ok",
                 "row_count": result.get("row_count", 0),
                 "result_keys": sorted(row_keys),
@@ -85,10 +140,19 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
                 "semantic_query": result.get("semantic_query", query),
             }
         )
-    key_warnings = _key_contract_warnings(manifest.get("entries", []), actual_keys)
+    # Check each resolved period independently; combining both key sets would
+    # let a valid current result hide a broken previous-period result.
+    key_warnings = _key_contract_warnings(
+        [
+            {"key": entry["name"], "result_keys": sorted(expected_result_keys(entry))}
+            for entry in entries
+        ],
+        actual_keys,
+    )
     ok_count = sum(1 for item in query_results if item["status"] == "ok")
     return {
         "success": not key_warnings and ok_count == len(query_results),
+        "query_context": context,
         "diagnostics": diagnostics,
         "manifest": manifest_summary,
         "queries": query_results,
