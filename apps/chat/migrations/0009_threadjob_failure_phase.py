@@ -10,7 +10,11 @@ class Migration(migrations.Migration):
             name="failure_phase",
             field=models.CharField(
                 blank=True,
-                choices=[("materialization", "Materialization"), ("resume", "Follow-up response")],
+                choices=[
+                    ("materialization", "Materialization"),
+                    ("query_build", "Query layer build"),
+                    ("resume", "Follow-up response"),
+                ],
                 db_default="",
                 default="",
                 max_length=20,

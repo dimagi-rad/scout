@@ -62,7 +62,7 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
 def _needs_materialization_retry_check(job: ThreadJob) -> bool:
     if job.state not in {ThreadJob.State.FAILED, ThreadJob.State.CANCELLED}:
         return False
-    if job.failure_phase == ThreadJob.FailurePhase.RESUME:
+    if job.failure_phase in {ThreadJob.FailurePhase.RESUME, ThreadJob.FailurePhase.QUERY_BUILD}:
         return False
     # Historical jobs cannot distinguish a failed follow-up from failed loading.
     # Preserve Retry for those ambiguous resumed jobs rather than infer from prose.
@@ -76,7 +76,12 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
     Completed jobs still clear stale failure cards in the frontend.
     """
     retry_available = job.state in {ThreadJob.State.FAILED, ThreadJob.State.CANCELLED}
-    if _needs_materialization_retry_check(job):
+    if (
+        job.state == ThreadJob.State.FAILED
+        and job.failure_phase == ThreadJob.FailurePhase.QUERY_BUILD
+    ):
+        retry_available = False
+    elif _needs_materialization_retry_check(job):
         failures = summary_failures([*job.materialization_preflight_failures, *run_results])
         retry_available = not failures or any(f.code not in REQUIRES_REMEDIATION for f in failures)
     return {

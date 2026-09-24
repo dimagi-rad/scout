@@ -108,6 +108,23 @@ def test_retry_keeps_partial_recovery_and_failed_followups_available(
     assert _termination_to_dict(job, [{"sources": sources}])["retry_available"] is retry
 
 
+@pytest.mark.parametrize("phase,retry", [("query_build", False), ("resume", True), ("", True)])
+def test_completed_source_runs_do_not_offer_reload_for_a_query_build_failure(phase, retry):
+    job = SimpleNamespace(
+        id="job",
+        thread_id="thread",
+        tool_call_id="tool",
+        state=ThreadJob.State.FAILED,
+        completed_at=None,
+        error_summary="Reload everything now",  # Prose must not override the phase.
+        failure_phase=phase,
+        started_at=timezone.now(),
+        materialization_preflight_failures=[],
+    )
+    results = [{"sources": {"sessions": {"state": "completed"}}}]
+    assert _termination_to_dict(job, results)["retry_available"] is retry
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_retry_policy_loads_run_results_and_preflight_failures_by_job():

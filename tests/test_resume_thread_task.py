@@ -12,6 +12,7 @@ from apps.chat.models import Thread, ThreadJob
 from apps.common.error_codes import ErrorCode
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.api.jobs_views import _termination_to_dict
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -330,6 +331,9 @@ async def test_resume_semantic_build_failure_maps_to_failed():
         status=SemanticModel.Status.ERROR,
         metadata={"last_build": {"ok": False, "error": "validator exploded"}},
     )
+    await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=ws).aupdate(
+        state=SchemaState.ACTIVE
+    )
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
@@ -348,6 +352,8 @@ async def test_resume_semantic_build_failure_maps_to_failed():
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert "semantic model failed to build" in tj.error_summary
+    assert tj.failure_phase == ThreadJob.FailurePhase.QUERY_BUILD
+    assert _termination_to_dict(tj, [])["retry_available"] is False
 
 
 @pytest.mark.asyncio
@@ -1256,7 +1262,7 @@ async def _make_multi_tenant_job(*, email, ws_name, pj_id, view_schema_state, la
         )
         await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
         schema = await TenantSchema.objects.acreate(
-            tenant=tenant, schema_name=f"{ws_name}_s{i}".replace("-", "_")
+            tenant=tenant, schema_name=f"{ws_name}_s{i}".replace("-", "_"), state=SchemaState.ACTIVE
         )
         await MaterializationRun.objects.acreate(
             tenant_schema=schema,
@@ -1320,6 +1326,8 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
     assert tj.state == ThreadJob.State.FAILED
     assert "view schema" in tj.error_summary.lower()
     assert "Canonical name collision" in tj.error_summary
+    assert tj.failure_phase == ThreadJob.FailurePhase.QUERY_BUILD
+    assert _termination_to_dict(tj, [])["retry_available"] is False
 
 
 @pytest.mark.asyncio
@@ -1359,6 +1367,42 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun():
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert "re-running materialization will rebuild it" in tj.error_summary.lower()
+    assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
+    assert _termination_to_dict(tj, [])["retry_available"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("current_state", [SchemaState.EXPIRED, SchemaState.FAILED])
+async def test_resume_missing_tenant_data_allows_refresh_without_cascade_marker(current_state):
+    tj = await _make_multi_tenant_job(
+        email="missing-current@b.c",
+        ws_name="W-missing-current",
+        pj_id=20004,
+        view_schema_state=SchemaState.FAILED,
+        last_error="A query layer could not be built",
+    )
+    await TenantSchema.objects.filter(schema_name="W_missing_current_s2").aupdate(
+        state=current_state
+    )
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=mock_agent),
+    ):
+        await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "Tenant 2" in body
+    assert "Verify current access and account credentials" in body
+    assert "ask someone with access" in body
+    assert "Do NOT re-run" not in body
+    await tj.arefresh_from_db()
+    assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
+    assert "Tenant 2" in tj.error_summary
+    assert "cannot fix" not in tj.error_summary
+    assert _termination_to_dict(tj, [])["retry_available"] is True
 
 
 @pytest.mark.asyncio

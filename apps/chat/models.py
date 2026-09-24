@@ -116,6 +116,7 @@ class ThreadJob(models.Model):
 
     class FailurePhase(models.TextChoices):
         MATERIALIZATION = "materialization", "Materialization"
+        QUERY_BUILD = "query_build", "Query layer build"
         RESUME = "resume", "Follow-up response"
 
     TERMINAL_STATES = frozenset({State.COMPLETED, State.FAILED, State.CANCELLED})

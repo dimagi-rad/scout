@@ -2828,7 +2828,35 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         semantic_state, semantic_error = await _semantic_layer_state(workspace)
     semantic_unavailable = semantic_state == "unavailable"
 
-    if view_schema_failed:
+    # A completed run is historical evidence, not proof its data still exists.
+    # Use current schema state before declaring that another load cannot help.
+    missing_active_tenants = []
+    if status == "completed" and (view_schema_failed or semantic_unavailable):
+        active_ids = {
+            tenant_id
+            async for tenant_id in TenantSchema.objects.filter(
+                tenant__workspace_tenants__workspace=workspace, state=SchemaState.ACTIVE
+            ).values_list("tenant_id", flat=True)
+        }
+        missing_active_tenants = [
+            tenant.canonical_name or tenant.external_id
+            async for tenant in workspace.tenants.all()
+            if tenant.id not in active_ids
+        ]
+    missing_data_guidance = (
+        f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
+        "Verify current access and account credentials before refreshing their data. "
+        "If you cannot access a source, ask someone with access to refresh it. "
+        "Then recheck the workspace query layer and semantic model; do not claim recovery until verified."
+    )
+
+    if missing_active_tenants:
+        body = (
+            f"{SYSTEM_RESUME_MARKER} The runs reported completion, but the current data "
+            f"and query surface are unavailable. {missing_data_guidance} "
+            f"Query layer error: {view_schema_error or semantic_error}. Per-tenant: {summary}"
+        )
+    elif view_schema_failed:
         if credential_guidance or status != "completed":
             body = (
                 f"{SYSTEM_RESUME_MARKER} Materialization left incomplete refresh coverage, "
@@ -3115,7 +3143,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     error_summary = ""
     if terminal == ThreadJob.State.FAILED:
-        if view_schema_failed and (credential_guidance or status != "completed"):
+        if missing_active_tenants:
+            error_summary = missing_data_guidance
+        elif view_schema_failed and (credential_guidance or status != "completed"):
             error_summary = (
                 "Some tenant data did not refresh successfully, and the workspace query "
                 "layer (view schema) "
@@ -3183,6 +3213,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the
     # row CANCELLED, so this matches zero rows rather than clobbering it back to a
     # success terminal; we then re-read the actual persisted state below.
+    failure_phase = ""
+    if terminal == ThreadJob.State.FAILED:
+        query_build_failed = (
+            status == "completed"
+            and not missing_active_tenants
+            and (view_schema_failed or semantic_unavailable)
+            and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in view_schema_error
+        )
+        failure_phase = (
+            ThreadJob.FailurePhase.QUERY_BUILD
+            if query_build_failed
+            else ThreadJob.FailurePhase.MATERIALIZATION
+        )
     updated = await ThreadJob.objects.filter(
         id=tj.id,
         state=ThreadJob.State.RUNNING,
@@ -3190,9 +3233,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         state=terminal,
         completed_at=timezone.now(),
         error_summary=error_summary,
-        failure_phase=ThreadJob.FailurePhase.MATERIALIZATION
-        if terminal == ThreadJob.State.FAILED
-        else "",
+        failure_phase=failure_phase,
     )
     if not updated:
         actual_state = (
