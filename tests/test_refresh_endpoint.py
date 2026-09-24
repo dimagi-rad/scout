@@ -7,8 +7,16 @@ from asgiref.sync import async_to_sync
 from django.db import connection
 from rest_framework.test import APIClient
 
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceMembership, WorkspaceRole
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from apps.workspaces.tasks import refresh_tenant_schema
+from tests.tenant_access import grant_tenant_access
 
 
 @pytest.fixture
@@ -158,3 +166,77 @@ def test_refresh_status_no_schema_returns_unavailable(manage_client, workspace):
     resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
     assert resp.status_code == 200
     assert resp.data["state"] == "unavailable"
+
+
+def _add_source(workspace, user, external_id, *, grant=True):
+    extra = Tenant.objects.create(
+        provider="commcare", external_id=external_id, canonical_name=external_id
+    )
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=extra)
+    if grant:
+        grant_tenant_access(user, extra)
+    return extra
+
+
+@pytest.mark.django_db
+def test_refresh_covers_every_source_of_a_multi_source_workspace(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    """Manual refresh used to refresh only the workspace's first tenant."""
+    second = _add_source(workspace, user, "second-source")
+
+    job_ids = iter([501, 502])
+    with patch(
+        "apps.workspaces.api.views.refresh_tenant_schema.defer",
+        side_effect=lambda **_: MagicMock(id=next(job_ids)),
+    ) as defer:
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 202
+    assert defer.call_count == 2
+    assert {t["tenant_id"] for t in resp.data["tenants"]} == {str(tenant.id), str(second.id)}
+    assert all(t["status"] == "provisioning" for t in resp.data["tenants"])
+    for source in (tenant, second):
+        assert TenantSchema.objects.filter(tenant=source, state=SchemaState.PROVISIONING).exists()
+
+
+@pytest.mark.django_db
+def test_refresh_reports_each_source_that_could_not_start(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    busy = _add_source(workspace, user, "busy-source")
+    # A workspace load is filling a candidate for this source under its tenant lock.
+    TenantSchema.objects.create(
+        tenant=busy,
+        schema_name="busy_r1",
+        state=SchemaState.PROVISIONING,
+        load_workspace_id=workspace.id,
+    )
+
+    with patch(
+        "apps.workspaces.api.views.refresh_tenant_schema.defer", return_value=MagicMock(id=610)
+    ) as defer:
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 202
+    defer.assert_called_once()
+    by_tenant = {t["tenant_id"]: t for t in resp.data["tenants"]}
+    assert by_tenant[str(tenant.id)]["status"] == "provisioning"
+    assert by_tenant[str(busy.id)]["status"] == "in_progress"
+
+
+@pytest.mark.django_db
+def test_refresh_status_reports_each_source_and_never_hides_a_failure(
+    manage_client, workspace, tenant, user
+):
+    failed = _add_source(workspace, user, "failed-source")
+    TenantSchema.objects.create(tenant=tenant, schema_name="ok_live", state=SchemaState.ACTIVE)
+    TenantSchema.objects.create(tenant=failed, schema_name="bad_r1", state=SchemaState.FAILED)
+
+    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
+
+    assert resp.data["state"] == SchemaState.FAILED
+    assert {t["tenant_id"]: t["state"] for t in resp.data["tenants"]} == {
+        str(tenant.id): SchemaState.ACTIVE,
+        str(failed.id): SchemaState.FAILED,
+    }
