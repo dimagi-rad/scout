@@ -197,6 +197,7 @@ def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names:
     sources_result = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
+    auxiliary_tables = {s.name: s.auxiliary_tables for s in pipeline_config.sources}
 
     tables = []
     for source_name, source_data in sources_result.items():
@@ -215,6 +216,18 @@ def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names:
                 "materialized_at": materialized_at,
             }
         )
+        for table_name, description in auxiliary_tables.get(source_name, {}).items():
+            if table_name in live_table_names:
+                tables.append(
+                    {
+                        "name": table_name,
+                        "type": "table",
+                        "description": description,
+                        "materialized_row_count": None,
+                        "row_count_verified": False,
+                        "materialized_at": materialized_at,
+                    }
+                )
 
     for model_name in pipeline_config.dbt_models:
         if live_table_names and model_name not in live_table_names:

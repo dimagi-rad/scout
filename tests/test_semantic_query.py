@@ -82,6 +82,32 @@ def semantic_model(workspace):
     return model
 
 
+def test_relative_dates_and_timezone_reach_cube(monkeypatch, workspace, semantic_model):
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
+    compiled = query_service._compile_semantic_query(
+        workspace,
+        {
+            "measures": ["visits.count"],
+            "time_dimension": "visits.visit_date",
+            "granularity": "day",
+            "date_range": {"preset": "last_7_days"},
+            "query_context": {"as_of": "2026-09-16T00:30:00Z", "timezone": "America/New_York"},
+        },
+    )
+    assert compiled["cube_query"]["timezone"] == "America/New_York"
+    assert compiled["cube_query"]["filters"] == [
+        {
+            "member": "visits.visit_date",
+            "operator": "inDateRange",
+            "values": ["2026-09-09", "2026-09-15"],
+        }
+    ]
+    assert compiled["query"]["query_context"]["today"] == "2026-09-15"
+    assert "date_range" not in compiled["query"]
+
+
 def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_model):
     monkeypatch.setattr(
         query_service, "get_active_semantic_model", lambda _workspace: semantic_model

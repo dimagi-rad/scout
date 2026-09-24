@@ -116,6 +116,22 @@ def test_artifact_manager_summary_is_compact():
     }
 
 
+def test_metadata_only_summary_does_not_claim_data_was_verified():
+    message = ToolMessage(
+        name="artifact_write",
+        tool_call_id="metadata-edit",
+        content=json.dumps(
+            {
+                "status": "updated",
+                "runtime": None,
+                "runtime_validation": "not_required_metadata_only",
+            }
+        ),
+    )
+    summary = _summarize_result([message], "Description saved.")
+    assert summary["runtime_summary"] == "Metadata-only edit; data was not revalidated."
+
+
 def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact():
     response = {
         "status": "needs_data_model",

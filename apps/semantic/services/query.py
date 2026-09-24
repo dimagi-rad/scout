@@ -26,6 +26,11 @@ from apps.semantic.services.cube_schema import (
     build_cube_security_context,
     get_active_cube_schema,
 )
+from apps.semantic.services.date_context import (
+    DateContextError,
+    resolve_query_dates,
+    validate_date_filter,
+)
 from apps.semantic.services.query_outcomes import QueryReadiness, query_error, query_readiness_error
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR
@@ -81,7 +86,7 @@ async def run_semantic_query(
         )
     except SemanticMemberError as exc:
         return query_error(VALIDATION_ERROR, str(exc), category="missing_model_dependency")
-    except SemanticQueryError as exc:
+    except (SemanticQueryError, DateContextError) as exc:
         return query_error(VALIDATION_ERROR, str(exc), category="invalid_query")
     except CubeSchemaBuildError as exc:
         return await query_readiness_error(
@@ -160,6 +165,7 @@ def _compile_semantic_query_for_async(workspace, query_spec: dict[str, Any]) -> 
 
 
 def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
+    query_spec = resolve_query_dates(query_spec)
     model = get_active_semantic_model(workspace)
 
     measures = _as_list(query_spec.get("measures"))
@@ -198,7 +204,12 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         if time_dimension
         else None
     )
-    resolved_filters = [_resolve_filter(model, f) for f in filters]
+    resolved_filters = [
+        _resolve_filter(
+            model, f, timezone_name=(query_spec.get("query_context") or {}).get("timezone")
+        )
+        for f in filters
+    ]
 
     datasets = {
         member.dataset.id
@@ -238,6 +249,8 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         "order_by": order_by,
         "limit": limit,
     }
+    if query_spec.get("query_context"):
+        canonical_query["query_context"] = query_spec["query_context"]
     return {
         "cube_query": _cube_query(
             resolved_measures=resolved_measures,
@@ -247,6 +260,7 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
             resolved_filters=resolved_filters,
             order_by=order_by,
             limit=limit,
+            timezone_name=(query_spec.get("query_context") or {}).get("timezone", ""),
         ),
         "model": model,
         "cube_schema": cube_schema,
@@ -265,6 +279,7 @@ def _cube_query(
     resolved_filters: list[tuple[ResolvedMember, dict[str, Any]]],
     order_by: list,
     limit: int,
+    timezone_name: str = "",
 ) -> dict[str, Any]:
     query: dict[str, Any] = {
         "measures": [member.member for member in resolved_measures],
@@ -272,6 +287,8 @@ def _cube_query(
         "filters": [_cube_filter(member, filter_spec) for member, filter_spec in resolved_filters],
         "limit": limit,
     }
+    if timezone_name:
+        query["timezone"] = timezone_name
     if resolved_time:
         time_dimension = {"dimension": resolved_time.member}
         if granularity:
@@ -348,9 +365,12 @@ def _resolve_member(
     return ResolvedMember(dataset=dataset, field=field, member=member)
 
 
-def _resolve_filter(model, filter_spec: dict[str, Any]) -> tuple[ResolvedMember, dict[str, Any]]:
+def _resolve_filter(
+    model, filter_spec: dict[str, Any], *, timezone_name=None
+) -> tuple[ResolvedMember, dict[str, Any]]:
     if not isinstance(filter_spec, dict):
         raise SemanticQueryError("Each filter must be an object.")
+    validate_date_filter(filter_spec, timezone_name)
     field = filter_spec.get("field") or filter_spec.get("member")
     member = _resolve_member(
         model,

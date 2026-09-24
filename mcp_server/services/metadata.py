@@ -72,6 +72,7 @@ async def pipeline_list_tables(
     sources_result: dict[str, Any] = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
+    auxiliary_tables = {s.name: s.auxiliary_tables for s in pipeline_config.sources}
 
     live_table_names = await _live_tables_in_schema(tenant_schema.schema_name)
 
@@ -92,6 +93,18 @@ async def pipeline_list_tables(
                 "materialized_at": materialized_at,
             }
         )
+        for table_name, description in auxiliary_tables.get(source_name, {}).items():
+            if table_name in live_table_names:
+                tables.append(
+                    {
+                        "name": table_name,
+                        "type": "table",
+                        "description": description,
+                        "materialized_row_count": None,
+                        "row_count_verified": False,
+                        "materialized_at": materialized_at,
+                    }
+                )
 
     for model_name in pipeline_config.dbt_models:
         if live_table_names and model_name not in live_table_names:
@@ -251,7 +264,14 @@ async def pipeline_describe_table(
         return None
 
     source_descriptions = (
-        {s.physical_table_name: s.description for s in pipeline_config.sources}
+        {
+            name: description
+            for source in pipeline_config.sources
+            for name, description in {
+                source.physical_table_name: source.description,
+                **source.auxiliary_tables,
+            }.items()
+        }
         if pipeline_config is not None
         else {}
     )
@@ -393,6 +413,9 @@ async def pipeline_get_metadata(
             "to_table": r.to_table,
             "to_column": r.to_column,
             "description": r.description,
+            "key_pairs": r.key_pairs,
+            "relationship_type": r.relationship_type,
+            "require_unique_target": r.require_unique_target,
         }
         for r in pipeline_config.relationships
     ]
