@@ -91,4 +91,85 @@ describe("LostAccessModal", () => {
     expect(screen.queryByTestId("lost-access-picker")).toBeNull()
     expect(screen.getByText(/don’t have access to any workspaces/)).toBeInTheDocument()
   })
+
+  it("links to the workspace's own page, where the user can leave or remove a source", async () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-workspace-settings"))
+
+    expect(navigate).toHaveBeenCalledWith(expect.stringMatching(/\/workspaces\/.*skelly$/))
+  })
+
+  it("does not cover the active workspace's own page", () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    render(
+      <MemoryRouter initialEntries={["/workspaces/skelly/skelly"]}>
+        <LostAccessModal />
+      </MemoryRouter>,
+    )
+
+    expect(screen.queryByTestId("lost-access-modal")).toBeNull()
+  })
+
+  it("offers Connected Accounts even without a missing-source list", async () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-connections"))
+
+    expect(navigate).toHaveBeenCalledWith("/settings/connections")
+  })
+})
+
+describe("LostAccessModal with missing sources", () => {
+  const partial = {
+    ...ws("both", false, "ocs"),
+    missing_tenants: [
+      {
+        tenant_id: "t-bot-b",
+        tenant_name: "Bot B",
+        provider: "ocs",
+        recovery: "connect_team" as const,
+        team_slug: "team-b",
+        team_name: "Team B",
+        remedy: "connect Open Chat Studio team 'Team B' in Connected Accounts",
+      },
+    ],
+  }
+
+  beforeEach(() => {
+    navigate.mockClear()
+    useAppStore.setState({ domainsStatus: "loaded", domains: [partial], activeDomainId: "both" })
+  })
+
+  it("names each missing source with its remedy", () => {
+    renderModal()
+
+    expect(screen.getByText(/can’t open “both” yet/)).toBeInTheDocument()
+    expect(screen.getByTestId("lost-access-missing-t-bot-b")).toHaveTextContent(
+      "Bot B: connect Open Chat Studio team 'Team B' in Connected Accounts",
+    )
+  })
+
+  it("links to Connected Accounts", async () => {
+    renderModal()
+
+    await userEvent.click(screen.getByTestId("lost-access-connections"))
+
+    expect(navigate).toHaveBeenCalledWith("/settings/connections")
+  })
+
+  it.each(["/settings/connections", "/settings/connections/"])(
+    "does not cover Connected Accounts (%s), where the user fixes it",
+    (path) => {
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <LostAccessModal />
+        </MemoryRouter>,
+      )
+
+      expect(screen.queryByTestId("lost-access-modal")).toBeNull()
+    },
+  )
 })
