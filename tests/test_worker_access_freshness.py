@@ -36,14 +36,14 @@ async def test_stale_and_revoked_actor_is_denied_before_loading(
 ):
     await amake_proof_stale(user, tenant)
     upstream_provider.domains = []
-    pipeline = AsyncMock()
+    pipeline = MagicMock()
 
     with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
         result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert result["status"] == "denied"
     assert result["error_code"] == ErrorCode.AUTH_ACCESS_DENIED
-    pipeline.assert_not_awaited()
+    pipeline.assert_not_called()
     membership = await TenantMembership.all_objects.aget(user=user, tenant=tenant)
     assert membership.archived_at is not None
     assert len(upstream_provider.requests) == 1
@@ -56,7 +56,7 @@ async def test_provider_outage_denies_the_job_without_touching_memberships(
 ):
     await amake_proof_stale(user, tenant)
     upstream_provider.failure = 503
-    pipeline = AsyncMock()
+    pipeline = MagicMock()
 
     with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
         result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
@@ -65,7 +65,7 @@ async def test_provider_outage_denies_the_job_without_touching_memberships(
     assert result["error_code"] == ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
     assert result["tenants"][0]["error_code"] == ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
     assert "retry shortly" in " ".join(result["guidance"])
-    pipeline.assert_not_awaited()
+    pipeline.assert_not_called()
     assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
 
 

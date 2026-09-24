@@ -1695,11 +1695,21 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
     if result.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
         # A role denial is not a source failure; don't label it as one.
         return str(result.get("error") or _ROLE_DENIED_MESSAGE)[:1000]
-    if result.get("status") == "denied" and result.get("error_code") in set(
-        FRESHNESS_ERROR_CODES.values()
-    ):
+    freshness_codes = set(FRESHNESS_ERROR_CODES.values())
+    if result.get("status") == "denied" and result.get("error_code") in freshness_codes:
         # A requester whose access could not be confirmed is not a failed source.
-        return str(result.get("error") or "")[:1000]
+        return str(result["error"])[:1000]
+    failed = [
+        tenant
+        for tenant in result.get("tenants") or []
+        if isinstance(tenant, dict) and tenant.get("success") is not True
+    ]
+    unverified = ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
+    if failed and all(tenant.get("error_code") == unverified for tenant in failed):
+        # A mid-run checkpoint denial skips the remaining tenants without a
+        # run-level status. The credential codes it can also carry are genuine
+        # source remedies, so only the verification-only code is re-labelled.
+        return str(failed[0].get("error") or "")[:1000]
     # A failed source commonly causes a downstream Cube *skip*, not a Cube
     # failure. Show the source remedy first; never infer auth advice by parsing
     # human/provider error text, or conflate missing credentials with a 403.
