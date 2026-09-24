@@ -943,9 +943,10 @@ class SchemaManager:
             )
             cursor.close()
             conn.commit()
-        except psycopg.errors.LockNotAvailable:
-            # The expected outcome of the bounded wait, not an error: a reader is
-            # parked on these views, and retirement will ask again.
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled):
+            # The expected outcome of the bounded wait (or a statement_timeout at or
+            # below it), not an error: a reader is parked on these views, and
+            # retirement will ask again.
             logger.warning("Dropping view schema '%s' timed out behind a reader", view_schema_name)
             self._rollback_publication(conn, view_schema_name)
             return False

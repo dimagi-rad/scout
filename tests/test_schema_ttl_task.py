@@ -824,8 +824,34 @@ async def test_retirement_never_rebuilds_an_expired_dependent_view_schema(
         await teardown_schema(schema_id=str(active_schema.id))
 
     rebuild.assert_not_awaited()
+    # Its views are already gone, so the next attempt can retire: keep retrying.
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=1
+    )
     await expired.arefresh_from_db()
     assert expired.state == SchemaState.EXPIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_query_bug_taking_t_is_not_retried_as_contention(active_schema):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    @asynccontextmanager
+    async def buggy_session(_tenant_ids):
+        raise psycopg.errors.UndefinedFunction("function pg_advisory_lock_x does not exist")
+        yield
+
+    with (
+        patch("apps.workspaces.tasks.tenant_data_lock", buggy_session),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        pytest.raises(psycopg.errors.UndefinedFunction),
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_not_awaited()
 
 
 @pytest.mark.asyncio

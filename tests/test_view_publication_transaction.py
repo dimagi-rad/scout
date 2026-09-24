@@ -103,8 +103,8 @@ def _seed_tenant_schema(conn, schema_name: str, *, sentinel: str, staging_view: 
     """Create a tenant schema the way provisioning does, with one sentinel row."""
     cursor = conn.cursor()
     cursor.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema_name)))
+    # Also creates the dbt role, so retirement's role cleanup is really tested.
     SchemaManager()._create_readonly_role(cursor, schema_name)
-    SchemaManager()._create_dbt_role(cursor, schema_name)
     cursor.execute(
         psycopg.sql.SQL("CREATE TABLE {}.raw_cases (value text)").format(
             psycopg.sql.Identifier(schema_name)

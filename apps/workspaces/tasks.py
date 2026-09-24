@@ -1787,7 +1787,14 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
             await schema.arefresh_from_db()
         except TenantSchema.DoesNotExist:
             return False  # deleted (e.g. with its tenant) while we waited for T
-        except (DataLockTimeout, DatabaseError, psycopg.Error) as exc:
+        except (
+            DataLockTimeout,
+            DatabaseError,
+            psycopg.OperationalError,
+            psycopg.InterfaceError,
+        ) as exc:
+            # Unreachable or closed sessions only: a query bug (ProgrammingError
+            # and friends) must surface, not be retried as contention.
             raise _RetirementNotStarted from exc
         if schema.state != SchemaState.TEARDOWN:
             return False
@@ -1894,10 +1901,11 @@ async def _retry_retirement(
     )
     movable = 0
     async for vs in WorkspaceViewSchema.objects.filter(schema_name__in=dependent_schemas):
-        if vs.state == SchemaState.EXPIRED:
-            # Leaving service already; a rebuild would resurrect it as ACTIVE.
-            continue
         movable += 1
+        if vs.state == SchemaState.EXPIRED:
+            # Its views were dropped after our attempt looked, so a plain retry
+            # converges; a rebuild would only resurrect it as ACTIVE.
+            continue
         try:
             if vs.state == SchemaState.TEARDOWN:
                 await teardown_view_schema_task.defer_async(view_schema_id=str(vs.id))
