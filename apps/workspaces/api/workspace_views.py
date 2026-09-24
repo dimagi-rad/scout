@@ -26,6 +26,7 @@ from apps.workspaces.access import (
     _live_tenant_ids,
     _shares_live_tenant,
     missing_tenants_by_workspace,
+    missing_tenants_for_member,
     missing_tenants_payload,
 )
 from apps.workspaces.models import (
@@ -510,14 +511,18 @@ class WorkspaceMemberListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        # The only source of the membership id that leaving needs.
+        # The only source of the membership id that leaving needs, so reachable
+        # without coverage; but then it shows only the caller's own row.
         workspace, _membership, err = resolve_workspace(
             request, workspace_id, require_coverage=False
         )
         if err:
             return err
+        covered = not missing_tenants_for_member(request.user, workspace)
 
         memberships = WorkspaceMembership.objects.filter(workspace=workspace).select_related("user")
+        if not covered:
+            memberships = memberships.filter(user=request.user)
         members = [
             {
                 "id": str(m.id),
@@ -534,7 +539,7 @@ class WorkspaceMemberListView(APIView):
             status__in=LIVE_INVITE_STATUSES,
             expires_at__gt=timezone.now(),
         )
-        invites = [_serialize_invite(i) for i in live_invites]
+        invites = [_serialize_invite(i) for i in live_invites] if covered else []
         return Response({"members": members, "invites": invites})
 
     def post(self, request, workspace_id):
@@ -891,6 +896,14 @@ class WorkspaceTenantView(APIView):
             return Response(
                 {"error": "Tenant not found in workspace."}, status=status.HTTP_404_NOT_FOUND
             )
+
+        # Without coverage a manager may only remove a source they are missing;
+        # removing one they can't read either would change the workspace for
+        # members who still have full access.
+        missing = {t.tenant_id for t in missing_tenants_for_member(request.user, workspace)}
+        if missing and str(wt.tenant_id) not in missing:
+            _workspace, _membership, err = resolve_workspace(request, workspace_id)
+            return err
 
         try:
             remove_workspace_tenant(workspace, wt)

@@ -219,6 +219,12 @@ def missing_tenants_by_workspace(user, workspaces) -> dict:
     }
 
 
+def missing_tenants_for_member(user, workspace) -> tuple[MissingTenant, ...]:
+    """:func:`missing_workspace_tenants` for one workspace, for handlers that
+    resolved with ``require_coverage=False`` and must narrow what they allow."""
+    return missing_workspace_tenants(user, _workspace_tenants(workspace))
+
+
 def _workspace_tenants(workspace) -> list:
     return [wt.tenant for wt in workspace.workspace_tenants.select_related("tenant")]
 

@@ -200,7 +200,7 @@ def test_outsider_gets_generic_denial_without_source_details(other_user, partial
 
 
 @pytest.mark.django_db
-def test_rollout_switch_off_keeps_the_any_of_rule(settings, user, partial_member, two_sources):
+def test_rollout_switch_off_keeps_the_any_of_rule(settings, user, partial_member):
     settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
 
     assert resolve_workspace_access_ex(user, partial_member.id).granted
@@ -221,7 +221,6 @@ def _list_entry(client, ws):
 @pytest.mark.django_db
 def test_list_has_access_agrees_with_the_gate(client, user, partial_member, two_sources):
     client.force_login(user)
-    _list_entry(client, partial_member)  # warm session/auth queries out of the bound below
     zero = _workspace(user, name="Empty")
     _join(zero, user)
 
@@ -381,7 +380,7 @@ class TestRemediationWithoutCoverage:
         assert resp.status_code == 204
         assert resolve_workspace_access_ex(manager, partial_member.id).granted
 
-    def test_can_leave(self, client, manager, partial_member, other_user, two_sources):
+    def test_can_leave(self, client, manager, partial_member, other_user):
         _join(partial_member, other_user, role=WorkspaceRole.MANAGE)
         mine = WorkspaceMembership.objects.get(workspace=partial_member, user=manager)
         client.force_login(manager)
@@ -410,12 +409,29 @@ class TestRemediationWithoutCoverage:
 
         assert resp.status_code == 204
 
-    def test_can_reach_the_page_that_offers_the_fixes(self, client, manager, partial_member):
+    def test_can_reach_the_page_that_offers_the_fixes(
+        self, client, manager, partial_member, other_user
+    ):
+        _join(partial_member, other_user)
         client.force_login(manager)
 
         assert client.get(f"/api/workspaces/{partial_member.id}/").status_code == 200
-        members = client.get(f"/api/workspaces/{partial_member.id}/members/").json()["members"]
-        assert str(manager.id) in {m["user_id"] for m in members}
+        roster = client.get(f"/api/workspaces/{partial_member.id}/members/").json()
+        # Only their own row (for leaving), not the other members or invites.
+        assert [m["user_id"] for m in roster["members"]] == [str(manager.id)]
+        assert roster["invites"] == []
+
+    def test_cannot_remove_a_source_they_still_have(
+        self, client, manager, partial_member, two_sources
+    ):
+        client.force_login(manager)
+        sources = client.get(f"/api/workspaces/{partial_member.id}/tenants/").json()
+        kept = next(s for s in sources if s["tenant_id"] == str(two_sources[0].id))
+
+        resp = client.delete(f"/api/workspaces/{partial_member.id}/tenants/{kept['id']}/")
+
+        assert resp.status_code == 403
+        assert WorkspaceTenant.objects.filter(pk=kept["id"]).exists()
 
     def test_still_cannot_read_workspace_content(self, client, manager, partial_member):
         client.force_login(manager)

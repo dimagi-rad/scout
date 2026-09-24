@@ -7,7 +7,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from tests.tenant_access import usable_connection
+from tests.tenant_access import grant_tenant_access, usable_connection
 
 
 @pytest.fixture
@@ -41,13 +41,14 @@ def test_add_tenant_to_workspace(api_client, user, workspace, tenant2, tenant_me
     assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant2).exists()
 
 
-def test_add_tenant_requires_manage_role(api_client, user, workspace, tenant2):
+def test_add_tenant_requires_manage_role(api_client, user, workspace, tenant, tenant2):
     from django.contrib.auth import get_user_model
 
     other = get_user_model().objects.create_user(email="other@example.com", password="pass")
     WorkspaceMembership.objects.create(
         workspace=workspace, user=other, role=WorkspaceRole.READ_WRITE
     )
+    grant_tenant_access(other, tenant)
     api_client.force_login(other)
     resp = api_client.post(
         f"/api/workspaces/{workspace.id}/tenants/",
@@ -55,6 +56,7 @@ def test_add_tenant_requires_manage_role(api_client, user, workspace, tenant2):
         format="json",
     )
     assert resp.status_code == 403
+    assert resp.data["error"] == "Only workspace managers can add tenants."
 
 
 def test_add_tenant_user_lacks_tenant_membership_is_rejected(api_client, user, workspace, tenant2):
@@ -114,6 +116,23 @@ def test_add_tenant_refused_when_member_lacks_a_workspace_tenant(
     # all, so the re-add is refused before it gets to the tenant check.
     assert resp.status_code == 403
     assert resp.data["reason"] == "tenant_access_lost"
+
+
+def test_add_tenant_already_in_workspace_still_checks_the_requester_under_any_of(
+    settings, api_client, user, workspace, tenant, tenant2
+):
+    """With the rollout switch off the gate lets them in; the re-add still checks."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    api_client.force_login(user)
+
+    resp = api_client.post(
+        f"/api/workspaces/{workspace.id}/tenants/",
+        {"tenant_id": str(tenant2.id)},
+        format="json",
+    )
+
+    assert resp.status_code == 400
 
 
 def test_list_workspace_tenants(api_client, user, workspace):
