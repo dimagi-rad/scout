@@ -5,6 +5,25 @@ import { StoryEngine } from "./engine"
 import type { Row } from "./types"
 
 describe("StoryEngine recovery refresh", () => {
+  it("clears an unchanged block's structural error when its missing dependency is added", async () => {
+    const runQuery = vi.fn().mockResolvedValue([{ visits_count: 4 }])
+    const engine = new StoryEngine(buildStoryRegistry(), { runQuery })
+    const table = { id: "table", type: "table", inputs: { data: { $ref: "q.visits" } } }
+    engine.loadDoc({ blocks: [table] })
+    expect(engine.getDiagnostics()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ blockId: "table", message: expect.stringContaining("does not exist") }),
+    ]))
+    engine.loadDoc({ blocks: [
+      table,
+      { id: "q", type: "semantic_query", config: { queries: { visits: { measures: ["visits.count"] } } } },
+    ] })
+    await vi.waitFor(() => expect(engine.getOutput("q.visits").status).toBe("ready"))
+    expect(engine.getDiagnostics()).toEqual([])
+    await vi.waitFor(() => expect(engine.getOutput("table.data").status).toBe("ready"))
+    expect(engine.getOutput("table.data").value).toEqual([{ visits_count: 4 }])
+    engine.destroy()
+  })
+
   it("contains invalid source presets and recovers when the block is fixed", async () => {
     const runQuery = vi.fn().mockResolvedValue([{ visits_count: 1 }])
     const engine = new StoryEngine(buildStoryRegistry(), { runQuery })

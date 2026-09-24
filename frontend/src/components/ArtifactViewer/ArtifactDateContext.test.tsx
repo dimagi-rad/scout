@@ -112,7 +112,7 @@ it.each(["previous_period", "previous_year"] as const)("keeps %s queries aligned
   ))
 })
 
-it("does not display an old inspector response after dates change", async () => {
+it("replaces an in-flight inspector request when dates change", async () => {
   let finishOld!: (data: QueryDataResponse) => void
   vi.spyOn(api, "post").mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
     .mockResolvedValueOnce({ queries: [{ name: "new", rows: [[5]] }], static_data: {} })
@@ -121,7 +121,7 @@ it("does not display an old inspector response after dates change", async () => 
   let oldRequest!: Promise<void>
   act(() => { oldRequest = result.current.refetch() })
   rerender({ runtime: { sources: { range: { start: "2026-09-10", end: "2026-09-16" } } } })
-  await act(async () => { await result.current.refetch() })
+  await waitFor(() => expect(result.current.queryData?.queries[0].rows).toEqual([[5]]))
   await act(async () => { finishOld({ queries: [{ name: "old", rows: [[18]] }], static_data: {} }); await oldRequest })
   expect(result.current.queryData?.queries[0].rows).toEqual([[5]])
 })

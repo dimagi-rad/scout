@@ -18,9 +18,11 @@ export function useArtifactQueryData(artifactId: string, workspaceId: string, ru
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const generation = useRef(0)
+  const hasRequested = useRef(false)
   const runtimeKey = JSON.stringify(runtime)
 
   const refetch = useCallback(async () => {
+    hasRequested.current = true
     const request = ++generation.current
     setIsLoading(true)
     setError(null)
@@ -42,8 +44,9 @@ export function useArtifactQueryData(artifactId: string, workspaceId: string, ru
     setQueryData(null)
     setError(null)
     setIsLoading(false)
+    if (hasRequested.current) void refetch()
     return () => { generation.current += 1 }
-  }, [artifactId, workspaceId, runtimeKey])
+  }, [artifactId, workspaceId, runtimeKey, refetch])
 
   return { queryData, isLoading, error, refetch, setQueryData }
 }

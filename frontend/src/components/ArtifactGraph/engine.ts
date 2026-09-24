@@ -93,7 +93,7 @@ export class StoryEngine implements StoryEngineApi {
 
     for (const node of this.nodes.values()) {
       const previous = oldNodes.get(node.id)
-      const carried = previous && previous.signature === node.signature && !node.configError
+      const carried = previous && previous.signature === node.signature && !previous.configError && !node.configError
 
       if (node.configError) {
         this.publishStatusAll(node, "error", node.configError)
@@ -101,10 +101,6 @@ export class StoryEngine implements StoryEngineApi {
       }
 
       if (carried) {
-        if (previous.configError) {
-          node.configError = previous.configError
-          this.diagnostics.push({ severity: "error", blockId: node.id, message: node.configError })
-        }
         node.lastSnapshot = previous.lastSnapshot
         node.lastOk = previous.lastOk
         for (const port of node.ports.outputs) {

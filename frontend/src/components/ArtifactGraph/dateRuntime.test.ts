@@ -33,4 +33,14 @@ describe("deterministic calendar dates", () => {
       start: "2026-02-24", end: "2026-03-02", preset: "previous_period",
     })
   })
+  it("does not trust malformed comparison metadata", () => {
+    const range = { start: "2026-03-03", end: "2026-03-09", preset: "last_7_days" }
+    const context = {
+      as_of: "2026-03-09T12:00:00Z", timezone: "UTC", today: "2026-03-09",
+      presets: { last_7_days: { ...range, comparisons: { previous_period: {} } } },
+    } as DateContext
+    expect(comparisonPeriod(range, "previous_period", context)).toEqual({
+      start: "2026-02-24", end: "2026-03-02", preset: "previous_period",
+    })
+  })
 })
