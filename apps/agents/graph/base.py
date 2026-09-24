@@ -39,6 +39,7 @@ from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
+from apps.common.error_codes import ErrorCode
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
 from apps.workspaces.access import aresolve_workspace_access_ex
@@ -151,12 +152,12 @@ ESCALATION_TRIGGER_COUNT = 3
 ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
 
 
-def _tool_message_error_code(content: Any) -> str | None:
-    """Extract the MCP envelope ``error.code`` from a ToolMessage's content.
+def _tool_message_error(content: Any) -> dict | None:
+    """Extract the MCP envelope ``error`` object from a ToolMessage's content.
 
     Content may be a JSON string, a list of content blocks (the
     langchain_mcp_adapters shape), or already-parsed structures. Reads the
-    structured ``error.code`` rather than a whitespace-sensitive substring (06#1).
+    structured ``error`` rather than a whitespace-sensitive substring (06#1).
     Returns None when the content isn't a recognizable error envelope.
     """
     if isinstance(content, list):
@@ -167,9 +168,9 @@ def _tool_message_error_code(content: Any) -> str | None:
             elif isinstance(block, str):
                 text = block
             if text:
-                code = _tool_message_error_code(text)
-                if code is not None:
-                    return code
+                error = _tool_message_error(text)
+                if error is not None:
+                    return error
         return None
     if isinstance(content, dict):
         envelope = content
@@ -183,11 +184,43 @@ def _tool_message_error_code(content: Any) -> str | None:
     if not isinstance(envelope, dict) or envelope.get("success") is not False:
         return None
     error = envelope.get("error")
-    if isinstance(error, dict):
-        code = error.get("code")
-        return code if isinstance(code, str) else None
-    return None
+    return error if isinstance(error, dict) else None
 
+
+def _tool_message_error_code(content: Any) -> str | None:
+    """The envelope ``error.code`` of a ToolMessage's content, if any."""
+    code = (_tool_message_error(content) or {}).get("code")
+    return code if isinstance(code, str) else None
+
+
+def _workspace_access_denial(messages: list) -> str | None:
+    """The authorizer's message when the latest tool round denied workspace access.
+
+    The denial holds for every remaining tool call this turn, so the graph ends
+    the turn on it with the remedy instead of letting the agent retry. The whole
+    trailing run of tool results is one round (parallel calls), and a successful
+    sibling in that round must not hide the denial.
+    """
+    batch = []
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            break
+        batch.append(message)
+    error = next(
+        (
+            e
+            for e in (_tool_message_error(m.content) for m in batch)
+            if e and e.get("code") == ErrorCode.WORKSPACE_ACCESS_DENIED
+        ),
+        None,
+    )
+    if error is None:
+        return None
+    message = error.get("message")
+    return message if isinstance(message, str) and message else ACCESS_DENIED_MESSAGE
+
+
+ACCESS_DENIED_MESSAGE = "I can no longer read this workspace's data."
 
 ESCALATION_MESSAGE = (
     "I've encountered repeated schema errors — the tables I expected to "
@@ -992,6 +1025,8 @@ async def build_agent_graph(
         See ``_should_escalate`` for the loop-detection rule. The escalation
         node ends the turn with a fixed message — no further tool calls.
         """
+        if _workspace_access_denial(state.get("messages", [])) is not None:
+            return "escalate"
         if _should_escalate(state.get("messages", [])):
             logger.warning(
                 "agent graph: routing to escalation node after %d consecutive "
@@ -1004,7 +1039,10 @@ async def build_agent_graph(
 
     def escalation_node(state: AgentState) -> dict[str, Any]:
         """Terminal node that emits a fixed escalation message and ends the turn."""
-        if not write_capable:
+        denial = _workspace_access_denial(state.get("messages", []))
+        if denial is not None:
+            message = denial
+        elif not write_capable:
             message = READ_ONLY_ESCALATION_MESSAGE
         elif not interactive:
             message = HEADLESS_ESCALATION_MESSAGE

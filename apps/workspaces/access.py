@@ -256,6 +256,8 @@ def resolve_workspace_access_ex(
     no tenant data (remove a source, leave, delete the workspace, list its
     sources). Without it a member who lost a source for good could never get out
     of the state, since the fix itself would be refused (ACCESS-CONTRACT §5).
+    It applies only while all-of is enforced, so with the rollout switch off every
+    endpoint keeps exactly the pre-#380 any-of decision.
     """
     try:
         wm = WorkspaceMembership.objects.select_related("workspace").get(
@@ -265,7 +267,7 @@ def resolve_workspace_access_ex(
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     missing = (
         missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
-        if require_coverage
+        if require_coverage or not all_of_access_enforced()
         else ()
     )
     if missing:

@@ -65,6 +65,13 @@ class ErrorCode(StrEnum):
     # provider admin. Retrying as the same user cannot succeed.
     WORKSPACE_ROLE_INSUFFICIENT = "WORKSPACE_ROLE_INSUFFICIENT"
 
+    # The acting user may not read this workspace now (not a member, or missing
+    # one of its sources). A Scout authorization decision re-checked per tool
+    # call, not an upstream 403: it must not share AUTH_ACCESS_DENIED, which
+    # upstream-denial handling treats as authoritative revocation. Retrying in
+    # the same turn cannot succeed, so the agent ends the turn on it.
+    WORKSPACE_ACCESS_DENIED = "WORKSPACE_ACCESS_DENIED"
+
     # A queued refresh job does not match the request its candidate schema records
     # (stale, duplicated, or foreign job). Nothing ran; this is not an authorization
     # failure, so it must not be reported as a missing role.
