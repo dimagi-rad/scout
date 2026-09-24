@@ -415,26 +415,21 @@ async def refresh_tenant_schema(
         }
 
     # Upstream freshness is checked here, after the claim's transaction closed, so
-    # no row lock is held across a provider call. A denial fails this candidate
-    # like any other refresh failure, with its own code (an outage says retry).
-    access = await aresolve_workspace_access_ex(
-        membership.user,
-        workspace_id,
-        minimum_role=WorkspaceRole.READ_WRITE,
-        verification=VerificationBudget.BACKGROUND,
-    )
-    if not access.granted:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        if access.denied_reason in FRESHNESS_ERROR_CODES:
-            return _refresh_denial_result(access.denied_reason)
-        return _refresh_denial_result(DENIED_ROLE_REQUIRED)
+    # no row lock is held across a provider call.
+    denial = await _refresh_access_denial(membership, workspace_id, new_schema, context.job.id)
+    if denial is not None:
+        return denial
 
     # T serializes this refresh with every other writer of the tenant (workspace
     # loads, retirement). Sibling work happens only after T is released: never
     # wait on another workspace's lock while holding a tenant lock.
     try:
         async with tenant_data_lock([new_schema.tenant_id]):
-            outcome = await _run_claimed_refresh(context, new_schema, membership)
+            # The wait for T can outlast the proof (up to the lock timeout), and
+            # the fetch must not run on stale authority: check again under T.
+            outcome = await _refresh_access_denial(
+                membership, workspace_id, new_schema, context.job.id
+            ) or await _run_claimed_refresh(context, new_schema, membership)
     except DataLockTimeout:
         logger.warning("Refresh of '%s' timed out waiting for its tenant", new_schema.schema_name)
         await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
@@ -563,9 +558,32 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
     return {"status": "active", "schema_id": str(new_schema.id)}
 
 
-async def _end_refresh_load(schema, job_id: int, generation: int) -> None:
-    await _to_thread_fresh_db(end_load_generation, schema.tenant_id, generation)
+async def _refresh_access_denial(membership, workspace_id, schema, job_id) -> dict | None:
+    """Fail the candidate and return the denial if the actor's authority lapsed.
+
+    A denial fails the candidate like any other refresh failure, with its own
+    code (an outage says retry).
+    """
+    access = await aresolve_workspace_access_ex(
+        membership.user,
+        workspace_id,
+        minimum_role=WorkspaceRole.READ_WRITE,
+        verification=VerificationBudget.BACKGROUND,
+    )
+    if access.granted:
+        return None
     await _drop_claimed_refresh_schema_and_fail(schema, job_id)
+    if access.denied_reason in FRESHNESS_ERROR_CODES:
+        return _refresh_denial_result(access.denied_reason)
+    return _refresh_denial_result(DENIED_ROLE_REQUIRED)
+
+
+async def _end_refresh_load(schema, job_id: int, generation: int) -> None:
+    try:
+        await _to_thread_fresh_db(end_load_generation, schema.tenant_id, generation)
+    finally:
+        # Paired: a failure clearing the marker must not leave the candidate live.
+        await _drop_claimed_refresh_schema_and_fail(schema, job_id)
 
 
 def _preflight_failure(tenant, error: str, code: str = "") -> dict:
@@ -1404,7 +1422,8 @@ async def _load_workspace_candidate(
     """
     # The candidate owner; a job-less load (the agent's blocking tool) gets a token.
     owner = load_owner_token(job_id)
-    config = raw_load_fingerprint(pipeline_config)
+    # Off the loop: the first call hashes the implementation source tree.
+    config = await asyncio.to_thread(raw_load_fingerprint, pipeline_config)
     await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tm.tenant_id)
     generation = await _to_thread_fresh_db(begin_load_generation, tm.tenant_id)
     try:
@@ -1483,38 +1502,69 @@ async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation:
 
 
 async def _drain(operation, subject) -> None:
-    """Finish cleanup before propagating worker cancellation, even if aborted again."""
+    """Finish cleanup before propagating worker cancellation, even if aborted again.
+
+    An abort that lands during cleanup is re-raised once cleanup is done, so a
+    caller handling an ordinary error still stops instead of moving on.
+    """
     cleanup = asyncio.create_task(operation)
+    aborted = False
     while True:
         try:
             await asyncio.shield(cleanup)
         except asyncio.CancelledError:
+            aborted = True
             if cleanup.cancelled():
-                return
+                break
             continue
         except Exception:
             logger.exception(
                 "Cancellation cleanup failed for '%s'", getattr(subject, "schema_name", subject)
             )
-        return
+        break
+    if aborted:
+        raise asyncio.CancelledError
 
 
 async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
-    abandoned = await _to_thread_fresh_db(
-        abandoned_workspace_candidates, tenant_id, keep_id=keep_id
-    )
-    for schema in abandoned:
-        try:
+    await _to_thread_fresh_db(_abandon_and_queue_drops, tenant_id, keep_id)
+
+
+def _abandon_and_queue_drops(tenant_id, keep_id) -> None:
+    """Take abandoned candidates out of resume and queue their drops in one commit.
+
+    Clearing the resume evidence without a queued drop would strand the schema:
+    nothing else would ever drop a FAILED candidate no load can resume.
+    """
+    with transaction.atomic():
+        for schema in abandoned_workspace_candidates(tenant_id, keep_id=keep_id):
             # Delayed: this writer holds T until its whole load publishes, and the
             # drop needs T, so an immediate job would only sit in a lock wait.
-            await drop_abandoned_candidate.configure(
+            drop_abandoned_candidate.configure(
                 schedule_in={"seconds": _CANDIDATE_DROP_DELAY_SECONDS}
-            ).defer_async(schema_id=str(schema.id))
-        except Exception:
-            logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
+            ).defer(schema_id=str(schema.id))
 
 
 _CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
+
+
+async def _recovery_intent(workspace) -> str:
+    """What a data-restore repair must ask of the tenants' loads.
+
+    Missing data is reconciled: whatever is already published satisfies it. But
+    the same repair is offered when data is present and its latest load did not
+    complete, and reconciling would reuse that same published generation and
+    change nothing, so that case asks for a fresh load.
+    """
+    view = await WorkspaceViewSchema.objects.filter(
+        workspace=workspace, state=SchemaState.ACTIVE
+    ).afirst()
+    coverage = view.tenant_coverage if view is not None else None
+    if await _included_tenant_snapshot_state(workspace, coverage) == "unsafe":
+        return INTENT_FULL_REFRESH
+    return INTENT_RECONCILE_MISSING
+
+
 _CANDIDATE_DROP_RETRYABLE = (
     DataLockTimeout,
     psycopg.OperationalError,
@@ -1992,7 +2042,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                     str(recovery.workspace_id),
                     str(recovery.requested_by_id),
                     context.job.id,
-                    intent_kind=INTENT_RECONCILE_MISSING,
+                    intent_kind=await _recovery_intent(recovery.workspace),
                 )
             elif action == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD:
                 result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))

@@ -913,3 +913,33 @@ async def test_a_refresh_cancelled_during_promotion_ends_its_load(
     assert ledger.loading_generation == 0
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_refresh_rechecks_authority_once_it_holds_the_tenant_lock(
+    provisioning_schema, old_active_schema, tenant_membership_obj
+):
+    """The wait for T can outlast the access proof; a revocation during it must
+    stop the fetch rather than publish on stale authority."""
+    access = AsyncMock(
+        side_effect=[MagicMock(granted=True), MagicMock(granted=False, denied_reason="role")]
+    )
+    patches = _refresh_patches(pipeline=patch("apps.workspaces.tasks.run_pipeline"))
+    with contextlib.ExitStack() as stack:
+        mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+        stack.enter_context(patch("apps.workspaces.tasks.aresolve_workspace_access_ex", access))
+        result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+            **await _refresh_auth_kwargs(tenant_membership_obj),
+        )
+
+    assert result["status"] == "denied"
+    assert access.await_count == 2
+    mocks["pipeline"].assert_not_called()
+    await provisioning_schema.arefresh_from_db()
+    await old_active_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.FAILED
+    assert old_active_schema.state == SchemaState.ACTIVE
