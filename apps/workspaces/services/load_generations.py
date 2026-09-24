@@ -137,8 +137,8 @@ def capture_load_intent(tenant_ids, kind: str) -> dict[str, int]:
     accepted after that load started fetching asks for the next generation: the
     user clicked after the data was read, so the running load cannot answer it.
     Missing-source reconciliation is satisfied by whatever is already published
-    (validated at run time) and only requests a load when nothing was ever
-    published.
+    (validated at run time), joins any in-flight first load (even one already
+    fetching), and only requests a load when nothing was ever published or pending.
     """
     if kind not in INTENT_KINDS:
         raise ValueError(f"Unknown load intent {kind!r}")
@@ -147,23 +147,22 @@ def capture_load_intent(tenant_ids, kind: str) -> dict[str, int]:
         # Sorted, so two requests over overlapping tenants lock rows in one order.
         for tenant_id in sorted({str(tenant_id) for tenant_id in tenant_ids}):
             generation = _locked_generation(tenant_id)
-            joinable = (
-                generation.requested_generation > generation.published_generation
-                and generation.loading_generation < generation.requested_generation
-            )
             pending = generation.requested_generation > generation.published_generation
-            if kind == INTENT_RECONCILE_MISSING and generation.published_generation >= 1:
-                intent[tenant_id] = generation.published_generation
-            elif kind == INTENT_RECONCILE_MISSING and pending:
-                # Reconciliation needs data, not freshness: any in-flight load answers
-                # it, even one whose fetch has already started.
+            if kind == INTENT_RECONCILE_MISSING:
+                if generation.published_generation >= 1:
+                    intent[tenant_id] = generation.published_generation
+                    continue
+                if pending:
+                    # Reconciliation needs data, not freshness: any in-flight load
+                    # answers it, even one whose fetch has already started.
+                    intent[tenant_id] = generation.requested_generation
+                    continue
+            elif pending and generation.loading_generation < generation.requested_generation:
                 intent[tenant_id] = generation.requested_generation
-            elif joinable:
-                intent[tenant_id] = generation.requested_generation
-            else:
-                generation.requested_generation += 1
-                generation.save(update_fields=["requested_generation", "updated_at"])
-                intent[tenant_id] = generation.requested_generation
+                continue
+            generation.requested_generation += 1
+            generation.save(update_fields=["requested_generation", "updated_at"])
+            intent[tenant_id] = generation.requested_generation
     return intent
 
 
@@ -194,8 +193,9 @@ def parse_load_intent(value) -> dict[str, int] | None:
             canonical = str(uuid.UUID(tenant_id))
         except ValueError:
             return None
-        # Normalized, so a braced or bare-hex spelling still matches str(tenant.id).
-        intent[canonical] = generation
+        # Normalized, so a braced or bare-hex spelling still matches str(tenant.id);
+        # two spellings of one tenant keep the stricter (higher) requirement.
+        intent[canonical] = max(generation, intent.get(canonical, 0))
     return intent
 
 
