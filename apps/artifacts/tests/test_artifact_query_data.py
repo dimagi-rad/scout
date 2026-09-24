@@ -55,6 +55,57 @@ async def test_query_inspector_resolves_controls_and_separates_filter_cache(
         )
         assert same_bounds_new_clock.status_code == 200
         assert run.await_count == 2
+        body = same_bounds_new_clock.json()
+        assert body["query_context"]["as_of"].startswith("2026-09-16T14:00:00")
+        assert body["queries"][0]["semantic_query"]["query_context"] == {
+            "timezone": CONTEXT["timezone"]
+        }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_inspector_never_executes_a_manifest_rejected_query(
+    member_client, workspace, live_artifact
+):
+    doc = story()
+    doc["blocks"][1]["config"]["queries"]["sessions"]["dateRange"] = ["2026-09-01", "2026-09-10"]
+    live_artifact.data = {"story_doc": doc}
+    await live_artifact.asave(update_fields=["data"])
+    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as execute:
+        response = await member_client.post(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
+            CONTEXT,
+            content_type="application/json",
+        )
+    assert response.status_code == 400
+    execute.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_inspector_bounds_concurrent_queries(member_client, workspace, live_artifact):
+    live_artifact.semantic_queries = [
+        {"name": f"q{i}", "measures": ["visits.count"]} for i in range(9)
+    ]
+    await live_artifact.asave(update_fields=["semantic_queries"])
+    active = 0
+    peak = 0
+
+    async def execute(*args, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return {"columns": ["visits.count"], "rows": [[1]], "row_count": 1}
+
+    with patch("apps.artifacts.views.run_semantic_query", side_effect=execute):
+        response = await member_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
+        )
+    assert response.status_code == 200
+    assert len(response.json()["queries"]) == 9
+    assert 2 <= peak <= 4
 
 
 @pytest.mark.django_db(transaction=True)

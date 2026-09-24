@@ -59,6 +59,18 @@ logger = logging.getLogger(__name__)
 # execution. The key includes the artifact version + a hash of the source
 # queries, so an update invalidates it immediately.
 ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
+ARTIFACT_QUERY_CONCURRENCY = 4
+
+
+def _query_cache_intent(query):
+    if isinstance(query, dict) and isinstance(query.get("query_context"), dict):
+        return {
+            **query,
+            "query_context": {
+                "timezone": query["query_context"].get("timezone", settings.TIME_ZONE)
+            },
+        }
+    return query
 
 
 def _artifact_query_cache_key(
@@ -67,17 +79,7 @@ def _artifact_query_cache_key(
     # A new clock instant with identical resolved bounds must not defeat the
     # short-lived cache. Timezone and the compiled date filters remain in it.
     if resolved_queries is not None:
-        resolved_queries = [
-            {
-                **query,
-                "query_context": {
-                    "timezone": query["query_context"].get("timezone", settings.TIME_ZONE)
-                },
-            }
-            if isinstance(query, dict) and isinstance(query.get("query_context"), dict)
-            else query
-            for query in resolved_queries
-        ]
+        resolved_queries = [_query_cache_intent(query) for query in resolved_queries]
     payload = json.dumps(
         {
             "semantic_queries": artifact.semantic_queries,
@@ -1006,17 +1008,20 @@ class ArtifactQueryDataView(View):
                 }
             )
 
+        query_slots = asyncio.Semaphore(ARTIFACT_QUERY_CONCURRENCY)
+
         async def _run_one(i: int, entry: dict) -> dict:
             if not isinstance(entry, dict):
                 return {"name": f"semantic_query_{i}", "error": "Semantic query must be an object"}
             name = entry.get("name", f"semantic_query_{i}")
             query_spec = {k: v for k, v in entry.items() if k != "name"}
             try:
-                result = await run_semantic_query(
-                    artifact.workspace,
-                    query_spec,
-                    user_id=str(user.id),
-                )
+                async with query_slots:
+                    result = await run_semantic_query(
+                        artifact.workspace,
+                        query_spec,
+                        user_id=str(user.id),
+                    )
             except Exception:
                 logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
                 return {
@@ -1035,7 +1040,7 @@ class ArtifactQueryDataView(View):
                 return {"name": name, "semantic_query": query_spec, "error": msg}
             return {
                 "name": name,
-                "semantic_query": result.get("semantic_query", query_spec),
+                "semantic_query": _query_cache_intent(result.get("semantic_query", query_spec)),
                 "columns": result.get("columns", []),
                 "rows": result.get("rows", []),
                 "row_count": result.get("row_count", 0),
