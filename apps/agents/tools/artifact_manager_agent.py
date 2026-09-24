@@ -807,7 +807,8 @@ def _extract_final_text(messages: list[Any]) -> str:
 
 def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     parsed_final = _parse_json_object(final_text)
-    artifact_result = _last_artifact_write_result(messages)
+    requested_id = parsed_final.get("artifact_id") if isinstance(parsed_final, dict) else None
+    artifact_result = _artifact_write_result_for_summary(messages, requested_id)
     artifact = artifact_result.get("artifact") if isinstance(artifact_result, dict) else None
     runtime = artifact_result.get("runtime") if isinstance(artifact_result, dict) else None
     diagnostics = artifact_result.get("diagnostics") if isinstance(artifact_result, dict) else None
@@ -960,12 +961,32 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     return summary
 
 
-def _last_artifact_write_result(messages: list[Any]) -> dict[str, Any]:
+def _artifact_write_result_for_summary(messages: list[Any], requested_id: Any) -> dict[str, Any]:
+    results = []
     for message in reversed(messages):
         if isinstance(message, ToolMessage) and message.name == "artifact_write":
-            parsed = _parse_json_object(message.content)
-            return parsed if isinstance(parsed, dict) else {}
-    return {}
+            results.append(_parse_json_object(message.content) or {})
+    latest = results[0] if results else {}
+    if not isinstance(requested_id, str) or not requested_id:
+        return latest
+
+    # Cleanup of another artifact must not replace the requested deliverable.
+    # Only tool-confirmed results can authorize the model's selected target.
+    for result in results:
+        runtime = result.get("runtime")
+        if result.get("status") in ("error", "denied") or (
+            isinstance(runtime, dict) and runtime.get("success") is False
+        ):
+            return result
+        if result.get("status") not in ("created", "updated", "replaced", "checked"):
+            return latest
+        artifact = result.get("artifact")
+        if isinstance(artifact, dict) and artifact.get("id") == requested_id:
+            return result
+        # A later published revision supersedes an earlier selected ID.
+        if result.get("previous_artifact_id") == requested_id:
+            return latest
+    return latest
 
 
 def _parse_json_object(value: Any) -> dict[str, Any] | None:

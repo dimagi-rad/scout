@@ -145,6 +145,148 @@ def test_metadata_only_summary_does_not_claim_data_was_verified():
     assert summary["runtime_summary"] == "Metadata-only edit; data was not revalidated."
 
 
+def _write_message(result, call_id="write"):
+    return ToolMessage(name="artifact_write", tool_call_id=call_id, content=json.dumps(result))
+
+
+def _published_artifact_result(artifact_id, **overrides):
+    return {
+        "status": "created",
+        "artifact": {"id": artifact_id, "version": 1},
+        "runtime": {"success": True, "summary": "2/2 queries ok"},
+        **overrides,
+    }
+
+
+def test_selected_deliverable_survives_cleanup_of_another_artifact():
+    deliverable = _published_artifact_result("deliverable")
+    cleanup = _published_artifact_result(
+        "probe-v2",
+        status="updated",
+        previous_artifact_id="probe-v1",
+        runtime=None,
+        runtime_validation="not_required_metadata_only",
+    )
+    summary = _summarize_result(
+        [_write_message(deliverable), _write_message(cleanup, "cleanup")],
+        json.dumps({"status": "done", "artifact_id": "deliverable"}),
+    )
+    assert summary["artifact_id"] == "deliverable"
+    assert summary["artifact_version"] == 1
+    assert summary["runtime_summary"] == "2/2 queries ok"
+
+
+@pytest.mark.parametrize("requested_id", [None, "", "invented", [], {"id": "deliverable"}])
+def test_unverified_deliverable_selection_keeps_latest_tool_result(requested_id):
+    summary = _summarize_result(
+        [_write_message(_published_artifact_result("saved"))],
+        json.dumps({"status": "done", "artifact_id": requested_id}),
+    )
+    assert summary["artifact_id"] == "saved"
+
+
+@pytest.mark.parametrize("status", ["updated", "replaced"])
+def test_selected_predecessor_cannot_override_a_later_published_revision(status):
+    summary = _summarize_result(
+        [
+            _write_message(_published_artifact_result("v1")),
+            _write_message(
+                _published_artifact_result("v2", status=status, previous_artifact_id="v1"),
+                "update",
+            ),
+        ],
+        json.dumps({"status": "done", "artifact_id": "v1"}),
+    )
+    assert summary["artifact_id"] == "v2"
+
+
+@pytest.mark.parametrize("status", ["error", "denied", "checked"])
+@pytest.mark.parametrize("cleanup_after_failure", [False, True])
+def test_deliverable_selection_cannot_hide_a_later_failure(status, cleanup_after_failure):
+    failure = {
+        "status": status,
+        "message": "Access denied",
+        "runtime": {
+            "success": False,
+            "failures": [{"category": "permission_required", "message": "Access denied"}],
+        },
+    }
+    messages = [
+        _write_message(_published_artifact_result("deliverable")),
+        _write_message(failure, "failure"),
+    ]
+    if cleanup_after_failure:
+        messages.append(_write_message(_published_artifact_result("other"), "cleanup"))
+    summary = _summarize_result(
+        messages, json.dumps({"status": "done", "artifact_id": "deliverable"})
+    )
+    assert summary["status"] == "error"
+    assert summary["artifact_id"] is None
+    assert summary["runtime_failures"][0]["category"] == "permission_required"
+
+
+def test_deliverable_selection_uses_latest_check_of_the_same_artifact():
+    summary = _summarize_result(
+        [
+            _write_message(_published_artifact_result("deliverable")),
+            _write_message(
+                _published_artifact_result(
+                    "deliverable", status="checked", runtime={"success": True, "summary": "Fresh"}
+                ),
+                "check",
+            ),
+            _write_message(_published_artifact_result("other"), "cleanup"),
+        ],
+        json.dumps({"status": "done", "artifact_id": "deliverable"}),
+    )
+    assert summary["artifact_id"] == "deliverable"
+    assert summary["runtime_summary"] == "Fresh"
+
+
+def test_unparseable_latest_write_does_not_resurrect_an_earlier_deliverable():
+    summary = _summarize_result(
+        [
+            _write_message(_published_artifact_result("deliverable")),
+            ToolMessage(name="artifact_write", tool_call_id="broken", content="not JSON"),
+        ],
+        json.dumps({"status": "done", "artifact_id": "deliverable"}),
+    )
+    assert summary["artifact_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_selected_deliverable_is_emitted_in_parent_result_and_preview_event(monkeypatch):
+    class FakeGraph:
+        async def astream_events(self, input_state, config, version):
+            yield {
+                "event": "on_chain_end",
+                "data": {
+                    "output": {
+                        "messages": [
+                            _write_message(_published_artifact_result("deliverable")),
+                            _write_message(_published_artifact_result("other"), "cleanup"),
+                            AIMessage(
+                                content=json.dumps({"status": "done", "artifact_id": "deliverable"})
+                            ),
+                        ]
+                    }
+                },
+            }
+
+    monkeypatch.setattr(
+        "apps.agents.tools.artifact_manager_agent._build_artifact_manager_graph",
+        lambda *args, **kwargs: FakeGraph(),
+    )
+    manager = create_artifact_manager_tool(SimpleNamespace(id="workspace"), None, [])
+    result = await manager.ainvoke({"task": "Create the deliverable."})
+
+    assert result["artifact_id"] == "deliverable"
+    completed = result["subagent_trace"]["events"][-1]
+    assert completed["type"] == "data-subagent-status"
+    assert completed["data"]["phase"] == "completed"
+    assert completed["data"]["artifactId"] == "deliverable"
+
+
 def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact():
     response = {
         "status": "needs_data_model",
