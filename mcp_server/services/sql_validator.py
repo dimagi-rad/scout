@@ -245,6 +245,7 @@ ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
         "to_number",
         "to_timestamp",
         "pg_input_is_valid",
+        "pg_typeof",
         "translate",
         "trim",
         "trunc",

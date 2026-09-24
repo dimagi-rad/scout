@@ -84,6 +84,7 @@ _SCALAR_FUNCTIONS = frozenset(
         "pad",
         "position",
         "pg_input_is_valid",
+        "pg_typeof",
         "pow",
         "power",
         "regexp_extract",

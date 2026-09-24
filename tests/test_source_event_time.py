@@ -12,7 +12,7 @@ from apps.semantic.services import catalog
 from apps.semantic.services.field_sql import compile_dimension_sql
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
-from mcp_server.event_time import event_time_sql, normalize_event_time
+from mcp_server.event_time import event_time_metadata, event_time_sql, normalize_event_time
 from mcp_server.services.materializer import _write_cases, _write_forms
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
@@ -24,6 +24,7 @@ from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
         "2026-09-23",
         "2026-09-23T10:20:30Z",
         "2026-09-23 10:20:30.123456",
+        "2026-09-23 10:20:30.9999995",
         "2026-09-23T10:20:30+05:30",
         "2026-09-23T10:20:30-04",
         "2024-02-29T10:20:30Z",
@@ -119,6 +120,32 @@ def test_materialized_hq_dates_are_typed_and_original_values_preserved():
         )
         cursor.execute("SELECT pg_typeof(received_on)::text FROM derived_times LIMIT 1")
         assert cursor.fetchone() == ("timestamp with time zone",)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("date_style", ["ISO, MDY", "SQL, DMY", "German, DMY"])
+def test_native_times_do_not_depend_on_session_text_rendering(date_style):
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('DateStyle', %s, true)", [date_style])
+        cursor.execute("SET LOCAL TIME ZONE 'America/New_York'")
+        cursor.execute(
+            "SELECT EXTRACT(EPOCH FROM ("
+            + event_time_sql("value")
+            + ")) FROM (SELECT %s::timestamptz AS value) source",
+            [datetime(2026, 9, 23, 10, 20, 30, tzinfo=UTC)],
+        )
+        assert (
+            float(cursor.fetchone()[0]) == datetime(2026, 9, 23, 10, 20, 30, tzinfo=UTC).timestamp()
+        )
+
+
+def test_native_provider_contract_does_not_promise_null_normalization():
+    assert event_time_metadata("commcare")["invalid_values"] == "null"
+    for provider in ("ocs", "commcare_connect"):
+        assert event_time_metadata(provider) == {
+            "storage": "native_timestamp",
+            "invalid_values": "rejected_by_database",
+        }
 
 
 @pytest.mark.django_db

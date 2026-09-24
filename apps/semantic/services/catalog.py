@@ -41,7 +41,7 @@ from apps.workspaces.services.view_sources import (
     validate_published_views,
 )
 from mcp_server.context import load_workspace_context
-from mcp_server.event_time import SOURCE_TIME_COLUMNS, event_time_sql
+from mcp_server.event_time import SOURCE_TIME_COLUMNS, event_time_metadata, event_time_sql
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
     pipeline_describe_table,
@@ -306,11 +306,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
         columns = [
             {
                 **column,
-                "event_time": {
-                    "format": "iso8601",
-                    "naive_timezone": "UTC",
-                    "invalid_values": "null",
-                },
+                "event_time": event_time_metadata(owner.provider),
             }
             if column.get("name") in time_columns
             else column

@@ -210,7 +210,7 @@ def _parent_source(sql: str, *, provider: str) -> str | None:
     templates = [expected]
     if provider == "commcare":
         typed_time = expected.copy()
-        typed_time.expressions[2].set(
+        next(p for p in typed_time.expressions if p.alias_or_name == "received_on").set(
             "this", sqlglot.parse_one(event_time_sql("received_on"), read="postgres")
         )
         templates.append(typed_time)
@@ -247,8 +247,8 @@ def _canonical_case(sql: str) -> bool:
         read="postgres",
     )
     typed_times = expected.copy()
-    for index, column in [(4, "date_opened"), (5, "last_modified")]:
-        typed_times.expressions[index].set(
+    for column in ("date_opened", "last_modified"):
+        next(p for p in typed_times.expressions if p.alias_or_name == column).set(
             "this", sqlglot.parse_one(event_time_sql(column), read="postgres")
         )
     return any(

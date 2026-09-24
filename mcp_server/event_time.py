@@ -22,7 +22,7 @@ SOURCE_TIME_COLUMNS = {
 # ("now", "tomorrow") or locale-sensitive survey text as a stable event time.
 ISO_EVENT_TIME = (
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}"
-    r"([T ]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?"
+    r"([T ]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]{1,6})?"
     r"(Z|[+-](0[0-9]|1[0-4])(:[0-5][0-9])?)?)?$"
 )
 OFFSET_SUFFIX = r"[T ].*(Z|[+-][0-9]{2}(:[0-9]{2})?)$"
@@ -44,8 +44,15 @@ def event_time_sql(column: str) -> str:
     identifier = '"' + column.replace('"', '""') + '"'
     value = f"{identifier}::text"
     return (
-        f"CASE WHEN {value} ~ '{ISO_EVENT_TIME}' "
+        f"CASE WHEN pg_typeof({identifier})::text = 'timestamp with time zone' "
+        f"THEN {identifier}::timestamptz WHEN {value} ~ '{ISO_EVENT_TIME}' "
         f"AND pg_input_is_valid({value}, 'timestamp with time zone') "
         f"THEN CASE WHEN {value} ~ '{OFFSET_SUFFIX}' "
         f"THEN {value}::timestamptz ELSE {value}::timestamp AT TIME ZONE 'UTC' END END"
     )
+
+
+def event_time_metadata(provider: str) -> dict[str, str]:
+    if provider == "commcare":
+        return {"format": "iso8601", "naive_timezone": "UTC", "invalid_values": "null"}
+    return {"storage": "native_timestamp", "invalid_values": "rejected_by_database"}
