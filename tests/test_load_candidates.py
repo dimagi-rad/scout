@@ -14,6 +14,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.load_candidates import (
     abandoned_workspace_candidates,
     fail_workspace_candidate,
+    load_owner_token,
     open_workspace_candidate,
     promote_candidate_schema,
     settle_orphaned_workspace_candidates,
@@ -288,3 +289,17 @@ def test_a_resumed_then_published_generation_stays_reusable(tenant, workspace):
 def test_listing_abandoned_candidates_requires_the_kept_one():
     with pytest.raises(TypeError):
         abandoned_workspace_candidates(uuid.uuid4())
+
+
+def test_a_job_less_load_owns_its_candidate_through_a_per_attempt_token(tenant, workspace):
+    first, second = load_owner_token(None), load_owner_token(None)
+    assert first < 0
+    assert second < 0
+    assert first != second
+    assert load_owner_token(42) == 42
+    generation = begin_load_generation(tenant.id)
+    candidate = _open(tenant, workspace, generation=generation, job_id=first).schema
+    run = _completed_run(candidate, job_id=None)
+
+    assert not _promote(candidate, workspace, generation, run, job_id=second).promoted
+    assert _promote(candidate, workspace, generation, run, job_id=first).promoted
