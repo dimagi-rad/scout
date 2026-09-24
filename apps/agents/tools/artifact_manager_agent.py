@@ -856,12 +856,11 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
                 "Artifact Manager returned an invalid data-model proposal. "
                 "Retry with complete, bounded structured data_requirements; no model change is authorized."
             )
-    # A missing-model handoff is not a success claim. Preserve it when all the
-    # typed failures describe that same gap, while retaining other failures as
-    # errors (including mixed access/runtime failures and malformed payloads).
-    model_handoff = (
-        summary["status"] == "needs_data_model"
-        and bool(summary.get("data_requirements"))
+    # A missing-model response is not a success claim. Preserve both a valid
+    # handoff and its correctable validation errors when every typed failure
+    # describes that gap. Other runtime failures must still take precedence.
+    model_gap_response = (
+        summary["status"] in {"needs_data_model", "invalid_data_requirements"}
         and isinstance(runtime_failures, list)
         and bool(runtime_failures)
         and all(
@@ -869,8 +868,10 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
             for failure in runtime_failures
         )
     )
-    if artifact_failed and not model_handoff:
+    if artifact_failed and not model_gap_response:
         summary["status"] = "error"
+        summary.pop("requirement_errors", None)
+        summary.pop("subagent_message", None)
         error_message = artifact_result.get("message")
         summary["message"] = (
             error_message[:1200]

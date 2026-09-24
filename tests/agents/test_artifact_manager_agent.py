@@ -251,6 +251,47 @@ def test_failed_check_preserves_model_gap_without_hiding_other_failures(tool_sta
         assert summary["message"] == response["message"]
 
 
+@pytest.mark.parametrize("tool_status", ["checked", "error"])
+@pytest.mark.parametrize("mixed_failure", [False, True])
+def test_failed_check_preserves_correctable_proposal_only_for_pure_model_gap(
+    tool_status, mixed_failure
+):
+    failures = [{"category": "missing_model_dependency", "message": "visits.reviewed is missing"}]
+    if mixed_failure:
+        failures.append({"category": "permission_required", "message": "Access denied"})
+    messages = [
+        ToolMessage(
+            name="artifact_write",
+            tool_call_id="check",
+            content=json.dumps(
+                {"status": tool_status, "runtime": {"success": False, "failures": failures}}
+            ),
+        )
+    ]
+    summary = _summarize_result(
+        messages,
+        json.dumps(
+            {
+                "status": "needs_data_model",
+                "message": "A reviewed dimension is missing.",
+                "data_requirements": [{}],
+            }
+        ),
+    )
+
+    assert summary["status"] == ("error" if mixed_failure else "invalid_data_requirements")
+    assert "data_requirements" not in summary
+    assert summary["runtime_failures"] == failures
+    if mixed_failure:
+        assert "requirement_errors" not in summary
+        assert "subagent_message" not in summary
+        assert "validation failed" in summary["message"]
+    else:
+        assert len(summary["requirement_errors"]) == 6
+        assert summary["subagent_message"] == "A reviewed dimension is missing."
+        assert "no model change is authorized" in summary["message"]
+
+
 @pytest.mark.asyncio
 async def test_artifact_manager_tool_preserves_data_preparation_handoff(monkeypatch):
     final = {
