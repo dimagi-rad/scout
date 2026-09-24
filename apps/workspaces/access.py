@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from django.conf import settings
 from django.core.cache import cache
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import PROVIDER_CHOICES, TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 from apps.workspaces.services.access_freshness import (
@@ -65,6 +66,7 @@ from apps.workspaces.services.credential_coverage import (
     amember_coverage_gaps,
     member_coverage_gaps,
 )
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 
 NOT_MEMBER = "not_member"
 TENANT_ACCESS_LOST = "tenant_access_lost"
@@ -157,8 +159,7 @@ _FRESHNESS_MESSAGES = {
         "Reconnect it under Connected Accounts."
     ),
     UPSTREAM_ACCESS_LOST: (
-        "Your access to one of this workspace's sources was removed upstream. "
-        "Reconnect or ask an admin to restore it."
+        "For one of this workspace's sources: " + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
     ),
     VERIFICATION_UNAVAILABLE: (
         "We couldn't verify your access to this workspace right now. Please retry shortly."
@@ -222,7 +223,10 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
             else "You need access to at least one of this workspace's data sources. Options"
         )
         return {
-            "error": f"{rule} — {needed}. Access returns automatically once fixed.",
+            "error": (
+                f"{rule} — {needed}. Access returns automatically once fixed. "
+                "A workspace admin can help remove a source you no longer need."
+            ),
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),
             "missing_tenants": payload,

@@ -93,7 +93,7 @@ export class StoryEngine implements StoryEngineApi {
 
     for (const node of this.nodes.values()) {
       const previous = oldNodes.get(node.id)
-      const carried = previous && previous.signature === node.signature && !node.configError
+      const carried = previous && previous.signature === node.signature && !previous.configError && !node.configError
 
       if (node.configError) {
         this.publishStatusAll(node, "error", node.configError)
@@ -112,13 +112,19 @@ export class StoryEngine implements StoryEngineApi {
       }
 
       if (node.spec.initialOutputs) {
-        const values = node.spec.initialOutputs(node.block.config ?? {})
-        for (const port of node.ports.outputs) {
-          this.outputs.set(outputKey(node.id, port.name), {
-            status: "ready",
-            value: values[port.name],
-            epoch: 1,
-          })
+        try {
+          const values = node.spec.initialOutputs(node.block.config ?? {})
+          for (const port of node.ports.outputs) {
+            this.outputs.set(outputKey(node.id, port.name), {
+              status: "ready",
+              value: values[port.name],
+              epoch: 1,
+            })
+          }
+        } catch (error) {
+          node.configError = `Invalid config: ${message(error)}`
+          this.diagnostics.push({ severity: "error", blockId: node.id, message: node.configError })
+          this.publishStatusAll(node, "error", node.configError)
         }
       }
     }
@@ -172,6 +178,12 @@ export class StoryEngine implements StoryEngineApi {
     }
     this.notifyAllListeners()
     this.onOutputsChanged(blockId, changedPorts)
+  }
+
+  setSourceError(blockId: string, error: string): void {
+    if (this.destroyed) return
+    const node = this.nodes.get(blockId)
+    if (node) this.publishStatusAll(node, "error", error)
   }
 
   getDiagnostics(): Diagnostic[] {

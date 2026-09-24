@@ -7,7 +7,6 @@ import time
 from collections.abc import Iterable
 from datetime import timedelta
 from functools import wraps
-from typing import NamedTuple
 
 import psycopg
 import psycopg.errors
@@ -70,6 +69,9 @@ from apps.workspaces.services.data_operation import (
     workspace_data_lock,
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE as _CREDENTIAL_GUIDANCE
+from apps.workspaces.services.failure_guidance import SourceFailure as _SourceFailure
+from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
@@ -122,68 +124,6 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
-# Remediation copy for the problems a run can report, keyed by the ``error_code``
-# recorded against the thing that failed — a source inside a run, or a whole
-# tenant the run never covered (arch #252, finding 14#4).
-#
-# This copy lives here and NOT at the raise site. A loader describes what the
-# provider said; deciding what the user should do about it is a presentation
-# concern, and when both layers wrote advice the user got it twice in two
-# different phrasings.
-#
-# Fragments, not sentences: _credential_guidance prefixes each with the sources
-# it applies to. A 401 and a 403 in one run need *opposite* advice, so an
-# unattributed pair reads as a flat contradiction (#372).
-_CREDENTIAL_GUIDANCE: dict[str, str] = {
-    ErrorCode.AUTH_CREDENTIAL_MISSING: (
-        "no usable sign-in is available — open Connected Accounts and connect or "
-        "reconnect the affected account before retrying."
-    ),
-    ErrorCode.PIPELINE_UNRESOLVED: (
-        "ask an administrator to configure or repair the materialization pipeline "
-        "for this provider before retrying. Re-running cannot resolve this pipeline "
-        "configuration problem until that configuration changes."
-    ),
-    ErrorCode.AUTH_TOKEN_EXPIRED: (
-        "expired or revoked sign-in — reconnect the affected account "
-        "(Settings → Connections) and re-run materialization."
-    ),
-    ErrorCode.AUTH_REFRESH_FAILED: (
-        "sign-in refresh could not complete — retry shortly. If the problem persists, "
-        "ask an administrator to check the provider connection settings."
-    ),
-    ErrorCode.AUTH_ACCESS_DENIED: (
-        "access was removed upstream or this resource is restricted — reconnecting "
-        "alone does not change upstream permissions. "
-        "Ask an admin on the affected provider to restore access, or remove that "
-        "data source from the workspace."
-    ),
-    ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE: (
-        "access could not be confirmed with the provider just now — nothing was "
-        "removed; retry shortly."
-    ),
-    ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
-        "in this workspace but not connected to your account, so this run did not "
-        "refresh it — connect that account "
-        "(Settings → Connections) if you should have access, or ask a workspace "
-        "admin to move it to its own workspace."
-    ),
-}
-
-
-class _SourceFailure(NamedTuple):
-    """One failure to attribute guidance to.
-
-    Usually a source inside a run, as recorded in ``run.result["sources"][name]``.
-    A tenant the run never covered has no source map to sit in, so it is reported
-    the same way with the tenant's external id as ``name`` (#364).
-    """
-
-    name: str
-    error: str
-    code: str
-
-
 def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
     """Return one guidance line per distinct problem, naming what it applies to.
 
@@ -208,40 +148,6 @@ def _set_tenant_display_names(summaries: list[dict]) -> None:
     for entry in summaries:
         if len(providers_by_name[entry["tenant"]]) > 1 and entry.get("provider"):
             entry["display_name"] = f"{entry['tenant']} ({entry['provider']})"
-
-
-def _summary_failures(tenant_summaries: Iterable[dict]) -> list[_SourceFailure]:
-    """Every coded failure in a per-tenant summary, at both levels.
-
-    A tenant-level failure — an unreachable tenant, a pre-flight credential
-    refusal, a run-level error — has no entry under ``sources``, and
-    ``MaterializationRun`` rows only exist from inside ``run_pipeline``. Walking
-    ``sources`` alone therefore could not reach its guidance at all (#364).
-
-    Serves both the ``materialize_workspace_core`` return shape and
-    ``_aggregate_materialization_state``'s summary; only ``sources`` differs.
-    """
-    failures: list[_SourceFailure] = []
-    for tenant in tenant_summaries:
-        if tenant.get("error_code"):
-            failures.append(
-                _SourceFailure(
-                    name=str(tenant.get("display_name") or tenant.get("tenant") or "unknown"),
-                    error=str(tenant.get("error") or ""),
-                    code=str(tenant["error_code"]),
-                )
-            )
-        for name, src in (tenant.get("sources") or {}).items():
-            if not isinstance(src, dict):
-                continue
-            failures.append(
-                _SourceFailure(
-                    name=name,
-                    error=str(src.get("error") or ""),
-                    code=str(src.get("error_code") or ErrorCode.INTERNAL_ERROR),
-                )
-            )
-    return failures
 
 
 def _unreachable_tenant_error(tenant) -> str:
@@ -2206,6 +2112,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
                 "Materialization completed but the follow-up response was "
                 "interrupted (likely a server restart). Please retry."
@@ -2233,6 +2140,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
             error_summary=summary,
         )
         if not updated:
@@ -2264,6 +2172,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
                 "Background queue unavailable; the materialization could "
                 "not be resumed. Please retry."
@@ -2436,6 +2345,7 @@ async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) 
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
             error_summary=summary,
         )
         if updated:
@@ -2933,7 +2843,45 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         semantic_state, semantic_error = await _semantic_layer_state(workspace)
     semantic_unavailable = semantic_state == "unavailable"
 
-    if view_schema_failed:
+    # A completed run is historical evidence, not proof its data still exists.
+    # Use current schema state before declaring that another load cannot help.
+    missing_active_tenants = []
+    if status == "completed" and (view_schema_failed or semantic_unavailable):
+        active_ids = {
+            tenant_id
+            async for tenant_id in TenantSchema.objects.filter(
+                tenant__workspace_tenants__workspace=workspace, state=SchemaState.ACTIVE
+            ).values_list("tenant_id", flat=True)
+        }
+        missing_active_tenants = [
+            tenant.canonical_name or tenant.external_id
+            async for tenant in workspace.tenants.all()
+            if tenant.id not in active_ids
+        ]
+    missing_data_guidance = ""
+    if missing_active_tenants:
+        missing_data_guidance = (
+            f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
+        )
+        if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+            missing_data_guidance += (
+                "The data and dependent views expired or were torn down. "
+                "Re-running materialization rebuilds them."
+            )
+        else:
+            missing_data_guidance += (
+                "Verify current access and account credentials before refreshing their data. "
+                "If you cannot access a source, ask someone with access to refresh it."
+            )
+
+    if missing_active_tenants:
+        body = (
+            f"{SYSTEM_RESUME_MARKER} The runs reported completion, but the current data "
+            f"and query surface are unavailable. {missing_data_guidance} "
+            "Then recheck the workspace query layer and semantic model; do not claim recovery until verified. "
+            f"Query layer error: {view_schema_error or semantic_error}. Per-tenant: {summary}"
+        )
+    elif view_schema_failed:
         if credential_guidance or status != "completed":
             body = (
                 f"{SYSTEM_RESUME_MARKER} Materialization left incomplete refresh coverage, "
@@ -3153,6 +3101,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
         )
         return {"status": "agent_timeout"}
     except Exception:
@@ -3171,6 +3120,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=("The agent failed to respond after materialization. Please retry."),
         )
         return {"status": "agent_failed"}
@@ -3218,7 +3168,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     error_summary = ""
     if terminal == ThreadJob.State.FAILED:
-        if view_schema_failed and (credential_guidance or status != "completed"):
+        if missing_active_tenants:
+            error_summary = missing_data_guidance
+        elif view_schema_failed and (credential_guidance or status != "completed"):
             error_summary = (
                 "Some tenant data did not refresh successfully, and the workspace query "
                 "layer (view schema) "
@@ -3286,6 +3238,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the
     # row CANCELLED, so this matches zero rows rather than clobbering it back to a
     # success terminal; we then re-read the actual persisted state below.
+    failure_phase = ""
+    if terminal == ThreadJob.State.FAILED:
+        query_build_failed = (
+            status == "completed"
+            and not missing_active_tenants
+            and view_schema_failed
+            and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in view_schema_error
+        )
+        failure_phase = (
+            ThreadJob.FailurePhase.QUERY_BUILD
+            if query_build_failed
+            else ThreadJob.FailurePhase.MATERIALIZATION
+        )
     updated = await ThreadJob.objects.filter(
         id=tj.id,
         state=ThreadJob.State.RUNNING,
@@ -3293,6 +3258,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         state=terminal,
         completed_at=timezone.now(),
         error_summary=error_summary,
+        failure_phase=failure_phase,
     )
     if not updated:
         actual_state = (

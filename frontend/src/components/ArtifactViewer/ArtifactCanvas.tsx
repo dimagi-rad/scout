@@ -2,6 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react"
 import { Loader2 } from "lucide-react"
 
 import { ArtifactGraphRenderer, type ArtifactDetail } from "@/components/ArtifactGraph"
+import type { DateRange } from "@/components/ArtifactGraph/types"
 import { withBasePath } from "@/config"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { cn } from "@/lib/utils"
@@ -22,11 +23,12 @@ interface ArtifactCanvasProps {
   error: string | null
   className?: string
   onQueryData?: (queryData: QueryDataResponse) => void
+  onDateSourcesChange?: (sources: Record<string, DateRange | null>) => void
 }
 
 export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasProps>(
   function ArtifactCanvas(
-    { artifactId, workspaceId, artifact, isLoading, error, className, onQueryData },
+    { artifactId, workspaceId, artifact, isLoading, error, className, onQueryData, onDateSourcesChange },
     ref,
   ) {
     const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -105,7 +107,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
               />
             )}
             {dataIsReady && isGraphArtifact && (
-              <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} />
+              <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} onDateSourcesChange={onDateSourcesChange} />
             )}
             {dataIsReady && !isGraphArtifact && (
               <iframe

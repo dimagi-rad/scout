@@ -11,6 +11,7 @@ from apps.transformations.services.commcare_staging import (
     upsert_system_assets,
 )
 from apps.workspaces.models import TenantMetadata
+from mcp_server.event_time import event_time_sql
 
 
 @pytest.fixture
@@ -298,8 +299,8 @@ class TestCaseTypeGeneration:
         assert "case_type" in sql
         assert "case_name" in sql
         assert "owner_id" in sql
-        assert 'date_opened::timestamp AS "date_opened"' in sql
-        assert 'last_modified::timestamp AS "last_modified"' in sql
+        assert f'{event_time_sql("date_opened")} AS "date_opened"' in sql
+        assert f'{event_time_sql("last_modified")} AS "last_modified"' in sql
 
     def test_case_sql_filters_by_case_type(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
