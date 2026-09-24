@@ -316,6 +316,23 @@ def test_failed_check_preserves_runtime_document_diagnostics():
     assert summary["diagnostics"] == diagnostics
 
 
+def test_bounded_handoff_keeps_a_late_failure_with_a_different_cause():
+    failures = [
+        {"category": "missing_model_dependency", "message": f"Missing {i}"} for i in range(9)
+    ]
+    permission = {"category": "permission_required", "message": "Access must be restored"}
+    failures.append(permission)
+    result = {"status": "checked", "runtime": {"success": False, "failures": failures}}
+    summary = _summarize_result(
+        [ToolMessage(name="artifact_write", tool_call_id="check", content=json.dumps(result))],
+        json.dumps({"status": "needs_data_model", "data_requirements": ["A dimension"]}),
+    )
+    assert summary["status"] == "error"
+    assert len(summary["runtime_failures"]) == 8
+    assert permission in summary["runtime_failures"]
+    assert summary["runtime_failures"][0] == failures[0]
+
+
 @pytest.mark.parametrize("claimed_status", ["done", "needs_data_model"])
 def test_static_artifact_failure_cannot_be_overridden_by_model_output(claimed_status):
     result = {

@@ -833,7 +833,21 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     if isinstance(runtime, dict):
         failures = runtime.get("failures")
         if isinstance(failures, list) and failures:
-            summary["runtime_failures"] = failures[:MAX_RUNTIME_FAILURES]
+            # Preserve each distinct cause before spending the bounded handoff
+            # on repeated errors. A late permission/runtime failure must not
+            # disappear behind eight earlier missing-model failures.
+            representative = []
+            repeated = []
+            seen = set()
+            for failure in failures:
+                category = failure.get("category") if isinstance(failure, dict) else None
+                category = category if isinstance(category, str) else "runtime_failure"
+                if category in seen:
+                    repeated.append(failure)
+                else:
+                    seen.add(category)
+                    representative.append(failure)
+            summary["runtime_failures"] = (representative + repeated)[:MAX_RUNTIME_FAILURES]
     artifact_failed = artifact_result.get("status") == "error" or (
         isinstance(runtime, dict) and runtime.get("success") is False
     )
