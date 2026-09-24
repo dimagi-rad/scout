@@ -21,6 +21,7 @@ from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -28,6 +29,8 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.load_candidates import promote_candidate_schema
+from apps.workspaces.services.load_generations import begin_load_generation
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
     DENIED_ROLE_REQUIRED,
@@ -35,7 +38,6 @@ from apps.workspaces.services.refresh_requests import (
     REFRESH_TASK_NAME,
     UNSCANNED_GRACE,
     RefreshClaim,
-    activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
     find_legacy_refresh_jobs,
@@ -349,10 +351,28 @@ def test_only_the_owning_job_can_activate_or_fail_a_claimed_candidate(
 ):
     candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     assert claim_refresh_candidate(job_id=job_id, **args).status == "claimed"
+    generation = begin_load_generation(tenant.id)
+    run = MaterializationRun.objects.create(
+        tenant_schema=candidate,
+        pipeline="commcare_sync",
+        procrastinate_job_id=job_id,
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {}, "load_fingerprint": "receipt"},
+    )
 
-    assert activate_claimed_refresh_candidate(candidate.id, job_id + 1, timezone.now()) is False
+    def promote(job):
+        return promote_candidate_schema(
+            candidate.id,
+            accessed_at=timezone.now(),
+            refresh_job_id=job,
+            loading_generation=generation,
+            run_id=run.id,
+            fingerprint="receipt",
+        ).promoted
+
+    assert promote(job_id + 1) is False
     assert fail_claimed_refresh_candidate(candidate.id, job_id + 1) is None
-    assert activate_claimed_refresh_candidate(candidate.id, job_id, timezone.now()) is True
+    assert promote(job_id) is True
     assert fail_claimed_refresh_candidate(candidate.id, job_id) is None
 
     candidate.refresh_from_db()
