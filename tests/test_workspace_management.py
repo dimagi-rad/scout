@@ -12,6 +12,7 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
 )
+from tests.tenant_access import ausable_connection, usable_connection
 
 User = get_user_model()
 
@@ -299,7 +300,9 @@ class TestMemberAdd:
     def test_manager_can_add_same_tenant_user(self, client, user, workspace, tenant, db):
         """Manager adds an existing user who shares the workspace's tenant."""
         target = User.objects.create_user(email="alice@example.com", password="pass")
-        TenantMembership.objects.create(user=target, tenant=tenant)
+        TenantMembership.objects.create(
+            user=target, tenant=tenant, connection=usable_connection(target, tenant.provider)
+        )
 
         client.force_login(user)
         resp = client.post(
@@ -433,7 +436,11 @@ class TestMemberAdd:
 
         async def fake_refresh(target, providers):
             # simulate the resolver discovering the newly-granted access
-            await TenantMembership.objects.acreate(user=target, tenant=tenant)
+            await TenantMembership.objects.acreate(
+                user=target,
+                tenant=tenant,
+                connection=await ausable_connection(target, tenant.provider),
+            )
             return True
 
         mocker.patch(
@@ -471,12 +478,16 @@ class TestMemberAdd:
 
     def test_non_manager_cannot_add_members(self, client, workspace, tenant, db):
         writer = User.objects.create_user(email="wr@example.com", password="pass")
-        TenantMembership.objects.create(user=writer, tenant=tenant)
+        TenantMembership.objects.create(
+            user=writer, tenant=tenant, connection=usable_connection(writer, tenant.provider)
+        )
         WorkspaceMembership.objects.create(
             workspace=workspace, user=writer, role=WorkspaceRole.READ_WRITE
         )
         target = User.objects.create_user(email="alice@example.com", password="pass")
-        TenantMembership.objects.create(user=target, tenant=tenant)
+        TenantMembership.objects.create(
+            user=target, tenant=tenant, connection=usable_connection(target, tenant.provider)
+        )
 
         client.force_login(writer)
         resp = client.post(
@@ -489,7 +500,9 @@ class TestMemberAdd:
 
     def test_existing_member_returns_409(self, client, user, workspace, tenant, db):
         target = User.objects.create_user(email="alice@example.com", password="pass")
-        TenantMembership.objects.create(user=target, tenant=tenant)
+        TenantMembership.objects.create(
+            user=target, tenant=tenant, connection=usable_connection(target, tenant.provider)
+        )
         WorkspaceMembership.objects.create(
             workspace=workspace, user=target, role=WorkspaceRole.READ
         )
@@ -506,7 +519,9 @@ class TestMemberAdd:
     def test_case_insensitive_duplicate_returns_409(self, client, user, workspace, tenant, db):
         """Adding ALICE@X.COM when alice@x.com is already a member should 409."""
         target = User.objects.create_user(email="alice@example.com", password="pass")
-        TenantMembership.objects.create(user=target, tenant=tenant)
+        TenantMembership.objects.create(
+            user=target, tenant=tenant, connection=usable_connection(target, tenant.provider)
+        )
         WorkspaceMembership.objects.create(
             workspace=workspace, user=target, role=WorkspaceRole.READ
         )
@@ -522,7 +537,9 @@ class TestMemberAdd:
 
     def test_add_with_role_read(self, client, user, workspace, tenant, db):
         target = User.objects.create_user(email="r@example.com", password="pass")
-        TenantMembership.objects.create(user=target, tenant=tenant)
+        TenantMembership.objects.create(
+            user=target, tenant=tenant, connection=usable_connection(target, tenant.provider)
+        )
 
         client.force_login(user)
         resp = client.post(
@@ -535,7 +552,9 @@ class TestMemberAdd:
 
     def test_add_with_role_manage(self, client, user, workspace, tenant, db):
         target = User.objects.create_user(email="m@example.com", password="pass")
-        TenantMembership.objects.create(user=target, tenant=tenant)
+        TenantMembership.objects.create(
+            user=target, tenant=tenant, connection=usable_connection(target, tenant.provider)
+        )
 
         client.force_login(user)
         resp = client.post(
@@ -557,7 +576,9 @@ class TestMemberListWithInvites:
         self, client, user, workspace, tenant, db
     ):
         member = User.objects.create_user(email="member@example.com", password="pass")
-        TenantMembership.objects.create(user=member, tenant=tenant)
+        TenantMembership.objects.create(
+            user=member, tenant=tenant, connection=usable_connection(member, tenant.provider)
+        )
         WorkspaceMembership.objects.create(
             workspace=workspace, user=member, role=WorkspaceRole.READ
         )
@@ -632,7 +653,9 @@ class TestInviteDetail:
 
     def test_non_manager_cannot_revoke(self, client, workspace, tenant, db):
         reader = User.objects.create_user(email="reader2@example.com", password="pass")
-        TenantMembership.objects.create(user=reader, tenant=tenant)
+        TenantMembership.objects.create(
+            user=reader, tenant=tenant, connection=usable_connection(reader, tenant.provider)
+        )
         WorkspaceMembership.objects.create(
             workspace=workspace, user=reader, role=WorkspaceRole.READ
         )

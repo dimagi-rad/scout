@@ -27,7 +27,7 @@ from apps.common.identifiers import view_name
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, ensure_semantic_model
 from apps.semantic.services.cube_schema import build_and_promote_cube_schema
-from apps.users.models import Tenant, TenantMembership, User
+from apps.users.models import Tenant, User
 from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
@@ -42,6 +42,7 @@ from apps.workspaces.tasks import rebuild_workspace_view_schema, teardown_schema
 from mcp_server.context import load_workspace_context
 from mcp_server.services.pool import close_all_pools
 from mcp_server.services.query import _execute_async_parameterized
+from tests.tenant_access import grant_tenant_access
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -104,7 +105,7 @@ async def published_sources(settings, monkeypatch):
         ]
         for tenant in tenants:
             WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-            TenantMembership.objects.bulk_create([TenantMembership(user=user, tenant=tenant)])
+            grant_tenant_access(user, tenant)
             schema = manager.provision(tenant)
             owned_schemas.append(schema)
             _create_table(settings.MANAGED_DATABASE_URL, schema.schema_name)

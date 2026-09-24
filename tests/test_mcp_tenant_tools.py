@@ -31,6 +31,7 @@ from mcp_server.server import get_schema_status
 from mcp_server.services.pool import close_all_pools
 from mcp_server.services.query import execute_query
 from tests.managed_query_fixture import managed_query_context
+from tests.tenant_access import ausable_connection
 
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
@@ -1145,7 +1146,9 @@ async def test_cancel_materialization_aborts_job_and_flips_threadjob():
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
-    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
     schema = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="s_mcpc", state=SchemaState.ACTIVE
     )
