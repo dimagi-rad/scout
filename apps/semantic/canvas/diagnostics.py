@@ -39,7 +39,12 @@ _DECIMAL_COERCION_RE = re.compile(
 )
 
 
-def compute_diagnostics(canvas, changes: list[SemanticCanvasChange] | None = None) -> list[dict]:
+def compute_diagnostics(
+    canvas,
+    changes: list[SemanticCanvasChange] | None = None,
+    *,
+    retry_failed_sql: bool = False,
+) -> list[dict]:
     if changes is None:
         changes = list(canvas.changes.all())
     diagnostics: list[dict[str, Any]] = []
@@ -80,7 +85,11 @@ def compute_diagnostics(canvas, changes: list[SemanticCanvasChange] | None = Non
             )
         )
     for change in custom_drafts:
-        diagnostics.extend(_custom_draft_diagnostics(canvas, model, change, custom_drafts))
+        diagnostics.extend(
+            _custom_draft_diagnostics(
+                canvas, model, change, custom_drafts, retry_failed_sql=retry_failed_sql
+            )
+        )
 
     for change in changes:
         if change.change_type == ChangeType.CREATE:
@@ -292,7 +301,9 @@ def _relationship_draft_diagnostics(canvas, model, change, siblings, field_draft
     return out
 
 
-def _custom_draft_diagnostics(canvas, model, change, siblings) -> list[dict]:
+def _custom_draft_diagnostics(
+    canvas, model, change, siblings, *, retry_failed_sql: bool = False
+) -> list[dict]:
     out: list[dict[str, Any]] = []
     fields = change.fields
     name = fields.get("name", "")
@@ -311,9 +322,11 @@ def _custom_draft_diagnostics(canvas, model, change, siblings) -> list[dict]:
             )
         )
 
-    validation = validate_custom_dataset_draft(canvas, change)
+    validation = validate_custom_dataset_draft(canvas, change, retry_failed=retry_failed_sql)
     if validation.get("error"):
-        out.append(_diagnostic("INVALID_SQL", change, "definition_sql", validation["error"]))
+        code = validation.get("error_code", "INVALID_SQL")
+        path = "" if code == "CATALOG_UNAVAILABLE" else "definition_sql"
+        out.append(_diagnostic(code, change, path, validation["error"]))
         return out
     columns = validation.get("columns") or []
     if not columns:

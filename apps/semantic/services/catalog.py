@@ -41,6 +41,7 @@ from apps.workspaces.services.view_sources import (
     validate_published_views,
 )
 from mcp_server.context import load_workspace_context
+from mcp_server.event_time import SOURCE_TIME_COLUMNS, event_time_metadata, event_time_sql
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
     pipeline_describe_table,
@@ -238,7 +239,11 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
 
     ts = None
     if not is_view_schema:
-        ts = await TenantSchema.objects.filter(schema_name=schema_name).afirst()
+        ts = (
+            await TenantSchema.objects.select_related("tenant")
+            .filter(schema_name=schema_name)
+            .afirst()
+        )
 
     if ts is None:
         # A multi-tenant ws_* view schema (or a schema with no TenantSchema row)
@@ -285,18 +290,28 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
         )
         columns = (detail or {}).get("columns", [])
         source = sources.get(table_name) if sources else None
-        source_provider = (
-            pipeline_config.provider
-            if pipeline_config
+        owner = (
+            ts.tenant
+            if ts is not None
             else next(
-                (
-                    tenant.provider
-                    for tenant in tenants
-                    if source and str(tenant.id) == source.tenant_id
-                ),
+                (tenant for tenant in tenants if source and str(tenant.id) == source.tenant_id),
                 None,
             )
         )
+        source_provider = owner.provider if owner else None
+        source_table = sources[table_name].source_table_name if sources else table_name
+        time_columns = (
+            SOURCE_TIME_COLUMNS.get(owner.provider, {}).get(source_table, set()) if owner else set()
+        )
+        columns = [
+            {
+                **column,
+                "event_time": event_time_metadata(owner.provider),
+            }
+            if column.get("name") in time_columns
+            else column
+            for column in columns
+        ]
         physical_tables.append(
             PhysicalTable(
                 name=table_name,
@@ -396,7 +411,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         raise SemanticCatalogUnavailable("No queryable datasets are available.")
 
     with transaction.atomic():
-        model, _ = SemanticModel.objects.select_for_update().get_or_create(
+        model, created = SemanticModel.objects.select_for_update().get_or_create(
             workspace=workspace,
             defaults={"name": f"{workspace.name} Semantic Model"},
         )
@@ -457,7 +472,9 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         _sync_relationships(model, workspace)
         model.status = SemanticModel.Status.ACTIVE
         model.diagnostics = diagnostics
-        model.save(update_fields=["status", "diagnostics", "updated_at"])
+        if not created:
+            model.version += 1
+        model.save(update_fields=["version", "status", "diagnostics", "updated_at"])
         return model
 
 
@@ -710,9 +727,15 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
         field_name = semantic_name(column_name)
         data_type = column.get("type") or column.get("data_type") or ""
         description = column_notes.get(column_name) or column.get("description", "")
+        event_time = column.get("event_time")
+        text_event_time = bool(event_time) and data_type.lower() in {
+            "text",
+            "character varying",
+            "varchar",
+        }
         field_type = (
             SemanticField.FieldType.TIME_DIMENSION
-            if _is_time(data_type)
+            if _is_time(data_type) or text_event_time
             else SemanticField.FieldType.DIMENSION
         )
         upsert_field(
@@ -721,7 +744,7 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                 "label": _humanize_name(column_name),
                 "description": description,
                 "field_type": field_type,
-                "data_type": data_type,
+                "data_type": "timestamp with time zone" if text_event_time else data_type,
                 "expression": column_name,
                 "measure_type": "",
                 "is_visible": True,
@@ -729,6 +752,8 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                     "source_column": column_name,
                     "nullable": column.get("nullable"),
                     "default": column.get("default"),
+                    **({"event_time": event_time} if event_time else {}),
+                    **({"cube_sql": event_time_sql(column_name)} if text_event_time else {}),
                     **(
                         {}
                         if _is_identifier_column(column_name, dataset)

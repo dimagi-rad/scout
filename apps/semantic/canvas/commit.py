@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.utils import timezone
 
 from apps.semantic.canvas.objects import (
@@ -23,12 +23,18 @@ from apps.semantic.canvas.objects import (
     is_canvas_created,
     is_custom_dataset_field,
 )
-from apps.semantic.canvas.service import ChangeType, ObjectType, base_and_state
+from apps.semantic.canvas.service import (
+    ChangeType,
+    ObjectType,
+    base_and_state,
+    custom_dataset_catalog_revision,
+)
 from apps.semantic.models import (
     CustomDataset,
     SemanticCanvasChange,
     SemanticDataset,
     SemanticField,
+    SemanticModel,
     SemanticRelationship,
 )
 from apps.semantic.services.catalog import _sync_fields
@@ -45,6 +51,10 @@ class _CommitConflict(Exception):
         self.conflicts = conflicts
 
 
+class _CatalogChanged(Exception):
+    pass
+
+
 def commit_canvas(canvas, user=None) -> dict[str, Any]:
     """Persist all pending canvas changes; returns a structured commit report."""
     from apps.semantic.canvas.diagnostics import compute_diagnostics
@@ -54,7 +64,7 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
     if not pending:
         return {"committed": [], "blocked": False, "conflicts": [], "blocking_diagnostics": []}
 
-    diagnostics = compute_diagnostics(canvas, changes)
+    diagnostics = compute_diagnostics(canvas, changes, retry_failed_sql=True)
     blocking = [d for d in diagnostics if d["severity"] == "error" and d["code"] != "CONFLICT"]
     conflicts = [_conflict_entry(canvas, c) for c in changes if _state_of(canvas, c) == "conflict"]
     if blocking:
@@ -74,6 +84,22 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
 
     try:
         committed = _commit_transaction(canvas, pending, user)
+    except _CatalogChanged:
+        return {
+            "committed": [],
+            "blocked": True,
+            "conflicts": [],
+            "blocking_diagnostics": [
+                {
+                    "severity": "error",
+                    "code": "CATALOG_CHANGED",
+                    "object": "canvas",
+                    "object_uuid": "",
+                    "path": "",
+                    "message": "The semantic catalog is being updated or changed during validation. Review the canvas diagnostics and save again; your drafts are preserved.",
+                }
+            ],
+        }
     except _CommitConflict as exc:
         return {
             "committed": [],
@@ -123,7 +149,29 @@ def _commit_transaction(canvas, pending: list[SemanticCanvasChange], user) -> li
     committed: list[dict[str, Any]] = []
     now = timezone.now()
     with transaction.atomic():
-        model = canvas.semantic_model
+        custom_drafts = [
+            change
+            for change in pending
+            if change.object_type == ObjectType.CUSTOM_DATASET
+            and change.change_type == ChangeType.CREATE
+        ]
+        models = SemanticModel.objects.all()
+        if custom_drafts:
+            # Only SQL probes need to exclude a concurrent physical catalog refresh.
+            models = models.select_for_update(nowait=True)
+        try:
+            model = models.get(pk=canvas.semantic_model_id)
+        except OperationalError as exc:
+            if getattr(exc.__cause__, "sqlstate", None) == "55P03":
+                raise _CatalogChanged from exc
+            raise
+        for change in custom_drafts:
+            validation = change.fields.get("_validation") or {}
+            if model.status != SemanticModel.Status.ACTIVE or validation.get(
+                "catalog_revision"
+            ) != custom_dataset_catalog_revision(model):
+                raise _CatalogChanged
+        canvas.semantic_model = model
         workspace = canvas.workspace
         for change in pending:
             # Capture identity before settle/delete clears the draft fields.
