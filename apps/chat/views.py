@@ -115,7 +115,7 @@ async def chat_view(request):
         )
 
     # Resolve workspace and verify access. The multi-tenant flag is determined
-    # in a single DB read inside _resolve_workspace_and_membership to avoid TOCTOU.
+    # in a single DB read inside _resolve_chat_access to avoid TOCTOU.
     access, tm, is_multi_tenant = await _resolve_chat_access(user, workspace_id)
     workspace = access.workspace
     if workspace is None:

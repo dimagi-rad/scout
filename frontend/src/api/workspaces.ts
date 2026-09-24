@@ -153,6 +153,9 @@ export const workspaceApi = {
   getDetail: (workspaceId: string) =>
     api.get<WorkspaceDetail>(`/api/workspaces/${workspaceId}/`),
 
+  retryAccessVerification: (workspaceId: string) =>
+    api.post<{ has_access: true }>(`/api/workspaces/${workspaceId}/access/verify/`, {}),
+
   create: (name: string, tenantIds: string[] = []) =>
     api.post<{ id: string; name: string }>("/api/workspaces/", {
       name,

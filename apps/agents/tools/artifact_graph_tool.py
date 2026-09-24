@@ -78,8 +78,8 @@ class ArtifactWriteInput(BaseModel):
     run_check: bool = Field(
         default=True,
         description=(
-            "Deprecated. Runtime validation always runs for create, replace, "
-            "and apply before publishing."
+            "Deprecated and ignored. New artifacts and document changes require runtime "
+            "validation. Metadata-only edits preserve the document without rerunning queries."
         ),
     )
 
@@ -433,7 +433,10 @@ async def _write_result(
     previous: Artifact | None = None,
 ) -> dict[str, Any]:
     runtime = None
-    if run_check and artifact.workspace_id:
+    # Compare persisted content, not the requested action or agent-supplied
+    # flags: a replace/apply can include a description AND a query change.
+    metadata_only = previous is not None and artifact.data == previous.data
+    if run_check and artifact.workspace_id and not metadata_only:
         runtime = await check_graph_artifact(artifact, user_id=str(user.id) if user else "")
     if runtime and runtime.get("success") is False:
         await ThreadArtifact.objects.filter(artifact=artifact).adelete()
@@ -454,6 +457,13 @@ async def _write_result(
         "diagnostics": diagnostics,
         "manifest": _manifest_summary(artifact.semantic_query_manifest or {}),
         "runtime": runtime,
+        "runtime_validation": (
+            "not_required_metadata_only"
+            if metadata_only
+            else "performed"
+            if runtime is not None
+            else "skipped"
+        ),
         "render_url": f"/api/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}/data/",
     }
 

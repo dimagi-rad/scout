@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
@@ -29,6 +29,9 @@ export function LostAccessModal() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
+  const retryOutcome = useAppStore((s) => s.threadsAccessLostMessage)
+  const [verifyingId, setVerifyingId] = useState<string | null>(null)
 
   const active = domains.find((d) => d.id === activeDomainId)
   const accessible = useMemo(() => domains.filter(workspaceHasAccess), [domains])
@@ -104,6 +107,12 @@ export function LostAccessModal() {
           </p>
         )}
 
+        {retryOutcome && (
+          <p className="mt-3 text-sm text-muted-foreground" data-testid="lost-access-retry-outcome">
+            {retryOutcome}
+          </p>
+        )}
+
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             data-testid="lost-access-connections"
@@ -111,6 +120,21 @@ export function LostAccessModal() {
             className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           >
             Open Connected Accounts
+          </button>
+          <button
+            type="button"
+            disabled={verifyingId === active.id}
+            onClick={() => {
+              const workspaceId = active.id
+              setVerifyingId(workspaceId)
+              void retryAccessVerification(workspaceId).finally(() =>
+                setVerifyingId((current) => (current === workspaceId ? null : current)),
+              )
+            }}
+            className="rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+            data-testid="lost-access-retry-verification"
+          >
+            {verifyingId === active.id ? "Verifying…" : "Retry verification"}
           </button>
           <button
             data-testid="lost-access-workspace-settings"

@@ -398,6 +398,16 @@ class TestRemediationWithoutCoverage:
         assert left.status_code == 204
         assert WorkspaceMembership.objects.get(pk=theirs["id"]).role == WorkspaceRole.MANAGE
 
+    def test_uncovered_non_manager_sees_only_their_own_row(
+        self, client, user, partial_member, other_user
+    ):
+        _join(partial_member, other_user, role=WorkspaceRole.MANAGE)
+        client.force_login(user)
+
+        roster = client.get(f"/api/workspaces/{partial_member.id}/members/").json()
+
+        assert [m["user_id"] for m in roster["members"]] == [str(user.id)]
+
     def test_uncovered_non_manager_cannot_change_roles(
         self, client, manager, partial_member, other_user
     ):

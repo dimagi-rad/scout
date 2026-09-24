@@ -168,6 +168,9 @@ string clears it. For a description-only edit, use apply without ops. Read the
 persisted `artifact.description` in the tool result or artifact_graph_overview
 before claiming the description changed; runtime validation alone does not verify
 the requested metadata.
+When the tool returns `runtime_validation: "not_required_metadata_only"`, the
+unchanged document was preserved without contacting the data service. Do not
+run an additional check just to save metadata or claim the data was freshly verified.
 
 For `action="apply"`, `ops` supports only these exact shapes:
 - Set a story field: `{"op":"set","target":"story/name","value":"..."}`
@@ -793,7 +796,11 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         "artifact_version": artifact.get("version") if isinstance(artifact, dict) else None,
         "touched_blocks": touched_blocks,
         "diagnostics": diagnostics or [],
-        "runtime_summary": _runtime_summary(runtime),
+        "runtime_summary": (
+            "Metadata-only edit; data was not revalidated."
+            if artifact_result.get("runtime_validation") == "not_required_metadata_only"
+            else _runtime_summary(runtime)
+        ),
         "message": message[:1200] if isinstance(message, str) else str(message)[:1200],
     }
     if status == "needs_data_model" and isinstance(parsed_final, dict):

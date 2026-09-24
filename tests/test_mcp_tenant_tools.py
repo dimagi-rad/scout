@@ -15,6 +15,7 @@ from django.test import override_settings
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.access import WorkspaceAccess
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -1056,6 +1057,10 @@ class TestCancelMaterialization:
                 new=AsyncMock(return_value=object()),
             ),
             patch(
+                "mcp_server.server._materialization_write_access",
+                new=AsyncMock(return_value=WorkspaceAccess(workspace=object())),
+            ),
+            patch(
                 "mcp_server.server._run_belongs_to_workspace",
                 new=AsyncMock(return_value=True),
             ),
@@ -1106,6 +1111,10 @@ class TestCancelMaterialization:
             patch(
                 "mcp_server.server._authorize_materialization_write",
                 new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "mcp_server.server._materialization_write_access",
+                new=AsyncMock(return_value=WorkspaceAccess(workspace=object())),
             ),
             patch(
                 "mcp_server.server._run_belongs_to_workspace",
