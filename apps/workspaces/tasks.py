@@ -851,6 +851,9 @@ async def materialize_workspace_core(
             # An equivalent load completed while this request waited. The requester
             # authorized and resolved its own credential above, and still publishes
             # its own views and Cube below; its status says what really happened.
+            # Reuse counts as use: without the touch, the inactivity sweep could
+            # retire the schema this run just reported ready.
+            await evidence.schema.atouch()
             successful_attempted_tenant_ids.add(str(tm.tenant_id))
             tenant_results.append(
                 {
@@ -1380,7 +1383,7 @@ async def _load_workspace_candidate(
     except BaseException:
         # No candidate yet, but the generation is marked loading: clear it, or
         # later requests stop joining it and its resumable candidate is lost.
-        await asyncio.shield(_end_load(tm.tenant_id, generation))
+        await _drain(_end_load(tm.tenant_id, generation), f"tenant {tm.tenant_id}")
         raise
     candidate = opened.schema
     try:
@@ -1441,8 +1444,8 @@ async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation:
     await _to_thread_fresh_db(end_load_generation, candidate.tenant_id, generation)
 
 
-async def _drain(operation, candidate) -> None:
-    """Finish candidate cleanup before propagating worker cancellation."""
+async def _drain(operation, subject) -> None:
+    """Finish cleanup before propagating worker cancellation, even if aborted again."""
     cleanup = asyncio.create_task(operation)
     while True:
         try:
@@ -1453,7 +1456,7 @@ async def _drain(operation, candidate) -> None:
             continue
         except Exception:
             logger.exception(
-                "Cancellation cleanup failed for candidate '%s'", candidate.schema_name
+                "Cancellation cleanup failed for '%s'", getattr(subject, "schema_name", subject)
             )
         return
 
@@ -1464,7 +1467,9 @@ async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
     )
     for schema in abandoned:
         try:
-            await _queue_candidate_drop(schema)
+            # Delayed: this writer holds T until its whole load publishes, and the
+            # drop needs T, so an immediate job would only find it busy.
+            await _queue_candidate_drop(schema, delay=_CANDIDATE_DROP_DELAY_SECONDS)
         except AlreadyEnqueued:
             continue
         except Exception:
@@ -1475,11 +1480,19 @@ def _drop_lock(schema_id) -> str:
     return f"drop_abandoned_candidate:{schema_id}"
 
 
-async def _queue_candidate_drop(schema) -> None:
+async def _queue_candidate_drop(schema, *, delay: int = 0) -> None:
     """Queue one drop per candidate, pinned to the attempt it was judged on."""
-    await drop_abandoned_candidate.configure(queueing_lock=_drop_lock(schema.id)).defer_async(
-        schema_id=str(schema.id), last_attempt_at=schema.last_attempt_at.isoformat()
-    )
+    schedule = {"schedule_in": {"seconds": delay}} if delay else {}
+    await drop_abandoned_candidate.configure(
+        queueing_lock=_drop_lock(schema.id), **schedule
+    ).defer_async(schema_id=str(schema.id), last_attempt_at=schema.last_attempt_at.isoformat())
+
+
+_CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
+
+
+class _TenantBusy(Exception):
+    """A writer holds the tenant's T; the drop is retried later rather than waiting."""
 
 
 _CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
@@ -1493,17 +1506,20 @@ async def drop_abandoned_candidate(
 ) -> None:
     """Drop the partial data of a failed candidate no load will resume.
 
-    Holds T so a writer cannot be resuming this candidate while it is dropped.
-    ``last_attempt_at`` is the attempt the candidate was judged abandoned on; if
-    a load has resumed it since (and failed again), it is the pending
-    generation's resume point and is kept. A failed drop is retried with
-    backoff and then left for an operator.
+    Holds T so a writer cannot be resuming this candidate while it is dropped,
+    but never waits for it: a load can hold T for hours, so a busy tenant is
+    retried later like a failed drop. ``last_attempt_at`` is the attempt the
+    candidate was judged abandoned on; if a load has resumed it since (and
+    failed again), it is the pending generation's resume point and is kept. A
+    failed drop is retried with backoff and then left for an operator.
     """
     schema = await TenantSchema.objects.filter(id=schema_id).afirst()
     if schema is None:
         return
     try:
-        async with tenant_data_lock([schema.tenant_id]):
+        async with tenant_data_lock_if_free(schema.tenant_id) as locked:
+            if not locked:
+                raise _TenantBusy(f"tenant {schema.tenant_id} is being loaded")
             await schema.arefresh_from_db()
             if schema.state != SchemaState.FAILED or schema.load_workspace_id is None:
                 return

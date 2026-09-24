@@ -8,9 +8,11 @@ are stubbed.
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from django.utils import timezone
 
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.users.models import Tenant
@@ -273,7 +275,11 @@ async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
 
     pipeline = _Pipeline()
     async with _loads(pipeline):
-        with patch("apps.workspaces.tasks.tenant_data_lock", add_tenant_after_locking):
+        with (
+            patch("apps.workspaces.tasks.tenant_data_lock", add_tenant_after_locking),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
             result = await _run(workspace, user)
 
     assert [call[0] for call in pipeline.calls] == [tenant.id]
@@ -298,10 +304,16 @@ async def test_workspaces_locking_shared_tenants_in_opposite_order_do_not_deadlo
 
     pipeline = _Pipeline()
     async with _loads(pipeline):
+        # Both intents up front, so the fetch count does not depend on which
+        # workspace reaches begin_load_generation first.
+        ab_intent, ba_intent = await _intent(ab), await _intent(ba)
         with patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build:
             build.return_value.tenant_coverage = {}
             results = await asyncio.wait_for(
-                asyncio.gather(_run(ab, user), _run(ba, user)), timeout=60
+                asyncio.gather(
+                    _run(ab, user, load_intent=ab_intent), _run(ba, user, load_intent=ba_intent)
+                ),
+                timeout=60,
             )
 
     assert all(r["all_succeeded"] for r in results)
@@ -463,3 +475,40 @@ async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, 
 
     retire.assert_called_once_with(schedule_in={"seconds": 30 * 60})
     retire.return_value.defer.assert_called_once_with(schema_id=str(first.id))
+
+
+async def test_reusing_a_generation_resets_its_inactivity_clock(workspace, tenant, user):
+    sibling = await _sibling(user, tenant)
+    first_intent = await _intent(workspace)
+    second_intent = await _intent(sibling)
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user, load_intent=first_intent)
+        [served] = await _active_schemas(tenant)
+        stale = timezone.now() - timedelta(hours=23)
+        await TenantSchema.objects.filter(id=served.id).aupdate(last_accessed_at=stale)
+        reused = await _run(sibling, user, load_intent=second_intent)
+
+    assert "reused_generation" in reused["tenants"][0]
+    await served.arefresh_from_db()
+    assert served.last_accessed_at > stale + timedelta(hours=1)
+
+
+async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline) as queue:
+        await _run(workspace, user)
+        old = await TenantSchema.objects.acreate(
+            tenant=tenant,
+            schema_name="old_generation_candidate",
+            state=SchemaState.FAILED,
+            load_workspace_id=workspace.id,
+            load_generation=1,
+            load_config_fingerprint="old",
+        )
+        queue.reset_mock()
+        await _run(workspace, user)
+
+    [(queued,)] = [call.args for call in queue.await_args_list]
+    assert queued.id == old.id
+    assert queue.await_args.kwargs == {"delay": 15 * 60}

@@ -195,3 +195,24 @@ async def test_a_drop_proceeds_when_nothing_attempted_the_candidate_since(tenant
     teardown.assert_called_once()
     await candidate.arefresh_from_db()
     assert candidate.state == SchemaState.EXPIRED
+
+
+async def test_a_drop_never_waits_on_a_loading_tenant(tenant, workspace):
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
+
+    async def drop_while_loading():
+        with (
+            patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown,
+            patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as retry,
+        ):
+            retry.return_value.defer_async = AsyncMock(return_value=1)
+            await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
+        return teardown, retry
+
+    async with tenant_data_lock([tenant.id]):
+        teardown, retry = await asyncio.wait_for(asyncio.create_task(drop_while_loading()), 10)
+
+    teardown.assert_not_called()
+    retry.assert_called_once()
+    await candidate.arefresh_from_db()
+    assert candidate.state == SchemaState.FAILED
