@@ -31,6 +31,7 @@ from apps.agents.subagents.events import (
     set_subagent_event_queue,
 )
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
+from apps.semantic.services.date_context import agent_date_context
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -149,9 +150,18 @@ How to build data-backed blocks:
 - Graph artifacts do not support transform/bucketing config. If a derived
   category is missing, return the data-model prerequisite to the parent as
   described below. You cannot create semantic fields or datasets yourself.
-- When adding `date_filter` or `period_selector` controls, choose defaults that
-  cover rows you have verified. For demo/library artifacts, prefer
-  `last_90_days` unless you have confirmed `last_30_days` returns data.
+- For rolling windows use `date_filter`
+  with `inputs.date_range={"$ref":"<date_filter_block_id>.value"}` on EVERY affected query.
+  For comparisons use `period_selector`, bind
+  `inputs.compare={"$ref":"<period_selector_block_id>.pair"}`, and set `config.compare=true`
+  on the semantic_query block. Replace the ref prefix with the actual control block's id.
+  Supported presets: today, yesterday, last_7_days, last_30_days, last_90_days,
+  month_to_date. Last N days includes today and N-1 preceding calendar days.
+  Never pass a preset such as last_90_days to inDateRange. For exploratory
+  semantic_query calls use date_range={"preset":"last_90_days"} instead.
+  Keep the user's requested period even when it contains no rows; do not widen
+  it or substitute all-time data to make a chart look populated. Date controls
+  are resolved by Scout in its reporting timezone, not by model arithmetic.
 
 Use `artifact_write(action="create")` for a new artifact, `replace` when
 rewriting the whole doc, `apply` for targeted edits, and `check` for runtime
@@ -424,9 +434,14 @@ def _build_artifact_manager_graph(
     llm = ChatAnthropic(model=settings.DEFAULT_LLM_MODEL, max_tokens=NESTED_MAX_TOKENS)
     llm_with_tools = llm.bind_tools(_nested_llm_tool_schemas(tools))
 
+    system_prompt = ARTIFACT_MANAGER_SYSTEM_PROMPT + agent_date_context()
+
     async def agent_node(state: AgentState) -> dict[str, Any]:
         state_messages = [m for m in list(state["messages"]) if not isinstance(m, SystemMessage)]
-        messages = [SystemMessage(content=ARTIFACT_MANAGER_SYSTEM_PROMPT), *state_messages]
+        messages = [
+            SystemMessage(content=system_prompt),
+            *state_messages,
+        ]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
