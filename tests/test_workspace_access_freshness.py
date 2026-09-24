@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from apps.users.models import TenantMembership, UpstreamAccessProof, VerificationControl
 from apps.users.services.access_verification import PROOF_MAX_AGE, proofs_are_fresh
+from apps.workspaces import access as access_module
 from apps.workspaces.access import (
     INSUFFICIENT_ROLE,
     NOT_MEMBER,
@@ -26,6 +27,7 @@ from apps.workspaces.access import (
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_MISSING,
+    FRESHNESS_DENIAL_REASONS,
     UPSTREAM_ACCESS_LOST,
     VERIFICATION_IN_PROGRESS,
     VERIFICATION_UNAVAILABLE,
@@ -102,15 +104,18 @@ async def test_concurrent_stale_requests_share_one_recheck(
 
     first = asyncio.create_task(aresolve_workspace_access_ex(user, workspace.id))
     second = asyncio.create_task(aresolve_workspace_access_ex(user, workspace.id))
-    await asyncio.wait_for(upstream_provider.requested.wait(), timeout=10)
-    # Give the second caller time to find the lease held and start waiting on it.
-    await asyncio.sleep(0.2)
-    lease_held = await VerificationControl.objects.filter(
-        connection__user=user, lease_token__isnull=False
-    ).aexists()
-    assert lease_held
-    assert not first.done() and not second.done()
-    upstream_provider.gate.set()
+    try:
+        await asyncio.wait_for(upstream_provider.requested.wait(), timeout=10)
+        # Give the second caller time to find the lease held and start waiting on it.
+        await asyncio.sleep(0.2)
+        lease_held = await VerificationControl.objects.filter(
+            connection__user=user, lease_token__isnull=False
+        ).aexists()
+        assert lease_held
+        assert not first.done() and not second.done()
+    finally:
+        # Never leave the callers parked on the gate if an assertion above fails.
+        upstream_provider.gate.set()
     results = await asyncio.gather(first, second)
 
     assert all(result.granted for result in results)
@@ -316,3 +321,7 @@ def test_no_provider_call_inside_a_callers_transaction(user, workspace, tenant, 
     assert result.denied_reason == VERIFICATION_IN_PROGRESS
     assert result.retryable
     assert upstream_provider.requests == []
+
+
+def test_every_freshness_denial_reason_has_a_public_message():
+    assert set(access_module._FRESHNESS_MESSAGES) == set(FRESHNESS_DENIAL_REASONS)

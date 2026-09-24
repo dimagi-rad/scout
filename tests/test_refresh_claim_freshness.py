@@ -101,6 +101,7 @@ async def test_tenant_refresh_outage_is_retryable_and_keeps_the_membership(
 
     assert result["error_code"] == ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
     assert "retry" in result["error"].lower()
+    assert upstream_provider.requests, "the pre-claim recheck must reach the provider"
     create_schema.assert_not_called()
     assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
 

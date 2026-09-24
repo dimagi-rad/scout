@@ -181,9 +181,14 @@ async def _averify_stale(user_id, stale: dict, budget: VerificationBudget) -> li
             raise result
     # One connection's unexpected failure (e.g. a deadlock) must neither 500 the
     # access check nor abandon its siblings mid-lease; it is an unconfirmed check.
-    for result in results:
+    for connection_id, result in zip(stale, results, strict=True):
         if isinstance(result, Exception):
-            logger.warning("Upstream verification failed unexpectedly", exc_info=result)
+            logger.warning(
+                "Upstream verification failed unexpectedly for user %s connection %s",
+                user_id,
+                connection_id,
+                exc_info=result,
+            )
     return [
         AccessVerificationResult(AccessVerificationStatus.UNAVAILABLE, VERIFICATION_UNAVAILABLE)
         if isinstance(result, Exception)

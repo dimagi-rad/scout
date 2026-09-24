@@ -362,7 +362,8 @@ async def refresh_tenant_schema(
                 verification=VerificationBudget.BACKGROUND,
             )
     except (TypeError, ValueError, ValidationError):
-        pass  # Malformed ids: the claim below rejects the job against its recorded request.
+        # Malformed ids: the claim below rejects the job against its recorded request.
+        logger.info("refresh_tenant_schema: skipped pre-claim recheck for job %s", context.job.id)
 
     claim = await _to_thread_fresh_db(
         claim_refresh_candidate,
