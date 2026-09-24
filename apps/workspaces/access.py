@@ -90,7 +90,7 @@ def remedy_text(missing: MissingTenant) -> str:
     if missing.recovery == CoverageRecovery.ACCESS_REMOVED:
         # The tombstone can't tell a disconnect from upstream removal, so name both.
         return (
-            f"your access through {product} ended; reconnect it in Connected Accounts, "
+            f"your access through {product} ended: reconnect it in Connected Accounts, "
             f"or if it was removed in {product}, ask an admin there to restore it"
         )
     if missing.recovery == CoverageRecovery.CONNECT_TEAM and team:

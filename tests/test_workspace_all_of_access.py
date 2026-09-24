@@ -424,6 +424,19 @@ class TestRemediationWithoutCoverage:
         assert [m["user_id"] for m in roster["members"]] == [str(manager.id)]
         assert roster["invites"] == []
 
+    def test_cannot_delete_a_workspace_others_are_in(
+        self, client, manager, partial_member, other_user, two_sources
+    ):
+        _join(partial_member, other_user)
+        spare = _workspace(manager, *two_sources, name="Spare")
+        _join(spare, manager, role=WorkspaceRole.MANAGE)
+        client.force_login(manager)
+
+        resp = client.delete(f"/api/workspaces/{partial_member.id}/")
+
+        assert resp.status_code == 403
+        assert Workspace.objects.filter(pk=partial_member.pk).exists()
+
     def test_cannot_remove_a_source_they_still_have(
         self, client, manager, partial_member, two_sources
     ):

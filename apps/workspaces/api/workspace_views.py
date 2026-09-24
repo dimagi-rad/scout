@@ -598,6 +598,19 @@ class WorkspaceDetailView(APIView):
                 {"error": "Only workspace managers can delete a workspace."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # Deleting destroys every member's content, so without coverage it is a
+        # remediation only for a workspace nobody else is in.
+        if (
+            missing_tenants_for_member(request.user, workspace)
+            and workspace.memberships.exclude(user=request.user).exists()
+        ):
+            return Response(
+                {
+                    "error": "You can't delete a shared workspace while you're missing one "
+                    "of its sources. Remove that source or leave the workspace instead."
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         # Check this is not the user's last workspace covering any tenant
         tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))

@@ -133,6 +133,7 @@ def test_add_tenant_already_in_workspace_still_checks_the_requester_under_any_of
     )
 
     assert resp.status_code == 400
+    assert "do not have access" in resp.data["error"]
 
 
 def test_list_workspace_tenants(api_client, user, workspace):

@@ -525,9 +525,8 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
     """Return ``None`` if ``user_id`` may load the workspace, else a denied summary.
 
     Every denial has one shape: ``status: "denied"``, a str ``error``, a registry
-    ``error_code`` saying why, and the affected tenants as not-run failures (every
-    tenant for a role denial, the ones the requester lacks for a coverage denial),
-    so the resume path records per-tenant codes the same way for either reason.
+    ``error_code`` saying why, and every workspace tenant as a not-run failure, so
+    the resume path records per-tenant codes the same way for either reason.
     """
     access = None
     if user_id:
