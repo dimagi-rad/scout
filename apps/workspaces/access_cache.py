@@ -6,7 +6,8 @@ all-of gate each resolution evaluates credential readiness for every workspace
 tenant, so the repeats are pure overhead. Decisions are cached only inside an
 explicit scope (``WorkspaceAccessCacheMiddleware`` opens one per HTTP request)
 and only for ``MAX_AGE_SECONDS``, so a long turn still re-checks and a background
-worker, which opens no scope, always resolves afresh.
+worker, which opens no scope, always resolves afresh. Within a scope, repeat
+calls return the same ``WorkspaceAccess`` and model instances, not fresh rows.
 """
 
 from __future__ import annotations
@@ -61,11 +62,13 @@ def _key(user, workspace_id, options):
 def lookup(user, workspace_id, options):
     scope = _active()
     key = _key(user, workspace_id, options)
-    if scope is None or key is None or key not in scope:
+    # Single get/pop calls: the dict is shared with sync_to_async threads.
+    entry = scope.get(key) if scope is not None and key is not None else None
+    if entry is None:
         return None
-    stored_at, result = scope[key]
+    stored_at, result = entry
     if time.monotonic() - stored_at > MAX_AGE_SECONDS:
-        del scope[key]
+        scope.pop(key, None)
         return None
     return result
 

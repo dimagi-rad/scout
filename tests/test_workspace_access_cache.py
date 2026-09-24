@@ -9,12 +9,14 @@ scope ends with it (including a streamed response's body).
 
 import pytest
 from asgiref.sync import sync_to_async
+from django.db import connection
 from django.http import HttpResponse, StreamingHttpResponse
 from django.test import RequestFactory
+from django.test.utils import CaptureQueriesContext
 
 from apps.workspaces import access_cache
 from apps.workspaces.access import aresolve_workspace_access_ex, resolve_workspace_access_ex
-from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import Workspace, WorkspaceRole
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
 
 
@@ -40,32 +42,33 @@ def test_repeat_resolution_in_a_scope_costs_no_queries(
 
 
 @pytest.mark.django_db
-def test_no_scope_means_no_caching(user, workspace, django_assert_max_num_queries):
+def test_no_scope_means_no_caching(user, workspace):
     resolve_workspace_access_ex(user, workspace.id)
 
-    with django_assert_max_num_queries(10) as queries:
+    with CaptureQueriesContext(connection) as queries:
         resolve_workspace_access_ex(user, workspace.id)
 
     assert len(queries.captured_queries) > 0
 
 
 @pytest.mark.django_db
-def test_minimum_role_and_workspace_are_part_of_the_key(scope, user, workspace, read_user):
-    WorkspaceMembership.objects.filter(user=read_user).update(role=WorkspaceRole.READ)
+def test_user_role_and_workspace_are_all_part_of_the_key(scope, user, workspace, read_user):
+    other = Workspace.objects.create(name="Other", created_by=user)
 
     assert resolve_workspace_access_ex(read_user, workspace.id).granted
     assert not resolve_workspace_access_ex(
         read_user, workspace.id, minimum_role=WorkspaceRole.READ_WRITE
     ).granted
     assert resolve_workspace_access_ex(user, workspace.id).granted
+    assert not resolve_workspace_access_ex(read_user, other.id).granted
 
 
 @pytest.mark.django_db
-def test_entries_expire(scope, user, workspace, monkeypatch, django_assert_max_num_queries):
+def test_entries_expire(scope, user, workspace, monkeypatch):
     resolve_workspace_access_ex(user, workspace.id)
     monkeypatch.setattr(access_cache, "MAX_AGE_SECONDS", -1)
 
-    with django_assert_max_num_queries(10) as queries:
+    with CaptureQueriesContext(connection) as queries:
         resolve_workspace_access_ex(user, workspace.id)
 
     assert len(queries.captured_queries) > 0
@@ -138,3 +141,28 @@ async def test_async_middleware_closes_the_scope_after_a_plain_response(user, wo
     await WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
 
     assert access_cache.lookup(user, workspace.id, (WorkspaceRole.READ,)) is None
+
+
+@pytest.mark.django_db
+def test_sync_middleware_closes_the_scope_when_the_view_raises(user, workspace):
+    def view(_request):
+        resolve_workspace_access_ex(user, workspace.id)
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
+
+    assert access_cache.lookup(user, workspace.id, (WorkspaceRole.READ,)) is None
+
+
+@pytest.mark.asyncio
+async def test_sync_streamed_bodies_are_left_untouched():
+    def chunks():
+        yield b"file"
+
+    async def view(_request):
+        return StreamingHttpResponse(chunks())
+
+    response = await WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
+
+    assert not response.is_async
