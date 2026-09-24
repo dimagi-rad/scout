@@ -43,6 +43,7 @@ from apps.users.services.credential_resolver import (
 from apps.workspaces.access import (
     TENANT_ACCESS_LOST,
     WorkspaceAccess,
+    access_denied_body,
     aresolve_workspace_access_ex,
 )
 from apps.workspaces.models import (
@@ -56,6 +57,10 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
     WorkspaceViewSchema,
+)
+from apps.workspaces.services.access_freshness import (
+    FRESHNESS_ERROR_CODES,
+    VerificationBudget,
 )
 from apps.workspaces.services.data_operation import (
     DataLockTimeout,
@@ -74,6 +79,7 @@ from apps.workspaces.services.query_state import (
 )
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
+    DENIED_ROLE_REQUIRED,
     DENIED_WORKSPACE_UNLINKED,
     LegacyRefreshJobs,
     LegacyRefreshReconciliation,
@@ -383,6 +389,21 @@ async def refresh_tenant_schema(
             "retry_required": True,
         }
 
+    # Upstream freshness is checked here, after the claim's transaction closed, so
+    # no row lock is held across a provider call. A denial fails this candidate
+    # like any other refresh failure, with its own code (an outage says retry).
+    access = await aresolve_workspace_access_ex(
+        membership.user,
+        workspace_id,
+        minimum_role=WorkspaceRole.READ_WRITE,
+        verification=VerificationBudget.BACKGROUND,
+    )
+    if not access.granted:
+        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
+        if access.denied_reason in FRESHNESS_ERROR_CODES:
+            return _refresh_denial_result(access.denied_reason)
+        return _refresh_denial_result(DENIED_ROLE_REQUIRED)
+
     manager = SchemaManager()
     try:
         await run_data_thread(manager.create_physical_schema, new_schema)
@@ -538,7 +559,10 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
             user = None
         if user is not None:
             access = await aresolve_workspace_access_ex(
-                user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+                user,
+                workspace_id,
+                minimum_role=WorkspaceRole.READ_WRITE,
+                verification=VerificationBudget.BACKGROUND,
             )
             if access.granted:
                 return None
@@ -1128,7 +1152,10 @@ def _run_pipeline_with_progress(
 
 
 def _refresh_denial_result(reason: str) -> dict:
-    if reason == DENIED_MEMBERSHIP_MISSING:
+    if reason in FRESHNESS_ERROR_CODES:
+        error_code = FRESHNESS_ERROR_CODES[reason]
+        error = access_denied_body(WorkspaceAccess(denied_reason=reason))["error"]
+    elif reason == DENIED_MEMBERSHIP_MISSING:
         error_code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         error = "The requesting user no longer has access to this tenant, so nothing was run."
     elif reason == DENIED_WORKSPACE_UNLINKED:
@@ -1529,6 +1556,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                     requester,
                     recovery.workspace_id,
                     minimum_role=WorkspaceRole.READ_WRITE,
+                    verification=VerificationBudget.BACKGROUND,
                 )
                 if requester is not None
                 else None
