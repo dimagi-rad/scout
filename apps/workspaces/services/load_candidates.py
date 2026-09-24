@@ -73,6 +73,9 @@ def open_workspace_candidate(
     resuming a candidate concurrently; the Tenant row lock orders this against
     promotion and the reconciler.
     """
+    if job_id is None:
+        # Promotion refuses a None owner, so such a candidate could never publish.
+        raise ValueError("job_id is required; use load_owner_token() for a job-less load")
     assert_tenant_lock_held(tenant.id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant.id)
