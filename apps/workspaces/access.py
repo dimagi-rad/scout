@@ -388,18 +388,27 @@ def resolve_workspace_access_ex(
     no tenant data (remove a missing source, leave, hand the manager role to
     another member, delete a workspace nobody else is in, open its page). Without
     it a member who lost a source for good could never get out of the state, since
-    the fix itself would be refused (ACCESS-CONTRACT §5). Those actions skip
-    freshness too, for the same reason. It applies only while all-of is enforced,
-    so with the rollout switch off every endpoint keeps exactly the pre-#380
-    decision.
+    the fix itself would be refused (ACCESS-CONTRACT §5). The exemption applies only
+    when coverage is what denied: a covered caller still goes through freshness,
+    and a caller let in by the exemption skips it (it rechecks the coverage they
+    lack). With the all-of switch off there is no exemption at all.
     """
-    require_coverage = require_coverage or not all_of_access_enforced()
-    if not require_coverage:
-        verification = None
+    result = _resolve_with_freshness(
+        user, workspace_id, minimum_role=minimum_role, verification=verification
+    )
+    if require_coverage or not all_of_access_enforced() or not result.missing_tenants:
+        return result
+    return _resolve_local_access_ex(
+        user, workspace_id, minimum_role=minimum_role, require_coverage=False
+    )
 
+
+def _resolve_with_freshness(
+    user, workspace_id, *, minimum_role: str, verification: VerificationBudget | None
+) -> WorkspaceAccess:
     def local():
         return _resolve_local_access_ex(
-            user, workspace_id, minimum_role=minimum_role, require_coverage=require_coverage
+            user, workspace_id, minimum_role=minimum_role, require_coverage=True
         )
 
     result = local()

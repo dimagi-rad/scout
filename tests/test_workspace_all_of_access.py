@@ -23,7 +23,13 @@ from apps.workspaces.access import (
     aresolve_workspace_access_ex,
     resolve_workspace_access_ex,
 )
-from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceInvite,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from apps.workspaces.services.credential_coverage import CoverageRecovery
 from mcp_server.server import semantic_catalog
 from tests.tenant_access import (
@@ -374,20 +380,43 @@ class TestRemediationWithoutCoverage:
         """No dead end for a shared workspace whose only manager lost everything."""
         TenantMembership.objects.filter(user=manager).update(archived_at=timezone.now())
         _join(partial_member, other_user)
-        theirs = WorkspaceMembership.objects.get(workspace=partial_member, user=other_user)
-        mine = WorkspaceMembership.objects.get(workspace=partial_member, user=manager)
         client.force_login(manager)
+        roster = client.get(f"/api/workspaces/{partial_member.id}/members/").json()["members"]
+        mine = next(m for m in roster if m.get("user_id") == str(manager.id))
+        theirs = next(m for m in roster if m is not mine)
+        # Enough to hand over, without naming anyone.
+        assert set(theirs) == {"id", "role"}
 
         promoted = client.patch(
+            f"/api/workspaces/{partial_member.id}/members/{theirs['id']}/",
+            {"role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+        left = client.delete(f"/api/workspaces/{partial_member.id}/members/{mine['id']}/")
+
+        assert promoted.status_code == 200
+        assert left.status_code == 204
+        assert WorkspaceMembership.objects.get(pk=theirs["id"]).role == WorkspaceRole.MANAGE
+
+    def test_uncovered_non_manager_cannot_change_roles(
+        self, client, manager, partial_member, other_user
+    ):
+        _join(partial_member, other_user, role=WorkspaceRole.READ)
+        WorkspaceMembership.objects.filter(workspace=partial_member, user=manager).update(
+            role=WorkspaceRole.READ_WRITE
+        )
+        _join(partial_member, User.objects.create_user(email="boss@example.com"), role="manage")
+        theirs = WorkspaceMembership.objects.get(workspace=partial_member, user=other_user)
+        client.force_login(manager)
+
+        resp = client.patch(
             f"/api/workspaces/{partial_member.id}/members/{theirs.id}/",
             {"role": WorkspaceRole.MANAGE},
             content_type="application/json",
         )
-        left = client.delete(f"/api/workspaces/{partial_member.id}/members/{mine.id}/")
 
-        assert promoted.status_code == 200
-        assert left.status_code == 204
-        assert WorkspaceMembership.objects.get(pk=theirs.pk).role == WorkspaceRole.MANAGE
+        assert resp.status_code == 403
+        assert WorkspaceMembership.objects.get(pk=theirs.pk).role == WorkspaceRole.READ
 
     def test_other_role_changes_still_need_coverage(
         self, client, manager, partial_member, other_user
@@ -465,14 +494,20 @@ class TestRemediationWithoutCoverage:
     ):
         _join(partial_member, other_user)
         Workspace.objects.filter(pk=partial_member.pk).update(system_prompt="secret instructions")
+        WorkspaceInvite.objects.create(
+            workspace=partial_member, email="invitee@example.com", role=WorkspaceRole.READ
+        )
         client.force_login(manager)
 
         detail = client.get(f"/api/workspaces/{partial_member.id}/")
         assert detail.status_code == 200
         assert detail.json()["system_prompt"] == ""
+        assert [t["tenant_name"] for t in detail.json()["missing_tenants"]] == ["Source Two"]
         roster = client.get(f"/api/workspaces/{partial_member.id}/members/").json()
-        # Only their own row (for leaving), not the other members or invites.
-        assert [m["user_id"] for m in roster["members"]] == [str(manager.id)]
+        # Only the caller is named; others are ids and roles, and invites are hidden.
+        named = [m for m in roster["members"] if "email" in m]
+        assert [m["user_id"] for m in named] == [str(manager.id)]
+        assert len(roster["members"]) == 2
         assert roster["invites"] == []
 
     def test_cannot_delete_a_workspace_others_are_in(

@@ -1380,9 +1380,12 @@ async def test_partially_covering_requester_is_refused_before_loading(
     assert other.canonical_name in result["error"]
     assert tenant.canonical_name not in result["error"]
     assert {r["tenant"] for r in result["tenants"]} == {tenant.external_id, other.external_id}
-    assert {r["error_code"] for r in result["tenants"]} == {ErrorCode.WORKSPACE_TENANT_UNREACHABLE}
-    covered = next(r for r in result["tenants"] if r["tenant"] == tenant.external_id)
-    assert covered["error"].startswith("not attempted")
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    # The covered tenant must not inherit the "connect that account" guidance.
+    assert "error_code" not in by_tenant[tenant.external_id]
+    assert by_tenant[tenant.external_id]["error"].startswith("not attempted")
+    assert not any(tenant.external_id in line for line in result["guidance"])
 
 
 @pytest.mark.asyncio
