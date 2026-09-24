@@ -15,6 +15,7 @@ import psycopg
 import pytest
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.users.models import Tenant
 from apps.workspaces import tasks as workspaces_tasks
@@ -63,6 +64,11 @@ class _Pipeline:
         return completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
 
 
+@pytest.fixture(autouse=True)
+def _no_candidate_ddl(no_candidate_ddl):
+    """Shared stub: see tests.pipeline_doubles.no_candidate_ddl."""
+
+
 @asynccontextmanager
 async def _loads(pipeline: _Pipeline):
     with (
@@ -71,8 +77,6 @@ async def _loads(pipeline: _Pipeline):
             "apps.workspaces.tasks.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema", return_value=None),
-        patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None),
         patch(
             "apps.workspaces.tasks.build_and_promote_cube_schema",
             return_value=MagicMock(id="cube", content_hash="hash"),
@@ -286,6 +290,7 @@ async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
     late_entry = next(e for e in result["tenants"] if e.get("tenant_id") == str(late.id))
     assert late_entry["success"] is False
     assert "added while the load was starting" in late_entry["error"]
+    assert late_entry["error_code"] == ErrorCode.WORKSPACE_SOURCES_CHANGED
 
 
 async def test_workspaces_locking_shared_tenants_in_opposite_order_do_not_deadlock(user):
@@ -528,3 +533,59 @@ async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspa
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
 
     retry.assert_not_called()
+
+
+async def test_the_resume_never_reports_rows_of_an_unpublished_candidate_as_loaded(
+    workspace, tenant, user
+):
+    """A failed load's run records its committed sources, but they live in a
+    candidate nothing serves; the resume must not present them as loaded."""
+    candidate = await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="failed_candidate",
+        state=SchemaState.FAILED,
+        load_workspace_id=workspace.id,
+        load_generation=1,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=candidate,
+        pipeline="commcare_sync",
+        procrastinate_job_id=404,
+        state=MaterializationRun.RunState.PARTIAL,
+        result={
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "visits": {"state": "failed", "rows": 0, "error": "timeout"},
+            }
+        },
+    )
+
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        404, workspace, str(user.id)
+    )
+
+    [entry] = summary
+    assert status == "partial"
+    assert entry["published"] is False
+    assert entry["materialized_row_counts"] == {}
+    assert entry["sources"]["users"]["state"] == "not_published"
+
+
+async def test_an_abort_while_queuing_drops_still_settles_the_candidate(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._defer_abandoned_candidate_drops",
+                side_effect=asyncio.CancelledError,
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await _run(workspace, user)
+
+    [candidate] = [
+        s async for s in TenantSchema.objects.filter(tenant=tenant, load_workspace_id=workspace.id)
+    ]
+    assert candidate.state == SchemaState.FAILED
+    ledger = await TenantLoadGeneration.objects.aget(tenant=tenant)
+    assert ledger.loading_generation == 0
