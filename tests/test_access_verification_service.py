@@ -45,10 +45,7 @@ from apps.users.services.token_refresh import (
     credential_fingerprint,
 )
 from tests.clocks import ManualClock, ShiftedClock
-from tests.row_locks import arow_locked, await_blocked_on_lock, control_row, user_row
-
-# Far beyond any budget under test: a wait that is bounded returns long before it.
-LOCK_SAFETY_SECONDS = 8
+from tests.row_locks import LOCK_SAFETY_SECONDS, HeldRow, arow_locked, control_row, user_row
 
 
 def _observing_sleep():
@@ -67,12 +64,23 @@ def _observing_sleep():
     return waiting, sleep
 
 
+async def _release_once_waiting(waiting, release):
+    # Release in a finally: if the second request never waits, the winner must not be
+    # left parked on the event, burying the real failure under teardown noise.
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+    finally:
+        release.set()
+
+
 async def _drain_overdue_work():
     """Wait for ORM work the service abandoned at its deadline to finish.
 
     Deterministic replacement for a fixed sleep: overdue tasks stay in the
     supervised set until they complete, and a late-result cleanup is added to it
-    before the task it follows is reported done.
+    before the task it follows is reported done -- because ``_supervise`` creates
+    the follow-up synchronously inside its done-callback. Deferring that would make
+    this return early and the tests race again.
     """
     loop = asyncio.get_running_loop()
     async with asyncio.timeout(10):
@@ -215,8 +223,7 @@ async def test_disjoint_concurrent_requests_share_one_provider_call(user, tenant
             user.id, connection.id, {other.id}, provider_verifier=provider, sleep=observing_sleep
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=5)
-    release.set()
+    await _release_once_waiting(waiting, release)
     results = await asyncio.gather(first, second)
 
     assert {result.status for result in results} == {AccessVerificationStatus.VERIFIED}
@@ -634,8 +641,7 @@ async def test_waiter_converges_on_durable_unavailable_result_without_second_cal
             user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=observing_sleep
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=5)
-    release.set()
+    await _release_once_waiting(waiting, release)
     results = await asyncio.gather(first, second)
 
     assert {result.status for result in results} == {AccessVerificationStatus.UNAVAILABLE}
@@ -686,8 +692,7 @@ async def test_disjoint_waiter_observes_connection_attempt_failure(
             user.id, connection.id, {other.id}, provider_verifier=provider, sleep=observing_sleep
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=5)
-    release.set()
+    await _release_once_waiting(waiting, release)
     results = await asyncio.gather(winner, waiter)
 
     assert [result.status for result in results] == [expected_status, expected_status]
@@ -731,8 +736,7 @@ async def test_omitted_waiter_reverifies_rather_than_reading_a_receipt_that_skip
             user.id, connection.id, {omitted.id}, provider_verifier=provider, sleep=observing_sleep
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=5)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.VERIFIED
@@ -773,8 +777,7 @@ async def test_disjoint_waiter_observes_credential_rejection_without_second_disc
             user.id, connection.id, {other.id}, provider_verifier=provider, sleep=observing_sleep
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=5)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.DENIED
@@ -833,7 +836,7 @@ async def test_cancellation_during_initial_claim_drains_and_releases_lease(
     connection, _membership = api_connection
     async with arow_locked(user_row(user.id)) as release:
         task = asyncio.create_task(verify_connection_access(user.id, connection.id, {tenant.id}))
-        await await_blocked_on_lock()
+        await release.await_blocking()
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
@@ -1019,7 +1022,7 @@ async def test_publication_lock_wait_crossing_deadline_cannot_publish_success(
     user, tenant, api_connection, monkeypatch
 ):
     connection, _membership = api_connection
-    release = threading.Event()
+    release = HeldRow()
     # The lock is taken mid-verification, so its context outlives the provider call.
     locks = contextlib.AsyncExitStack()
     # Claim and mapping get a full budget; it is cut to a sliver exactly as publication
@@ -1149,8 +1152,7 @@ async def test_covered_waiter_reads_a_complete_receipt_as_verified(user, tenant,
             user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=observing_sleep
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=5)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.VERIFIED
@@ -1191,8 +1193,7 @@ async def test_denied_waiter_reads_a_tenant_denied_receipt_as_denied(user, tenan
             user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=observing_sleep
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=5)
-    release.set()
+    await _release_once_waiting(waiting, release)
     winner_result, waiter_result = await asyncio.gather(winner, waiter)
 
     assert winner_result.status == AccessVerificationStatus.DENIED

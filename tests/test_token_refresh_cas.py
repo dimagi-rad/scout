@@ -30,7 +30,7 @@ from apps.users.services.token_refresh import (
     refresh_oauth_token_result_sync,
 )
 from tests.clocks import ManualClock
-from tests.row_locks import row_locked, user_row
+from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked, user_row
 
 URL = "https://provider.example/o/token/"
 
@@ -363,9 +363,9 @@ async def test_refresh_success_cannot_persist_after_database_deadline(
     oauth_identity, mode, httpx_mock, requests_mock
 ):
     token, connection = oauth_identity
-    # Frozen, so preflight can never spend the budget however slow the runner; the
-    # persist phase's lock wait is then bounded by the real lock_timeout derived from
-    # it. The holder outlasts that, so the lock cannot free early and let the write in.
+    # Frozen, so a slow runner cannot spend the end-to-end budget before persist (each
+    # statement still gets the real 1s timeout). The persist lock wait is then bounded
+    # by that lock_timeout; the holder outlasts it, so the write cannot slip in.
     clock = ManualClock()
     deadline = clock() + 1.0
     payload = {"access_token": "late-access", "refresh_token": "late-refresh"}
@@ -839,7 +839,7 @@ def _stubbed_provider(payload=None):
 FORWARDED_DEADLINE_SECONDS = 2.0
 
 
-def _user_row_locked(user_id, hold_seconds=8.0):
+def _user_row_locked(user_id, hold_seconds=LOCK_SAFETY_SECONDS):
     """Hold a competing lock on the User row the refresh must take."""
     return row_locked(user_row(user_id), release_after=hold_seconds, acquire_timeout=5)
 

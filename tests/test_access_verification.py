@@ -37,10 +37,7 @@ from apps.users.services.access_verification_types import (
     VerificationResult,
 )
 from tests.clocks import ManualClock
-from tests.row_locks import control_row, row_locked, user_row, wait_until_blocked_on_lock
-
-# Far beyond any budget under test: a wait that is bounded returns long before it.
-LOCK_SAFETY_SECONDS = 8
+from tests.row_locks import LOCK_SAFETY_SECONDS, HeldRow, control_row, row_locked, user_row
 
 
 @dataclass(frozen=True)
@@ -444,7 +441,7 @@ def test_freshness_clock_is_sampled_after_lock_wait(
     base = timezone.now()
     first = claim_verification(user.id, conn.id, {tenant.id}, now=base)
     publish_verification(first, VerificationResult.complete({tenant.id}), now=base)
-    release = threading.Event()
+    release = HeldRow()
     monkeypatch.setattr(
         "apps.users.services.access_verification.timezone.now",
         lambda: base + (timedelta(minutes=5) if release.is_set() else timedelta(minutes=4)),
@@ -456,7 +453,7 @@ def test_freshness_clock_is_sampled_after_lock_wait(
         row_locked(user_row(user.id), release=release, acquire_timeout=10),
     ):
         waiter = executor.submit(claim_verification, user.id, conn.id, {tenant.id})
-        wait_until_blocked_on_lock()
+        release.wait_until_blocking()
         assert not waiter.done()
         release.set()
         result = waiter.result(timeout=10)
@@ -471,7 +468,7 @@ def test_publication_clock_is_sampled_after_lock_wait(
     conn, _membership = verification_connection
     base = timezone.now()
     claim = claim_verification(user.id, conn.id, {tenant.id}, now=base)
-    release = threading.Event()
+    release = HeldRow()
     monkeypatch.setattr(
         "apps.users.services.access_verification.timezone.now",
         lambda: (
@@ -487,7 +484,7 @@ def test_publication_clock_is_sampled_after_lock_wait(
         waiter = executor.submit(
             publish_verification, claim, VerificationResult.complete({tenant.id})
         )
-        wait_until_blocked_on_lock()
+        release.wait_until_blocking()
         assert not waiter.done()
         release.set()
         status = waiter.result(timeout=10)
@@ -981,8 +978,8 @@ def test_verification_restores_timeouts_inside_outer_transaction(user, operation
             cursor.execute(
                 "SELECT set_config('lock_timeout', '3s', true), set_config('statement_timeout', '4s', true)"
             )
-        # Frozen: the operation must succeed however slow the runner, since what this
-        # checks is that the timeouts it set are restored afterwards.
+        # Frozen, so the whole-operation budget cannot run out on a slow runner; each
+        # statement still gets the real 500ms timeouts, which is what must be restored.
         clock = ManualClock()
         deadline = clock() + 0.5
         if operation == "claim":

@@ -12,6 +12,11 @@ from apps.users.models import VerificationControl
 
 HOLD_LIMIT_SECONDS = 10
 JOIN_TIMEOUT_SECONDS = 5
+# A safety release for tests that assert a wait was bounded: far beyond any budget
+# under test, so a bounded wait returns long before it, yet inside the hold limit, so
+# an unbounded one takes the lock and fails on its result rather than on the holder.
+LOCK_SAFETY_SECONDS = 8
+assert LOCK_SAFETY_SECONDS < HOLD_LIMIT_SECONDS
 
 
 def user_row(user_id):
@@ -22,13 +27,53 @@ def control_row(connection_id):
     return lambda: VerificationControl.objects.select_for_update().get(connection_id=connection_id)
 
 
+class HeldRow(threading.Event):
+    """The release event for a held row, which also knows the holder's backend."""
+
+    pid = None
+
+    def wait_until_blocking(self, timeout=JOIN_TIMEOUT_SECONDS):
+        """Return once some backend is waiting on this holder's lock.
+
+        Replaces a fixed sleep before acting on a waiter: under load the waiter may not
+        have reached the lock yet, and the test would then pass without exercising the
+        lock wait at all.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                    [self.pid],
+                )
+                if cursor.fetchone()[0]:
+                    return
+            time.sleep(0.01)
+        raise AssertionError("no backend started waiting on the held row")
+
+    async def await_blocking(self):
+        """:meth:`wait_until_blocking` for async tests.
+
+        Runs on a plain thread, not the thread-sensitive executor, which the blocked
+        waiter may itself be occupying.
+        """
+
+        def poll():
+            try:
+                self.wait_until_blocking()
+            finally:
+                connection.close()
+
+        await asyncio.to_thread(poll)
+
+
 class _Holder:
     """Owns the holder thread; the waits are plain callables so the async variant
     can run them off the event loop without duplicating the orchestration."""
 
     def __init__(self, lock, release, release_after, acquire_timeout):
         self.lock = lock
-        self.release = release or threading.Event()
+        self.release = release or HeldRow()
         self.acquired = threading.Event()
         self.acquire_timeout = acquire_timeout
         self.outcome = {}
@@ -49,6 +94,9 @@ class _Holder:
                         [f"{max(1, int(self.acquire_timeout * 1000))}ms"],
                     )
                 self.lock()
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_backend_pid()")
+                    self.release.pid = cursor.fetchone()[0]
                 self.acquired.set()
                 self.outcome["released"] = self.release.wait(timeout=HOLD_LIMIT_SECONDS)
         except Exception as exc:
@@ -120,39 +168,3 @@ async def arow_locked(lock, *, release=None, release_after=None, acquire_timeout
         holder.stop()
         await asyncio.to_thread(holder.join)
     holder.check()
-
-
-def wait_until_blocked_on_lock(timeout=JOIN_TIMEOUT_SECONDS):
-    """Return once another backend in this database is waiting on a lock.
-
-    Replaces a fixed sleep before acting on a waiter: under load the waiter may not
-    have reached the lock yet, and the test would then pass without exercising the
-    lock wait at all.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT count(*) FROM pg_stat_activity"
-                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
-            )
-            if cursor.fetchone()[0]:
-                return
-        time.sleep(0.01)
-    raise AssertionError("no backend started waiting on the lock")
-
-
-async def await_blocked_on_lock():
-    """:func:`wait_until_blocked_on_lock` for async tests.
-
-    Runs on a plain thread, not the thread-sensitive executor, which the blocked
-    waiter may itself be occupying.
-    """
-
-    def poll():
-        try:
-            wait_until_blocked_on_lock()
-        finally:
-            connection.close()
-
-    await asyncio.to_thread(poll)
