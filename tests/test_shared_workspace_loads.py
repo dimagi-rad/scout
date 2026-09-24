@@ -319,3 +319,28 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
 
     await candidate.arefresh_from_db()
     assert candidate.state == SchemaState.FAILED
+
+
+async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace, tenant, user):
+    """Adding a source loads it before publication; sources already serving data
+    are published as they are, not reloaded for it."""
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user)
+        new_source = await Tenant.objects.acreate(
+            provider="commcare", external_id="new-source", canonical_name="New"
+        )
+        await agrant_tenant_access(user, new_source)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=new_source)
+        with patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build:
+            build.return_value.tenant_coverage = {}
+            result = await workspaces_tasks.materialize_workspace_core(
+                str(workspace.id), str(user.id), None, only_unserved=True
+            )
+
+    assert [call[0] for call in pipeline.calls] == [tenant.id, new_source.id]
+    by_tenant = {e.get("tenant_id") or e["tenant"]: e for e in result["tenants"]}
+    assert by_tenant[str(tenant.id)]["result"]["status"] == "already_loaded"
+    assert result["all_succeeded"] is True
+    build.assert_called_once()
+    assert len(await _active_schemas(new_source)) == 1

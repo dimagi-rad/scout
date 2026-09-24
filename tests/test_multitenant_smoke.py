@@ -4,7 +4,14 @@ import pytest
 from rest_framework.test import APIClient
 
 from apps.users.models import Tenant, TenantMembership
-from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from tests.tenant_access import usable_connection
 
 
@@ -34,12 +41,16 @@ def setup(transactional_db):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_adding_tenant_dispatches_rebuild_task(api_client, setup):
+def test_adding_a_tenant_that_already_serves_data_only_rebuilds_views(api_client, setup):
     user, ws, t2 = setup
+    TenantSchema.objects.create(tenant=t2, schema_name="smoke_2_live", state=SchemaState.ACTIVE)
 
-    with patch(
-        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
-    ) as mock_defer:
+    with (
+        patch(
+            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        ) as mock_defer,
+        patch("apps.workspaces.services.workspace_service.materialize_workspace.defer") as load,
+    ):
         api_client.force_login(user)
         resp = api_client.post(
             f"/api/workspaces/{ws.id}/tenants/",
@@ -50,3 +61,33 @@ def test_adding_tenant_dispatches_rebuild_task(api_client, setup):
     assert resp.status_code == 202
     assert WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
     mock_defer.assert_called_once_with(workspace_id=str(ws.id))
+    load.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup):
+    """A new source is loaded first; the load then publishes the views and Cube,
+    so it is never published as a missing source."""
+    user, ws, t2 = setup
+
+    with (
+        patch(
+            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        ) as rebuild,
+        patch("apps.workspaces.services.workspace_service.materialize_workspace.defer") as load,
+    ):
+        api_client.force_login(user)
+        resp = api_client.post(
+            f"/api/workspaces/{ws.id}/tenants/",
+            {"tenant_id": str(t2.id)},
+            format="json",
+        )
+
+    assert resp.status_code == 202
+    rebuild.assert_not_called()
+    load.assert_called_once()
+    kwargs = load.call_args.kwargs
+    assert kwargs["workspace_id"] == str(ws.id)
+    assert kwargs["user_id"] == str(user.id)
+    assert kwargs["only_unserved"] is True
+    assert kwargs["load_intent"] == {str(t2.id): 1}

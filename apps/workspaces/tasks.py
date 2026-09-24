@@ -712,6 +712,7 @@ async def materialize_workspace_core(
     *,
     load_intent: dict[str, int] | None = None,
     locked_tenant_ids: frozenset[str] | None = None,
+    only_unserved: bool = False,
 ) -> dict:
     """Run materialization for all tenants in a workspace and rebuild view schemas.
 
@@ -818,6 +819,24 @@ async def materialize_workspace_core(
                     "loaded. Run the load again to include it.",
                     ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
                 )
+            )
+            continue
+        if (
+            only_unserved
+            and await TenantSchema.objects.filter(
+                tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
+            ).aexists()
+        ):
+            # A source added to the workspace loads before publication; sources
+            # already serving data are only published, never reloaded for it.
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
+                    "provider": tm.tenant.provider,
+                    "success": True,
+                    "result": {"status": "already_loaded"},
+                }
             )
             continue
         attempted_tenant_ids.add(str(tm.tenant_id))
@@ -1132,6 +1151,7 @@ async def materialize_workspace(
     workspace_id: str,
     user_id: str = "",
     load_intent: dict | None = None,
+    only_unserved: bool = False,
 ) -> dict:
     """Procrastinate task: run materialization for a workspace, then ALWAYS
     defer the chat-resume task so an interactive user is never left with a
@@ -1145,7 +1165,11 @@ async def materialize_workspace(
     preflight_failures = None
     try:
         result = await materialize_workspace_core(
-            workspace_id, user_id, job_id, load_intent=load_intent
+            workspace_id,
+            user_id,
+            job_id,
+            load_intent=load_intent,
+            only_unserved=only_unserved,
         )
         preflight_failures = [
             {

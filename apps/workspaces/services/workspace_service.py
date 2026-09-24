@@ -6,15 +6,31 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
-from apps.workspaces.tasks import rebuild_workspace_view_schema, teardown_view_schema_task
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
+from apps.workspaces.services.load_generations import (
+    INTENT_RECONCILE_MISSING,
+    capture_load_intent,
+)
+from apps.workspaces.tasks import (
+    materialize_workspace,
+    rebuild_workspace_view_schema,
+    teardown_view_schema_task,
+)
 
 
-def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
-    """Add a tenant to a workspace and mark the view schema for rebuild.
+def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[WorkspaceTenant, bool]:
+    """Add a tenant to a workspace and publish it once it has data.
 
-    Uses get_or_create to atomically handle concurrent requests. Only triggers
-    the schema rebuild when a new WorkspaceTenant is actually created.
+    A tenant that already serves data (loaded for a sibling workspace) only needs
+    this workspace's views rebuilt. One with nothing loaded is loaded first, as
+    ``actor_id``, and the views and Cube are published after that load, so the new
+    source is never published as an empty or missing view. Uses get_or_create to
+    handle concurrent requests; only a newly created link dispatches work.
 
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
@@ -25,7 +41,17 @@ def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
             WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                 state=SchemaState.PROVISIONING
             )
-            rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+            serving = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).exists()
+            if serving or actor_id is None:
+                rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+            else:
+                intent = capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING)
+                materialize_workspace.defer(
+                    workspace_id=str(workspace.id),
+                    user_id=str(actor_id),
+                    load_intent=intent,
+                    only_unserved=True,
+                )
 
     return wt, created
 

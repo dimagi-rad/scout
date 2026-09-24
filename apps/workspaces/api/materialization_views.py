@@ -12,6 +12,10 @@ from apps.users.decorators import async_login_required
 from apps.workspaces.access import access_denied_body, aresolve_workspace_access_ex
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
+from apps.workspaces.services.load_generations import (
+    INTENT_FULL_REFRESH,
+    acapture_workspace_load_intent,
+)
 from apps.workspaces.tasks import materialize_workspace
 from apps.workspaces.workspace_resolver import aresolve_workspace
 from config.procrastinate import app
@@ -192,9 +196,13 @@ async def materialization_retry_view(request, workspace_id):
             )
 
     try:
+        # Captured before queueing, so requests accepted while an equivalent load
+        # is still pending join it rather than each running a full load.
+        load_intent = await acapture_workspace_load_intent(workspace.id, INTENT_FULL_REFRESH)
         job = await materialize_workspace.defer_async(
             workspace_id=str(workspace.id),
             user_id=str(user.id),
+            load_intent=load_intent,
         )
     except Exception:
         logger.exception("materialization_retry_view: failed to dispatch")
