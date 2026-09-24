@@ -8,6 +8,10 @@ data: the next load of the same pending generation with the same raw-load
 configuration resumes it (the materializer continues resumable sources from
 its last committed cursor). Every other failed candidate is abandoned and
 dropped by a bounded-retry cleanup.
+
+Lock order is T (the tenant advisory lock), then the Tenant row, then its
+TenantSchema rows. T's holder waits on an idle side session, so PostgreSQL
+cannot see a cycle: never wait on T while holding the Tenant row.
 """
 
 from __future__ import annotations
@@ -20,7 +24,6 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from apps.common.identifiers import refresh_schema_name
-from apps.transformations.models import TransformationRunStatus
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
@@ -28,7 +31,12 @@ from apps.workspaces.models import (
     TenantLoadGeneration,
     TenantSchema,
 )
-from apps.workspaces.services.load_generations import publish_generation, resumable_candidate
+from apps.workspaces.services.data_operation import assert_tenant_lock_held
+from apps.workspaces.services.load_generations import (
+    publish_generation,
+    resumable_candidate,
+    transforms_publishable,
+)
 
 _SUPERSEDABLE_RUN_STATES = (
     MaterializationRun.RunState.COMPLETED,
@@ -67,10 +75,11 @@ def open_workspace_candidate(
 ) -> OpenedCandidate:
     """Resume this generation's matching FAILED candidate, or create a fresh one.
 
-    The caller holds T for ``tenant``, so no other writer can be filling or
+    The caller must hold T for ``tenant``, so no other writer can be filling or
     resuming a candidate concurrently; the Tenant row lock orders this against
     promotion and the reconciler.
     """
+    assert_tenant_lock_held(tenant.id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant.id)
         match = resumable_candidate(tenant.id, generation, config_fingerprint)
@@ -108,17 +117,7 @@ def _run_is_publishable(run: MaterializationRun | None, fingerprint: str) -> boo
         return False
     if not fingerprint or result.get("load_fingerprint") != fingerprint:
         return False
-    transforms = result.get("transforms") or {}
-    return not (
-        result.get("cancelled")
-        or result.get("error")
-        or result.get("transform_error")
-        or not isinstance(transforms, dict)
-        or (
-            transforms.get("error")
-            and transforms.get("status") != TransformationRunStatus.TESTS_FAILED
-        )
-    )
+    return not (result.get("cancelled") or result.get("error")) and transforms_publishable(result)
 
 
 def promote_candidate_schema(
@@ -145,6 +144,10 @@ def promote_candidate_schema(
 
     Nothing sweeps stranded TEARDOWN rows: the caller must queue a teardown for
     each of ``retired_schema_ids`` in the same transaction or on commit.
+
+    ``workspace_job_id`` is the candidate owner (``load_owner_token``): a real
+    queue job id, which the run must also record, or a negative token for a
+    job-less load, whose run records no job.
     """
     tenant_id = (
         TenantSchema.objects.filter(id=candidate_id).values_list("tenant_id", flat=True).first()
@@ -245,8 +248,11 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
     holding T sees only orphans. They become FAILED, which keeps them eligible
     for resume by the same pending generation. Any loading marker is equally a
     dead writer's, so it is cleared: later requests then join the pending
-    generation and resume its candidate instead of starting another.
+    generation and resume its candidate instead of starting another. Raises
+    LockOrderError without T: a caller without it would fail a live writer's
+    load underneath it.
     """
+    assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
         TenantLoadGeneration.objects.filter(tenant_id=tenant_id).exclude(
@@ -274,8 +280,9 @@ def unresumable_workspace_candidates(tenant_id, *, stale_before) -> list[TenantS
     Resume needs the tenant's pending generation, so a candidate of any other
     generation is abandoned. One of the pending generation is kept for a retry
     until it was created before ``stale_before``; past that nobody is coming
-    back for it, and a later load simply starts fresh. Call under T.
+    back for it, and a later load simply starts fresh. Requires T.
     """
+    assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
         failed = TenantSchema.objects.filter(
@@ -304,6 +311,7 @@ def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
     ``keep_id`` is required: excluding None would exclude nothing and hand the
     resumable candidate to cleanup.
     """
+    assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
         return list(

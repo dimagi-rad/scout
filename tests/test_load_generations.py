@@ -165,7 +165,7 @@ def test_reuse_rejects_stale_partial_or_superseded_evidence(tenant, pipeline, sp
         )
     elif spoil == "transform_error":
         # Keep the receipt intact so only the transform error can refuse reuse.
-        run.result["transform_error"] = "dbt failed"
+        run.result["transforms"] = {"status": "failed", "error": "dbt failed"}
         run.save(update_fields=["result"])
     elif spoil == "run_missing":
         run.delete()
