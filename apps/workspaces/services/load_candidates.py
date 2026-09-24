@@ -168,6 +168,8 @@ def promote_candidate_schema(
             )
             job_id = refresh_job_id
         else:
+            # Retiring runs the caller does not own below is only safe under T.
+            assert_tenant_lock_held(tenant_id)
             # None would match any job-less candidate and run; job-less loads use
             # load_owner_token instead, whose run records no queue job.
             owned = (
@@ -271,6 +273,14 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
         return orphans
 
 
+def _forget_resume_evidence(candidates) -> None:
+    # resumable_candidate requires a matching config fingerprint, so clearing it
+    # takes a candidate out of resume for good.
+    TenantSchema.objects.filter(id__in=[c.id for c in candidates]).update(
+        load_config_fingerprint=""
+    )
+
+
 def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
     """FAILED workspace candidates no load will resume, other than ``keep_id``.
 
@@ -278,17 +288,20 @@ def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
     one is ``keep_id``); only that one can match the pending generation's
     config, so every other FAILED candidate is abandoned partial data.
     ``keep_id`` is required: excluding None would exclude nothing and hand the
-    resumable candidate to cleanup.
+    resumable candidate to cleanup. The returned rows lose their resume evidence
+    here, under T, so none can be resumed once cleanup has dropped its schema.
     """
     if keep_id is None:
         raise ValueError("keep_id is required; None would hand the resumable candidate to cleanup")
     assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
-        return list(
+        abandoned = list(
             TenantSchema.objects.filter(
                 tenant_id=tenant_id,
                 state=SchemaState.FAILED,
                 load_workspace_id__isnull=False,
             ).exclude(id=keep_id)
         )
+        _forget_resume_evidence(abandoned)
+        return abandoned
