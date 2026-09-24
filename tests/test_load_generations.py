@@ -1,8 +1,11 @@
 """Generation intent, join/bump rules, positive reuse evidence and resume eligibility."""
 
+import dataclasses
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from django.utils import timezone
 
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.users.models import Tenant
@@ -18,6 +21,7 @@ from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     begin_load_generation,
     capture_load_intent,
+    end_load_generation,
     parse_load_intent,
     pipeline_fingerprint,
     publish_generation,
@@ -76,11 +80,41 @@ def test_reconcile_missing_is_satisfied_by_published_generation(tenant, pipeline
     assert capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING) == {str(tenant.id): 1}
 
 
-def test_begin_load_marks_pending_so_later_requests_join(tenant, pipeline):
+def test_requests_join_a_pending_load_only_until_it_starts_fetching(tenant, pipeline):
     _published(tenant, pipeline, generation=1)
-    assert begin_load_generation(tenant.id) == 2
     assert capture_load_intent([tenant.id], INTENT_FULL_REFRESH) == {str(tenant.id): 2}
+    assert capture_load_intent([tenant.id], INTENT_FULL_REFRESH) == {str(tenant.id): 2}
+
     assert begin_load_generation(tenant.id) == 2
+    # Clicked after the fetch started: generation 2 read its data too early.
+    assert capture_load_intent([tenant.id], INTENT_FULL_REFRESH) == {str(tenant.id): 3}
+    assert capture_load_intent([tenant.id], INTENT_FULL_REFRESH) == {str(tenant.id): 3}
+
+
+def test_a_failed_load_stays_joinable_so_a_retry_can_resume_it(tenant, pipeline):
+    _published(tenant, pipeline, generation=1)
+    loading = begin_load_generation(tenant.id)
+    end_load_generation(tenant.id, loading)
+
+    assert capture_load_intent([tenant.id], INTENT_FULL_REFRESH) == {str(tenant.id): loading}
+    assert begin_load_generation(tenant.id) == loading
+
+
+def test_an_older_generation_never_overwrites_newer_published_evidence(tenant, pipeline):
+    newer_schema, newer_run, newer_fingerprint = _published(tenant, pipeline, generation=3)
+    stale = TenantSchema.objects.create(
+        tenant=tenant, schema_name="gen_stale", state=SchemaState.ACTIVE
+    )
+    stale_run = MaterializationRun.objects.create(
+        tenant_schema=stale, pipeline=pipeline.name, state=MaterializationRun.RunState.COMPLETED
+    )
+
+    publish_generation(tenant.id, 2, stale_run, stale, "stale-fingerprint")
+
+    row = TenantLoadGeneration.objects.get(tenant=tenant)
+    assert row.published_generation == 3
+    assert (row.published_run_id, row.published_schema_id) == (newer_run.id, newer_schema.id)
+    assert row.published_fingerprint == newer_fingerprint
 
 
 def test_intent_is_one_bounded_integer_per_tenant():
@@ -92,6 +126,7 @@ def test_intent_is_one_bounded_integer_per_tenant():
     assert parse_load_intent({}) is None
     assert parse_load_intent({str(a.id): 0}) is None
     assert parse_load_intent({str(a.id): "1"}) is None
+    assert parse_load_intent({"not-a-uuid": 1}) is None
     with pytest.raises(ValueError):
         capture_load_intent([a.id], "bogus")
 
@@ -129,9 +164,9 @@ def test_reuse_rejects_stale_partial_or_superseded_evidence(tenant, pipeline, sp
             tenant_schema=schema, pipeline=pipeline.name, state=MaterializationRun.RunState.PARTIAL
         )
     elif spoil == "transform_error":
-        MaterializationRun.objects.filter(id=run.id).update(
-            result={"sources": {}, "transform_error": "dbt failed"}
-        )
+        # Keep the receipt intact so only the transform error can refuse reuse.
+        run.result["transform_error"] = "dbt failed"
+        run.save(update_fields=["result"])
     elif spoil == "run_missing":
         run.delete()
     elif spoil in {"missing_receipt", "wrong_receipt"}:
@@ -180,11 +215,29 @@ def test_raw_load_fingerprint_ignores_assets_but_not_config_or_code(tenant, pipe
     assert raw_load_fingerprint(pipeline) == base
     with patch.object(load_generations, "implementation_revision", return_value="deploy-b"):
         assert raw_load_fingerprint(pipeline) != base
-    assert raw_load_fingerprint(get_registry().get_by_provider("ocs")) != base
+    assert raw_load_fingerprint(dataclasses.replace(pipeline, version="next")) != base
 
 
-def _failed_candidate(tenant, *, generation, config, suffix="a"):
-    return TenantSchema.objects.create(
+def test_a_configured_revision_is_read_every_call(settings, pipeline):
+    settings.SCOUT_IMPLEMENTATION_REVISION = "deploy-a"
+    first = raw_load_fingerprint(pipeline)
+    settings.SCOUT_IMPLEMENTATION_REVISION = "deploy-b"
+
+    assert raw_load_fingerprint(pipeline) != first
+
+
+def test_a_missing_implementation_path_fails_loudly(monkeypatch):
+    load_generations._source_tree_revision.cache_clear()
+    monkeypatch.setattr(load_generations, "_IMPLEMENTATION_PATHS", ("no/such/path",))
+    try:
+        with pytest.raises(RuntimeError, match="no/such/path"):
+            load_generations._source_tree_revision()
+    finally:
+        load_generations._source_tree_revision.cache_clear()
+
+
+def _failed_candidate(tenant, *, generation, config, suffix="a", created_at=None):
+    schema = TenantSchema.objects.create(
         tenant=tenant,
         schema_name=f"cand_{tenant.id.hex[:8]}_{suffix}",
         state=SchemaState.FAILED,
@@ -192,6 +245,9 @@ def _failed_candidate(tenant, *, generation, config, suffix="a"):
         load_generation=generation,
         load_config_fingerprint=config,
     )
+    if created_at is not None:
+        TenantSchema.objects.filter(pk=schema.pk).update(created_at=created_at)
+    return schema
 
 
 def test_resume_only_the_same_pending_generation_with_matching_config(tenant, pipeline):
@@ -227,7 +283,10 @@ def test_resume_never_picks_a_refresh_request_or_live_candidate(tenant, pipeline
 
 def test_resume_prefers_the_newest_matching_candidate(tenant, pipeline):
     config = raw_load_fingerprint(pipeline)
-    _failed_candidate(tenant, generation=2, config=config, suffix="old")
-    newest = _failed_candidate(tenant, generation=2, config=config, suffix="new")
+    now = timezone.now()
+    _failed_candidate(tenant, generation=2, config=config, suffix="old", created_at=now)
+    newest = _failed_candidate(
+        tenant, generation=2, config=config, suffix="new", created_at=now + timedelta(seconds=1)
+    )
 
     assert resumable_candidate(tenant.id, 2, config) == newest

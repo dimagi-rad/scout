@@ -42,6 +42,7 @@ class Migration(migrations.Migration):
                 ),
                 ("requested_generation", models.BigIntegerField(default=0)),
                 ("published_generation", models.BigIntegerField(default=0)),
+                ("loading_generation", models.BigIntegerField(default=0)),
                 ("published_fingerprint", models.CharField(blank=True, default="", max_length=64)),
                 ("updated_at", models.DateTimeField(auto_now=True)),
                 (

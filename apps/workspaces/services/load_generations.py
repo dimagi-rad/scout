@@ -14,6 +14,7 @@ import dataclasses
 import hashlib
 import json
 import pathlib
+import uuid
 from dataclasses import dataclass
 from functools import cache
 
@@ -53,17 +54,25 @@ class ReuseEvidence:
     schema: TenantSchema
 
 
-@cache
 def implementation_revision() -> str:
     configured = getattr(settings, "SCOUT_IMPLEMENTATION_REVISION", "")
     if configured:
         return str(configured)
+    return _source_tree_revision()
+
+
+@cache
+def _source_tree_revision() -> str:
     digest = hashlib.sha256()
     for relative in _IMPLEMENTATION_PATHS:
         path = _REPO_ROOT / relative
+        if not path.exists():
+            # A renamed path would silently stop tracking code changes, and reuse
+            # would start accepting loads made by a different deploy.
+            raise RuntimeError(f"Implementation path {relative!r} is missing; update the list")
         files = sorted(p for p in path.rglob("*") if p.is_file()) if path.is_dir() else [path]
         for file in files:
-            if not file.exists() or "__pycache__" in file.parts:
+            if "__pycache__" in file.parts:
                 continue
             digest.update(str(file.relative_to(_REPO_ROOT)).encode())
             digest.update(file.read_bytes())
@@ -77,7 +86,12 @@ def _canonical(value) -> str:
 def _config_payload(pipeline_config) -> dict:
     if dataclasses.is_dataclass(pipeline_config):
         return dataclasses.asdict(pipeline_config)
-    return {field: str(getattr(pipeline_config, field, "")) for field in ("name", "version")}
+    # Registry configs are always dataclasses; this only keys duck-typed test
+    # doubles, and never compares equal to a real config.
+    return {
+        "duck_typed": True,
+        **{field: str(getattr(pipeline_config, field, "")) for field in ("name", "version")},
+    }
 
 
 def raw_load_fingerprint(pipeline_config) -> str:
@@ -119,10 +133,12 @@ def _locked_generation(tenant_id) -> TenantLoadGeneration:
 def capture_load_intent(tenant_ids, kind: str) -> dict[str, int]:
     """Record, before any wait, the generation each tenant must reach.
 
-    A refresh accepted while a load is pending joins it; one accepted after the
-    previous generation completed asks for a new one. Missing-source
-    reconciliation is satisfied by whatever is already published (validated at
-    run time) and only requests a load when nothing was ever published.
+    A refresh accepted while a load is pending but not yet started joins it. One
+    accepted after that load started fetching asks for the next generation: the
+    user clicked after the data was read, so the running load cannot answer it.
+    Missing-source reconciliation is satisfied by whatever is already published
+    (validated at run time) and only requests a load when nothing was ever
+    published.
     """
     if kind not in INTENT_KINDS:
         raise ValueError(f"Unknown load intent {kind!r}")
@@ -131,10 +147,13 @@ def capture_load_intent(tenant_ids, kind: str) -> dict[str, int]:
         # Sorted, so two requests over overlapping tenants lock rows in one order.
         for tenant_id in sorted({str(tenant_id) for tenant_id in tenant_ids}):
             generation = _locked_generation(tenant_id)
-            pending = generation.requested_generation > generation.published_generation
+            joinable = (
+                generation.requested_generation > generation.published_generation
+                and generation.loading_generation < generation.requested_generation
+            )
             if kind == INTENT_RECONCILE_MISSING and generation.published_generation >= 1:
                 intent[tenant_id] = generation.published_generation
-            elif pending:
+            elif joinable:
                 intent[tenant_id] = generation.requested_generation
             else:
                 generation.requested_generation += 1
@@ -165,6 +184,10 @@ def parse_load_intent(value) -> dict[str, int] | None:
     intent: dict[str, int] = {}
     for tenant_id, generation in value.items():
         if not isinstance(tenant_id, str) or type(generation) is not int or generation < 1:
+            return None
+        try:
+            uuid.UUID(tenant_id)
+        except ValueError:
             return None
         intent[tenant_id] = generation
     return intent
@@ -209,17 +232,30 @@ def reusable_generation(tenant_id, required: int, fingerprint: str) -> ReuseEvid
 
 
 def begin_load_generation(tenant_id) -> int:
-    """Mark a load as pending and return the generation it will publish.
+    """Mark the pending generation as loading and return it.
 
-    Called under the tenant lock right before loading, so any request accepted
-    from now until publication joins this generation.
+    Called under the tenant lock right before fetching. From now until the load
+    ends, a new refresh request asks for the next generation instead of joining.
+    Any loading marker already set is stale: T is exclusive, so its writer died.
     """
     with transaction.atomic():
         generation = _locked_generation(tenant_id)
         if generation.requested_generation <= generation.published_generation:
             generation.requested_generation = generation.published_generation + 1
-            generation.save(update_fields=["requested_generation", "updated_at"])
+        generation.loading_generation = generation.requested_generation
+        generation.save(update_fields=["requested_generation", "loading_generation", "updated_at"])
         return generation.requested_generation
+
+
+def end_load_generation(tenant_id, loading_generation: int) -> None:
+    """Clear the loading marker after a load that did not publish.
+
+    The generation stays pending, so a retry joins it and can resume its
+    candidate rather than being pushed to a fresh generation.
+    """
+    TenantLoadGeneration.objects.filter(
+        tenant_id=tenant_id, loading_generation=loading_generation
+    ).update(loading_generation=0)
 
 
 def resumable_candidate(tenant_id, generation: int, config_fingerprint: str) -> TenantSchema | None:
@@ -240,7 +276,7 @@ def resumable_candidate(tenant_id, generation: int, config_fingerprint: str) -> 
             load_generation=generation,
             load_config_fingerprint=config_fingerprint,
         )
-        .order_by("-created_at")
+        .order_by("-created_at", "-id")
         .first()
     )
 
@@ -253,10 +289,13 @@ def publish_generation(tenant_id, loading_generation: int, run, schema, fingerpr
     """
     with transaction.atomic():
         generation = _locked_generation(tenant_id)
-        generation.published_generation = max(loading_generation, generation.published_generation)
-        generation.requested_generation = max(
-            generation.requested_generation, generation.published_generation
-        )
+        if loading_generation < generation.published_generation:
+            # A newer generation is already published; never regress its evidence.
+            return
+        generation.published_generation = loading_generation
+        generation.requested_generation = max(generation.requested_generation, loading_generation)
+        if generation.loading_generation == loading_generation:
+            generation.loading_generation = 0
         generation.published_run = run
         generation.published_schema = schema
         generation.published_fingerprint = fingerprint
@@ -264,6 +303,7 @@ def publish_generation(tenant_id, loading_generation: int, run, schema, fingerpr
             update_fields=[
                 "published_generation",
                 "requested_generation",
+                "loading_generation",
                 "published_run",
                 "published_schema",
                 "published_fingerprint",

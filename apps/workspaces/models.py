@@ -133,6 +133,9 @@ class TenantLoadGeneration(models.Model):
     )
     requested_generation = models.BigIntegerField(default=0)
     published_generation = models.BigIntegerField(default=0)
+    # The generation a writer is fetching right now (0 when none). A refresh
+    # accepted after its fetch started must not be answered by it.
+    loading_generation = models.BigIntegerField(default=0)
     published_run = models.ForeignKey(
         MaterializationRun,
         on_delete=models.SET_NULL,
