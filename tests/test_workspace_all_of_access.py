@@ -413,9 +413,12 @@ class TestRemediationWithoutCoverage:
         self, client, manager, partial_member, other_user
     ):
         _join(partial_member, other_user)
+        Workspace.objects.filter(pk=partial_member.pk).update(system_prompt="secret instructions")
         client.force_login(manager)
 
-        assert client.get(f"/api/workspaces/{partial_member.id}/").status_code == 200
+        detail = client.get(f"/api/workspaces/{partial_member.id}/")
+        assert detail.status_code == 200
+        assert detail.json()["system_prompt"] == ""
         roster = client.get(f"/api/workspaces/{partial_member.id}/members/").json()
         # Only their own row (for leaving), not the other members or invites.
         assert [m["user_id"] for m in roster["members"]] == [str(manager.id)]

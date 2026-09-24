@@ -85,10 +85,14 @@ class WorkspaceAccess:
 
 def remedy_text(missing: MissingTenant) -> str:
     """One clause telling the member how to regain ``missing``."""
-    product = _PROVIDER_LABELS.get(missing.provider, "the source")
+    product = _PROVIDER_LABELS.get(missing.provider, "its provider")
     team = missing.team_name or missing.team_slug
     if missing.recovery == CoverageRecovery.ACCESS_REMOVED:
-        return f"your {product} access was removed; ask its admin to restore it, then reconnect"
+        # The tombstone can't tell a disconnect from upstream removal, so name both.
+        return (
+            f"your access through {product} ended; reconnect it in Connected Accounts, "
+            f"or if it was removed in {product}, ask an admin there to restore it"
+        )
     if missing.recovery == CoverageRecovery.CONNECT_TEAM and team:
         return f"connect {product} team '{team}' in Connected Accounts"
     if missing.recovery == CoverageRecovery.LEGACY_TEAM_UNKNOWN:
@@ -97,7 +101,7 @@ def remedy_text(missing: MissingTenant) -> str:
         return f"connect the {product} team that owns it in Connected Accounts"
     if missing.recovery == CoverageRecovery.RECONNECT:
         return f"reconnect {product} in Connected Accounts"
-    return f"connect a {product} account that has access to it in Connected Accounts"
+    return f"connect an account on {product} that has access to it in Connected Accounts"
 
 
 def missing_tenants_payload(missing) -> list[dict]:
@@ -274,7 +278,11 @@ def resolve_workspace_access_ex(
 async def aresolve_workspace_access_ex(
     user, workspace_id, *, minimum_role: str = WorkspaceRole.READ
 ) -> WorkspaceAccess:
-    """Async: resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
+    """Async: resolve access, exposing the denial reason (see ``WorkspaceAccess``).
+
+    No ``require_coverage`` here: the remediation actions it exists for are all
+    sync DRF views, and async callers are data paths that must always check it.
+    """
     try:
         wm = await WorkspaceMembership.objects.select_related("workspace").aget(
             workspace_id=workspace_id, user=user

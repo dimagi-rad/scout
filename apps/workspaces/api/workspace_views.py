@@ -429,7 +429,10 @@ class WorkspaceDetailView(APIView):
                 "display_name": display_name,
                 "is_auto_created": workspace.is_auto_created,
                 "role": membership.role,
-                "system_prompt": workspace.system_prompt,
+                # Agent configuration is workspace content, not page metadata.
+                "system_prompt": workspace.system_prompt
+                if not missing_tenants_for_member(request.user, workspace)
+                else "",
                 "schema_status": schema_status,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
@@ -902,8 +905,12 @@ class WorkspaceTenantView(APIView):
         # members who still have full access.
         missing = {t.tenant_id for t in missing_tenants_for_member(request.user, workspace)}
         if missing and str(wt.tenant_id) not in missing:
-            _workspace, _membership, err = resolve_workspace(request, workspace_id)
-            return err
+            return Response(
+                {
+                    "error": "You can only remove a source you're missing until you can use them all."
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         try:
             remove_workspace_tenant(workspace, wt)

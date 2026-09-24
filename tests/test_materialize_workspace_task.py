@@ -1385,6 +1385,7 @@ async def test_partially_covering_requester_is_refused_before_loading(
 
     cube.assert_not_called()
     assert result["status"] == "denied"
+    assert "Connected Accounts" in result["tenants"][0]["error"]
     assert result["all_succeeded"] is False
     assert [(r["tenant"], r["error_code"]) for r in result["tenants"]] == [
         (other.external_id, ErrorCode.WORKSPACE_TENANT_UNREACHABLE)
