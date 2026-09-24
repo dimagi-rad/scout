@@ -8,9 +8,11 @@ are stubbed.
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from django.utils import timezone
 
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.users.models import Tenant
@@ -76,12 +78,11 @@ async def _loads(pipeline: _Pipeline):
         ),
         patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
-        patch(
-            "apps.workspaces.tasks.drop_abandoned_candidate.defer_async", new_callable=AsyncMock
-        ) as drop,
+        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop,
     ):
         retire.return_value.defer_async = AsyncMock(return_value=1)
-        yield drop
+        drop.return_value.defer_async = AsyncMock(return_value=1)
+        yield drop.return_value.defer_async
 
 
 async def _sibling(user, tenant, name="Sibling"):
@@ -273,7 +274,11 @@ async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
 
     pipeline = _Pipeline()
     async with _loads(pipeline):
-        with patch("apps.workspaces.tasks.tenant_data_lock", add_tenant_after_locking):
+        with (
+            patch("apps.workspaces.tasks.tenant_data_lock", add_tenant_after_locking),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
             result = await _run(workspace, user)
 
     assert [call[0] for call in pipeline.calls] == [tenant.id]
@@ -298,10 +303,16 @@ async def test_workspaces_locking_shared_tenants_in_opposite_order_do_not_deadlo
 
     pipeline = _Pipeline()
     async with _loads(pipeline):
+        # Both intents up front, so the fetch count does not depend on which
+        # workspace reaches begin_load_generation first.
+        ab_intent, ba_intent = await _intent(ab), await _intent(ba)
         with patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build:
             build.return_value.tenant_coverage = {}
             results = await asyncio.wait_for(
-                asyncio.gather(_run(ab, user), _run(ba, user)), timeout=60
+                asyncio.gather(
+                    _run(ab, user, load_intent=ab_intent), _run(ba, user, load_intent=ba_intent)
+                ),
+                timeout=60,
             )
 
     assert all(r["all_succeeded"] for r in results)
@@ -535,3 +546,40 @@ async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_vie
 
     assert rebuild.await_count == (1 if rebuilds else 0)
     resume.assert_not_awaited()
+
+
+async def test_reusing_a_generation_resets_its_inactivity_clock(workspace, tenant, user):
+    sibling = await _sibling(user, tenant)
+    first_intent = await _intent(workspace)
+    second_intent = await _intent(sibling)
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user, load_intent=first_intent)
+        [served] = await _active_schemas(tenant)
+        stale = timezone.now() - timedelta(hours=23)
+        await TenantSchema.objects.filter(id=served.id).aupdate(last_accessed_at=stale)
+        reused = await _run(sibling, user, load_intent=second_intent)
+
+    assert "reused_generation" in reused["tenants"][0]
+    await served.arefresh_from_db()
+    assert served.last_accessed_at > stale + timedelta(hours=1)
+
+
+async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user)
+        old = await TenantSchema.objects.acreate(
+            tenant=tenant,
+            schema_name="old_generation_candidate",
+            state=SchemaState.FAILED,
+            load_workspace_id=workspace.id,
+            load_generation=1,
+            load_config_fingerprint="old",
+        )
+        with patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop:
+            drop.return_value.defer_async = AsyncMock(return_value=1)
+            await _run(workspace, user)
+
+    drop.assert_called_once_with(schedule_in={"seconds": 15 * 60})
+    drop.return_value.defer_async.assert_awaited_once_with(schema_id=str(old.id))

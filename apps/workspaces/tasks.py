@@ -904,6 +904,9 @@ async def materialize_workspace_core(
             # An equivalent load completed while this request waited. The requester
             # authorized and resolved its own credential above, and still publishes
             # its own views and Cube below; its status says what really happened.
+            # Reuse counts as use: without the touch, the inactivity sweep could
+            # retire the schema this run just reported ready.
+            await evidence.schema.atouch()
             successful_attempted_tenant_ids.add(str(tm.tenant_id))
             tenant_results.append(
                 {
@@ -1458,7 +1461,7 @@ async def _load_workspace_candidate(
     except BaseException:
         # No candidate yet, but the generation is marked loading: clear it, or
         # later requests stop joining it and its resumable candidate is lost.
-        await asyncio.shield(_end_load(tm.tenant_id, generation))
+        await _drain(_end_load(tm.tenant_id, generation), f"tenant {tm.tenant_id}")
         raise
     candidate = opened.schema
     try:
@@ -1519,8 +1522,8 @@ async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation:
     await _to_thread_fresh_db(end_load_generation, candidate.tenant_id, generation)
 
 
-async def _drain(operation, candidate) -> None:
-    """Finish candidate cleanup before propagating worker cancellation."""
+async def _drain(operation, subject) -> None:
+    """Finish cleanup before propagating worker cancellation, even if aborted again."""
     cleanup = asyncio.create_task(operation)
     while True:
         try:
@@ -1531,7 +1534,7 @@ async def _drain(operation, candidate) -> None:
             continue
         except Exception:
             logger.exception(
-                "Cancellation cleanup failed for candidate '%s'", candidate.schema_name
+                "Cancellation cleanup failed for '%s'", getattr(subject, "schema_name", subject)
             )
         return
 
@@ -1542,11 +1545,16 @@ async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
     )
     for schema in abandoned:
         try:
-            await drop_abandoned_candidate.defer_async(schema_id=str(schema.id))
+            # Delayed: this writer holds T until its whole load publishes, and the
+            # drop needs T, so an immediate job would only sit in a lock wait.
+            await drop_abandoned_candidate.configure(
+                schedule_in={"seconds": _CANDIDATE_DROP_DELAY_SECONDS}
+            ).defer_async(schema_id=str(schema.id))
         except Exception:
             logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
 
 
+_CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
 _CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
 _CANDIDATE_DROP_RETRY_MAX_SECONDS = 3600
 _CANDIDATE_DROP_MAX_ATTEMPTS = 10
