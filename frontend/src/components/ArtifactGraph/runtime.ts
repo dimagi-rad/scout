@@ -1,7 +1,9 @@
 import { api } from "@/api/client"
-import { localIsoDate } from "@/lib/localDate"
+import { createContext } from "react"
 
-import type { DateRange, ResolvedQuery, Row, SemanticQuerySpec, StoryDoc } from "./types"
+import type { DateContext, DateRange, ResolvedQuery, Row, SemanticQuerySpec, StoryDoc } from "./types"
+
+export const ArtifactDateContext = createContext<DateContext | undefined>(undefined)
 
 export const COMPARISON_PRESETS = ["previous_period", "previous_year"] as const
 export type ComparisonPreset = (typeof COMPARISON_PRESETS)[number]
@@ -37,52 +39,69 @@ export function normalizeStoryDoc(value: unknown, fallbackName: string): StoryDo
   }
 }
 
-export function resolvePresetRange(preset: string | undefined, today = new Date()): DateRange {
+export function resolvePresetRange(preset: string | undefined, clock: Date | DateContext = new Date()): DateRange {
+  preset ??= "last_30_days"
+  if (!(clock instanceof Date)) {
+    const range = Object.hasOwn(clock.presets, preset) ? clock.presets[preset] : undefined
+    if (!range || typeof range.start !== "string" || typeof range.end !== "string") {
+      throw new Error(`Unsupported date preset: ${preset}`)
+    }
+    return { start: range.start, end: range.end, preset }
+  }
+  const today = clock
   const end = startOfDay(today)
   const start = new Date(end)
   switch (preset) {
     case "today":
       break
     case "yesterday":
-      start.setDate(start.getDate() - 1)
-      end.setDate(end.getDate() - 1)
+      start.setUTCDate(start.getUTCDate() - 1)
+      end.setUTCDate(end.getUTCDate() - 1)
       break
     case "last_7_days":
-      start.setDate(start.getDate() - 6)
+      start.setUTCDate(start.getUTCDate() - 6)
       break
     case "last_90_days":
-      start.setDate(start.getDate() - 89)
+      start.setUTCDate(start.getUTCDate() - 89)
       break
     case "month_to_date":
-      start.setDate(1)
+      start.setUTCDate(1)
+      break
+    case "last_30_days":
+      start.setUTCDate(start.getUTCDate() - 29)
       break
     default:
-      start.setDate(start.getDate() - 29)
-      preset = "last_30_days"
-      break
+      throw new Error(`Unsupported date preset: ${preset}`)
   }
-  return { start: localIsoDate(start), end: localIsoDate(end), preset }
+  return { start: isoDate(start), end: isoDate(end), preset }
 }
 
 export function previousPeriod(range: DateRange): DateRange {
   const start = parseIsoDate(range.start)
   const end = parseIsoDate(range.end)
   const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1)
-  start.setDate(start.getDate() - days)
-  end.setDate(end.getDate() - days)
-  return { start: localIsoDate(start), end: localIsoDate(end), preset: "previous_period" }
+  start.setUTCDate(start.getUTCDate() - days)
+  end.setUTCDate(end.getUTCDate() - days)
+  return { start: isoDate(start), end: isoDate(end), preset: "previous_period" }
 }
 
 export function normalizeComparisonPreset(value: unknown): ComparisonPreset {
   return value === "previous_year" ? "previous_year" : "previous_period"
 }
 
-export function comparisonPeriod(range: DateRange, preset: ComparisonPreset): DateRange {
+export function comparisonPeriod(range: DateRange, preset: ComparisonPreset, context?: DateContext): DateRange {
+  const resolved = range.preset && context && Object.hasOwn(context.presets, range.preset)
+    ? context.presets[range.preset] : undefined
+  const comparison = resolved && resolved.comparisons?.[preset]
+  if (resolved && comparison && typeof comparison.start === "string" && typeof comparison.end === "string"
+    && resolved.start === range.start && resolved.end === range.end) {
+    return { ...comparison, preset }
+  }
   if (preset === "previous_period") return previousPeriod(range)
 
   return {
-    start: localIsoDate(previousYearDate(parseIsoDate(range.start))),
-    end: localIsoDate(previousYearDate(parseIsoDate(range.end))),
+    start: isoDate(previousYearDate(parseIsoDate(range.start))),
+    end: isoDate(previousYearDate(parseIsoDate(range.end))),
     preset,
   }
 }
@@ -113,10 +132,16 @@ export function buildSemanticQueryInput(query: ResolvedQuery): SemanticQuerySpec
 export async function runSemanticQuery(
   workspaceId: string,
   query: ResolvedQuery,
+  context?: DateContext,
 ): Promise<Row[]> {
+  const input = buildSemanticQueryInput(query)
+  // Production date controls use server-resolved bounds. The compiler validates
+  // them and applies this same reporting timezone to Cube, including all-time
+  // time buckets. Offline Storybook keeps the deterministic calendar helpers.
+  if (context) input.query_context = { as_of: context.as_of, timezone: context.timezone }
   const response = await api.post<SemanticQueryResponse>(
     `/api/workspaces/${workspaceId}/semantic-query/`,
-    buildSemanticQueryInput(query),
+    input,
   )
   return normalizeResultRows(response.rows ?? [], response.columns ?? [], query)
 }
@@ -174,17 +199,21 @@ function normalizeInputs(value: unknown): StoryDoc["blocks"][number]["inputs"] {
 }
 
 function startOfDay(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+}
+
+function isoDate(date: Date): string {
+  return date.toISOString().slice(0, 10)
 }
 
 function parseIsoDate(value: string): Date {
   const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10))
-  return new Date(year, month - 1, day)
+  return new Date(Date.UTC(year, month - 1, day))
 }
 
 function previousYearDate(date: Date): Date {
-  const year = date.getFullYear() - 1
-  const month = date.getMonth()
-  const lastDay = new Date(year, month + 1, 0).getDate()
-  return new Date(year, month, Math.min(date.getDate(), lastDay))
+  const year = date.getUTCFullYear() - 1
+  const month = date.getUTCMonth()
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
+  return new Date(Date.UTC(year, month, Math.min(date.getUTCDate(), lastDay)))
 }

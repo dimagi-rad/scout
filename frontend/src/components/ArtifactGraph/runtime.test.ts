@@ -5,15 +5,14 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
-// CI runs in UTC, where a UTC-based date formatter looks correct. Node honours a
-// runtime TZ change, so pin zones on both sides of UTC to keep an off-by-one-day
-// regression from passing there.
+// Artifact reporting dates use the server context, not the viewer's timezone.
+// Offline Date inputs use UTC consistently, including across DST boundaries.
 describe.each(["Pacific/Kiritimati", "Asia/Kolkata", "UTC", "America/Los_Angeles", "Pacific/Pago_Pago"])(
   "date ranges in %s",
   (tz) => {
-    it("resolves presets to the local calendar day", () => {
+    it("resolves offline presets to the UTC reporting day in every viewer timezone", () => {
       vi.stubEnv("TZ", tz)
-      const justAfterMidnight = new Date(2025, 8, 22, 0, 30)
+      const justAfterMidnight = new Date("2025-09-22T00:30:00Z")
 
       expect(resolvePresetRange("last_7_days", justAfterMidnight)).toEqual({
         start: "2025-09-16",
@@ -27,7 +26,7 @@ describe.each(["Pacific/Kiritimati", "Asia/Kolkata", "UTC", "America/Los_Angeles
       })
     })
 
-    it("shifts comparison ranges by whole local days across DST changes", () => {
+    it("shifts comparison ranges by whole reporting days across DST changes", () => {
       vi.stubEnv("TZ", tz)
       const range = { start: "2025-10-27", end: "2025-11-09", preset: "custom" }
 

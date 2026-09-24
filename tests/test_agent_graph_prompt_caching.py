@@ -127,12 +127,14 @@ async def test_agent_node_applies_cache_control_breakpoints():
     with (
         patch("apps.agents.graph.base.ChatAnthropic", return_value=mock_llm),
         patch("apps.agents.graph.base._build_tools", return_value=[]),
+        patch("apps.agents.graph.base.agent_date_context", return_value="DATE CONTEXT") as clock,
         patch(
             "apps.agents.graph.base._build_system_prompt",
             new=AsyncMock(return_value=("STABLE PREFIX", "VOLATILE SUFFIX")),
         ),
     ):
         graph = await graph_base.build_agent_graph(workspace, user)
+        clock.assert_called_once()
 
     # Drive a single agent turn through the compiled graph.
     state = {
@@ -156,10 +158,12 @@ async def test_agent_node_applies_cache_control_breakpoints():
     bp = _cache_breakpoint_blocks(sys_content)
     assert len(bp) == 1, "exactly one cache breakpoint on the stable system block"
     assert "STABLE PREFIX" in bp[0]["text"]
+    assert "DATE CONTEXT" not in bp[0]["text"]
     # The volatile suffix must come AFTER the breakpoint (uncached, last block).
     assert any("VOLATILE SUFFIX" in b.get("text", "") for b in sys_content)
     last_block = sys_content[-1]
     assert "VOLATILE SUFFIX" in last_block.get("text", "")
+    assert "DATE CONTEXT" in last_block.get("text", "")
     assert not last_block.get("cache_control")
 
 
