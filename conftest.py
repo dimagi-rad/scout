@@ -10,7 +10,7 @@ os.environ["DO_NOT_TRACK"] = "1"
 
 # Registered from the rootdir conftest so the guard also covers apps/*/tests and
 # single-file runs that never load tests/conftest.py.
-pytest_plugins = ["tests.network_guard"]
+pytest_plugins = ["tests.network_guard", "tests.verified_memberships"]
 
 
 @pytest.fixture(autouse=True)
