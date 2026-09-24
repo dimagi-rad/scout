@@ -94,19 +94,22 @@ async def test_async_resolution_shares_the_scope_with_sync_threads(user, workspa
 def test_middleware_caches_within_a_request_and_closes_after(
     user, workspace, django_assert_num_queries
 ):
-    counts = []
+    scopes = []
 
     def view(_request):
         resolve_workspace_access_ex(user, workspace.id)
         with django_assert_num_queries(0):
             resolve_workspace_access_ex(user, workspace.id)
-        counts.append(True)
+        scopes.append(access_cache._scope.get())
         return HttpResponse("ok")
 
     WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
 
-    assert counts == [True]
-    assert access_cache.lookup(user, workspace.id, (WorkspaceRole.READ,)) is None
+    # Contexts copied out of the request hold the scope object itself, so it must
+    # be closed, not merely detached from the variable.
+    [scope] = scopes
+    assert scope.closed
+    assert not scope
 
 
 @pytest.mark.asyncio
@@ -145,24 +148,49 @@ async def test_async_middleware_closes_the_scope_after_a_plain_response(user, wo
 
 @pytest.mark.django_db
 def test_sync_middleware_closes_the_scope_when_the_view_raises(user, workspace):
+    scopes = []
+
     def view(_request):
         resolve_workspace_access_ex(user, workspace.id)
+        scopes.append(access_cache._scope.get())
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
         WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
 
-    assert access_cache.lookup(user, workspace.id, (WorkspaceRole.READ,)) is None
+    [scope] = scopes
+    assert scope.closed
+    assert not scope
+
+
+def test_sync_streamed_response_closes_at_view_return_and_is_not_wrapped():
+    scopes = []
+
+    def chunks():
+        yield b"file"
+
+    def view(_request):
+        scopes.append(access_cache._scope.get())
+        return StreamingHttpResponse(chunks())
+
+    response = WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
+
+    assert scopes[0].closed
+    assert list(response.streaming_content) == [b"file"]
 
 
 @pytest.mark.asyncio
 async def test_sync_streamed_bodies_are_left_untouched():
+    scopes = []
+
     def chunks():
         yield b"file"
 
     async def view(_request):
+        scopes.append(access_cache._scope.get())
         return StreamingHttpResponse(chunks())
 
     response = await WorkspaceAccessCacheMiddleware(view)(RequestFactory().get("/"))
 
-    assert not response.is_async
+    assert scopes[0].closed
+    assert list(response.streaming_content) == [b"file"]
