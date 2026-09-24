@@ -468,7 +468,7 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
     try:
         await run_data_thread(manager.create_physical_schema, new_schema)
     except asyncio.CancelledError:
-        await _drain_cancelled_refresh_cleanup(new_schema, job_id)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
         raise
     except Exception:
         logger.exception("Failed to create schema '%s'", new_schema.schema_name)
@@ -529,6 +529,10 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
             run_id=result.get("run_id") if isinstance(result, dict) else None,
             fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
         )
+    except asyncio.CancelledError:
+        # A no-op if the promotion committed: both steps CAS on the unpublished state.
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        raise
     except Exception:
         # It rolled back, so the candidate is still ours and handled as unpublished.
         logger.exception("Publishing refresh schema '%s' failed", new_schema.schema_name)
@@ -556,7 +560,6 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
         except Exception:
             logger.exception("Failed to drop lost refresh schema '%s'", new_schema.schema_name)
         return {"status": "ignored"}
-    new_schema.state = SchemaState.ACTIVE
     return {"status": "active", "schema_id": str(new_schema.id)}
 
 
@@ -1696,23 +1699,6 @@ async def reconcile_refresh_candidates(timestamp: int = 0) -> dict:
         settled += len(result.settled_schema_ids)
         recovery_needed += result.recovery_needed
     return {"settled": settled, "recovery_needed": recovery_needed}
-
-
-async def _drain_cancelled_refresh_cleanup(schema, job_id: int) -> None:
-    """Finish exact-claim cleanup before propagating worker cancellation."""
-    cleanup = asyncio.create_task(_drop_claimed_refresh_schema_and_fail(schema, job_id))
-    while True:
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            if cleanup.cancelled():
-                return
-            continue
-        except Exception:
-            logger.exception(
-                "Refresh cancellation cleanup failed for schema %s, job %s", schema.id, job_id
-            )
-        return
 
 
 @app.periodic(cron="*/30 * * * *")

@@ -286,7 +286,6 @@ async def test_real_pipeline_defers_refresh_promotion_to_owned_worker_cas(
     registry.list.return_value = [pipeline_config]
     registry.get.return_value = pipeline_config
     teardown_deferrer = MagicMock()
-    teardown_deferrer.defer_async = AsyncMock(return_value=1)
     state_before_owned_promotion = []
 
     def observe_owned_promotion(schema_id, **kwargs):
@@ -758,8 +757,8 @@ async def test_refresh_publishes_its_generation_so_equivalent_loads_reuse_it(
     tenant_id = provisioning_schema.tenant_id
     patches = _refresh_patches()
     with contextlib.ExitStack() as stack:
-        mocks = {name: stack.enter_context(p) for name, p in patches.items()}
-        mocks["retire"].return_value.defer_async = AsyncMock(return_value=1)
+        for p in patches.values():
+            stack.enter_context(p)
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -772,6 +771,9 @@ async def test_refresh_publishes_its_generation_so_equivalent_loads_reuse_it(
     assert ledger.published_generation == 1
     assert ledger.published_schema_id == provisioning_schema.id
     assert ledger.loading_generation == 0
+    run = await MaterializationRun.objects.aget(tenant_schema=provisioning_schema)
+    assert ledger.published_run_id == run.id
+    assert ledger.published_fingerprint == run.result["load_fingerprint"]
 
 
 @pytest.mark.asyncio
@@ -817,7 +819,10 @@ async def test_refresh_waits_for_its_tenant_and_fails_visibly_on_timeout(
             await release.wait()
 
     holder = asyncio.create_task(hold_tenant())
-    await holder_ready.wait()
+    ready = asyncio.create_task(holder_ready.wait())
+    # Bounded, and over both tasks: a holder that fails before set() surfaces here.
+    done, _ = await asyncio.wait({holder, ready}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+    assert ready in done, "the tenant-lock holder never became ready"
     try:
         with (
             patch.object(data_operation, "_LOCK_TIMEOUT", "300ms"),
@@ -840,5 +845,71 @@ async def test_refresh_waits_for_its_tenant_and_fails_visibly_on_timeout(
 
     assert result["retry_required"] is True
     pipeline.assert_not_called()
+    await provisioning_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_refresh_whose_transforms_failed_keeps_the_previous_data(
+    provisioning_schema, old_active_schema, tenant_membership_obj
+):
+    """Transform failures are isolated in the run, but a schema whose models did not
+    build is not published (the same rule as workspace loads); last-good serves."""
+
+    def transforms_failed(*args, **kwargs):
+        result = completed_refresh_run(*args, **kwargs)
+        MaterializationRun.objects.filter(id=result["run_id"]).update(
+            result={
+                "sources": {},
+                "load_fingerprint": result["load_fingerprint"],
+                "transforms": {"status": "failed", "error": "dbt model failed"},
+            }
+        )
+        return result
+
+    patches = _refresh_patches(
+        pipeline=patch("apps.workspaces.tasks.run_pipeline", side_effect=transforms_failed)
+    )
+    with contextlib.ExitStack() as stack:
+        for p in patches.values():
+            stack.enter_context(p)
+        result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+            **await _refresh_auth_kwargs(tenant_membership_obj),
+        )
+
+    assert result["retry_required"] is True
+    await old_active_schema.arefresh_from_db()
+    assert old_active_schema.state == SchemaState.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_refresh_cancelled_during_promotion_ends_its_load(
+    provisioning_schema, tenant_membership_obj
+):
+    patches = _refresh_patches()
+    with contextlib.ExitStack() as stack:
+        for p in patches.values():
+            stack.enter_context(p)
+        stack.enter_context(
+            patch(
+                "apps.workspaces.tasks._promote_and_queue_retirement",
+                side_effect=asyncio.CancelledError,
+            )
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await refresh_tenant_schema(
+                context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+                schema_id=str(provisioning_schema.id),
+                membership_id=str(tenant_membership_obj.id),
+                **await _refresh_auth_kwargs(tenant_membership_obj),
+            )
+
+    ledger = await TenantLoadGeneration.objects.aget(tenant_id=provisioning_schema.tenant_id)
+    assert ledger.loading_generation == 0
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.FAILED
