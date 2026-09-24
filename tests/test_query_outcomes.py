@@ -305,15 +305,23 @@ def test_missing_error_detail_uses_a_readable_failure_message():
     assert graph_runtime._query_failure(None)["message"] == "Semantic query failed"
 
 
-def test_failed_check_preserves_runtime_document_diagnostics():
+@pytest.mark.parametrize("status", ["checked", "error"])
+@pytest.mark.parametrize(
+    "static_diagnostics", [None, [], [{"severity": "warning", "code": "layout"}]]
+)
+def test_failed_check_preserves_runtime_document_diagnostics(status, static_diagnostics):
     diagnostics = [{"severity": "error", "code": "missing_block", "path": "blocks.0"}]
-    result = {"status": "checked", "runtime": {"success": False, "diagnostics": diagnostics}}
+    result = {
+        "status": status,
+        "diagnostics": static_diagnostics,
+        "runtime": {"success": False, "diagnostics": diagnostics},
+    }
     summary = _summarize_result(
         [ToolMessage(name="artifact_write", tool_call_id="check", content=json.dumps(result))],
         json.dumps({"status": "done", "message": "Incorrect success claim"}),
     )
     assert summary["status"] == "error"
-    assert summary["diagnostics"] == diagnostics
+    assert summary["diagnostics"] == (static_diagnostics or []) + diagnostics
 
 
 def test_bounded_handoff_keeps_a_late_failure_with_a_different_cause():
