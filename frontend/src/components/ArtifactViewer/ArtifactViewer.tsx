@@ -27,13 +27,10 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
     setQueryData,
   } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
     as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
-  } : undefined)
+  } : undefined, dataOpen)
 
   function handleViewData() {
     setDataOpen(true)
-    if (!queryData && !isDataLoading) {
-      void refetchData()
-    }
   }
 
   return (

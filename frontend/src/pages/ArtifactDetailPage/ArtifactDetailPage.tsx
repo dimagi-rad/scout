@@ -61,7 +61,7 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
     setQueryData,
   } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
     as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
-  } : undefined)
+  } : undefined, dataOpen)
 
   useEffect(() => {
     if (adoptedWorkspaceRef.current) {
@@ -84,9 +84,6 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
 
   function handleViewData() {
     setDataOpen(true)
-    if (!queryData && !isDataLoading) {
-      void refetchData()
-    }
   }
 
   return (

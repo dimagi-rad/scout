@@ -66,11 +66,14 @@ it("uses the server clock and carries changed chart dates into View Data", async
   }))
   fireEvent.click(screen.getByRole("button", { name: "View Data" }))
   await waitFor(() => expect(within(screen.getByRole("dialog")).getByText("18")).toBeInTheDocument())
+  expect(post.mock.calls.filter(([url]) => url.endsWith("/query-data/"))).toHaveLength(1)
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }))
   fireEvent.change(screen.getByRole("combobox", { name: "Activity window" }), { target: { value: "last_7_days" } })
   await screen.findByText("5")
+  expect(post.mock.calls.filter(([url]) => url.endsWith("/query-data/"))).toHaveLength(1)
   fireEvent.click(screen.getByRole("button", { name: "View Data" }))
   await waitFor(() => expect(within(screen.getByRole("dialog")).getByText("5")).toBeInTheDocument())
+  expect(post.mock.calls.filter(([url]) => url.endsWith("/query-data/"))).toHaveLength(2)
   expect(post).toHaveBeenLastCalledWith("/api/workspaces/workspace/artifacts/artifact/query-data/", {
     as_of: context.as_of, timezone: "Asia/Singapore", sources: { range: { start: "2026-09-10", end: "2026-09-16" } },
   })
@@ -117,11 +120,53 @@ it("replaces an in-flight inspector request when dates change", async () => {
   vi.spyOn(api, "post").mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
     .mockResolvedValueOnce({ queries: [{ name: "new", rows: [[5]] }], static_data: {} })
   const initial: ArtifactQueryContext = { sources: { range: { start: "2026-08-18", end: "2026-09-16" } } }
-  const { result, rerender } = renderHook(({ runtime }) => useArtifactQueryData("artifact", "workspace", runtime), { initialProps: { runtime: initial } })
-  let oldRequest!: Promise<void>
-  act(() => { oldRequest = result.current.refetch() })
+  const { result, rerender } = renderHook(({ runtime }) => useArtifactQueryData("artifact", "workspace", runtime, true), { initialProps: { runtime: initial } })
   rerender({ runtime: { sources: { range: { start: "2026-09-10", end: "2026-09-16" } } } })
   await waitFor(() => expect(result.current.queryData?.queries[0].rows).toEqual([[5]]))
-  await act(async () => { finishOld({ queries: [{ name: "old", rows: [[18]] }], static_data: {} }); await oldRequest })
+  await act(async () => { finishOld({ queries: [{ name: "old", rows: [[18]] }], static_data: {} }) })
   expect(result.current.queryData?.queries[0].rows).toEqual([[5]])
+})
+
+it("does not query a closed inspector when dates or artifacts change, then fetches the current context on reopening", async () => {
+  const response = { queries: [], static_data: {} }
+  const post = vi.spyOn(api, "post").mockResolvedValue(response)
+  const initial = {
+    artifactId: "first", workspaceId: "workspace", enabled: true,
+    runtime: { sources: { range: { start: "2026-08-18", end: "2026-09-16" } } },
+  }
+  const { result, rerender } = renderHook(
+    ({ artifactId, workspaceId, runtime, enabled }) => useArtifactQueryData(artifactId, workspaceId, runtime, enabled),
+    { initialProps: initial },
+  )
+  await waitFor(() => expect(result.current.queryData).toEqual(response))
+  rerender({ ...initial, enabled: false })
+  const changed = {
+    ...initial, artifactId: "second", workspaceId: "another-workspace", enabled: false,
+    runtime: { sources: { range: { start: "2026-09-10", end: "2026-09-16" } } },
+  }
+  rerender({ ...initial, runtime: changed.runtime, enabled: false })
+  rerender(changed)
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(result.current.queryData).toBeNull()
+  rerender({ ...changed, enabled: true })
+  await waitFor(() => expect(result.current.queryData).toEqual(response))
+  expect(post).toHaveBeenCalledTimes(2)
+  expect(post).toHaveBeenLastCalledWith(
+    "/api/workspaces/another-workspace/artifacts/second/query-data/", changed.runtime,
+  )
+})
+
+it("discards an inspector response that arrives after closing", async () => {
+  let finish!: (data: QueryDataResponse) => void
+  const get = vi.spyOn(api, "get").mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+  const { result, rerender } = renderHook(
+    ({ enabled }) => useArtifactQueryData("artifact", "workspace", undefined, enabled),
+    { initialProps: { enabled: true } },
+  )
+  expect(result.current.isLoading).toBe(true)
+  rerender({ enabled: false })
+  await act(async () => { finish({ queries: [], static_data: {} }) })
+  expect(get).toHaveBeenCalledTimes(1)
+  expect(result.current.queryData).toBeNull()
+  expect(result.current.isLoading).toBe(false)
 })

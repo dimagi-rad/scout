@@ -13,16 +13,19 @@ export function useArtifactDateSources(artifact: ArtifactDetail | null) {
   return [state.key === key ? state.sources : EMPTY_SOURCES, update] as const
 }
 
-export function useArtifactQueryData(artifactId: string, workspaceId: string, runtime?: ArtifactQueryContext) {
+export function useArtifactQueryData(
+  artifactId: string,
+  workspaceId: string,
+  runtime?: ArtifactQueryContext,
+  enabled = false,
+) {
   const [queryData, setQueryData] = useState<QueryDataResponse | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const generation = useRef(0)
-  const hasRequested = useRef(false)
   const runtimeKey = JSON.stringify(runtime)
 
   const refetch = useCallback(async () => {
-    hasRequested.current = true
     const request = ++generation.current
     setIsLoading(true)
     setError(null)
@@ -44,9 +47,11 @@ export function useArtifactQueryData(artifactId: string, workspaceId: string, ru
     setQueryData(null)
     setError(null)
     setIsLoading(false)
-    if (hasRequested.current) void refetch()
+    // Only an open inspector owns these queries. Closing it also invalidates any
+    // in-flight response; reopening fetches the current artifact and date window.
+    if (enabled) void refetch()
     return () => { generation.current += 1 }
-  }, [artifactId, workspaceId, runtimeKey, refetch])
+  }, [enabled, refetch])
 
   return { queryData, isLoading, error, refetch, setQueryData }
 }
