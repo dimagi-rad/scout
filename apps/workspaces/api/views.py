@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from apps.common.error_codes import ErrorCode
 from apps.common.localized import localized_str
 from apps.knowledge.models import TableKnowledge
-from apps.users.models import TenantMembership
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -24,9 +24,10 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     resolve_pipeline_config,
 )
+from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
-from apps.workspaces.tasks import refresh_tenant_schema
+from apps.workspaces.tasks import refresh_tenant_schema, settle_finished_refresh_candidates
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -467,15 +468,11 @@ class RefreshSchemaView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
         if err:
             return err
-
-        if membership.role not in (WorkspaceRole.READ_WRITE, WorkspaceRole.MANAGE):
-            return Response(
-                {"error": "Read-write or manage role required to trigger a refresh."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
 
         tenant = workspace.tenant
         if tenant is None:
@@ -493,7 +490,21 @@ class RefreshSchemaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        legacy_jobs = find_legacy_refresh_jobs(tenant)
         with transaction.atomic():
+            tenant = Tenant.objects.select_for_update().get(id=tenant.id)
+            legacy = settle_finished_refresh_candidates(tenant, legacy_jobs)
+            if legacy.recovery_needed:
+                return Response(
+                    {
+                        "error": (
+                            "A previous refresh could not be verified. Ask an operator to inspect "
+                            "and reconcile the queued refresh before retrying."
+                        ),
+                        "code": ErrorCode.REFRESH_RECOVERY_REQUIRED,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
             if (
                 TenantSchema.objects.select_for_update()
                 .filter(tenant=tenant, state=SchemaState.PROVISIONING)
@@ -506,7 +517,24 @@ class RefreshSchemaView(APIView):
             new_schema = SchemaManager().create_refresh_schema(tenant)
             schema_id = str(new_schema.id)
             membership_id = str(tenant_membership.id)
-            refresh_tenant_schema.defer(schema_id=schema_id, membership_id=membership_id)
+            job = refresh_tenant_schema.defer(
+                schema_id=schema_id,
+                membership_id=membership_id,
+                actor_user_id=str(request.user.id),
+                workspace_id=str(workspace.id),
+            )
+            new_schema.refresh_job_id = getattr(job, "id", job)
+            new_schema.refresh_workspace_id = workspace.id
+            new_schema.refresh_actor_user_id = request.user.id
+            new_schema.refresh_membership_id = tenant_membership.id
+            new_schema.save(
+                update_fields=[
+                    "refresh_job_id",
+                    "refresh_workspace_id",
+                    "refresh_actor_user_id",
+                    "refresh_membership_id",
+                ]
+            )
 
         return Response(
             {"schema_id": schema_id, "status": "provisioning"},

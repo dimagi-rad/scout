@@ -61,7 +61,9 @@ async def test_semantic_context_active_run_takes_precedence_over_active_model(
         state=state,
     )
 
-    result = await _fetch_semantic_model_context(workspace, interactive=interactive)
+    result = await _fetch_semantic_model_context(
+        workspace, interactive=interactive, write_capable=True
+    )
 
     assert "in progress" in result.lower()
     if interactive:
@@ -99,7 +101,9 @@ async def test_refresh_keeps_previous_data_queryable_only_when_ready(
         state=MaterializationRun.RunState.LOADING,
     )
 
-    result = await _fetch_semantic_model_context(workspace, interactive=interactive)
+    result = await _fetch_semantic_model_context(
+        workspace, interactive=interactive, write_capable=True
+    )
 
     assert "in progress" in result.lower()
     if has_serving_schema and has_catalog:
@@ -148,7 +152,7 @@ async def test_multi_source_refresh_requires_serving_view_and_no_in_place_writer
             workspace=workspace, schema_name="serving_view", state=SchemaState.ACTIVE
         )
 
-    result = await _fetch_semantic_model_context(workspace)
+    result = await _fetch_semantic_model_context(workspace, write_capable=True)
 
     assert "in progress" in result.lower()
     if has_view and not in_place_run:
@@ -173,7 +177,7 @@ async def test_old_untracked_active_run_does_not_claim_data_ready(workspace, ten
         started_at=timezone.now() - timedelta(hours=2)
     )
 
-    result = await _fetch_semantic_model_context(workspace)
+    result = await _fetch_semantic_model_context(workspace, write_capable=True)
 
     assert "do not call other data tools" in result.lower()
     assert "Data is loaded and ready" not in result
@@ -202,7 +206,7 @@ async def test_semantic_context_completed_run_does_not_hide_active_model(workspa
         state=MaterializationRun.RunState.COMPLETED,
     )
 
-    result = await _fetch_semantic_model_context(workspace)
+    result = await _fetch_semantic_model_context(workspace, write_capable=True)
 
     assert "Data is loaded and ready" in result
     assert "in progress" not in result.lower()
@@ -224,19 +228,23 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
         patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
     ):
         retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
-        stable, ready = await graph_base._build_system_prompt(workspace, user, interactive)
+        stable, ready = await graph_base._build_system_prompt(
+            workspace, user, interactive, write_capable=True
+        )
         run = await MaterializationRun.objects.acreate(
             tenant_schema=schema,
             pipeline="commcare_sync",
             state=MaterializationRun.RunState.LOADING,
         )
         stable_loading, loading = await graph_base._build_system_prompt(
-            workspace, user, interactive
+            workspace, user, interactive, write_capable=True
         )
         await MaterializationRun.objects.filter(pk=run.pk).aupdate(
             state=MaterializationRun.RunState.COMPLETED
         )
-        stable_done, done = await graph_base._build_system_prompt(workspace, user, interactive)
+        stable_done, done = await graph_base._build_system_prompt(
+            workspace, user, interactive, write_capable=True
+        )
 
     assert "Data is loaded and ready" in ready
     assert "in progress" in loading.lower()
@@ -643,7 +651,9 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
         ),
     ):
         retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
-        stable, degraded = await graph_base._build_system_prompt(workspace, user, interactive)
+        stable, degraded = await graph_base._build_system_prompt(
+            workspace, user, interactive, write_capable=True
+        )
         await WorkspaceViewSchema.objects.filter(pk=view.pk).aupdate(
             tenant_coverage={
                 "included_tenants": [{"tenant_id": str(tenant.id)}, {"tenant_id": str(missing.id)}],
@@ -651,7 +661,7 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
             }
         )
         stable_again, recovered = await graph_base._build_system_prompt(
-            workspace, user, interactive
+            workspace, user, interactive, write_capable=True
         )
     if coverage_kind == "malformed":
         assert "coverage is unknown" in degraded.lower()
@@ -704,7 +714,7 @@ async def test_excluded_source_loading_does_not_block_serving_view(
     await SemanticModel.objects.acreate(
         workspace=workspace, name="Available", status=SemanticModel.Status.ACTIVE
     )
-    result = await _fetch_semantic_model_context(workspace)
+    result = await _fetch_semantic_model_context(workspace, write_capable=True)
     if coverage_kind == "excluded":
         assert "previously loaded data" in result
         assert "do not call other data tools" not in result.lower()

@@ -115,8 +115,9 @@ class TestCredentialResolverTokenRefresh:
         with patch(
             "apps.users.services.credential_resolver.token_needs_refresh", return_value=True
         ):
-            with pytest.raises(CredentialResolutionError):
+            with pytest.raises(CredentialResolutionError) as caught:
                 await _aresolve_oauth_credential(mock_token, "commcare")
+        assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
 
     @pytest.mark.asyncio
     async def test_valid_oauth_credential_carries_refresh_callable(self):
@@ -140,7 +141,7 @@ class TestCredentialResolverTokenRefresh:
 
 class TestSyncTokenRefresh:
     @pytest.fixture(autouse=True)
-    def _mock_connection_health_storage(self, mocker):
+    def _isolate_persistence_for_http_unit_tests(self, mocker):
         preflight = mocker.patch("apps.users.services.token_refresh._preflight_token").return_value
         preflight.refresh_token = "old-refresh"
         preflight.expires_at = None
@@ -180,10 +181,19 @@ class TestSyncTokenRefresh:
             patch(
                 "apps.users.services.token_refresh._persist_refresh_response",
                 return_value=TokenRefreshResult(TokenRefreshStatus.APPLIED, persisted),
-            ),
+            ) as persist,
         ):
+            before = timezone.now()
             new = refresh_oauth_token_sync(social_token, "https://token/")
 
+        # Persistence is stubbed, so pin what it was handed: the provider response,
+        # not the canned snapshot above, is what must reach the database.
+        persist.assert_called_once()
+        refreshed = persist.call_args.args[1]
+        assert refreshed.access_token == "brand-new"
+        assert refreshed.refresh_token == "rotated-refresh"
+        assert before + timedelta(seconds=900) <= refreshed.expires_at
+        assert refreshed.expires_at <= timezone.now() + timedelta(seconds=900)
         assert new == "brand-new"
         assert social_token.token == "brand-new"
         assert social_token.token_secret == "rotated-refresh"
@@ -200,5 +210,7 @@ class TestSyncTokenRefresh:
         response = MagicMock()
         response.raise_for_status.side_effect = RuntimeError("500")
         with patch("apps.users.services.token_refresh.requests.post", return_value=response):
-            with pytest.raises(TokenRefreshError):
+            with pytest.raises(TokenRefreshError) as caught:
                 refresh_oauth_token_sync(social_token, "https://token/")
+            assert caught.type is TokenRefreshError
+            assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED

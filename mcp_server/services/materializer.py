@@ -109,6 +109,7 @@ def run_pipeline(
     progress_updater: ProgressUpdater | None = None,
     procrastinate_job_id: int | None = None,
     target_schema: TenantSchema | None = None,
+    defer_schema_promotion: bool = False,
 ) -> dict:
     """Run a three-phase materialization pipeline.
 
@@ -132,6 +133,9 @@ def run_pipeline(
             (used by the blue-green refresh path to load into its new "_r"
             schema). When ``None``, the tenant's base schema is resolved via
             ``SchemaManager().provision()`` (the initial-materialization path).
+        defer_schema_promotion: Keep an explicit target in its current state so
+            the refresh worker can publish it with its request-owned CAS. Normal
+            materialization keeps the default immediate promotion behavior.
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
@@ -197,6 +201,8 @@ def run_pipeline(
     if target_schema is not None:
         tenant_schema = target_schema
     else:
+        if defer_schema_promotion:
+            raise ValueError("defer_schema_promotion requires an explicit target_schema")
         tenant_schema = SchemaManager().provision(tenant_membership.tenant)
     schema_name = tenant_schema.schema_name
 
@@ -535,9 +541,12 @@ def run_pipeline(
     # Start the TTL from completion, not the provision-time snapshot this instance
     # captured at run start — else an H-hour load rewinds the 24h clock by H hours
     # (arch #255 04#0).
-    tenant_schema.state = "active"
     tenant_schema.last_accessed_at = timezone.now()
-    tenant_schema.save(update_fields=["state", "last_accessed_at"])
+    if defer_schema_promotion:
+        tenant_schema.save(update_fields=["last_accessed_at"])
+    else:
+        tenant_schema.state = "active"
+        tenant_schema.save(update_fields=["state", "last_accessed_at"])
 
     total_rows = sum(s.get("rows", 0) for s in source_results.values())
     logger.info("Pipeline '%s' complete for '%s': %d rows", pipeline.name, schema_name, total_rows)

@@ -5,6 +5,7 @@ from rest_framework.test import APIClient
 
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.tenant_access import usable_connection
 
 
 @pytest.fixture
@@ -20,8 +21,12 @@ def setup(transactional_db):
     user = User.objects.create_user(email="smoke@example.com", password="pass")
     t1 = Tenant.objects.create(provider="commcare", external_id="smoke-1", canonical_name="Smoke 1")
     t2 = Tenant.objects.create(provider="commcare", external_id="smoke-2", canonical_name="Smoke 2")
-    TenantMembership.objects.create(user=user, tenant=t1)
-    TenantMembership.objects.create(user=user, tenant=t2)
+    TenantMembership.objects.create(
+        user=user, tenant=t1, connection=usable_connection(user, t1.provider)
+    )
+    TenantMembership.objects.create(
+        user=user, tenant=t2, connection=usable_connection(user, t2.provider)
+    )
     ws = Workspace.objects.create(name="Smoke WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     WorkspaceTenant.objects.create(workspace=ws, tenant=t1)

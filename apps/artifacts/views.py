@@ -17,7 +17,7 @@ from uuid import UUID
 
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
-from django.db import IntegrityError, connection
+from django.db import IntegrityError
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -41,6 +41,7 @@ from .services.graph_manifest import (
     build_artifact_semantic_query_manifest,
     manifest_entry_summary,
     semantic_query_summary,
+    sort_manifest_entries,
     sync_artifact_semantic_query_manifest,
 )
 from .services.versioning import latest_visible_version_ids
@@ -1141,7 +1142,7 @@ class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
             # live-query metadata, and for a drifted catalog persist an empty
             # semantic_queries that cut off live data workspace-wide (see #515).
             manifest = build_artifact_semantic_query_manifest(artifact)
-            entries = _sorted_by_db_collation(manifest["entries"])
+            entries = sort_manifest_entries(manifest["entries"])
             total_count = len(entries)
             records = [manifest_entry_summary(e) for e in entries[offset : offset + limit]]
         else:
@@ -1175,19 +1176,6 @@ class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
                 },
             }
         )
-
-
-def _sorted_by_db_collation(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Order entries as ``order_by("query_key")`` would, which Python sorting doesn't match."""
-    if not entries:
-        return []
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT key FROM unnest(%s::text[]) AS key ORDER BY key",
-            [[entry["key"] for entry in entries]],
-        )
-        rank = {key: index for index, (key,) in enumerate(cursor.fetchall())}
-    return sorted(entries, key=lambda entry: rank[entry["key"]])
 
 
 def _bounded_int(value: Any, *, default: int, lower: int, upper: int) -> int:

@@ -19,6 +19,7 @@ from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.chat.models import Thread, ThreadArtifact
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.tenant_access import usable_connection
 
 
 @pytest.fixture
@@ -36,7 +37,11 @@ def workspace(db):
 @pytest.fixture
 def member_user(db, workspace):
     user = User.objects.create_user(email="graph@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant=workspace.tenant)
+    TenantMembership.objects.create(
+        user=user,
+        tenant=workspace.tenant,
+        connection=usable_connection(user, workspace.tenant.provider),
+    )
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user
 
@@ -240,7 +245,8 @@ async def test_graph_manager_description_only_edit(
     assert latest.description == description
     assert latest.data["story_doc"] == original.data["story_doc"]
     assert latest.version == 2
-    assert result["runtime"]["success"] is True
+    assert result["runtime"] is None
+    assert result["runtime_validation"] == "not_required_metadata_only"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -285,7 +291,7 @@ async def test_graph_manager_rejects_missing_or_invalid_description_edit(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["apply", "replace"])
-async def test_graph_manager_failed_description_edit_preserves_original(
+async def test_graph_manager_failed_document_edit_preserves_original(
     graph_tools, static_story_doc, action
 ):
     write = graph_tools["artifact_write"]
@@ -303,7 +309,13 @@ async def test_graph_manager_failed_description_edit_preserves_original(
         "description": "Must not be published",
     }
     if action == "replace":
-        edit["story_doc"] = static_story_doc
+        revised = deepcopy(static_story_doc)
+        revised["blocks"][0]["config"]["body"] = "Changed document"
+        edit["story_doc"] = revised
+    else:
+        edit["ops"] = [
+            {"op": "set", "target": "block/intro/config/body", "value": "Changed document"}
+        ]
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
         new=AsyncMock(return_value={"success": False, "summary": "Runtime failure"}),
@@ -318,6 +330,62 @@ async def test_graph_manager_failed_description_edit_preserves_original(
     assert (
         await Artifact.all_objects.filter(parent_artifact=original, is_deleted=True).acount() == 1
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["apply", "replace"])
+@pytest.mark.parametrize("description", ["New description", ""])
+async def test_metadata_edit_does_not_query_unavailable_data(
+    graph_tools, workspace, member_user, action, description
+):
+    doc = graph_doc()
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        artifact_type=ArtifactType.STORY,
+        title=doc["name"],
+        description="Original description",
+        data={"story_doc": doc},
+    )
+    edit = {"action": action, "artifact_id": str(original.id), "description": description}
+    if action == "replace":
+        edit["story_doc"] = doc
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(side_effect=AssertionError("Metadata edits must not contact Cube")),
+    ) as check:
+        result = await graph_tools["artifact_write"].ainvoke(edit)
+
+    check.assert_not_awaited()
+    assert result["status"] == ("updated" if action == "apply" else "replaced")
+    assert result["runtime"] is None  # Do not claim a fresh successful data check.
+    assert result["runtime_validation"] == "not_required_metadata_only"
+    latest = await Artifact.objects.aget(id=result["artifact"]["id"])
+    assert latest.data == original.data
+    assert latest.description == description
+    assert latest.parent_artifact_id == original.id
+    assert latest.version == original.version + 1
+    assert await latest.semantic_query_records.acount() > 0
+    await original.arefresh_from_db()
+    assert original.description == "Original description"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_metadata_edit_cannot_skip_static_document_validation(graph_tools, workspace):
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        artifact_type=ArtifactType.STORY,
+        title="Invalid old artifact",
+        data={"story_doc": {"schema_version": 1, "name": "Invalid", "blocks": []}},
+    )
+    result = await graph_tools["artifact_write"].ainvoke(
+        {"action": "apply", "artifact_id": str(original.id), "description": "Description"}
+    )
+    assert result["status"] == "error"
+    assert result["diagnostics"]
+    assert await Artifact.all_objects.acount() == 1
 
 
 def test_graph_doc_rejects_empty_blocks():
@@ -947,6 +1015,8 @@ async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
         if item.name == "artifact_write"
     )
 
+    replacement = graph_doc()
+    replacement["blocks"][1]["config"]["queries"]["visits_by_day"]["limit"] = 99
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
         new=AsyncMock(return_value={"success": False, "summary": "0/1 queries ok"}),
@@ -955,7 +1025,8 @@ async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
             {
                 "action": "replace",
                 "artifact_id": str(original.id),
-                "story_doc": graph_doc(),
+                "story_doc": replacement,
+                "run_check": False,
             }
         )
 
@@ -1196,3 +1267,41 @@ async def test_read_dependency_inspection_paginates_without_creating_cache(works
     assert artifact.semantic_query_manifest == {}
     assert artifact.semantic_queries == []
     assert not await ArtifactSemanticQuery.objects.filter(artifact=artifact).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_dependency_tool_and_api_page_in_the_same_order(
+    workspace, member_user, member_client
+):
+    doc = graph_doc()
+    queries = doc["blocks"][1]["config"]["queries"]
+    # Mixed case sorts differently under Python and most DB collations.
+    queries["Zeta"] = deepcopy(queries["visits_by_day"])
+    queries["alpha"] = deepcopy(queries["visits_by_day"])
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    persisted = [
+        row.query_key async for row in ArtifactSemanticQuery.objects.filter(artifact=artifact)
+    ]
+    tool = next(
+        t
+        for t in create_artifact_graph_tools(workspace, member_user)
+        if t.name == "get_artifact_semantic_queries"
+    )
+
+    from_tool = await tool.ainvoke({"artifact_id": str(artifact.id)})
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/semantic-queries/"
+    response = await member_client.get(url)
+    assert response.status_code == 200
+    from_api = response.json()
+
+    tool_keys = [r["query_key"] for r in from_tool["semantic_queries"]]
+    assert tool_keys == [r["query_key"] for r in from_api["semantic_queries"]]
+    assert tool_keys == persisted

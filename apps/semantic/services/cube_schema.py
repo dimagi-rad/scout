@@ -149,7 +149,12 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
 
 
 def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
-    content = generate_cube_schema_yaml(model)
+    try:
+        content = generate_cube_schema_yaml(model)
+    except ValueError as exc:
+        # Never remove a broken filter/measure silently: that changes the metric.
+        # The normal failed-build path retains the previous active publication.
+        raise CubeSchemaBuildError(f"Could not generate Cube schema: {exc}") from exc
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
     validation = async_to_sync(CubeClient().validate_schema)(content)

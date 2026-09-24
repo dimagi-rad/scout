@@ -51,6 +51,8 @@ jobs:
       # The Cube runtime uses the existing scout/mcp ECR repository; the MCP
       # process itself shares the API image, so that repository is otherwise idle.
       CUBE_TAG: cube-${{ github.sha }}
+      # A deploy pulls several ~1 GB images; below this the pull itself can fail.
+      HOST_MIN_FREE_GB: 8
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -116,6 +118,44 @@ jobs:
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # Both destinations share one host. A full disk once failed every deploy
+      # for six days: the first pull died, so Kamal's end-of-deploy prune never
+      # ran. Prune before anything is pulled on the host, and stop with a clear
+      # error if that still leaves too little room. See DEPLOYMENT.md: Host disk full.
+      - name: Free host disk space
+        timeout-minutes: 10
+        run: |
+          total=1 failed=0 kamal_failed=0 kamal_total=0
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "scout@$SCOUT_EC2_IP" bash -s -- prune-workers < scripts/host-disk-guard.sh \
+            || { failed=$((failed + 1)); echo "::warning title=Prune failed::Worker container prune failed."; }
+          # Same service-wide prune `kamal deploy` runs after a successful deploy.
+          # Workers are excluded: the host script above guards their receipts.
+          for config in config/deploy.yml config/deploy-mcp.yml config/deploy-cube.yml config/deploy-frontend.yml; do
+            total=$((total + 1)) kamal_total=$((kamal_total + 1))
+            kamal prune all -c "$config" -d staging \
+              || { failed=$((failed + 1)) kamal_failed=$((kamal_failed + 1)); echo "::warning title=Prune failed::kamal prune all -c $config failed."; }
+          done
+          total=$((total + 1)) kamal_total=$((kamal_total + 1))
+          kamal prune images -c config/deploy-worker.yml -d staging \
+            || { failed=$((failed + 1)) kamal_failed=$((kamal_failed + 1)); echo "::warning title=Prune failed::Worker image prune failed."; }
+          if (( failed > 0 )); then
+            echo "Host prune: $failed of $total commands failed; see the step's warnings." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # The disk check below is the real gate, so one failure only warns. Every
+          # Kamal prune failing means pruning itself is broken (e.g. a stale Kamal
+          # lock), which would otherwise stay invisible until the disk fills again.
+          if (( kamal_failed == kamal_total )); then
+            echo "::error title=Host prune failed::Every kamal prune failed. Check kamal lock status, SSH and host disk space (DEPLOYMENT.md: Host disk full) before retrying."
+            exit 1
+          fi
+
+      - name: Check host disk space
+        timeout-minutes: 2
+        run: |
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "scout@$SCOUT_EC2_IP" bash -s -- check "$HOST_MIN_FREE_GB" < scripts/host-disk-guard.sh
 
       # Role-specific Kamal builds retain the correct service labels without
       # making a build/push failure pause the existing worker queue.

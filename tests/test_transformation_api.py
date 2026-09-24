@@ -386,15 +386,22 @@ def test_list_runs_tenant_filter(api_client, user, tenant, tenant_membership):
 # Trigger endpoint
 # ---------------------------------------------------------------------------
 
+# dbt and profile generation are stubbed, so the managed DB is never contacted; the
+# executor only refuses to start without a URL. Setting one keeps these tests from
+# depending on whether the developer's environment happens to export it.
+FAKE_MANAGED_DATABASE_URL = "postgresql://dbt@managed.invalid:5432/unused"
+
 
 @pytest.mark.django_db
-def test_trigger_run_uses_confined_dbt_path(api_client, user, tenant, tenant_membership):
+def test_trigger_run_uses_confined_dbt_path(api_client, user, tenant, tenant_membership, settings):
     """The trigger endpoint must drive the real confined dbt path (issue #241),
     not a mocked-instant pipeline. Only the dbt invocation itself is stubbed; the
     real executor + profile generation run, and we assert the profile pins a
     low-privilege confinement role (04#3) and a schema-scoped search_path (04#4)
     — never the bare managed-DB superuser connection."""
     from apps.workspaces.models import TenantSchema
+
+    settings.MANAGED_DATABASE_URL = FAKE_MANAGED_DATABASE_URL
 
     TenantSchema.objects.create(tenant=tenant, schema_name="test_schema", state="active")
     TransformationAsset.objects.create(
@@ -408,6 +415,7 @@ def test_trigger_run_uses_confined_dbt_path(api_client, user, tenant, tenant_mem
 
     def _fake_generate_profiles_yml(*, output_path, schema_name, db_url, confinement_role=None):
         captured["schema_name"] = schema_name
+        captured["db_url"] = db_url
         captured["confinement_role"] = confinement_role
         # Write a minimal valid profiles.yml so dbt_project + run_dbt (mocked)
         # don't trip on a missing file.
@@ -441,14 +449,19 @@ def test_trigger_run_uses_confined_dbt_path(api_client, user, tenant, tenant_mem
     # Confinement was wired: a dedicated low-priv role derived from the schema,
     # and the search_path-bearing profile generator was the real one.
     assert captured["schema_name"] == "test_schema"
+    assert captured["db_url"] == FAKE_MANAGED_DATABASE_URL
     assert captured["confinement_role"] == "test_schema_dbt"
 
 
 @pytest.mark.django_db
-def test_trigger_run_surfaces_dbt_failure_as_failed(api_client, user, tenant, tenant_membership):
+def test_trigger_run_surfaces_dbt_failure_as_failed(
+    api_client, user, tenant, tenant_membership, settings
+):
     """A dbt failure during a triggered run must surface as a FAILED run rather
     than a swallowed COMPLETED (issue #241, 04#4)."""
     from apps.workspaces.models import TenantSchema
+
+    settings.MANAGED_DATABASE_URL = FAKE_MANAGED_DATABASE_URL
 
     TenantSchema.objects.create(tenant=tenant, schema_name="test_schema", state="active")
     TransformationAsset.objects.create(

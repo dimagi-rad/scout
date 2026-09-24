@@ -6,11 +6,20 @@ import pytest
 from langchain_core.tools import StructuredTool
 
 from apps.agents.graph.base import (
+    ESCALATION_MESSAGE,
+    HEADLESS_ESCALATION_MESSAGE,
+    READ_ONLY_ESCALATION_MESSAGE,
     _build_system_prompt,
     _build_tools,
     _fetch_semantic_model_context,
     _system_prompt_cache,
     build_agent_graph,
+)
+from apps.agents.prompts.base_system import (
+    BASE_SYSTEM_PROMPT,
+    HEADLESS_BASE_SYSTEM_PROMPT,
+    PLACEHOLDERS,
+    READ_ONLY_BASE_SYSTEM_PROMPT,
 )
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant, WorkspaceViewSchema
@@ -26,14 +35,18 @@ def test_read_graph_keeps_queries_and_artifact_inspection_but_filters_writes(wor
     query.name = "query"
     run_materialization = AsyncMock()
     run_materialization.name = "run_materialization"
+    cancel_materialization = AsyncMock()
+    cancel_materialization.name = "cancel_materialization"
 
     tools = _by_name(
         _build_tools(
             workspace,
             read_user,
-            [query, run_materialization],
+            [query, run_materialization, cancel_materialization],
             conversation_id="thread",
             interactive=True,
+            # canvas_write=True so the canvas_manager exclusion comes from the role gate.
+            canvas_write=True,
             write_capable=False,
         )
     )
@@ -44,6 +57,7 @@ def test_read_graph_keeps_queries_and_artifact_inspection_but_filters_writes(wor
     assert "canvas_read" in tools
     assert {
         "run_materialization",
+        "cancel_materialization",
         "save_learning",
         "save_as_recipe",
         "artifact_manager",
@@ -172,3 +186,155 @@ async def test_graph_resolves_live_role_for_bound_tools_and_prompt(
     assert ("canvas_manager" in names) is (writer and interactive)
     assert prompt.call_args.kwargs["write_capable"] is writer
     assert prompt.call_args.kwargs["canvas_write"] is (writer and interactive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize("writer", [False, True])
+async def test_escalation_message_matches_role_and_mode(
+    workspace, read_user, write_user, writer, interactive
+):
+    with patch("apps.agents.graph.base.ChatAnthropic"):
+        graph = await build_agent_graph(
+            workspace, write_user if writer else read_user, interactive=interactive
+        )
+
+    escalate = graph.builder.nodes["escalate"].runnable
+    message = escalate.invoke({"messages": []})["messages"][0].content
+
+    if not writer:
+        assert message == READ_ONLY_ESCALATION_MESSAGE
+        assert "workspace member with write access" in message
+    elif interactive:
+        assert message == ESCALATION_MESSAGE
+    else:
+        assert message == HEADLESS_ESCALATION_MESSAGE
+    assert ("?" in message) is (writer and interactive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("writer", [False, True])
+async def test_static_prompt_rebuild_offers_match_role(workspace, read_user, write_user, writer):
+    _system_prompt_cache.clear()
+    stable, _ = await _build_system_prompt(
+        workspace,
+        write_user if writer else read_user,
+        interactive=True,
+        canvas_write=False,
+        write_capable=writer,
+    )
+
+    assert ("offer to re-run materialization" in stable) is writer
+    assert ("ask to rebuild the data" in stable) is writer
+    assert ("ask whether to re-materialize" in " ".join(stable.split())) is writer
+    assert ("run_materialization" in stable) is writer
+    assert ("workspace member with write access" in stable) is not writer
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, write_user):
+    _system_prompt_cache.clear()
+    stable, _ = await _build_system_prompt(
+        workspace, write_user, interactive=False, canvas_write=False, write_capable=True
+    )
+
+    drift = " ".join(
+        stable.split("## When the Schema is Broken", 1)[1].split("Do NOT:", 1)[0].split()
+    )
+    assert "call `run_materialization` to rebuild" in drift
+    assert "continue in the same run" in drift
+    assert "ask whether" not in drift
+    # No user gate headless: a typo must not reload, but real drift must still rebuild.
+    count_rule = " ".join(
+        stable.split("## Metadata vs. Verified Counts", 1)[1].split("## When", 1)[0].split()
+    )
+    for rule in (drift, count_rule):
+        assert "If it succeeds but the field is not listed, fix the member name" in rule
+        assert "If `describe_dataset` itself fails, or the field is listed" in rule
+        assert "at most once per run" in rule
+    assert "re-run the count in the same run" in count_rule
+    assert "offer to re-run materialization" not in stable
+    assert "ask to rebuild the data" not in stable
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [BASE_SYSTEM_PROMPT, HEADLESS_BASE_SYSTEM_PROMPT, READ_ONLY_BASE_SYSTEM_PROMPT],
+    ids=["interactive", "headless", "read_only"],
+)
+def test_every_base_prompt_variant_keeps_the_shared_guardrails(prompt):
+    for invariant in (
+        "## Metadata vs. Verified Counts",
+        "NEVER report",
+        "## When the Schema is Broken",
+        "STOP exploring",
+        "more than two",
+        "pg_namespace",
+        "pg_class",
+        "pg_views",
+        "pg_tables",
+    ):
+        assert invariant in prompt
+    for name in PLACEHOLDERS:
+        assert "{" + name + "}" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("loading", [False, True])
+async def test_read_unloaded_guidance_points_to_write_member(workspace, tenant, multi, loading):
+    state = SchemaState.MATERIALIZING if loading else SchemaState.FAILED
+    if multi:
+        other = await Tenant.objects.acreate(
+            provider="commcare", external_id="other", canonical_name="Other"
+        )
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=workspace, schema_name="view", state=state
+        )
+    else:
+        await TenantSchema.objects.acreate(tenant=tenant, schema_name="data", state=state)
+
+    context = await _fetch_semantic_model_context(workspace, interactive=True, write_capable=False)
+
+    assert "run_materialization" not in context
+    if loading:
+        assert "already in progress" in context
+        assert "workspace role is read-only" in context
+    else:
+        assert "not currently queryable" in context
+        assert "workspace member with write access" in context
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize("loaded", [False, True])
+async def test_write_multi_tenant_guidance_matches_single_tenant(
+    workspace, tenant, interactive, loaded
+):
+    other = await Tenant.objects.acreate(
+        provider="commcare", external_id="other", canonical_name="Other"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+    if loaded:
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=workspace, schema_name="view", state=SchemaState.ACTIVE
+        )
+
+    context = await _fetch_semantic_model_context(
+        workspace, interactive=interactive, write_capable=True
+    )
+
+    assert "{tenant_name}__{table_name}" in context
+    if loaded:
+        assert "Data is loaded" in context
+        assert "Run materialization to rebuild the semantic catalog" in context
+    else:
+        assert "No data has been loaded yet" in context
+        assert ("returns IMMEDIATELY" in context) is interactive
+        assert ("BLOCKS" in context) is not interactive
