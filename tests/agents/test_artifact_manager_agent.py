@@ -14,6 +14,7 @@ from apps.agents.tools.artifact_manager_agent import (
     _summarize_result,
     create_artifact_manager_tool,
 )
+from apps.workspaces.access import tool_write_denied
 
 
 @pytest.mark.asyncio
@@ -208,6 +209,43 @@ def test_invalid_handoff_keeps_bounded_gap_description_and_missing_field_details
     assert len(summary["subagent_message"]) == 1200
     assert len(summary["requirement_errors"]) == 6
     assert "data_requirements" not in summary
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["needs_data_model", "done", [], None],
+    ids=["model_proposal", "false_success", "malformed_status", "missing_status"],
+)
+def test_permission_denial_cannot_be_replaced_by_a_model_proposal(status):
+    denied = tool_write_denied()
+    summary = _summarize_result(
+        [ToolMessage(name="artifact_write", tool_call_id="write", content=json.dumps(denied))],
+        json.dumps(
+            {
+                "status": status,
+                "message": "Create a different model to fix this.",
+                "touched_blocks": ["invented_block"],
+                "data_requirements": [_topic_requirement()],
+            }
+        ),
+    )
+    assert summary["status"] == "error"
+    assert summary["message"] == denied["message"]
+    assert summary["artifact_id"] is None
+    assert summary["artifact_version"] is None
+    assert summary["touched_blocks"] == []
+    assert "data_requirements" not in summary
+    assert "requirement_errors" not in summary
+    assert "subagent_message" not in summary
+    assert summary["runtime_failures"] == [
+        {
+            "code": "FORBIDDEN",
+            "category": "permission_required",
+            "message": denied["message"],
+            "retryable": False,
+            "recovery_action": None,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

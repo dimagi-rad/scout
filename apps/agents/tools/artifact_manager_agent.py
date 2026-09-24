@@ -847,6 +847,31 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         ),
         "message": message[:1200] if isinstance(message, str) else str(message)[:1200],
     }
+    # Access can change after graph creation; a denied write is never a model gap.
+    if artifact_result.get("status") == "denied":
+        denial = artifact_result.get("message")
+        denial = (
+            denial[:1200]
+            if isinstance(denial, str) and denial
+            else "Artifact write access is required."
+        )
+        summary.update(
+            status="error",
+            artifact_id=None,
+            artifact_version=None,
+            touched_blocks=[],
+            message=denial,
+            runtime_failures=[
+                {
+                    "code": "FORBIDDEN",
+                    "category": "permission_required",
+                    "message": denial,
+                    "retryable": False,
+                    "recovery_action": None,
+                }
+            ],
+        )
+        return summary
     # Failed writes return a soft-deleted candidate, not a published revision.
     # A failed check, in contrast, still refers to an existing artifact.
     if artifact_result.get("status") == "error":
