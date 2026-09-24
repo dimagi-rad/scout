@@ -6,6 +6,7 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant, TenantMembership
+from tests.pipeline_doubles import no_candidate_ddl  # noqa: F401 (registers the fixture)
 from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_connection
 from tests.upstream_proofs import ProviderStub
 

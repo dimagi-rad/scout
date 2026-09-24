@@ -135,7 +135,7 @@ def assert_tenant_lock_held(tenant_id) -> None:
     # ownership; say so rather than claiming T is not held.
     _refuse_unbridged_thread(current, owner, keys)
     if owner is None or owner is not current or tenant_lock_key(tenant_id) not in keys:
-        raise LockOrderError("This candidate operation requires holding the tenant lock T")
+        raise LockOrderError(f"This operation requires holding the tenant lock T for {tenant_id}")
 
 
 def _refuse_unbridged_thread(owner, inherited_owner, inherited) -> None:

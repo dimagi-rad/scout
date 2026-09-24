@@ -32,14 +32,8 @@ from tests.tenant_access import agrant_tenant_access, grant_tenant_access
 
 
 @pytest.fixture(autouse=True)
-def _no_candidate_ddl():
-    """Orchestration tests don't need a physical candidate schema; candidate DDL
-    is covered against real managed PostgreSQL in test_shared_workspace_loads."""
-    with (
-        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema", return_value=None),
-        patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None),
-    ):
-        yield
+def _no_candidate_ddl(no_candidate_ddl):
+    """Shared stub: see tests.pipeline_doubles.no_candidate_ddl."""
 
 
 @pytest.mark.asyncio
