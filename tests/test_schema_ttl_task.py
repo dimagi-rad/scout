@@ -710,7 +710,10 @@ async def test_an_unlisted_leftover_object_gives_up_at_once(active_schema):
         patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = SchemaStillReferenced(
-            active_schema.schema_name, [], detail="type leftover depends on schema"
+            active_schema.schema_name,
+            [],
+            detail="type leftover depends on schema",
+            converges=False,
         )
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id))
@@ -718,3 +721,26 @@ async def test_an_unlisted_leftover_object_gives_up_at_once(active_schema):
     retry.return_value.defer_async.assert_not_awaited()
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_schema_deleted_while_waiting_for_t_is_a_no_op(active_schema):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    @asynccontextmanager
+    async def delete_while_waiting(_tenant_ids):
+        await TenantSchema.objects.filter(pk=active_schema.pk).adelete()
+        yield
+
+    with (
+        patch("apps.workspaces.tasks.tenant_data_lock", delete_while_waiting),
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    MockManager.return_value.retire_tenant_schema.assert_not_called()
+    retry.return_value.defer_async.assert_not_awaited()

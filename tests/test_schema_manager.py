@@ -601,14 +601,15 @@ class TestBuildViewSchemaTenantCoverage:
         ):
             SchemaManager().build_view_schema(workspace)
 
-        # No schema of this tenant can serve again, so the only physical statement
+        # No schema of this tenant can serve again, so the only physical work
         # drops the views: left behind they would block a RESTRICT retirement.
         statements = [
             call.args[0].as_string()
             for call in mock_connection.return_value.cursor.return_value.execute.call_args_list
         ]
-        assert len(statements) == 1
-        assert "DROP SCHEMA IF EXISTS" in statements[0]
+        assert len(statements) == 2
+        assert statements[0].startswith("SET LOCAL lock_timeout")
+        assert "DROP SCHEMA IF EXISTS" in statements[1]
         view_schema = WorkspaceViewSchema.objects.get(workspace=workspace)
         assert view_schema.state == SchemaState.FAILED
         assert "no active schema" in view_schema.last_error

@@ -89,10 +89,20 @@ def _assert_publication_owned(workspace, tenant_ids=None):
 class SchemaStillReferenced(Exception):
     """A schema cannot be retired: objects outside it still depend on its relations."""
 
-    def __init__(self, schema_name: str, dependents: list[dict], detail: str = ""):
+    def __init__(
+        self,
+        schema_name: str,
+        dependents: list[dict],
+        detail: str = "",
+        *,
+        converges: bool = True,
+    ):
         self.schema_name = schema_name
         self.dependents = dependents
         self.detail = detail
+        # False when no rebuild can move the blocker (a type, function or
+        # foreign key); retrying would only delay the operator's error log.
+        self.converges = converges
         listed = ", ".join(f"{d['schema']}.{d['name']}" for d in dependents[:5])
         reason = listed or detail or "unknown dependents"
         super().__init__(f"Schema '{schema_name}' is still referenced by {reason}")
@@ -452,7 +462,12 @@ class SchemaManager:
                 # Something that is not a relation (a type, function, or a relation
                 # created after the listing) is still in the schema.
                 conn.rollback()
-                raise SchemaStillReferenced(schema_name, [], detail=str(exc)) from exc
+                raise SchemaStillReferenced(
+                    schema_name,
+                    [],
+                    detail=str(exc),
+                    converges=self._relations_appeared(cursor, schema_name, relations),
+                ) from exc
             cursor.close()
             conn.commit()
         except Exception:
@@ -491,8 +506,27 @@ class SchemaManager:
             if len(blocked) == len(remaining):
                 dependents = self._external_dependents(cursor, schema_name)
                 conn.rollback()
-                raise SchemaStillReferenced(schema_name, dependents, detail=detail)
+                raise SchemaStillReferenced(
+                    schema_name,
+                    dependents,
+                    detail=detail,
+                    converges=bool(dependents)
+                    or self._relations_appeared(cursor, schema_name, relations),
+                )
             remaining = blocked
+
+    def _relations_appeared(self, cursor, schema_name: str, listed) -> bool:
+        """True if relations were created in the schema after it was listed.
+
+        That blocker is transient (a later attempt lists and drops them); a
+        type, function or foreign key that blocks the drop is not.
+        """
+        try:
+            cursor.execute(self._SCHEMA_RELATIONS_SQL, (schema_name,))
+            return bool(set(cursor.fetchall()) - set(listed))
+        except Exception:
+            logger.exception("Could not re-list relations of '%s'", schema_name)
+            return True
 
     def _drop_schema_roles(self, schema_name: str) -> None:
         # Best effort all the way down: the schema is already dropped, and an
@@ -889,6 +923,13 @@ class SchemaManager:
             return False
         try:
             cursor = conn.cursor()
+            # Runs under W, T and the view lock: a reader parked on one of these
+            # views must not pin all of them indefinitely.
+            cursor.execute(
+                psycopg.sql.SQL("SET LOCAL lock_timeout = {}").format(
+                    psycopg.sql.Literal(_PUBLICATION_LOCK_TIMEOUT)
+                )
+            )
             cursor.execute(
                 psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
                     psycopg.sql.Identifier(view_schema_name)

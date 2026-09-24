@@ -628,10 +628,36 @@ def test_retirement_refuses_a_schema_holding_a_non_relation_object(owned, manage
         )
     )
 
-    with pytest.raises(SchemaStillReferenced, match="leftover"):
+    with pytest.raises(SchemaStillReferenced, match="leftover") as blocked:
         SchemaManager().retire_tenant_schema(tenant_schema)
 
+    assert blocked.value.converges is False  # no rebuild can move a type
     assert _schema_exists(managed, tenant_schema.schema_name)
+
+
+def test_the_view_drop_gives_up_on_a_parked_reader_instead_of_pinning_locks(
+    owned, managed, monkeypatch
+):
+    workspace, _tenant, _ts = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    monkeypatch.setattr(sm, "_PUBLICATION_LOCK_TIMEOUT", "200ms")
+    reader = get_managed_db_connection()
+    try:
+        reader.autocommit = False
+        view = next(iter(vs.view_sources["views"]))
+        reader.execute(
+            psycopg.sql.SQL("SELECT * FROM {}.{} LIMIT 0").format(
+                psycopg.sql.Identifier(vs.schema_name), psycopg.sql.Identifier(view)
+            )
+        )
+        started = time.monotonic()
+        assert manager._drop_view_schema_physically(vs.schema_name) is False
+        assert time.monotonic() - started < 10
+    finally:
+        reader.rollback()
+        reader.close()
+    assert _schema_exists(managed, vs.schema_name)
 
 
 def test_reconcile_reports_a_failed_republish_instead_of_raising(owned, managed):

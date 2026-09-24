@@ -1751,8 +1751,11 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
     try:
         retired = await _retire_under_tenant_lock(schema, attempt)
     except _RetirementNotStarted as exc:
-        # Nothing was dropped and nothing else re-arms a TEARDOWN row.
-        logger.exception("teardown_schema: could not start retiring schema %s", schema.id)
+        # Nothing was dropped and nothing else re-arms a TEARDOWN row. Usually
+        # plain contention (another load holds T), so no traceback.
+        logger.warning(
+            "teardown_schema: could not start retiring schema %s: %r", schema.id, exc.__cause__
+        )
         await _retry_retirement(schema, [], attempt, str(exc.__cause__ or exc))
         return
     if retired:
@@ -1773,6 +1776,8 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
         try:
             await stack.enter_async_context(tenant_data_lock([schema.tenant_id]))
             await schema.arefresh_from_db()
+        except TenantSchema.DoesNotExist:
+            return False  # deleted (e.g. with its tenant) while we waited for T
         except (DataLockTimeout, DatabaseError, psycopg.OperationalError) as exc:
             raise _RetirementNotStarted from exc
         if schema.state != SchemaState.TEARDOWN:
@@ -1785,9 +1790,7 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
                 exc.dependents,
                 attempt,
                 str(exc),
-                # Nothing we can rebuild will move an unlisted dependent (a type or
-                # function left inside the schema); don't spend a day on retries.
-                converges=bool(exc.dependents) or not exc.detail,
+                converges=exc.converges,
             )
             return False
         except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
