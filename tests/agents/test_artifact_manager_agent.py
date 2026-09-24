@@ -9,6 +9,7 @@ from apps.agents.subagents.events import reset_subagent_event_queue, set_subagen
 from apps.agents.tools.artifact_manager_agent import (
     ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE,
     _artifact_manager_failure_result,
+    _extract_final_text,
     _forward_nested_event,
     _SubagentTraceRecorder,
     _summarize_result,
@@ -158,6 +159,25 @@ def _published_artifact_result(artifact_id, **overrides):
     }
 
 
+def _final_message(payload, content_blocks):
+    text = json.dumps(payload)
+    return AIMessage(content=[{"type": "text", "text": text}] if content_blocks else text)
+
+
+def test_final_text_joins_text_blocks_without_including_reasoning_or_tool_content():
+    message = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "Ignored non-text content", "signature": "test"},
+            "```json\n",
+            {"type": "text", "text": '{"status":'},
+            {"type": "text", "text": '"done"}'},
+            "\n```",
+            {"type": "tool_use", "id": "tool", "name": "unused", "input": {}},
+        ]
+    )
+    assert _extract_final_text([message]) == '```json\n{"status":"done"}\n```'
+
+
 def test_selected_deliverable_survives_cleanup_of_another_artifact():
     deliverable = _published_artifact_result("deliverable")
     cleanup = _published_artifact_result(
@@ -292,7 +312,10 @@ def test_unparseable_latest_write_does_not_resurrect_an_earlier_deliverable():
 
 
 @pytest.mark.asyncio
-async def test_selected_deliverable_is_emitted_in_parent_result_and_preview_event(monkeypatch):
+@pytest.mark.parametrize("content_blocks", [False, True], ids=["string", "provider_text_blocks"])
+async def test_selected_deliverable_is_emitted_in_parent_result_and_preview_event(
+    monkeypatch, content_blocks
+):
     class FakeGraph:
         async def astream_events(self, input_state, config, version):
             yield {
@@ -302,8 +325,8 @@ async def test_selected_deliverable_is_emitted_in_parent_result_and_preview_even
                         "messages": [
                             _write_message(_published_artifact_result("deliverable")),
                             _write_message(_published_artifact_result("other"), "cleanup"),
-                            AIMessage(
-                                content=json.dumps({"status": "done", "artifact_id": "deliverable"})
+                            _final_message(
+                                {"status": "done", "artifact_id": "deliverable"}, content_blocks
                             ),
                         ]
                     }
@@ -569,7 +592,10 @@ def test_failed_check_preserves_correctable_proposal_only_for_pure_model_gap(
 
 
 @pytest.mark.asyncio
-async def test_artifact_manager_tool_preserves_data_preparation_handoff(monkeypatch):
+@pytest.mark.parametrize("content_blocks", [False, True], ids=["string", "provider_text_blocks"])
+async def test_artifact_manager_tool_preserves_data_preparation_handoff(
+    monkeypatch, content_blocks
+):
     final = {
         "status": "needs_data_model",
         "message": "A reviewed topic field is needed.",
@@ -580,7 +606,7 @@ async def test_artifact_manager_tool_preserves_data_preparation_handoff(monkeypa
         async def astream_events(self, input_state, config, version):
             yield {
                 "event": "on_chain_end",
-                "data": {"output": {"messages": [AIMessage(content=json.dumps(final))]}},
+                "data": {"output": {"messages": [_final_message(final, content_blocks)]}},
             }
 
     monkeypatch.setattr(
