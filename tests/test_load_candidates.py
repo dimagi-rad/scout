@@ -370,6 +370,8 @@ def test_a_dead_writers_active_run_is_settled_failed_and_superseded_on_publish(t
     assert stuck.state == MaterializationRun.RunState.FAILED
     assert stuck.completed_at is not None
 
+    # The next writer, as it runs: settle, begin, then open (and resume).
+    assert begin_load_generation(tenant.id) == generation
     resumed = _open(tenant, workspace, generation=generation, job_id=2)
     run = _completed_run(resumed.schema, job_id=2)
     assert _promote(resumed.schema, workspace, generation, run, job_id=2).promoted
