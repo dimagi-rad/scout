@@ -208,8 +208,10 @@ def promote_candidate_schema(
         ):
             return Promotion(promoted=False)
 
-        # Under T every other run on the candidate is an earlier attempt's,
-        # including a dead writer's run stuck in an active state.
+        # Every other run on the candidate is an earlier attempt's, including a
+        # dead writer's run stuck in an active state: a workspace candidate is
+        # written only under T (asserted above), and a refresh candidate only by
+        # the one job its unique refresh_job_id binds it to.
         MaterializationRun.objects.filter(tenant_schema_id=candidate.id).exclude(id=run.id).exclude(
             state=MaterializationRun.RunState.STALE
         ).update(state=MaterializationRun.RunState.STALE)
