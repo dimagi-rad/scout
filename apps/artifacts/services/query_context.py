@@ -10,7 +10,7 @@ from apps.semantic.services.date_context import (
     resolve_query_dates,
 )
 
-from .graph_doc import collect_query_specs, normalize_doc
+from .graph_doc import collect_query_specs, normalize_doc, parse_ref
 
 
 def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
@@ -81,7 +81,7 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
             ref = binding["$ref"]
             if not isinstance(ref, str):
                 raise DateContextError(f"Unresolved date binding: {ref}.")
-            key, _, _port = ref.rpartition(".")
+            key, _port = parse_ref(ref)
             if ref not in sources and key in blocks:
                 resolve_source(key)
             if ref not in sources:
@@ -94,6 +94,8 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
         block = blocks[entry["block_id"]]
         query = dict(entry["query"])
         if (block.get("config") or {}).get("compare"):
+            if "date_range" in (block.get("inputs") or {}):
+                raise DateContextError("A comparison query cannot also bind date_range.")
             pair = bound(block, "compare")
             if not isinstance(pair, dict) or "current" not in pair or "previous" not in pair:
                 raise DateContextError("A comparison query requires current and previous ranges.")

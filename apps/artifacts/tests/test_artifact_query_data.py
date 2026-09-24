@@ -17,7 +17,7 @@ from apps.artifacts.views import _artifact_query_cache_key
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from tests.tenant_access import usable_connection
-from tests.test_date_context import CONTEXT, story
+from tests.test_artifact_date_resolution import CONTEXT, story
 
 
 @pytest.mark.django_db(transaction=True)
@@ -111,6 +111,30 @@ async def test_inspector_and_runtime_check_execute_same_default_periods(
         actual = copy.deepcopy(validated.args[1])
         actual.pop("limit", None)
         assert inspected.args[1] == actual
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_narrative_only_story_does_not_claim_a_query_date_context(
+    member_client, workspace, live_artifact
+):
+    live_artifact.data = {
+        "story_doc": {
+            "schema_version": 1,
+            "blocks": [{"id": "intro", "type": "markdown", "config": {"text": "Overview"}}],
+        }
+    }
+    await live_artifact.asave(update_fields=["data"])
+    result = {"columns": ["visits.count"], "rows": [[18]], "row_count": 1}
+    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock(return_value=result)):
+        response = await member_client.post(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
+            CONTEXT,
+            content_type="application/json",
+        )
+    assert response.status_code == 200
+    assert response.json()["queries"]
+    assert response.json()["query_context"] is None
 
 
 @pytest.fixture(autouse=True)

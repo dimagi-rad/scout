@@ -978,7 +978,7 @@ class ArtifactQueryDataView(View):
             if isinstance(doc, dict) and doc.get("blocks"):
                 queries, resolved_context = resolve_artifact_queries(doc, runtime)
                 if not queries:
-                    queries = artifact.semantic_queries
+                    queries, resolved_context = artifact.semantic_queries, None
             else:
                 queries, resolved_context = artifact.semantic_queries, None
         except DateContextError as exc:

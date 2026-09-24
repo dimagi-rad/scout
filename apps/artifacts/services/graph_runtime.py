@@ -42,7 +42,24 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "query_context": None,
             "summary": "Date context could not be resolved",
         }
-    entries = resolved[:MAX_CHECK_QUERIES]
+    if len(resolved) > MAX_CHECK_QUERIES:
+        return {
+            "success": False,
+            "diagnostics": [
+                *diagnostics,
+                {
+                    "severity": "error",
+                    "code": "query_check_limit",
+                    "message": f"Runtime checks support at most {MAX_CHECK_QUERIES} queries, including both comparison periods; this artifact resolves to {len(resolved)}.",
+                },
+            ],
+            "manifest": manifest_summary,
+            "queries": [],
+            "key_warnings": [],
+            "query_context": context,
+            "summary": "Too many queries to validate the complete artifact",
+        }
+    entries = resolved
     query_results = []
     actual_keys: dict[str, list[str]] = {}
     workspace = await Workspace.objects.aget(pk=artifact.workspace_id)

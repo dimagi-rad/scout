@@ -723,6 +723,14 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
             )
         else:
             require_time = bool(config.get("compare")) or _has_input_binding(block, "date_range")
+            if config.get("compare") and "date_range" in (block.get("inputs") or {}):
+                diagnostics.append(
+                    problem(
+                        "A comparison query cannot also bind date_range.",
+                        block_id=block_id,
+                        code="ambiguous_date_bindings",
+                    )
+                )
             for name, query in queries.items():
                 diagnostics.extend(
                     query_diagnostics(
