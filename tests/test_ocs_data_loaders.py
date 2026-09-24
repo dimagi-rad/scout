@@ -179,6 +179,37 @@ def test_message_loader_flattens_messages_with_composite_pk():
         assert [total for _, total in pages] == [1]
 
 
+def test_message_loader_deduplicates_sessions_before_snapshot_fetch():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    with (
+        patch.object(
+            loader,
+            "_paginate",
+            return_value=iter(
+                [
+                    ([{"id": "sess-1"}], None),
+                    ([{"id": "sess-1"}, {"id": "sess-2"}], None),
+                ]
+            ),
+        ),
+        patch.object(
+            loader,
+            "_get_json",
+            side_effect=[
+                {"messages": [{"role": "user", "content": "one snapshot"}]},
+                {"messages": []},
+            ],
+        ) as detail,
+    ):
+        pages = list(loader.load_pages())
+    assert [total for _, total in pages] == [2, 2]
+    assert [call.args[0] for call in detail.call_args_list] == [
+        f"{BASE_URL}/api/sessions/sess-1/",
+        f"{BASE_URL}/api/sessions/sess-2/",
+    ]
+    assert [row["session_id"] for rows, _ in pages for row in rows] == ["sess-1"]
+
+
 def test_message_loader_indexes_sessions_before_fetching_details():
     """Two-pass: the full session list is walked first, then one tuple is
     yielded per session — including sessions with no messages — each carrying

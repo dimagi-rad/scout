@@ -46,6 +46,8 @@ class OCSMessageLoader(OCSBaseLoader):
                 if session_id:
                     session_ids.append(session_id)
 
+        # A live pagination walk can repeat a session; load one snapshot per id.
+        session_ids = list(dict.fromkeys(session_ids))
         total_sessions = len(session_ids)
         total_messages = 0
         for session_id in session_ids:
