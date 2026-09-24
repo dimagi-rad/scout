@@ -25,6 +25,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.data_operation import LockOrderError
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     capture_load_intent,
@@ -389,3 +390,98 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
     assert result["all_succeeded"] is True
     build.assert_called_once()
     assert len(await _active_schemas(new_source)) == 1
+
+
+async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(workspace, tenant, user):
+    """The reusing job has no run of its own; the resume must read the reused run,
+    not report the tenant as "the run recorded nothing for it"."""
+    sibling = await _sibling(user, tenant)
+    first_intent = await _intent(workspace)
+    second_intent = await _intent(sibling)
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user, job_id=101, load_intent=first_intent)
+        reused = await _run(sibling, user, job_id=202, load_intent=second_intent)
+
+    assert "reused_generation" in reused["tenants"][0]
+    assert len(pipeline.calls) == 1
+    records = workspaces_tasks._resume_records(reused)
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        202, sibling, str(user.id), records
+    )
+
+    assert status == "completed"
+    assert [entry["state"] for entry in summary] == ["completed"]
+
+
+async def test_a_reused_run_of_a_tenant_outside_the_workspace_is_ignored(workspace, tenant, user):
+    stranger = await Tenant.objects.acreate(
+        provider="commcare", external_id="stranger", canonical_name="Stranger"
+    )
+    schema = await TenantSchema.objects.acreate(
+        tenant=stranger, schema_name="stranger_live", state=SchemaState.ACTIVE
+    )
+    run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {}},
+    )
+
+    _status, summary = await workspaces_tasks._aggregate_materialization_state(
+        303,
+        workspace,
+        str(user.id),
+        [{"tenant_id": str(stranger.id), "provider": "commcare", "reused_run_id": str(run.id)}],
+    )
+
+    assert "stranger" not in {entry["tenant"] for entry in summary}
+
+
+async def test_a_failure_opening_the_candidate_clears_the_loading_marker(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with patch(
+            "apps.workspaces.tasks.open_workspace_candidate",
+            side_effect=RuntimeError("schema name collision"),
+        ):
+            result = await _run(workspace, user)
+
+    assert result["all_succeeded"] is False
+    ledger = await TenantLoadGeneration.objects.aget(tenant=tenant)
+    assert ledger.loading_generation == 0
+    assert ledger.requested_generation > ledger.published_generation
+
+
+async def test_a_source_added_mid_run_reports_the_view_build_plainly(user):
+    a = await Tenant.objects.acreate(provider="commcare", external_id="mid-a", canonical_name="A")
+    b = await Tenant.objects.acreate(provider="commcare", external_id="mid-b", canonical_name="B")
+    for t in (a, b):
+        await agrant_tenant_access(user, t)
+    ws = await Workspace.objects.acreate(name="Mid", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    for t in (a, b):
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
+
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with patch(
+            "apps.workspaces.tasks.SchemaManager.build_view_schema",
+            side_effect=LockOrderError("Cannot expand held tenant locks"),
+        ):
+            result = await _run(ws, user)
+
+    assert result["view_schema"]["ok"] is False
+    assert result["view_schema"]["error"] == workspaces_tasks._SOURCE_ADDED_DURING_LOAD
+
+
+async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user)
+        [first] = await _active_schemas(tenant)
+        with patch("apps.workspaces.tasks.teardown_schema.configure") as retire:
+            await _run(workspace, user)
+
+    retire.assert_called_once_with(schedule_in={"seconds": 30 * 60})
+    retire.return_value.defer.assert_called_once_with(schema_id=str(first.id))
