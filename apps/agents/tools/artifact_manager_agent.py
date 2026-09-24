@@ -842,8 +842,11 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
                 }
                 for error in exc.errors(
                     include_input=False, include_context=False, include_url=False
-                )[:4]
+                )[:8]
             ]
+            gap_description = parsed_final.get("message")
+            if isinstance(gap_description, str) and gap_description.strip():
+                summary["subagent_message"] = gap_description[:1200]
             summary["message"] = (
                 "Artifact Manager returned an invalid data-model proposal. "
                 "Retry with complete, bounded structured data_requirements; no model change is authorized."

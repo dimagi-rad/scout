@@ -171,8 +171,26 @@ def test_artifact_manager_rejects_invalid_data_model_handoff(requirements):
     assert summary["status"] == "invalid_data_requirements"
     assert "data_requirements" not in summary
     assert "no model change is authorized" in summary["message"]
-    assert 1 <= len(summary["requirement_errors"]) <= 4
+    assert 1 <= len(summary["requirement_errors"]) <= 8
     assert all(set(error) == {"path", "code", "message"} for error in summary["requirement_errors"])
+
+
+def test_invalid_handoff_keeps_bounded_gap_description_and_missing_field_details():
+    summary = _summarize_result(
+        [],
+        json.dumps(
+            {
+                "status": "needs_data_model",
+                "message": "No topic field is available. " + "x" * 1500,
+                "data_requirements": [{}],
+            }
+        ),
+    )
+    assert summary["status"] == "invalid_data_requirements"
+    assert summary["subagent_message"].startswith("No topic field is available.")
+    assert len(summary["subagent_message"]) == 1200
+    assert len(summary["requirement_errors"]) == 6
+    assert "data_requirements" not in summary
 
 
 @pytest.mark.asyncio
