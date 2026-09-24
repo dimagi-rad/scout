@@ -2,10 +2,10 @@
 
 The read gate (``apps.workspaces.access``) denies a member who cannot use one of
 the workspace's tenants; these checks refuse the membership or source change that
-would create that state in the first place. By default they follow the read
-gate's rollout switch: while it is off, admission keeps the pre-#380 any-of rule,
-so merging changes nothing. ``ADMISSION_ALWAYS_ALL_OF`` makes admission strict
-ahead of the flip instead, which stops new gaps accumulating before it.
+would create that state in the first place. Admission is all-of even while the
+read gate's rollout switch is off (``ADMISSION_ALWAYS_ALL_OF``), so no new gaps
+accumulate before the flip: a partially covering user gets an awaiting-access
+invite rather than any-of access.
 
 Final checks and mutations run under a lock on the workspace row, shared by every
 admission mutation here, so a concurrent member add and source add cannot each pass
@@ -47,9 +47,9 @@ class MembersLackTenant(Exception):
         self.gaps = gaps
 
 
-# Product decision pending (#561): True admits only fully covering users even
-# while the read switch is off; False keeps admission on the switch.
-ADMISSION_ALWAYS_ALL_OF = False
+# Product decision (Brian, 2026-09-24): admission is strict ahead of the read flip.
+# False would make admission follow the read gate's rollout switch instead.
+ADMISSION_ALWAYS_ALL_OF = True
 
 
 def admission_all_of() -> bool:
