@@ -589,7 +589,10 @@ class SchemaManager:
             # Persist the error text so the resume task, MCP get_schema_status, and
             # the status API can surface *why* the query layer is unavailable.
             vs.last_error = str(exc)[:500]
-            if was_active and not self._published_views_missing(vs):
+            # A plan-level ValueError (name collision) fails every retry the same
+            # way; keeping ACTIVE would hide it behind the stale views forever.
+            deterministic = isinstance(exc, ValueError)
+            if was_active and not deterministic and not self._published_views_missing(vs):
                 # The restored views still serve, and coverage/provenance/token still
                 # describe them truthfully — only the error is new.
                 vs.save(update_fields=["last_error"])
@@ -661,8 +664,16 @@ class SchemaManager:
             logger.exception("Rolling back the view publication for '%s' failed", view_schema_name)
 
     @staticmethod
-    def _missing_views(cursor, vs) -> list[str]:
-        expected = set(((vs.view_sources or {}).get("views") or {}).keys())
+    def _missing_views(cursor, vs) -> list[str] | None:
+        """Recorded views absent from the schema, or None when nothing was recorded.
+
+        A row last built before view provenance existed (``view_sources == {}``)
+        cannot be verified; that is not the same as "published zero views".
+        """
+        recorded = (vs.view_sources or {}).get("views")
+        if recorded is None:
+            return None
+        expected = set(recorded.keys())
         if not expected:
             return []
         cursor.execute(
@@ -688,7 +699,8 @@ class SchemaManager:
             try:
                 if not self._schema_exists(cursor, vs.schema_name):
                     return True
-                return bool(self._missing_views(cursor, vs))
+                missing = self._missing_views(cursor, vs)
+                return missing is None or bool(missing)
             finally:
                 cursor.close()
         except Exception:
@@ -768,8 +780,11 @@ class SchemaManager:
         finally:
             conn.close()
 
+        if vs.state in (SchemaState.TEARDOWN, SchemaState.EXPIRED):
+            # Never resurrect a row that is leaving service; its teardown owns it.
+            return {"status": "retiring"}
         marker_matches = (marker or "") == (vs.physical_build_token or "")
-        if exists and marker_matches and not missing:
+        if exists and marker_matches and missing == []:
             return {"status": "consistent"}
         if exists and marker_matches:
             # The marker survives a view being dropped from under it (an in-place
