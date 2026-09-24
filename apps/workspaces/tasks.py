@@ -578,18 +578,18 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         # and the remedy comes once, from the code's guidance, as it did before.
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         missing = {t.tenant_id for t in access.missing_tenants}
-        results = _unreachable_tenant_results(t for t in tenants if str(t.pk) in missing)
-        skipped = [
-            _preflight_failure(
+        # Covered tenants get no error code: the code's guidance ("connect that
+        # account") is for the missing ones only.
+        results = [
+            _preflight_failure(t, _unreachable_tenant_error(t), code)
+            if str(t.pk) in missing
+            else _preflight_failure(
                 t,
                 "not attempted: the requesting user can't use every data source of this workspace",
-                code,
             )
             for t in tenants
-            if str(t.pk) not in missing
         ]
-        _set_tenant_display_names(skipped)
-        results += skipped
+        _set_tenant_display_names(results)
         error = "The requesting user can't use these data sources: " + (
             ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
         )

@@ -496,6 +496,7 @@ class WorkspaceDetailView(APIView):
         )
         if err:
             return err
+        missing = missing_tenants_for_member(request.user, workspace)
 
         tenants = list(workspace.tenants.all())
         active_schemas = TenantSchema.objects.filter(
@@ -544,9 +545,8 @@ class WorkspaceDetailView(APIView):
                 "is_auto_created": workspace.is_auto_created,
                 "role": membership.role,
                 # Agent configuration is workspace content, not page metadata.
-                "system_prompt": workspace.system_prompt
-                if not missing_tenants_for_member(request.user, workspace)
-                else "",
+                "system_prompt": "" if missing else workspace.system_prompt,
+                "missing_tenants": missing_tenants_payload(missing),
                 "schema_status": schema_status,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
@@ -646,8 +646,9 @@ class WorkspaceMemberListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        # The only source of the membership id that leaving needs, so reachable
-        # without coverage; but then it shows only the caller's own row.
+        # The only source of the membership ids that leaving and handing over the
+        # manager role need, so reachable without coverage; but then it names only
+        # the caller, and other rows carry just their id and role.
         workspace, _membership, err = resolve_workspace(
             request, workspace_id, require_coverage=False
         )
@@ -656,8 +657,6 @@ class WorkspaceMemberListView(APIView):
         covered = not missing_tenants_for_member(request.user, workspace)
 
         memberships = WorkspaceMembership.objects.filter(workspace=workspace).select_related("user")
-        if not covered:
-            memberships = memberships.filter(user=request.user)
         members = [
             {
                 "id": str(m.id),
@@ -667,6 +666,8 @@ class WorkspaceMemberListView(APIView):
                 "role": m.role,
                 "created_at": m.created_at.isoformat(),
             }
+            if covered or m.user_id == request.user.id
+            else {"id": str(m.id), "role": m.role}
             for m in memberships
         ]
         live_invites = WorkspaceInvite.objects.filter(

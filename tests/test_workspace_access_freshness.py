@@ -370,3 +370,18 @@ def test_both_switches_off_keep_the_pre_380_decision(
 
     assert resolve_workspace_access_ex(user, workspace.id).granted
     assert upstream_provider.requests == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_covered_callers_of_exempt_paths_still_pass_freshness(
+    client, user, workspace, tenant, upstream_provider
+):
+    """The coverage exemption must not switch freshness off for covered members."""
+    make_proof_stale(user, tenant)
+    upstream_provider.failure = 503
+    client.force_login(user)
+
+    resp = client.get(f"/api/workspaces/{workspace.id}/members/")
+
+    assert resp.status_code == 403
+    assert resp.json()["reason"] == VERIFICATION_UNAVAILABLE
