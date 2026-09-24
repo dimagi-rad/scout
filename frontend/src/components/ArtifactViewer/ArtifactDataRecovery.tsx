@@ -2,6 +2,7 @@ import { AlertTriangle, DatabaseBackup, Loader2, RefreshCw } from "lucide-react"
 import type { ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
+import { READ_ONLY_HINT } from "@/hooks/useWorkspaceRole"
 import type { ArtifactDataRecoveryState } from "./types"
 
 interface ArtifactDataRecoveryProps {
@@ -12,6 +13,7 @@ interface ArtifactDataRecoveryProps {
   isStarting: boolean
   onRecover: () => void
   onRetryCheck: () => void
+  canRecover?: boolean
 }
 
 export function ArtifactDataRecovery({
@@ -22,6 +24,7 @@ export function ArtifactDataRecovery({
   isStarting,
   onRecover,
   onRetryCheck,
+  canRecover = true,
 }: ArtifactDataRecoveryProps) {
   if (isChecking) {
     return (
@@ -110,7 +113,7 @@ export function ArtifactDataRecovery({
       <p>{state.message}</p>
       {state.detail && <p className="break-words text-xs text-muted-foreground">{state.detail}</p>}
       {state.recovery_action && (
-        <Button variant={readable ? "outline" : "default"} size={readable ? "sm" : "default"} onClick={onRecover} disabled={isStarting} data-testid="artifact-data-recover" data-artifact-recovery-control>
+        <Button variant={readable ? "outline" : "default"} size={readable ? "sm" : "default"} onClick={onRecover} disabled={isStarting || !canRecover} data-testid="artifact-data-recover" data-artifact-recovery-control>
           {isStarting ? <Loader2 className="animate-spin" /> : <RefreshCw />}
           {isStarting
             ? "Starting…"
@@ -122,6 +125,11 @@ export function ArtifactDataRecovery({
                   ? "Rebuild data model"
                   : "Restore workspace data"}
         </Button>
+      )}
+      {state.recovery_action && !canRecover && (
+        <p className="text-xs text-muted-foreground" data-testid="artifact-data-recover-readonly-hint">
+          {READ_ONLY_HINT}
+        </p>
       )}
     </RecoveryShell>
   )

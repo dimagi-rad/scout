@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from tests.tenant_access import ausable_connection
 
 User = get_user_model()
 
@@ -22,7 +23,9 @@ async def test_single_tenant_workspace_with_membership_is_accessible():
     ws = await Workspace.objects.acreate(name="Single WS", created_by=user)
     await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
-    await TenantMembership.objects.acreate(user=user, tenant=t)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=t, connection=await ausable_connection(user, t.provider)
+    )
 
     workspace, tm, _is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
@@ -92,7 +95,9 @@ async def test_multi_tenant_workspace_returns_none_tm_even_with_tenant_membershi
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
     # User has TenantMembership for t1 (first tenant) — must still get tm=None
-    await TenantMembership.objects.acreate(user=user, tenant=t1)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=t1, connection=await ausable_connection(user, t1.provider)
+    )
 
     workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None

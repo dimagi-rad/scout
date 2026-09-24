@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useParams } from "react-router-dom"
 import {
@@ -20,6 +20,7 @@ import {
 import { ApiError } from "@/api/client"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { READ_ONLY_HINT, useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { cn } from "@/lib/utils"
 import {
   applyCanvasOps,
@@ -48,6 +49,10 @@ interface ChatCanvasPanelProps {
 
 type LoadStatus = "idle" | "loading" | "loaded" | "error"
 
+// A read member downgraded after drafting still has entries on their canvas;
+// every per-entry action posts to the write-gated apply endpoint.
+const CanvasCanWriteContext = createContext(true)
+
 export function ChatCanvasPanel({ workspaceId, threadId, className }: ChatCanvasPanelProps) {
   const params = useParams<{ threadId?: string }>()
   const activeThreadId = threadId ?? params.threadId ?? null
@@ -72,6 +77,7 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
   const [projection, setProjection] = useState<CanvasProjection | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const { canWrite } = useWorkspaceRole(workspaceId)
   const mounted = useRef(false)
   const requestSequence = useRef(0)
   const readInFlight = useRef<number | null>(null)
@@ -210,6 +216,7 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
   }
 
   return (
+    <CanvasCanWriteContext.Provider value={canWrite}>
     <PanelShell className={className}>
       <div className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
         <p className="truncate text-xs text-muted-foreground" data-testid="canvas-pending-count">
@@ -228,19 +235,28 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
           >
             <RefreshCw className={cn("h-3.5 w-3.5", status === "loading" && "animate-spin")} />
           </Button>
-          <Button
-            size="xs"
-            onClick={() => void handleCommit()}
-            disabled={busy || !projection?.can_commit}
-            data-testid="canvas-commit-button"
-          >
-            {busy ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Save className="h-3.5 w-3.5" />
-            )}
-            Save all
-          </Button>
+          {canWrite ? (
+            <Button
+              size="xs"
+              onClick={() => void handleCommit()}
+              disabled={busy || !projection?.can_commit}
+              data-testid="canvas-commit-button"
+            >
+              {busy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5" />
+              )}
+              Save all
+            </Button>
+          ) : (
+            <span
+              className="text-xs text-muted-foreground"
+              data-testid="canvas-readonly-hint"
+            >
+              {READ_ONLY_HINT}
+            </span>
+          )}
         </div>
       </div>
 
@@ -291,6 +307,7 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
         </div>
       )}
     </PanelShell>
+    </CanvasCanWriteContext.Provider>
   )
 }
 
@@ -517,6 +534,8 @@ function EntryActions({
   onOps: (ops: CanvasOp[]) => Promise<boolean>
   showRevert: boolean
 }) {
+  const canWrite = useContext(CanvasCanWriteContext)
+  if (!canWrite) return null
   const objectRef = `${entry.object_type}/${entry.object_uuid}`
   return (
     <div className="flex shrink-0 items-center gap-1">

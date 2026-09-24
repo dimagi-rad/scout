@@ -3,6 +3,8 @@ import { useNavigate, useParams, useLocation } from "react-router-dom"
 import { Download, Loader2, Plus, Upload } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
+import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
+import { useWorkspaceRole, writeErrorMessage } from "@/hooks/useWorkspaceRole"
 import { Button } from "@/components/ui/button"
 import {
   AlertDialog,
@@ -21,6 +23,7 @@ export function KnowledgePage() {
   const { id } = useParams<{ id: string }>()
   const location = useLocation()
   const navigate = useNavigate()
+  const isCurrentAccount = useIsCurrentAccount()
   const importInputRef = useRef<HTMLInputElement>(null)
 
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -44,12 +47,15 @@ export function KnowledgePage() {
   } = useAppStore((s) => s.knowledgeActions)
 
   const { status: networkStatus } = useNetworkStatus()
+  const { canWrite } = useWorkspaceRole()
   const [formOpen, setFormOpen] = useState(false)
   const [editItem, setEditItem] = useState<KnowledgeItem | null>(null)
   const [deleteItem, setDeleteItem] = useState<KnowledgeItem | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const isNew = location.pathname.endsWith("/new")
+  const listPath = isNew || id ? location.pathname.replace(/\/[^/]+\/?$/, "") : location.pathname
 
   useEffect(() => {
     setPage(1)
@@ -65,11 +71,16 @@ export function KnowledgePage() {
   }, [activeDomainId, knowledgeFilter, knowledgeSearch, page, fetchKnowledge])
 
   useEffect(() => {
-    if (isNew) {
+    if (!isNew) return
+    if (canWrite) {
       setEditItem(null)
       setFormOpen(true)
+    } else {
+      // The role can resolve to read after the form opened optimistically.
+      setFormOpen(false)
+      navigate(listPath, { replace: true })
     }
-  }, [isNew])
+  }, [isNew, canWrite, navigate, listPath])
 
   useEffect(() => {
     if (id && !isNew && knowledgeItems.length > 0) {
@@ -90,14 +101,15 @@ export function KnowledgePage() {
   }, [setSearch])
 
   const handleNewClick = () => {
-    navigate("/knowledge/new")
+    navigate(`${listPath}/new`)
   }
 
   const handleEdit = (item: KnowledgeItem) => {
-    navigate(`/knowledge/${item.id}`)
+    navigate(`${listPath}/${item.id}`)
   }
 
   const handleDelete = (item: KnowledgeItem) => {
+    setDeleteError(null)
     setDeleteItem(item)
   }
 
@@ -106,7 +118,7 @@ export function KnowledgePage() {
     if (!open) {
       setEditItem(null)
       if (isNew || id) {
-        navigate("/knowledge")
+        navigate(listPath)
       }
     }
   }
@@ -125,9 +137,12 @@ export function KnowledgePage() {
     setIsDeleting(true)
     try {
       await deleteKnowledge(deleteItem.id)
-      setDeleteItem(null)
+      if (isCurrentAccount()) setDeleteItem(null)
+    } catch (error) {
+      if (!isCurrentAccount()) return
+      setDeleteError(writeErrorMessage(error, "Couldn’t delete this item. Try again.", canWrite))
     } finally {
-      setIsDeleting(false)
+      if (isCurrentAccount()) setIsDeleting(false)
     }
   }
 
@@ -158,26 +173,30 @@ export function KnowledgePage() {
             <Download className="mr-2 h-4 w-4" />
             Export
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => importInputRef.current?.click()}
-            data-testid="knowledge-import"
-          >
-            <Upload className="mr-2 h-4 w-4" />
-            Import
-          </Button>
-          <input
-            ref={importInputRef}
-            type="file"
-            accept=".zip"
-            className="hidden"
-            onChange={handleImport}
-          />
-          <Button onClick={handleNewClick} data-testid="knowledge-new">
-            <Plus className="mr-2 h-4 w-4" />
-            New
-          </Button>
+          {canWrite && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => importInputRef.current?.click()}
+                data-testid="knowledge-import"
+              >
+                <Upload className="mr-2 h-4 w-4" />
+                Import
+              </Button>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".zip"
+                className="hidden"
+                onChange={handleImport}
+              />
+              <Button onClick={handleNewClick} data-testid="knowledge-new">
+                <Plus className="mr-2 h-4 w-4" />
+                New
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -200,6 +219,7 @@ export function KnowledgePage() {
           onSearchChange={handleSearchChange}
           onEdit={handleEdit}
           onDelete={handleDelete}
+          canWrite={canWrite}
         />
       )}
 
@@ -245,6 +265,7 @@ export function KnowledgePage() {
         onOpenChange={handleFormClose}
         item={editItem}
         onSave={handleSave}
+        readOnly={!canWrite}
       />
 
       <AlertDialog open={!!deleteItem} onOpenChange={(open) => !isDeleting && !open && setDeleteItem(null)}>
@@ -256,12 +277,18 @@ export function KnowledgePage() {
               cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError && (
+            <p className="text-sm text-destructive" role="alert">
+              {deleteError}
+            </p>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
             <Button
               variant="destructive"
               onClick={handleConfirmDelete}
               disabled={isDeleting}
+              data-testid="knowledge-confirm-delete"
             >
               {isDeleting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Delete
