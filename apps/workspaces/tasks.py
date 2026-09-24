@@ -1382,11 +1382,6 @@ async def _load_workspace_candidate(
         await _drain(_end_load(tm.tenant_id, generation), f"tenant {tm.tenant_id}")
         raise
     candidate = opened.schema
-    try:
-        await _defer_abandoned_candidate_drops(tm.tenant_id, keep_id=candidate.id)
-    except Exception:
-        # Cleanup is best effort; the periodic sweep retries it.
-        logger.exception("Could not queue cleanup of abandoned candidates for %s", tm.tenant_id)
     if opened.resumed:
         logger.info(
             "Resuming failed candidate '%s' for tenant %s (generation %d)",
@@ -1395,6 +1390,11 @@ async def _load_workspace_candidate(
             generation,
         )
     try:
+        try:
+            await _defer_abandoned_candidate_drops(tm.tenant_id, keep_id=candidate.id)
+        except Exception:
+            # Best effort; an abort still reaches the guard below and settles the candidate.
+            logger.exception("Could not queue cleanup of abandoned candidates for %s", tm.tenant_id)
         await run_data_thread(SchemaManager().create_physical_schema, candidate)
         result = await run_data_thread(
             _run_pipeline_with_progress, tm, credential, pipeline_config, job_id, candidate
@@ -3050,6 +3050,11 @@ def _reused_run_ids(recorded: list[dict] | None) -> list[uuid.UUID]:
     return ids
 
 
+_UNPUBLISHED_SCHEMA_STATES = frozenset(
+    {SchemaState.PROVISIONING, SchemaState.FAILED, SchemaState.EXPIRED}
+)
+
+
 async def _aggregate_materialization_state(
     procrastinate_job_id: int,
     workspace,
@@ -3109,6 +3114,12 @@ async def _aggregate_materialization_state(
     all_completed = True
     for r in runs:
         tenant_id = r.tenant_schema.tenant.external_id
+        # A load writes a candidate; its rows serve only once promoted. A failed
+        # candidate keeps them for a resume, but nothing can query them.
+        unpublished = (
+            r.tenant_schema.load_workspace_id is not None
+            and r.tenant_schema.state in _UNPUBLISHED_SCHEMA_STATES
+        )
         materialized_row_counts: dict = {}
         sources_detail: dict = {}
         transform_error: str | None = None
@@ -3125,6 +3136,8 @@ async def _aggregate_materialization_state(
                 if not isinstance(info, dict):
                     continue
                 src_state = info.get("state")
+                if unpublished and src_state == "completed":
+                    src_state = "not_published"
                 if src_state == "completed" and "rows" in info:
                     materialized_row_counts[source] = info["rows"]
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
@@ -3167,6 +3180,9 @@ async def _aggregate_materialization_state(
             tenant_summary["error"] = run_error
         if run_error_code:
             tenant_summary["error_code"] = run_error_code
+        if unpublished:
+            tenant_summary["published"] = False
+            all_completed = False
         summary.append(tenant_summary)
         if r.state == MaterializationRun.RunState.CANCELLED:
             any_cancelled = True
@@ -3374,7 +3390,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"and freshness of available data before using it, and tell the user which sources were "
             f"not refreshed successfully. Older data may still be queryable. Do NOT "
             f"claim that fresh data is loaded for sources marked "
-            f"failed, skipped, or not_run. A source with state=in_progress or state=failed "
+            f"failed, skipped, not_run, or not_published (loaded but never "
+            f"published, so not queryable). A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
             f"as if it were complete.{credential_guidance} Per-tenant: {summary}"

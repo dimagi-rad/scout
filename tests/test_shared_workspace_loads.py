@@ -528,3 +528,59 @@ async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspa
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
 
     retry.assert_not_called()
+
+
+async def test_the_resume_never_reports_rows_of_an_unpublished_candidate_as_loaded(
+    workspace, tenant, user
+):
+    """A failed load's run records its committed sources, but they live in a
+    candidate nothing serves; the resume must not present them as loaded."""
+    candidate = await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="failed_candidate",
+        state=SchemaState.FAILED,
+        load_workspace_id=workspace.id,
+        load_generation=1,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=candidate,
+        pipeline="commcare_sync",
+        procrastinate_job_id=404,
+        state=MaterializationRun.RunState.PARTIAL,
+        result={
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "visits": {"state": "failed", "rows": 0, "error": "timeout"},
+            }
+        },
+    )
+
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        404, workspace, str(user.id)
+    )
+
+    [entry] = summary
+    assert status == "partial"
+    assert entry["published"] is False
+    assert entry["materialized_row_counts"] == {}
+    assert entry["sources"]["users"]["state"] == "not_published"
+
+
+async def test_an_abort_while_queuing_drops_still_settles_the_candidate(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._defer_abandoned_candidate_drops",
+                side_effect=asyncio.CancelledError,
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await _run(workspace, user)
+
+    [candidate] = [
+        s async for s in TenantSchema.objects.filter(tenant=tenant, load_workspace_id=workspace.id)
+    ]
+    assert candidate.state == SchemaState.FAILED
+    ledger = await TenantLoadGeneration.objects.aget(tenant=tenant)
+    assert ledger.loading_generation == 0
