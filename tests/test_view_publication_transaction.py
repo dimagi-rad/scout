@@ -103,6 +103,7 @@ def _seed_tenant_schema(conn, schema_name: str, *, sentinel: str, staging_view: 
     """Create a tenant schema the way provisioning does, with one sentinel row."""
     cursor = conn.cursor()
     cursor.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema_name)))
+    # Also creates the dbt role, so retirement's role cleanup is really tested.
     SchemaManager()._create_readonly_role(cursor, schema_name)
     cursor.execute(
         psycopg.sql.SQL("CREATE TABLE {}.raw_cases (value text)").format(
@@ -409,7 +410,14 @@ def test_concurrent_view_creation_cannot_slip_past_the_retirement_locks(owned, m
         return unpatched_dependents(self, cursor, schema_name)
 
     def create_view_concurrently():
-        assert locks_held.wait(10)
+        try:
+            _create_view_concurrently()
+        except Exception as exc:
+            outcome["status"] = f"worker failed: {exc!r}"
+
+    def _create_view_concurrently():
+        if not locks_held.wait(10):
+            raise AssertionError("retirement never reached its dependency check")
         conn = get_managed_db_connection()
         started = time.monotonic()
         try:
@@ -439,7 +447,8 @@ def test_concurrent_view_creation_cannot_slip_past_the_retirement_locks(owned, m
         locks_held.set()
         creator.join(30)
 
-    assert outcome["status"] in {"created", "lock_timeout"}
+    assert not creator.is_alive(), "creator still holds a managed connection"
+    assert outcome.get("status") in {"created", "lock_timeout"}, outcome
     if outcome["status"] == "created":
         # It could only proceed once retirement rolled back and released the locks.
         assert outcome["waited"] > 0.5
@@ -632,7 +641,8 @@ def test_retirement_refuses_a_schema_holding_a_non_relation_object(owned, manage
         SchemaManager().retire_tenant_schema(tenant_schema)
 
     assert blocked.value.converges is False  # no rebuild can move a type
-    assert _schema_exists(managed, tenant_schema.schema_name)
+    # The relation drops before the refused DROP SCHEMA were rolled back too.
+    assert _relations(managed, tenant_schema.schema_name) == {"raw_cases"}
 
 
 def test_the_view_drop_gives_up_on_a_parked_reader_instead_of_pinning_locks(

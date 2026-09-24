@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import psycopg.errors
 import pytest
 from asgiref.sync import sync_to_async
+from django.db import InterfaceError as DjangoInterfaceError
+from django.db import ProgrammingError as DjangoProgrammingError
 from django.utils import timezone
 
 from apps.users.models import Tenant
@@ -743,4 +745,180 @@ async def test_a_schema_deleted_while_waiting_for_t_is_a_no_op(active_schema):
         await teardown_schema(schema_id=str(active_schema.id))
 
     MockManager.return_value.retire_tenant_schema.assert_not_called()
+    retry.return_value.defer_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_statement_timeout_during_retirement_retries_instead_of_resurrecting(
+    active_schema,
+):
+    """A statement_timeout (57014) at or below the retire lock timeout is lock
+    contention too; it must not flip the only schema back to ACTIVE."""
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = psycopg.errors.QueryCanceled(
+            "canceling statement due to statement timeout"
+        )
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=1
+    )
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_dependent_that_is_not_a_view_schema_gives_up_at_once(active_schema):
+    """A dbt view in another tenant schema is nothing a rebuild can move."""
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = SchemaStillReferenced(
+            active_schema.schema_name,
+            [{"schema": "t_other_tenant", "name": "stg_cases", "relkind": "v"}],
+        )
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_not_awaited()
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retirement_never_rebuilds_an_expired_dependent_view_schema(
+    active_schema, tenant, user
+):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+    workspace = await Workspace.objects.acreate(name="Expired dependent", created_by=user)
+    expired = await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace, schema_name="ws_expired0000000", state=SchemaState.EXPIRED
+    )
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as rebuild,
+    ):
+        MockManager.return_value.retire_tenant_schema.side_effect = SchemaStillReferenced(
+            active_schema.schema_name,
+            [{"schema": expired.schema_name, "name": "v", "relkind": "v"}],
+        )
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    rebuild.assert_not_awaited()
+    # Its views are already gone, so the next attempt can retire: keep retrying.
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=1
+    )
+    await expired.arefresh_from_db()
+    assert expired.state == SchemaState.EXPIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_query_bug_taking_t_is_not_retried_as_contention(active_schema):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    @asynccontextmanager
+    async def buggy_session(_tenant_ids):
+        raise psycopg.errors.UndefinedFunction("function pg_advisory_lock_x does not exist")
+        yield
+
+    with (
+        patch("apps.workspaces.tasks.tenant_data_lock", buggy_session),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        pytest.raises(psycopg.errors.UndefinedFunction),
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_interface_error_taking_t_reschedules_instead_of_crashing(active_schema):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    @asynccontextmanager
+    async def broken_session(_tenant_ids):
+        raise psycopg.InterfaceError("connection already closed")
+        yield
+
+    with (
+        patch("apps.workspaces.tasks.tenant_data_lock", broken_session),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_dropped_orm_connection_while_waiting_for_t_reschedules(active_schema):
+    """After up to 30 minutes waiting for T, the ORM connection may be dead; Django
+    raises its own InterfaceError, which sits outside DatabaseError."""
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch.object(
+            TenantSchema,
+            "arefresh_from_db",
+            AsyncMock(side_effect=DjangoInterfaceError("connection already closed")),
+        ),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_orm_query_bug_while_re_reading_the_row_surfaces(active_schema):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        patch.object(
+            TenantSchema,
+            "arefresh_from_db",
+            AsyncMock(side_effect=DjangoProgrammingError("column does not exist")),
+        ),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        pytest.raises(DjangoProgrammingError),
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id))
+
     retry.return_value.defer_async.assert_not_awaited()
