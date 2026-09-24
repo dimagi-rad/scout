@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,6 +61,7 @@ from apps.transformations.services.executor import run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
+from apps.workspaces.services.load_generations import pipeline_fingerprint
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.event_time import normalize_event_time
@@ -139,6 +141,9 @@ def run_pipeline(
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
+    # The run's fingerprint must describe the config it actually executed, not a
+    # shared registry object someone else could mutate mid-load.
+    pipeline = deepcopy(pipeline)
     observed_connection = tenant_membership.connection
 
     # provision + discover + N sources + transform/skip
@@ -399,25 +404,7 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                # A resumable source that advanced its cursor has committed rows
-                # even if the source failed overall — treat as PARTIAL so the next
-                # run resumes from the watermark.
-                any_committed = any(
-                    s.get("state") == "completed" or _has_committed_cursor(s)
-                    for s in source_results.values()
-                )
-                final_state = (
-                    MaterializationRun.RunState.PARTIAL
-                    if any_committed
-                    else MaterializationRun.RunState.FAILED
-                )
-                run.state = final_state
-                run.completed_at = datetime.now(UTC)
-                run.result = {
-                    "pipeline": pipeline.name,
-                    "sources": source_results,
-                }
-                run.save(update_fields=["state", "completed_at", "result"])
+                _stamp_load_ended(run, pipeline, source_results)
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
@@ -431,6 +418,29 @@ def run_pipeline(
                 _persist_source_results(run, pipeline, source_results)
             logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
         current_source = None
+
+        # Discovery may have generated SYSTEM assets. Fingerprint and execute the
+        # same in-memory snapshot: the fingerprint is this run's receipt for what
+        # it built, and shared-load reuse and promotion accept nothing weaker.
+        # Computed inside this try so a failure (e.g. hashing the source tree)
+        # still ends the run terminal instead of stranding it in TRANSFORMING.
+        try:
+            asset_snapshot = list(
+                TransformationAsset.objects.filter(tenant=tenant_membership.tenant)
+            )
+            load_fingerprint = pipeline_fingerprint(
+                pipeline, tenant_membership.tenant, assets=asset_snapshot
+            )
+        except Exception as e:
+            # The sources are committed, so this is PARTIAL, not FAILED as if
+            # nothing had loaded.
+            _stamp_load_ended(
+                run,
+                pipeline,
+                source_results,
+                error={"error": _summarize_error(e), "error_code": code_of(e)},
+            )
+            raise
 
     except MaterializationCancelled:
         # State is already CANCELLED (set by the canceller before raising via
@@ -503,12 +513,11 @@ def run_pipeline(
     run.state = MaterializationRun.RunState.TRANSFORMING
     transform_result: dict = {}
 
-    has_assets = TransformationAsset.objects.filter(tenant=tenant_membership.tenant).exists()
-    if has_assets:
+    if asset_snapshot:
         report("Running transforms...")
         try:
             transform_result = _run_transform_phase(
-                pipeline, schema_name, tenant=tenant_membership.tenant
+                schema_name, tenant=tenant_membership.tenant, assets=asset_snapshot
             )
         except Exception as e:
             logger.exception("Transform phase failed for schema %s", schema_name)
@@ -519,6 +528,7 @@ def run_pipeline(
     # Conditional UPDATE: only transition to COMPLETED if still TRANSFORMING.
     # Preserves a CANCELLED (or FAILED) state written externally during transform.
     final_result = {
+        "load_fingerprint": load_fingerprint,
         "sources": source_results,
         "pipeline": pipeline.name,
         "transforms": transform_result,
@@ -558,6 +568,7 @@ def run_pipeline(
         )
 
     result: dict = {
+        "load_fingerprint": load_fingerprint,
         "status": "completed",
         "run_id": str(run.id),
         "schema": schema_name,
@@ -1154,7 +1165,24 @@ def _write_ocs_participants(
     return total
 
 
-def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None) -> dict:
+def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None = None):
+    """End a run whose load stopped early: PARTIAL if anything committed, else FAILED.
+
+    A resumable source that advanced its cursor has committed rows even if it
+    failed overall, so it counts: PARTIAL lets the next run resume from there.
+    """
+    committed = any(
+        s.get("state") == "completed" or _has_committed_cursor(s) for s in source_results.values()
+    )
+    run.state = (
+        MaterializationRun.RunState.PARTIAL if committed else MaterializationRun.RunState.FAILED
+    )
+    run.completed_at = datetime.now(UTC)
+    run.result = {"pipeline": pipeline.name, "sources": source_results, **(error or {})}
+    run.save(update_fields=["state", "completed_at", "result"])
+
+
+def _run_transform_phase(schema_name: str, tenant=None, assets=None) -> dict:
     """Run the transformation pipeline's SYSTEM + TENANT stages for this tenant.
 
     No ``workspace`` is passed because materialization is tenant-scoped: a tenant
@@ -1170,6 +1198,7 @@ def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None
     run = run_transformation_pipeline(
         tenant=tenant,
         schema_name=schema_name,
+        asset_snapshot=assets,
     )
 
     result = {

@@ -28,6 +28,7 @@ from apps.workspaces.services.load_generations import (
     raw_load_fingerprint,
     resumable_candidate,
     reusable_generation,
+    transforms_publishable,
 )
 from mcp_server.pipeline_registry import get_registry
 
@@ -165,7 +166,7 @@ def test_reuse_rejects_stale_partial_or_superseded_evidence(tenant, pipeline, sp
         )
     elif spoil == "transform_error":
         # Keep the receipt intact so only the transform error can refuse reuse.
-        run.result["transform_error"] = "dbt failed"
+        run.result["transforms"] = {"status": "failed", "error": "dbt failed"}
         run.save(update_fields=["result"])
     elif spoil == "run_missing":
         run.delete()
@@ -310,3 +311,22 @@ def test_two_spellings_of_one_tenant_keep_the_stricter_requirement(tenant):
     braced = "{" + str(tenant.id).upper() + "}"
     assert parse_load_intent({str(tenant.id): 3, braced: 1}) == {str(tenant.id): 3}
     assert parse_load_intent({braced: 1, str(tenant.id): 3}) == {str(tenant.id): 3}
+
+
+@pytest.mark.parametrize(
+    ("transforms", "publishable"),
+    [
+        (None, True),
+        ({}, True),
+        ({"status": "completed"}, True),
+        ({"status": "tests_failed", "error": "quality assertion"}, True),
+        # An exception can stringify to "": the status, not the message, decides.
+        ({"status": "failed"}, False),
+        ({"status": "failed", "error": ""}, False),
+        ({"error": "transform phase raised"}, False),
+        ("not a dict", False),
+    ],
+)
+def test_transform_publishability_is_decided_by_status(transforms, publishable):
+    result = {"sources": {}} if transforms is None else {"sources": {}, "transforms": transforms}
+    assert transforms_publishable(result) is publishable

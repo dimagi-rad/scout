@@ -118,6 +118,26 @@ def _sync_lock_owner():
     return threading.current_thread()
 
 
+def assert_tenant_lock_held(tenant_id) -> None:
+    """Raise LockOrderError unless the calling task (or its data thread) holds T.
+
+    For code whose safety rests on T rather than on a row lock: a row lock is
+    released at commit, while T spans a writer's whole load.
+    """
+    owner, keys = _held_tenants.get()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        current = _sync_lock_owner()
+    else:
+        current = asyncio.current_task()
+    # A thread reached without run_data_thread sees its task's locks but not its
+    # ownership; say so rather than claiming T is not held.
+    _refuse_unbridged_thread(current, owner, keys)
+    if owner is None or owner is not current or tenant_lock_key(tenant_id) not in keys:
+        raise LockOrderError(f"This operation requires holding the tenant lock T for {tenant_id}")
+
+
 def _refuse_unbridged_thread(owner, inherited_owner, inherited) -> None:
     # A bare asyncio.to_thread copies the task's context but not its ownership,
     # so it would open a second session and wait out _LOCK_TIMEOUT on a lock

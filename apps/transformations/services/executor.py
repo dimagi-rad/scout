@@ -98,8 +98,24 @@ def run_transformation_pipeline(
     schema_name: str,
     workspace=None,
     progress_callback=None,
+    asset_snapshot: list[TransformationAsset] | None = None,
 ) -> TransformationRun:
-    """Execute the three-stage transformation pipeline (system → tenant → workspace)."""
+    """Execute system → tenant → workspace; a supplied snapshot is tenant-only.
+
+    ``asset_snapshot`` lets a load run exactly the assets it fingerprinted, so a
+    concurrent edit cannot relabel or mix this load's transform stages. An asset
+    deleted after the snapshot fails this transform run (its run row cannot
+    reference it); the load itself is unaffected.
+    """
+    if asset_snapshot is not None and workspace is not None:
+        raise ValueError("asset_snapshot is only supported for tenant-scoped runs")
+    if asset_snapshot is not None and any(
+        asset.tenant_id != tenant.pk
+        or asset.workspace_id is not None
+        or asset.scope not in {TransformationScope.SYSTEM, TransformationScope.TENANT}
+        for asset in asset_snapshot
+    ):
+        raise ValueError("A tenant snapshot must contain only that tenant's SYSTEM/TENANT assets")
     run = TransformationRun.objects.create(
         tenant=tenant,
         workspace=workspace,
@@ -129,8 +145,12 @@ def run_transformation_pipeline(
 
     test_failures: list[TestFailure] = []
     try:
-        for stage_name, _scope, filters in stages:
-            assets = list(TransformationAsset.objects.filter(**filters))
+        for stage_name, scope, filters in stages:
+            assets = (
+                [asset for asset in asset_snapshot if asset.scope == scope]
+                if asset_snapshot is not None
+                else list(TransformationAsset.objects.filter(**filters))
+            )
             if not assets:
                 logger.info("Stage '%s': no assets, skipping", stage_name)
                 continue
