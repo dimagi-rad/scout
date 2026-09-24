@@ -90,7 +90,8 @@ export function normalizeComparisonPreset(value: unknown): ComparisonPreset {
 }
 
 export function comparisonPeriod(range: DateRange, preset: ComparisonPreset, context?: DateContext): DateRange {
-  const resolved = range.preset && context?.presets[range.preset]
+  const resolved = range.preset && context && Object.hasOwn(context.presets, range.preset)
+    ? context.presets[range.preset] : undefined
   const comparison = resolved && resolved.comparisons?.[preset]
   if (resolved && comparison && resolved.start === range.start && resolved.end === range.end) {
     return { ...comparison, preset }

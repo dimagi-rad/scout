@@ -268,7 +268,11 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
             value={displayed.preset ?? "custom"}
             onChange={(event) => {
               setDraft(null)
-              engine.setSourceOutputs(block.id, { value: resolvePresetRange(event.target.value, dateContext) })
+              try {
+                engine.setSourceOutputs(block.id, { value: resolvePresetRange(event.target.value, dateContext) })
+              } catch (error) {
+                engine.setSourceError(block.id, error instanceof Error ? error.message : String(error))
+              }
             }}
           >
             <option value="last_30_days">Last 30 days</option>
@@ -330,7 +334,13 @@ function PeriodSelectorComponent({ block, config, engine }: BlockComponentProps)
           <select
             className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
             value={value.preset ?? "last_30_days"}
-            onChange={(event) => publishPeriodOutputs(engine, block.id, event.target.value, comparison, dateContext)}
+            onChange={(event) => {
+              try {
+                publishPeriodOutputs(engine, block.id, event.target.value, comparison, dateContext)
+              } catch (error) {
+                engine.setSourceError(block.id, error instanceof Error ? error.message : String(error))
+              }
+            }}
           >
             <option value="last_7_days">Last 7 days</option>
             <option value="last_30_days">Last 30 days</option>

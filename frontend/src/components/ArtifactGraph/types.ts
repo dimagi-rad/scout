@@ -152,6 +152,7 @@ export interface StoryEngineApi {
   subscribe: (ref: string, callback: () => void) => () => void
   subscribeAll: (callback: () => void) => () => void
   setSourceOutputs: (blockId: string, outputs: Record<string, unknown>) => void
+  setSourceError: (blockId: string, error: string) => void
   getDiagnostics: () => Diagnostic[]
 }
 

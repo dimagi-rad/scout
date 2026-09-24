@@ -184,6 +184,12 @@ export class StoryEngine implements StoryEngineApi {
     this.onOutputsChanged(blockId, changedPorts)
   }
 
+  setSourceError(blockId: string, error: string): void {
+    if (this.destroyed) return
+    const node = this.nodes.get(blockId)
+    if (node) this.publishStatusAll(node, "error", error)
+  }
+
   getDiagnostics(): Diagnostic[] {
     return this.diagnostics
   }
