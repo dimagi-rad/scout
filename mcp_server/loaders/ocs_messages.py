@@ -69,9 +69,12 @@ class OCSMessageLoader(OCSBaseLoader):
 
 
 def _revision(value: object) -> str:
-    canonical = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
+    try:
+        canonical = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise OCSExportError("Session messages contain invalid JSON values.") from exc
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -84,17 +87,26 @@ def map_session_messages(session_id: str, messages: list[dict]) -> list[dict]:
     """
     if not isinstance(messages, list) or any(not isinstance(message, dict) for message in messages):
         raise OCSExportError("Session messages must be a list of message objects.")
-    revision = _revision([session_id, messages])
-    return [_map_message(session_id, index, raw, revision) for index, raw in enumerate(messages)]
+    # Ignore upstream fields we do not store: export-only metadata must not
+    # invalidate labels on otherwise unchanged rows.
+    projected = [_project_message(raw) for raw in messages]
+    revision = _revision([session_id, projected])
+    return [_map_message(session_id, index, row, revision) for index, row in enumerate(projected)]
 
 
-def _map_message(session_id: str, index: int, raw: dict, revision: str) -> dict:
+def _map_message(session_id: str, index: int, row: dict, revision: str) -> dict:
     return {
         "message_id": f"{session_id}:v2:{revision}:{index}",
         "snapshot_revision": revision,
-        "message_version": _revision(raw),
+        "message_version": _revision(row),
         "session_id": session_id,
         "message_index": index,
+        **row,
+    }
+
+
+def _project_message(raw: dict) -> dict:
+    return {
         "role": raw.get("role") or "",
         "content": raw.get("content") or "",
         "created_at": raw.get("created_at"),

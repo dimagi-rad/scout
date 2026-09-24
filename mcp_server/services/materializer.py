@@ -1467,9 +1467,7 @@ _OCS_MESSAGES_INSERT = psql.SQL(
         (message_id, session_id, message_index, role, content,
          created_at, metadata, tags, snapshot_revision, message_version)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (message_id) DO UPDATE SET
-        role=EXCLUDED.role, content=EXCLUDED.content,
-        metadata=EXCLUDED.metadata, tags=EXCLUDED.tags
+    ON CONFLICT (message_id) DO NOTHING
     """
 )
 

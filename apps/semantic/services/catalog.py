@@ -48,7 +48,7 @@ from mcp_server.services.metadata import (
     pipeline_table_primary_keys,
     workspace_list_tables,
 )
-from mcp_server.source_identity import source_identity
+from mcp_server.source_identity import source_identity, unverified_source_identity
 
 
 class SemanticCatalogUnavailable(Exception):
@@ -304,8 +304,12 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 description=(detail or {}).get("description") or entry.get("description", ""),
                 columns=columns,
                 identity=(detail or {}).get("identity")
-                or source_identity(
-                    source_provider, source.source_table_name if source else table_name, columns
+                or (
+                    source_identity(
+                        source_provider, source.source_table_name if source else table_name, columns
+                    )
+                    if source_provider is not None
+                    else unverified_source_identity()
                 ),
                 materialized_row_count=entry.get("materialized_row_count"),
                 materialized_at=entry.get("materialized_at"),

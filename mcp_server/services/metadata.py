@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from django.conf import settings
 from django.db import models
@@ -20,7 +21,7 @@ from apps.workspaces.services.view_sources import ViewSourcesError, parse_view_s
 from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
-from mcp_server.source_identity import source_identity
+from mcp_server.source_identity import source_identity, unverified_source_identity
 
 if TYPE_CHECKING:
     from apps.workspaces.models import TenantMetadata, TenantSchema
@@ -283,13 +284,11 @@ async def pipeline_describe_table(
     }
 
 
-async def workspace_table_identity(workspace_id, schema_name, table_name, columns) -> dict | None:
+async def workspace_table_identity(
+    workspace_id: UUID | str, schema_name: str, table_name: str, columns: list[dict]
+) -> dict | None:
     """Resolve a view's source from publication provenance, never its fitted name."""
-    unknown = {
-        "kind": "unknown",
-        "safe_for_reviewed_labels": False,
-        "label_policy": "Source identity is unverified. Resolve source provenance before saving reviewed labels.",
-    }
+    unknown = unverified_source_identity()
     view_schema = (
         await WorkspaceViewSchema.objects.filter(
             workspace_id=workspace_id, schema_name=schema_name, state=SchemaState.ACTIVE
@@ -303,6 +302,12 @@ async def workspace_table_identity(workspace_id, schema_name, table_name, column
     try:
         sources = parse_view_sources(view_schema.view_sources, set(tenants))
     except ViewSourcesError:
+        logger.warning(
+            "Unverified source identity for workspace %s table %s: invalid view provenance",
+            workspace_id,
+            table_name,
+            exc_info=True,
+        )
         return unknown
     source = sources.get(table_name) if sources else None
     if source is None:

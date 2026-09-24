@@ -27,7 +27,7 @@ HISTORY = [
     "changed",
     [
         HISTORY[1:],
-        HISTORY[::-1][:-1],
+        [HISTORY[1], HISTORY[0], HISTORY[2]],
         [{"role": "system", "content": "Summary"}, *HISTORY],
         [*HISTORY, {"role": "user", "content": "new message"}],
         [{**HISTORY[0], "content": "billing question"}, *HISTORY[1:]],
@@ -80,6 +80,18 @@ def test_identical_exports_are_stable_but_duplicate_messages_remain_distinct():
     )
 
 
+def test_ignored_export_fields_do_not_invalidate_stored_row_labels():
+    original = map_session_messages("s1", HISTORY)
+    exported = [{**message, "export_trace_id": "new-export"} for message in HISTORY]
+    assert map_session_messages("s1", exported) == original
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_invalid_json_values_use_the_loader_error_contract(value):
+    with pytest.raises(OCSExportError, match="invalid JSON"):
+        map_session_messages("s1", [{"metadata": {"invalid": value}}])
+
+
 @pytest.mark.parametrize("messages", [{"content": "bad"}, [None], ["bad"]])
 def test_malformed_history_is_not_published(messages):
     with pytest.raises(OCSExportError):
@@ -91,6 +103,7 @@ def test_legacy_ids_are_explicitly_unsafe_and_other_sources_are_not_guessed():
     assert legacy["kind"] == "snapshot_local"
     assert legacy["safe_for_reviewed_labels"] is False
     assert legacy["version"] == 1
+    assert legacy["scope_columns"] == []
     assert source_identity("commcare", "raw_messages", []) is None
     assert source_identity("ocs", "user_table", []) is None
 
@@ -128,13 +141,18 @@ def test_identity_contract_survives_semantic_catalog_serialization(workspace, mo
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_namespaced_views_keep_their_declared_source_identity(workspace, tenant, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_namespaced_views_keep_their_declared_source_identity(
+    workspace, tenant, monkeypatch, legacy
+):
     await Tenant.objects.filter(pk=tenant.pk).aupdate(provider="ocs")
     await WorkspaceViewSchema.objects.acreate(
         workspace=workspace,
         schema_name="identity_views",
         state=SchemaState.ACTIVE,
-        view_sources={
+        view_sources={}
+        if legacy
+        else {
             "version": 1,
             "views": {
                 "fitted_name": {"tenant_id": str(tenant.id), "source_table_name": "raw_messages"}
@@ -154,7 +172,15 @@ async def test_namespaced_views_keep_their_declared_source_identity(workspace, t
     }.items():
         monkeypatch.setattr(catalog, attribute, AsyncMock(return_value=value))
     _, tables = await catalog._load_physical_tables_async(workspace)
-    assert tables[0].identity["version"] == 2
+    identity = tables[0].identity
+    if legacy:
+        assert identity["kind"] == "unknown"
+        assert identity["safe_for_reviewed_labels"] is False
+        assert identity == await workspace_table_identity(
+            workspace.id, "identity_views", "fitted_name", tables[0].columns
+        )
+    else:
+        assert identity["version"] == 2
 
 
 @pytest.mark.django_db(transaction=True)
