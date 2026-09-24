@@ -651,3 +651,57 @@ def test_reconcile_reports_a_failed_republish_instead_of_raising(owned, managed)
     assert result["reason"] == "physical_missing"
     vs.refresh_from_db()
     assert vs.state == SchemaState.FAILED
+
+
+def test_a_deterministic_plan_failure_on_an_active_row_is_reported_failed(owned, managed):
+    """A name collision fails every retry the same way; keeping the row ACTIVE
+    would hide it behind the old views, so it goes FAILED even though they serve."""
+    workspace, _tenant, _ts = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    suffix = _suffix()
+    second = Tenant.objects.create(
+        provider="commcare", external_id=f"d2b-{suffix}", canonical_name=f"d2b{suffix}"
+    )
+    second_schema = owned.register(f"d2b_{suffix}")
+    _seed_tenant_schema(managed, second_schema, sentinel="v1")
+    TenantSchema.objects.create(tenant=second, schema_name=second_schema, state=SchemaState.ACTIVE)
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+
+    with (
+        patch.object(SchemaManager, "_view_prefix", return_value="same"),
+        pytest.raises(ValueError, match="collision"),
+    ):
+        manager.build_view_schema(workspace)
+
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.FAILED
+    assert "collision" in vs.last_error
+
+
+def test_reconcile_republishes_a_row_without_recorded_provenance(owned, managed):
+    """A row last built before view provenance existed can't be verified."""
+    workspace, _tenant, _ts = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    WorkspaceViewSchema.objects.filter(pk=vs.pk).update(view_sources={})
+
+    assert manager.reconcile_view_publication(workspace) == {
+        "status": "republished",
+        "reason": "views_missing",
+    }
+    vs.refresh_from_db()
+    assert vs.view_sources["views"]
+
+
+def test_reconcile_never_resurrects_a_retiring_row(owned, managed):
+    workspace, _tenant, _ts = _one_tenant_workspace(owned, managed)
+    manager = SchemaManager()
+    vs = manager.build_view_schema(workspace)
+    WorkspaceViewSchema.objects.filter(pk=vs.pk).update(
+        state=SchemaState.TEARDOWN, physical_build_token="diverged"
+    )
+
+    assert manager.reconcile_view_publication(workspace) == {"status": "retiring"}
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.TEARDOWN

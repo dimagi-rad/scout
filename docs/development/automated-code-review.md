@@ -42,6 +42,8 @@ The OCR workflow uses `pull_request_target` so fork PRs can be reviewed with the
 
 Do not change this workflow to check out a fork head or execute its install/build/test scripts while credentials are available. Review text is still untrusted input to the models.
 
+GitHub attaches checks from `@ocr` (`issue_comment`) runs to the default branch, not the PR. Without extra work the PR would keep showing the `review` check from the last `pull_request_target` run even after a re-run passed (PR #501). A separate `review-check` job therefore runs after `review` on authorized `@ocr` runs. It creates one completed check run named `review` on the PR head, with the re-run's success or failure. Cancelled runs record nothing, because the run that superseded them records its own result. Only that job has `checks: write`, so the OCR action and the Claude step never receive it. Nothing marks `review` as a required check. On `pull_request_target` runs the job shows as skipped.
+
 Manual command authorization happens before the per-PR cancellation group. New authorized reviews cancel older runs for the same PR.
 
 ## Model, cost and version settings

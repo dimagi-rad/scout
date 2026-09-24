@@ -1,4 +1,5 @@
 import { api } from "@/api/client"
+import { localIsoDate } from "@/lib/localDate"
 
 import type { DateRange, ResolvedQuery, Row, SemanticQuerySpec, StoryDoc } from "./types"
 
@@ -60,7 +61,7 @@ export function resolvePresetRange(preset: string | undefined, today = new Date(
       preset = "last_30_days"
       break
   }
-  return { start: isoDate(start), end: isoDate(end), preset }
+  return { start: localIsoDate(start), end: localIsoDate(end), preset }
 }
 
 export function previousPeriod(range: DateRange): DateRange {
@@ -69,7 +70,7 @@ export function previousPeriod(range: DateRange): DateRange {
   const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1)
   start.setDate(start.getDate() - days)
   end.setDate(end.getDate() - days)
-  return { start: isoDate(start), end: isoDate(end), preset: "previous_period" }
+  return { start: localIsoDate(start), end: localIsoDate(end), preset: "previous_period" }
 }
 
 export function normalizeComparisonPreset(value: unknown): ComparisonPreset {
@@ -80,8 +81,8 @@ export function comparisonPeriod(range: DateRange, preset: ComparisonPreset): Da
   if (preset === "previous_period") return previousPeriod(range)
 
   return {
-    start: isoDate(previousYearDate(parseIsoDate(range.start))),
-    end: isoDate(previousYearDate(parseIsoDate(range.end))),
+    start: localIsoDate(previousYearDate(parseIsoDate(range.start))),
+    end: localIsoDate(previousYearDate(parseIsoDate(range.end))),
     preset,
   }
 }
@@ -174,14 +175,6 @@ function normalizeInputs(value: unknown): StoryDoc["blocks"][number]["inputs"] {
 
 function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate())
-}
-
-// These are local-midnight dates; toISOString() would report the previous day in
-// every zone ahead of UTC.
-function isoDate(date: Date): string {
-  const month = String(date.getMonth() + 1).padStart(2, "0")
-  const day = String(date.getDate()).padStart(2, "0")
-  return `${String(date.getFullYear()).padStart(4, "0")}-${month}-${day}`
 }
 
 function parseIsoDate(value: string): Date {
