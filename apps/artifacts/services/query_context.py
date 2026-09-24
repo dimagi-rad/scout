@@ -10,7 +10,7 @@ from apps.semantic.services.date_context import (
     resolve_query_dates,
 )
 
-from .graph_doc import collect_query_specs, normalize_doc, parse_ref
+from .graph_doc import collect_query_specs, normalize_doc, parse_ref, query_diagnostics
 
 
 def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
@@ -93,6 +93,11 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
     for entry in collect_query_specs(doc):
         block = blocks[entry["block_id"]]
         query = dict(entry["query"])
+        errors = [item for item in query_diagnostics(query) if item["severity"] == "error"]
+        if errors:
+            raise DateContextError(
+                f"Invalid artifact query {entry['query_key']}: {errors[0]['message']}"
+            )
         if (block.get("config") or {}).get("compare"):
             if "date_range" in (block.get("inputs") or {}):
                 raise DateContextError("A comparison query cannot also bind date_range.")
@@ -102,13 +107,17 @@ def resolve_artifact_queries(doc, runtime=None) -> tuple[list[dict], dict]:
             for suffix, period in (("", "current"), ("_previous", "previous")):
                 queries.append(
                     {
-                        "name": entry["query_key"] + suffix,
                         **resolve_query_dates({**query, "date_range": pair[period]}, context),
+                        "name": entry["query_key"] + suffix,
                     }
                 )
         else:
             value = bound(block, "date_range")
             if "date_range" in (block.get("inputs") or {}):
                 query["date_range"] = value
-            queries.append({"name": entry["query_key"], **resolve_query_dates(query, context)})
+            queries.append({**resolve_query_dates(query, context), "name": entry["query_key"]})
+    if len({query["name"] for query in queries}) != len(queries):
+        raise DateContextError(
+            "Comparison query names collide with generated previous-period outputs."
+        )
     return queries, context

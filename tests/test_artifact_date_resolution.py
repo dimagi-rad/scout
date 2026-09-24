@@ -59,6 +59,16 @@ def test_inspector_and_checks_include_both_comparison_queries():
     assert queries[1]["filters"][0]["values"] == ["2026-07-19", "2026-08-17"]
 
 
+def test_comparison_output_name_collisions_are_rejected():
+    doc = story(compare=True)
+    doc["blocks"][1]["config"]["queries"]["sessions_previous"] = {
+        "measures": ["sessions.count"],
+        "time_dimension": "sessions.created_at",
+    }
+    with pytest.raises(DateContextError, match="names collide"):
+        resolve_artifact_queries(doc, CONTEXT)
+
+
 def test_previous_year_control_change_applies_to_both_queries():
     doc = story(compare=True)
     doc["blocks"][0]["config"]["default_comparison"] = "previous_year"
@@ -102,7 +112,15 @@ def test_malformed_filter_operator_is_a_graph_diagnostic(operator):
     doc["blocks"][1]["config"]["queries"]["sessions"]["filters"] = [
         {"field": "sessions.created_at", "operator": operator, "values": ["2026-01-01"]}
     ]
-    assert any(d["severity"] == "error" for d in validate_doc(doc))
+    assert "date_filter_value" in {d["code"] for d in validate_doc(doc)}
+
+
+@pytest.mark.parametrize("raw_key", ["dateRange", "timeDimensions", "name"])
+def test_rejected_query_keys_cannot_be_executed_by_the_inspector(raw_key):
+    doc = story()
+    doc["blocks"][1]["config"]["queries"]["sessions"][raw_key] = "not a semantic query key"
+    with pytest.raises(DateContextError, match="Invalid artifact query"):
+        resolve_artifact_queries(doc, CONTEXT)
 
 
 @pytest.mark.asyncio
