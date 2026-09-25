@@ -3,6 +3,7 @@ API views for data dictionary and workspace schema management.
 """
 
 import logging
+from dataclasses import dataclass
 
 from django.db import transaction
 from rest_framework import status
@@ -470,12 +471,23 @@ class DataDictionaryView(APIView):
         )
 
 
+@dataclass(frozen=True)
+class _RefreshOutcome:
+    """One source's refresh outcome: its public entry, plus the single-source
+    response (body and status) it would have produced on its own."""
+
+    public: dict
+    body: dict
+    http_status: int
+
+
 class RefreshSchemaView(APIView):
     """
     POST /api/workspaces/<workspace_id>/refresh/
 
-    Triggers a background schema refresh. Requires read-write or manage role.
-    Returns 202 Accepted immediately.
+    Triggers a background refresh of every source in the workspace. Requires
+    read-write or manage role. Returns 202 Accepted once at least one source's
+    refresh is queued; each source reports its own outcome.
     """
 
     permission_classes = [IsAuthenticated]
@@ -487,71 +499,144 @@ class RefreshSchemaView(APIView):
         if err:
             return err
 
-        tenant = workspace.tenant
-        if tenant is None:
+        tenants = sorted(workspace.tenants.all(), key=lambda tenant: str(tenant.id))
+        if not tenants:
             return Response(
                 {"error": "Workspace has no associated tenant."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        memberships = {
+            m.tenant_id: m
+            for m in TenantMembership.objects.filter(user=request.user, tenant__in=tenants)
+        }
+        # Queue scans must not run under the tenant row locks (see find_legacy_refresh_jobs).
+        legacy_jobs = {
+            tenant.id: find_legacy_refresh_jobs(tenant)
+            for tenant in tenants
+            if tenant.id in memberships
+        }
 
-        tenant_membership = TenantMembership.objects.filter(
-            user=request.user, tenant=tenant
-        ).first()
-        if tenant_membership is None:
+        outcomes = []
+        with transaction.atomic():
+            # One global order, so two refreshes over overlapping sources can't deadlock.
+            locked = (
+                Tenant.objects.select_for_update()
+                .filter(id__in=[tenant.id for tenant in tenants])
+                .order_by("id")
+            )
+            for tenant in locked:
+                outcomes.append(
+                    self._queue_tenant_refresh(
+                        request, workspace, tenant, memberships.get(tenant.id), legacy_jobs
+                    )
+                )
+
+        if not outcomes:
             return Response(
-                {"error": "No tenant membership found for this workspace."},
+                {"error": "Workspace has no associated tenant."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        legacy_jobs = find_legacy_refresh_jobs(tenant)
-        with transaction.atomic():
-            tenant = Tenant.objects.select_for_update().get(id=tenant.id)
-            legacy = settle_finished_refresh_candidates(tenant, legacy_jobs)
-            if legacy.recovery_needed:
+        if len(outcomes) == 1:
+            # Single-source workspaces keep the original response shapes.
+            only = outcomes[0]
+            if only.public["status"] == "provisioning":
                 return Response(
-                    {
-                        "error": (
-                            "A previous refresh could not be verified. Ask an operator to inspect "
-                            "and reconcile the queued refresh before retrying."
-                        ),
-                        "code": ErrorCode.REFRESH_RECOVERY_REQUIRED,
-                    },
-                    status=status.HTTP_409_CONFLICT,
+                    {"schema_id": only.public["schema_id"], "status": "provisioning"},
+                    status=status.HTTP_202_ACCEPTED,
                 )
-            if (
-                TenantSchema.objects.select_for_update()
-                .filter(tenant=tenant, state=SchemaState.PROVISIONING)
-                .exists()
-            ):
-                return Response(
-                    {"error": "A refresh is already in progress."},
-                    status=status.HTTP_409_CONFLICT,
+            return Response(only.body, status=only.http_status)
+        refused = [o for o in outcomes if o.public["status"] != "provisioning"]
+        started = len(refused) < len(outcomes)
+        # No top-level schema_id: each source reports its own in tenants[].
+        # "partial" keeps a 202 but tells clients some sources were not refreshed.
+        body = {
+            "status": ("partial" if refused else "provisioning") if started else "not_started",
+            "tenants": [o.public for o in outcomes],
+        }
+        if refused:
+            reasons = {o.body["error"] for o in refused}
+            if not started and len(reasons) == 1:
+                body["error"] = reasons.pop()
+            else:
+                prefix = (
+                    "Some sources could not be refreshed"
+                    if started
+                    else "No source could be refreshed"
                 )
-            new_schema = SchemaManager().create_refresh_schema(tenant)
-            schema_id = str(new_schema.id)
-            membership_id = str(tenant_membership.id)
-            job = refresh_tenant_schema.defer(
-                schema_id=schema_id,
-                membership_id=membership_id,
-                actor_user_id=str(request.user.id),
-                workspace_id=str(workspace.id),
-            )
-            new_schema.refresh_job_id = getattr(job, "id", job)
-            new_schema.refresh_workspace_id = workspace.id
-            new_schema.refresh_actor_user_id = request.user.id
-            new_schema.refresh_membership_id = tenant_membership.id
-            new_schema.save(
-                update_fields=[
-                    "refresh_job_id",
-                    "refresh_workspace_id",
-                    "refresh_actor_user_id",
-                    "refresh_membership_id",
-                ]
-            )
+                body["error"] = (
+                    prefix
+                    + ": "
+                    + "; ".join(f"{o.public['tenant_name']}: {o.body['error']}" for o in refused)
+                )
+        codes = {o.body.get("code") for o in outcomes} - {None}
+        if ErrorCode.REFRESH_RECOVERY_REQUIRED in codes:
+            body["code"] = ErrorCode.REFRESH_RECOVERY_REQUIRED
+        if started:
+            return Response(body, status=status.HTTP_202_ACCEPTED)
+        # 400 only when every source was a bad request, as the single-source path.
+        http_status = (
+            status.HTTP_400_BAD_REQUEST
+            if all(o.http_status == status.HTTP_400_BAD_REQUEST for o in outcomes)
+            else status.HTTP_409_CONFLICT
+        )
+        return Response(body, status=http_status)
 
-        return Response(
-            {"schema_id": schema_id, "status": "provisioning"},
-            status=status.HTTP_202_ACCEPTED,
+    @staticmethod
+    def _queue_tenant_refresh(
+        request, workspace, tenant, tenant_membership, legacy_jobs
+    ) -> _RefreshOutcome:
+        source = {"tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name}
+
+        def refused(state, error, http_status, code=None):
+            body = {"error": error, **({"code": code} if code else {})}
+            return _RefreshOutcome({**source, "status": state, **body}, body, http_status)
+
+        if tenant_membership is None:
+            return refused(
+                "no_membership",
+                "No tenant membership found for this workspace.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+        legacy = settle_finished_refresh_candidates(tenant, legacy_jobs[tenant.id])
+        if legacy.recovery_needed:
+            return refused(
+                "recovery_required",
+                "A previous refresh could not be verified. Ask an operator to inspect "
+                "and reconcile the queued refresh before retrying.",
+                status.HTTP_409_CONFLICT,
+                ErrorCode.REFRESH_RECOVERY_REQUIRED,
+            )
+        if (
+            TenantSchema.objects.select_for_update()
+            .filter(tenant=tenant, state=SchemaState.PROVISIONING)
+            .exists()
+        ):
+            return refused(
+                "in_progress", "A refresh is already in progress.", status.HTTP_409_CONFLICT
+            )
+        new_schema = SchemaManager().create_refresh_schema(tenant)
+        job = refresh_tenant_schema.defer(
+            schema_id=str(new_schema.id),
+            membership_id=str(tenant_membership.id),
+            actor_user_id=str(request.user.id),
+            workspace_id=str(workspace.id),
+        )
+        new_schema.refresh_job_id = getattr(job, "id", job)
+        new_schema.refresh_workspace_id = workspace.id
+        new_schema.refresh_actor_user_id = request.user.id
+        new_schema.refresh_membership_id = tenant_membership.id
+        new_schema.save(
+            update_fields=[
+                "refresh_job_id",
+                "refresh_workspace_id",
+                "refresh_actor_user_id",
+                "refresh_membership_id",
+            ]
+        )
+        return _RefreshOutcome(
+            {**source, "status": "provisioning", "schema_id": str(new_schema.id)},
+            {},
+            status.HTTP_202_ACCEPTED,
         )
 
 
@@ -559,7 +644,7 @@ class RefreshStatusView(APIView):
     """
     GET /api/workspaces/<workspace_id>/refresh/status/
 
-    Returns the current schema state for the workspace's tenant.
+    Returns the current schema state of each workspace source (and an aggregate).
     """
 
     permission_classes = [IsAuthenticated]
@@ -569,22 +654,59 @@ class RefreshStatusView(APIView):
         if err:
             return err
 
-        tenant = workspace.tenant
-        if tenant is None:
+        tenants = sorted(workspace.tenants.all(), key=lambda tenant: str(tenant.id))
+        if not tenants:
             return Response({"state": "unavailable", "started_at": None, "error": None})
-
-        latest = TenantSchema.objects.filter(tenant=tenant).order_by("-created_at").first()
-        if latest is None:
-            return Response({"state": "unavailable", "started_at": None, "error": None})
-
-        error = "Schema provisioning failed." if latest.state == SchemaState.FAILED else None
+        statuses = [_latest_refresh_status(tenant) for tenant in tenants]
+        if len(statuses) == 1:
+            return Response({k: v for k, v in statuses[0].items() if k != "tenant_id"})
+        # Truthful per source. The aggregate is the most severe state any source
+        # is in, failure first, so it never contradicts the error beside it.
+        states = {entry["state"] for entry in statuses}
+        aggregate = next(
+            (state for state in _AGGREGATE_STATE_ORDER if state in states), statuses[0]["state"]
+        )
+        representative = max(
+            (entry for entry in statuses if entry["state"] == aggregate),
+            key=lambda entry: entry["started_at"] or "",
+        )
         return Response(
             {
-                "state": latest.state,
-                "started_at": latest.created_at.isoformat(),
-                "error": error,
+                "state": aggregate,
+                "started_at": representative["started_at"],
+                "error": representative["error"],
+                "tenants": statuses,
             }
         )
+
+
+# Every state a source can report, most severe first.
+_AGGREGATE_STATE_ORDER = (
+    SchemaState.FAILED,
+    SchemaState.PROVISIONING,
+    SchemaState.MATERIALIZING,
+    "unavailable",
+    SchemaState.TEARDOWN,
+    SchemaState.EXPIRED,
+    SchemaState.ACTIVE,
+)
+
+
+def _latest_refresh_status(tenant) -> dict:
+    latest = TenantSchema.objects.filter(tenant=tenant).order_by("-created_at").first()
+    if latest is None:
+        return {
+            "tenant_id": str(tenant.id),
+            "state": "unavailable",
+            "started_at": None,
+            "error": None,
+        }
+    return {
+        "tenant_id": str(tenant.id),
+        "state": latest.state,
+        "started_at": latest.created_at.isoformat(),
+        "error": "Schema provisioning failed." if latest.state == SchemaState.FAILED else None,
+    }
 
 
 class TableDetailView(APIView):
