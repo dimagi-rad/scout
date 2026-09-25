@@ -247,13 +247,12 @@ async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, wri
     assert "call `run_materialization` to rebuild" in drift
     assert "continue in the same run" in drift
     assert "ask whether" not in drift
-    # No user gate headless: a typo must not reload, but real drift must still rebuild.
+    # No user gate headless, but only the backend can determine the repair.
     count_rule = " ".join(
         stable.split("## Metadata vs. Verified Counts", 1)[1].split("## When", 1)[0].split()
     )
     for rule in (drift, count_rule):
-        assert "If it succeeds but the field is not listed, fix the member name" in rule
-        assert "If `describe_dataset` itself fails, or the field is listed" in rule
+        assert "Only when recovery_action is materialization" in rule
         assert "at most once per run" in rule
     assert "re-run the count in the same run" in count_rule
     assert "offer to re-run materialization" not in stable

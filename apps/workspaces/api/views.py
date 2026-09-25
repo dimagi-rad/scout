@@ -198,6 +198,7 @@ def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names:
     sources_result = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
+    auxiliary_tables = {s.name: s.auxiliary_tables for s in pipeline_config.sources}
 
     tables = []
     for source_name, source_data in sources_result.items():
@@ -216,6 +217,18 @@ def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names:
                 "materialized_at": materialized_at,
             }
         )
+        for table_name, description in auxiliary_tables.get(source_name, {}).items():
+            if table_name in live_table_names:
+                tables.append(
+                    {
+                        "name": table_name,
+                        "type": "table",
+                        "description": description,
+                        "materialized_row_count": None,
+                        "row_count_verified": False,
+                        "materialized_at": materialized_at,
+                    }
+                )
 
     for model_name in pipeline_config.dbt_models:
         if live_table_names and model_name not in live_table_names:
@@ -518,6 +531,11 @@ class RefreshSchemaView(APIView):
                     )
                 )
 
+        if not outcomes:
+            return Response(
+                {"error": "Workspace has no associated tenant."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if len(outcomes) == 1:
             # Single-source workspaces keep the original response shapes.
             only = outcomes[0]
@@ -535,19 +553,26 @@ class RefreshSchemaView(APIView):
             "status": ("partial" if refused else "provisioning") if started else "not_started",
             "tenants": [o.public for o in outcomes],
         }
-        if started:
-            return Response(body, status=status.HTTP_202_ACCEPTED)
-        # Clients show the top-level error; without it a refusal reads as "Conflict".
-        reasons = {o.body["error"] for o in refused}
-        body["error"] = (
-            reasons.pop()
-            if len(reasons) == 1
-            else "No source could be refreshed: "
-            + "; ".join(f"{o.public['tenant_name']}: {o.body['error']}" for o in refused)
-        )
+        if refused:
+            reasons = {o.body["error"] for o in refused}
+            if not started and len(reasons) == 1:
+                body["error"] = reasons.pop()
+            else:
+                prefix = (
+                    "Some sources could not be refreshed"
+                    if started
+                    else "No source could be refreshed"
+                )
+                body["error"] = (
+                    prefix
+                    + ": "
+                    + "; ".join(f"{o.public['tenant_name']}: {o.body['error']}" for o in refused)
+                )
         codes = {o.body.get("code") for o in outcomes} - {None}
         if ErrorCode.REFRESH_RECOVERY_REQUIRED in codes:
             body["code"] = ErrorCode.REFRESH_RECOVERY_REQUIRED
+        if started:
+            return Response(body, status=status.HTTP_202_ACCEPTED)
         # 400 only when every source was a bad request, as the single-source path.
         http_status = (
             status.HTTP_400_BAD_REQUEST
@@ -641,12 +666,15 @@ class RefreshStatusView(APIView):
         aggregate = next(
             (state for state in _AGGREGATE_STATE_ORDER if state in states), statuses[0]["state"]
         )
-        started = [entry["started_at"] for entry in statuses if entry["started_at"]]
+        representative = max(
+            (entry for entry in statuses if entry["state"] == aggregate),
+            key=lambda entry: entry["started_at"] or "",
+        )
         return Response(
             {
                 "state": aggregate,
-                "started_at": max(started) if started else None,
-                "error": next((e["error"] for e in statuses if e["error"]), None),
+                "started_at": representative["started_at"],
+                "error": representative["error"],
                 "tenants": statuses,
             }
         )

@@ -198,6 +198,8 @@ def test_promotion_swaps_active_atomically_and_publishes_the_generation(
     states = dict(TenantSchema.objects.values_list("id", "state"))
     assert states[candidate.id] == SchemaState.ACTIVE
     assert states[old.id] == SchemaState.TEARDOWN
+    candidate.refresh_from_db()
+    assert candidate.load_workspace_id is None
     ledger = TenantLoadGeneration.objects.get(tenant=tenant)
     assert ledger.published_generation == generation
     assert (ledger.published_run_id, ledger.published_schema_id) == (run.id, candidate.id)

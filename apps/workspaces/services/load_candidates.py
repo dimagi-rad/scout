@@ -21,6 +21,8 @@ import uuid
 from dataclasses import dataclass
 
 from django.db import transaction
+from django.db.models import F, Max
+from django.db.models.functions import Greatest
 from django.utils import timezone
 
 from apps.common.identifiers import refresh_schema_name
@@ -150,6 +152,8 @@ def promote_candidate_schema(
     )
     if tenant_id is None:
         return Promotion(promoted=False)
+    # Retiring another writer's runs is only safe under T, including refreshes.
+    assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
         rows = list(
@@ -168,8 +172,6 @@ def promote_candidate_schema(
             )
             job_id = refresh_job_id
         else:
-            # Retiring runs the caller does not own below is only safe under T.
-            assert_tenant_lock_held(tenant_id)
             # None would match any job-less candidate and run; job-less loads use
             # load_owner_token instead, whose run records no queue job.
             owned = (
@@ -208,8 +210,10 @@ def promote_candidate_schema(
         ):
             return Promotion(promoted=False)
 
-        # Under T every other run on the candidate is an earlier attempt's,
-        # including a dead writer's run stuck in an active state.
+        # Every other run on the candidate is an earlier attempt's, including a
+        # dead writer's run stuck in an active state: a workspace candidate is
+        # written only under T (asserted above), and a refresh candidate only by
+        # the one job its unique refresh_job_id binds it to.
         MaterializationRun.objects.filter(tenant_schema_id=candidate.id).exclude(id=run.id).exclude(
             state=MaterializationRun.RunState.STALE
         ).update(state=MaterializationRun.RunState.STALE)
@@ -217,7 +221,10 @@ def promote_candidate_schema(
         TenantSchema.objects.filter(id__in=retired).update(state=SchemaState.TEARDOWN)
         candidate.state = SchemaState.ACTIVE
         candidate.last_accessed_at = accessed_at
-        candidate.save(update_fields=["state", "last_accessed_at"])
+        # This marker identifies an unpublished candidate. Clear it on publish
+        # so a later EXPIRED state cannot make a once-served run look unpublished.
+        candidate.load_workspace_id = None
+        candidate.save(update_fields=["state", "last_accessed_at", "load_workspace_id"])
         publish_generation(tenant_id, loading_generation, run, candidate, fingerprint)
         return Promotion(promoted=True, retired_schema_ids=retired)
 
@@ -245,12 +252,18 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
 
     A writer holds T for its candidate's whole PROVISIONING life, so a caller
     holding T sees only orphans. They become FAILED, which keeps them eligible
-    for resume by the same pending generation. Raises LockOrderError without
-    T: a caller without it would fail a live writer's load underneath it.
+    for resume by the same pending generation. Any loading marker is equally a
+    dead writer's, so it is cleared: later requests then join the pending
+    generation and resume its candidate instead of starting another. Raises
+    LockOrderError without T: a caller without it would fail a live writer's
+    load underneath it.
     """
     assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
+        TenantLoadGeneration.objects.filter(tenant_id=tenant_id).exclude(
+            loading_generation=0
+        ).update(loading_generation=0)
         orphans = list(
             TenantSchema.objects.select_for_update().filter(
                 tenant_id=tenant_id,
@@ -271,6 +284,67 @@ def settle_orphaned_workspace_candidates(tenant_id) -> list[TenantSchema]:
         for orphan in orphans:
             orphan.state = SchemaState.FAILED
         return orphans
+
+
+def _with_last_attempt(queryset):
+    # A resume reuses the row, so its creation time says nothing about the last
+    # attempt. Each attempt starts a run and a failed one stamps completed_at, so
+    # the latest of those is when a load last worked on the candidate.
+    return queryset.annotate(
+        last_attempt_at=Greatest(
+            Max("materialization_runs__started_at"),
+            Max("materialization_runs__completed_at"),
+            F("created_at"),
+        )
+    )
+
+
+def _failed_workspace_candidates(tenant_id):
+    return _with_last_attempt(
+        TenantSchema.objects.filter(
+            tenant_id=tenant_id,
+            state=SchemaState.FAILED,
+            load_workspace_id__isnull=False,
+        )
+    )
+
+
+def candidate_last_attempt_at(schema_id):
+    """When a load last worked on this candidate (None if it is gone)."""
+    return (
+        _with_last_attempt(TenantSchema.objects.filter(id=schema_id))
+        .values_list("last_attempt_at", flat=True)
+        .first()
+    )
+
+
+def unresumable_workspace_candidates(tenant_id, *, stale_before) -> list[TenantSchema]:
+    """FAILED workspace candidates no pending load will resume.
+
+    Resume needs the tenant's pending generation, so a candidate of any other
+    generation is abandoned. One of the pending generation with resume evidence
+    is kept until its last attempt ended before ``stale_before``; past that nobody is
+    coming back for it, and a later load simply starts fresh. Each returned row
+    carries ``last_attempt_at`` and has lost its resume evidence. Requires T.
+    """
+    assert_tenant_lock_held(tenant_id)
+    with transaction.atomic():
+        Tenant.objects.select_for_update().get(id=tenant_id)
+        failed = list(_failed_workspace_candidates(tenant_id))
+        generation = TenantLoadGeneration.objects.filter(tenant_id=tenant_id).first()
+        if (
+            generation is not None
+            and generation.requested_generation > generation.published_generation
+        ):
+            failed = [
+                schema
+                for schema in failed
+                if schema.load_generation != generation.requested_generation
+                or not schema.load_config_fingerprint
+                or schema.last_attempt_at < stale_before
+            ]
+        _forget_resume_evidence(failed)
+        return failed
 
 
 def _forget_resume_evidence(candidates) -> None:
@@ -296,12 +370,6 @@ def abandoned_workspace_candidates(tenant_id, *, keep_id) -> list[TenantSchema]:
     assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
-        abandoned = list(
-            TenantSchema.objects.filter(
-                tenant_id=tenant_id,
-                state=SchemaState.FAILED,
-                load_workspace_id__isnull=False,
-            ).exclude(id=keep_id)
-        )
+        abandoned = list(_failed_workspace_candidates(tenant_id).exclude(id=keep_id))
         _forget_resume_evidence(abandoned)
         return abandoned

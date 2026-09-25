@@ -7,6 +7,7 @@ are stubbed.
 """
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -36,6 +37,7 @@ from apps.workspaces.services.load_generations import (
 )
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import agrant_tenant_access
+from tests.tenant_lock_probe import try_tenant_data_lock
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.django_db(transaction=True)]
 
@@ -83,10 +85,10 @@ async def _loads(pipeline: _Pipeline):
         ),
         patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
-        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop,
+        patch("apps.workspaces.tasks._queue_candidate_drop_sync") as drop,
     ):
         retire.return_value.defer_async = AsyncMock(return_value=1)
-        yield drop.return_value.defer
+        yield drop
 
 
 async def _sibling(user, tenant, name="Sibling"):
@@ -208,6 +210,43 @@ async def test_a_failed_load_keeps_last_good_serving_and_the_retry_resumes_its_c
     drop.assert_not_called()
 
 
+@pytest.mark.parametrize("phase", ["begin", "open"])
+async def test_cancellation_during_candidate_setup_clears_committed_state(
+    workspace, tenant, user, phase
+):
+    operation_name = "begin_load_generation" if phase == "begin" else "open_workspace_candidate"
+    original = getattr(workspaces_tasks, operation_name)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def commit_then_wait(*args, **kwargs):
+        result = original(*args, **kwargs)
+        entered.set()
+        release.wait(5)
+        return result
+
+    async with _loads(_Pipeline()):
+        with patch(f"apps.workspaces.tasks.{operation_name}", side_effect=commit_then_wait):
+            task = asyncio.create_task(_run(workspace, user))
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    generation = await TenantLoadGeneration.objects.aget(tenant=tenant)
+    assert generation.loading_generation == 0
+    candidates = [
+        schema
+        async for schema in TenantSchema.objects.filter(
+            tenant=tenant, load_workspace_id=workspace.id
+        )
+    ]
+    assert [schema.state for schema in candidates] == (
+        [SchemaState.FAILED] if phase == "open" else []
+    )
+
+
 async def test_a_resumed_generation_is_reused_by_a_request_that_joined_it(workspace, tenant, user):
     """The failed attempt's run is superseded at promotion, so the generation the
     resume published is reusable instead of forcing every joiner to reload."""
@@ -258,7 +297,9 @@ async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old
     assert retried["all_succeeded"] is True
     first_candidate, second_candidate = (call[1] for call in pipeline.calls)
     assert first_candidate != second_candidate
-    drop.assert_called_once_with(schema_id=str(first_candidate))
+    drop.assert_called_once()
+    [(queued,), _] = drop.call_args
+    assert queued.id == first_candidate
 
 
 async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
@@ -358,6 +399,28 @@ async def test_a_candidate_resumed_before_its_drop_ran_is_left_alone(workspace, 
     assert candidate.state == SchemaState.PROVISIONING
 
 
+async def test_a_candidate_drop_defers_without_waiting_while_a_writer_holds_t(workspace, tenant):
+    candidate = await _failed_workspace_candidate(tenant, workspace)
+
+    with (
+        try_tenant_data_lock(tenant.id) as held,
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as retry,
+    ):
+        assert held
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=2)
+
+    teardown.assert_not_called()
+    retry.assert_called_once_with(
+        schedule_in={"seconds": workspaces_tasks._CANDIDATE_DROP_DELAY_SECONDS},
+        queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
+    )
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(candidate.id), attempt=2, last_attempt_at="", load_job_id=None, busy_count=1
+    )
+
+
 async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenant):
     candidate = await _failed_workspace_candidate(tenant, workspace)
 
@@ -370,9 +433,16 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=2)
-        retry.assert_called_once_with(schedule_in={"seconds": 240})
+        retry.assert_called_once_with(
+            schedule_in={"seconds": 240},
+            queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
+        )
         retry.return_value.defer_async.assert_awaited_once_with(
-            schema_id=str(candidate.id), attempt=3
+            schema_id=str(candidate.id),
+            attempt=3,
+            last_attempt_at="",
+            load_job_id=None,
+            busy_count=0,
         )
 
         retry.reset_mock()
@@ -619,7 +689,7 @@ async def test_reusing_a_generation_resets_its_inactivity_clock(workspace, tenan
 
 async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace, tenant, user):
     pipeline = _Pipeline()
-    async with _loads(pipeline):
+    async with _loads(pipeline) as queue:
         await _run(workspace, user)
         old = await TenantSchema.objects.acreate(
             tenant=tenant,
@@ -629,11 +699,12 @@ async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace,
             load_generation=1,
             load_config_fingerprint="old",
         )
-        with patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop:
-            await _run(workspace, user)
+        queue.reset_mock()
+        await _run(workspace, user)
 
-    drop.assert_called_once_with(schedule_in={"seconds": 15 * 60})
-    drop.return_value.defer.assert_called_once_with(schema_id=str(old.id))
+    [(queued,)] = [call.args for call in queue.call_args_list]
+    assert queued.id == old.id
+    assert queue.call_args.kwargs == {"delay": 15 * 60}
 
 
 async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspace, tenant):
@@ -652,15 +723,16 @@ async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspa
     retry.assert_not_called()
 
 
+@pytest.mark.parametrize("state", [SchemaState.FAILED, SchemaState.EXPIRED])
 async def test_the_resume_never_reports_rows_of_an_unpublished_candidate_as_loaded(
-    workspace, tenant, user
+    workspace, tenant, user, state
 ):
     """A failed load's run records its committed sources, but they live in a
     candidate nothing serves; the resume must not present them as loaded."""
     candidate = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="failed_candidate",
-        state=SchemaState.FAILED,
+        state=state,
         load_workspace_id=workspace.id,
         load_generation=1,
     )
@@ -686,6 +758,29 @@ async def test_the_resume_never_reports_rows_of_an_unpublished_candidate_as_load
     assert entry["published"] is False
     assert entry["materialized_row_counts"] == {}
     assert entry["sources"]["users"]["state"] == "not_published"
+
+
+async def test_the_resume_reports_a_retired_published_candidate_as_published(
+    workspace, tenant, user
+):
+    async with _loads(_Pipeline()):
+        await _run(workspace, user, job_id=405)
+    [schema] = await _active_schemas(tenant)
+    schema.state = SchemaState.EXPIRED
+    await schema.asave(update_fields=["state"])
+    run = await MaterializationRun.objects.aget(tenant_schema=schema, procrastinate_job_id=405)
+    run.result = {"sources": {"users": {"state": "completed", "rows": 100}}}
+    await run.asave(update_fields=["result"])
+
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        405, workspace, str(user.id)
+    )
+
+    [entry] = summary
+    assert status == "completed"
+    assert entry["materialized_row_counts"] == {"users": 100}
+    assert entry.get("published") is not False
+    assert entry["sources"]["users"]["state"] == "completed"
 
 
 async def test_an_abort_while_queuing_drops_still_settles_the_candidate(workspace, tenant, user):
@@ -723,8 +818,10 @@ async def test_abandoning_a_candidate_is_undone_if_its_drop_cannot_be_queued(
             load_generation=1,
             load_config_fingerprint="old",
         )
-        with patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop:
-            drop.return_value.defer.side_effect = RuntimeError("queue unavailable")
+        with patch(
+            "apps.workspaces.tasks._queue_candidate_drop_sync",
+            side_effect=RuntimeError("queue unavailable"),
+        ):
             await _run(workspace, user)
 
     await old.arefresh_from_db()
