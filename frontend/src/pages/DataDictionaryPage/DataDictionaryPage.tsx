@@ -61,6 +61,9 @@ export function DataDictionaryPage() {
           <p className="mt-2 text-sm text-muted-foreground">
             Start a chat to automatically fetch your schema data.
           </p>
+          {dictionaryError && (
+            <p role="alert" className="mt-2 text-sm text-muted-foreground">{dictionaryError}</p>
+          )}
         </div>
       </div>
     )
@@ -85,7 +88,7 @@ export function DataDictionaryPage() {
 
   return (
     <div className="flex h-full flex-col">
-      {dictionaryError && (
+      {dictionaryStatus === "loaded" && dictionaryError && (
         <div role="status" data-testid="refresh-schema-warning" className="border-b bg-muted px-4 py-3 text-sm">
           {dictionaryError}
         </div>

@@ -198,17 +198,18 @@ export const createDictionarySlice: StateCreator<
       refreshSchema: async () => {
         const isCurrent = requests.start("dictionary")
         set({ dictionaryStatus: "loading", dictionaryError: null })
+        let warning: string | null = null
         try {
           const activeDomainId = get().activeDomainId
           if (!activeDomainId) throw new Error("No active domain selected.")
           const result = await api.post<{
-            status: "provisioning" | "partial" | "not_started"
+            status: "provisioning" | "partial"
             error?: string
           }>(
             `/api/workspaces/${activeDomainId}/refresh/`
           )
           if (!isCurrent()) return
-          const warning = result.status === "partial"
+          warning = result.status === "partial"
             ? result.error ?? "Some sources could not be refreshed."
             : null
           // Materialization runs in the background — re-fetch to pick up any already-available data
@@ -222,9 +223,10 @@ export const createDictionarySlice: StateCreator<
           if (!isCurrent()) return
           const status =
             error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
+          const message = error instanceof Error ? error.message : "Failed to refresh schema"
           set({
             dictionaryStatus: status,
-            dictionaryError: error instanceof Error ? error.message : "Failed to refresh schema",
+            dictionaryError: warning ? `${warning} ${message}` : message,
           })
         }
       },

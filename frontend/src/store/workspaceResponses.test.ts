@@ -232,3 +232,11 @@ it("keeps the dictionary usable while surfacing a partial refresh warning", asyn
   expect(state().dataDictionary).not.toBeNull()
   expect(get).toHaveBeenCalledTimes(1)
 })
+
+it("preserves partial refresh guidance when the dictionary is not available yet", async () => {
+  vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "source B needs operator recovery" })
+  vi.spyOn(api, "get").mockRejectedValue(new ApiError(503, "Data unavailable"))
+  await state().dictionaryActions.refreshSchema()
+  expect(state().dictionaryStatus).toBe("not_materialized")
+  expect(state().dictionaryError).toContain("source B needs operator recovery")
+})
