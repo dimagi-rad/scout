@@ -1,5 +1,6 @@
 """Tests for schema TTL tasks."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,9 +21,16 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services import data_operation
 from apps.workspaces.services.data_operation import DataLockTimeout
 from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
-from apps.workspaces.tasks import _RETIRE_MAX_ATTEMPTS, expire_inactive_schemas, teardown_schema
+from apps.workspaces.tasks import (
+    _RETIRE_MAX_ATTEMPTS,
+    _RETIRE_RETRY_BASE_SECONDS,
+    expire_inactive_schemas,
+    teardown_schema,
+)
+from tests.tenant_lock_probe import try_tenant_data_lock
 
 
 @pytest.fixture
@@ -685,7 +693,7 @@ async def test_a_tenant_lock_timeout_reschedules_instead_of_stranding(active_sch
         yield
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock", never_granted),
+        patch("apps.workspaces.tasks.tenant_data_lock_if_free", never_granted),
         patch("apps.workspaces.tasks.SchemaManager") as MockManager,
         patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
     ):
@@ -695,6 +703,33 @@ async def test_a_tenant_lock_timeout_reschedules_instead_of_stranding(active_sch
     MockManager.return_value.retire_tenant_schema.assert_not_called()
     retry.return_value.defer_async.assert_awaited_once_with(
         schema_id=str(active_schema.id), attempt=1
+    )
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_busy_tenant_lock_defers_retirement_without_waiting_or_spending_an_attempt(
+    active_schema,
+):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with (
+        try_tenant_data_lock(active_schema.tenant_id) as held,
+        patch.object(data_operation, "_LOCK_TIMEOUT", "1s"),
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+    ):
+        assert held
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await asyncio.wait_for(teardown_schema(schema_id=str(active_schema.id)), timeout=3)
+
+    MockManager.return_value.retire_tenant_schema.assert_not_called()
+    retry.assert_called_once_with(schedule_in={"seconds": _RETIRE_RETRY_BASE_SECONDS})
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(active_schema.id), attempt=0
     )
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.TEARDOWN
@@ -734,10 +769,10 @@ async def test_a_schema_deleted_while_waiting_for_t_is_a_no_op(active_schema):
     @asynccontextmanager
     async def delete_while_waiting(_tenant_ids):
         await TenantSchema.objects.filter(pk=active_schema.pk).adelete()
-        yield
+        yield True
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock", delete_while_waiting),
+        patch("apps.workspaces.tasks.tenant_data_lock_if_free", delete_while_waiting),
         patch("apps.workspaces.tasks.SchemaManager") as MockManager,
         patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
     ):
@@ -846,7 +881,7 @@ async def test_a_query_bug_taking_t_is_not_retried_as_contention(active_schema):
         yield
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock", buggy_session),
+        patch("apps.workspaces.tasks.tenant_data_lock_if_free", buggy_session),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
         pytest.raises(psycopg.errors.UndefinedFunction),
     ):
@@ -868,7 +903,7 @@ async def test_an_interface_error_taking_t_reschedules_instead_of_crashing(activ
         yield
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock", broken_session),
+        patch("apps.workspaces.tasks.tenant_data_lock_if_free", broken_session),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)

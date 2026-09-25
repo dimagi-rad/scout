@@ -2192,7 +2192,12 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
     manager = SchemaManager()
     async with contextlib.AsyncExitStack() as stack:
         try:
-            await stack.enter_async_context(tenant_data_lock([schema.tenant_id]))
+            acquired = await stack.enter_async_context(tenant_data_lock_if_free(schema.tenant_id))
+            if not acquired:
+                await teardown_schema.configure(
+                    schedule_in={"seconds": _RETIRE_RETRY_BASE_SECONDS}
+                ).defer_async(schema_id=str(schema.id), attempt=attempt)
+                return False
             await schema.arefresh_from_db()
         except TenantSchema.DoesNotExist:
             return False  # deleted (e.g. with its tenant) while we waited for T
