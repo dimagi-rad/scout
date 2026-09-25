@@ -1,8 +1,9 @@
 import { render, screen } from "@testing-library/react"
-import { expect, it, vi } from "vitest"
+import { beforeEach, expect, it, vi } from "vitest"
 import { DataDictionaryPage } from "./DataDictionaryPage"
 
-const { state } = vi.hoisted(() => ({
+const { state, network } = vi.hoisted(() => ({
+  network: { status: "online" },
   state: {
     dataDictionary: { schemas: {} },
     dictionaryStatus: "loaded",
@@ -15,9 +16,14 @@ const { state } = vi.hoisted(() => ({
   },
 }))
 vi.mock("@/store/store", () => ({ useAppStore: (selector: (value: typeof state) => unknown) => selector(state) }))
-vi.mock("@/hooks/useNetworkStatus", () => ({ useNetworkStatus: () => ({ status: "online" }) }))
+vi.mock("@/hooks/useNetworkStatus", () => ({ useNetworkStatus: () => network }))
 vi.mock("./SchemaTree", () => ({ SchemaTree: () => <div>Available tables</div> }))
 vi.mock("./TableDetail", () => ({ TableDetail: () => null }))
+
+beforeEach(() => {
+  state.dictionaryStatus = "loaded"
+  network.status = "online"
+})
 
 it("shows a partial refresh warning alongside the usable dictionary", () => {
   render(<DataDictionaryPage />)
@@ -25,4 +31,18 @@ it("shows a partial refresh warning alongside the usable dictionary", () => {
   expect(screen.getByText("Available tables")).toBeVisible()
   expect(screen.getByTestId("refresh-schema-btn")).toBeEnabled()
   expect(screen.queryByText("Failed to load dictionary")).not.toBeInTheDocument()
+})
+
+it("shows partial refresh guidance even before dictionary data becomes available", () => {
+  state.dictionaryStatus = "not_materialized"
+  render(<DataDictionaryPage />)
+  expect(screen.getByTestId("dictionary-empty-state")).toHaveTextContent("source B needs operator recovery")
+})
+
+
+it("does not label an offline dictionary failure as a partial refresh warning", () => {
+  network.status = "offline"
+  state.dictionaryStatus = "error"
+  render(<DataDictionaryPage />)
+  expect(screen.queryByTestId("refresh-schema-warning")).not.toBeInTheDocument()
 })
