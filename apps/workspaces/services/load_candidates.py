@@ -150,6 +150,8 @@ def promote_candidate_schema(
     )
     if tenant_id is None:
         return Promotion(promoted=False)
+    # Retiring another writer's runs is only safe under T, including refreshes.
+    assert_tenant_lock_held(tenant_id)
     with transaction.atomic():
         Tenant.objects.select_for_update().get(id=tenant_id)
         rows = list(
@@ -168,8 +170,6 @@ def promote_candidate_schema(
             )
             job_id = refresh_job_id
         else:
-            # Retiring runs the caller does not own below is only safe under T.
-            assert_tenant_lock_held(tenant_id)
             # None would match any job-less candidate and run; job-less loads use
             # load_owner_token instead, whose run records no queue job.
             owned = (
