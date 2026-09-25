@@ -1,8 +1,10 @@
-"""Stand-ins for ``_run_pipeline_with_progress`` in workspace-load tests.
+"""Pipeline stand-ins that record the run a real load would.
 
-A workspace load only publishes a candidate that carries an owned, COMPLETED,
-fingerprinted run, so a double that returns a bare ``{"status": "completed"}``
-would be (correctly) refused. This double records the run a real load would.
+Promotion only publishes a candidate that carries an owned, COMPLETED,
+fingerprinted run, so a double returning a bare ``{"status": "completed"}``
+would be (correctly) refused. ``completed_pipeline_run`` stands in for
+``_run_pipeline_with_progress`` (workspace loads), ``completed_refresh_run``
+for ``run_pipeline`` (standalone refresh).
 """
 
 from unittest.mock import patch
@@ -26,6 +28,15 @@ def completed_pipeline_run(membership, credential, pipeline, job_id, target_sche
     )
     # extra first: the gate-critical keys below must not be overridable by accident.
     return {**extra, "status": "completed", "run_id": str(run.id), "load_fingerprint": fingerprint}
+
+
+def completed_refresh_run(
+    membership, credential, pipeline, *, target_schema, procrastinate_job_id, **_kwargs
+):
+    """``run_pipeline`` for the refresh path: a completed, owned, receipted run."""
+    return completed_pipeline_run(
+        membership, credential, pipeline, procrastinate_job_id, target_schema
+    )
 
 
 @pytest.fixture

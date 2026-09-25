@@ -21,6 +21,7 @@ from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -28,6 +29,9 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.data_operation import LockOrderError, sync_tenant_data_lock
+from apps.workspaces.services.load_candidates import promote_candidate_schema
+from apps.workspaces.services.load_generations import begin_load_generation
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
     DENIED_ROLE_REQUIRED,
@@ -35,7 +39,6 @@ from apps.workspaces.services.refresh_requests import (
     REFRESH_TASK_NAME,
     UNSCANNED_GRACE,
     RefreshClaim,
-    activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
     find_legacy_refresh_jobs,
@@ -49,6 +52,7 @@ from apps.workspaces.tasks import (
     reconcile_refresh_candidates,
     refresh_tenant_schema,
 )
+from tests.pipeline_doubles import completed_refresh_run
 
 JOB_RETENTION = timedelta(hours=JOB_RETENTION_HOURS)
 STALLED_AFTER = timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS)
@@ -348,11 +352,32 @@ def test_only_the_owning_job_can_activate_or_fail_a_claimed_candidate(
 ):
     candidate, args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     assert claim_refresh_candidate(job_id=job_id, **args).status == "claimed"
+    generation = begin_load_generation(tenant.id)
+    run = MaterializationRun.objects.create(
+        tenant_schema=candidate,
+        pipeline="commcare_sync",
+        procrastinate_job_id=job_id,
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {}, "load_fingerprint": "receipt"},
+    )
 
-    assert activate_claimed_refresh_candidate(candidate.id, job_id + 1, timezone.now()) is False
-    assert fail_claimed_refresh_candidate(candidate.id, job_id + 1) is None
-    assert activate_claimed_refresh_candidate(candidate.id, job_id, timezone.now()) is True
-    assert fail_claimed_refresh_candidate(candidate.id, job_id) is None
+    def promote(job):
+        return promote_candidate_schema(
+            candidate.id,
+            accessed_at=timezone.now(),
+            refresh_job_id=job,
+            loading_generation=generation,
+            run_id=run.id,
+            fingerprint="receipt",
+        ).promoted
+
+    with pytest.raises(LockOrderError):
+        promote(job_id)
+    with sync_tenant_data_lock([tenant.id]):
+        assert promote(job_id + 1) is False
+        assert fail_claimed_refresh_candidate(candidate.id, job_id + 1) is None
+        assert promote(job_id) is True
+        assert fail_claimed_refresh_candidate(candidate.id, job_id) is None
 
     candidate.refresh_from_db()
     assert candidate.state == SchemaState.ACTIVE
@@ -1099,7 +1124,9 @@ def test_real_enqueue_is_claimed_and_published_by_the_worker(
                 return_value={"type": "api_key", "value": "token"},
             ),
             patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
-            patch("apps.workspaces.tasks.run_pipeline") as pipeline,
+            patch(
+                "apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run
+            ) as pipeline,
             patch("apps.workspaces.tasks._rebuild_dependent_view_schemas"),
             patch("apps.workspaces.tasks._rebuild_single_tenant_semantic_models"),
         ):

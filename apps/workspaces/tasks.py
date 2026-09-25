@@ -111,7 +111,6 @@ from apps.workspaces.services.refresh_requests import (
     DENIED_WORKSPACE_UNLINKED,
     LegacyRefreshJobs,
     LegacyRefreshReconciliation,
-    activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
     find_legacy_refresh_jobs,
@@ -326,118 +325,208 @@ async def refresh_tenant_schema(
         }
 
     # Upstream freshness is checked here, after the claim's transaction closed, so
-    # no row lock is held across a provider call. A denial fails this candidate
-    # like any other refresh failure, with its own code (an outage says retry).
+    # no row lock is held across a provider call.
+    denial = await _refresh_access_denial(membership, workspace_id, new_schema, context.job.id)
+    if denial is not None:
+        return denial
+
+    # T serializes this refresh with every other writer of the tenant (workspace
+    # loads, retirement). Sibling work happens only after T is released: never
+    # wait on another workspace's lock while holding a tenant lock.
+    try:
+        async with tenant_data_lock([new_schema.tenant_id]):
+            membership = (
+                await TenantMembership.objects.select_related("tenant", "user", "connection")
+                .filter(
+                    id=new_schema.refresh_membership_id,
+                    user_id=new_schema.refresh_actor_user_id,
+                    tenant_id=new_schema.tenant_id,
+                )
+                .afirst()
+            )
+            if membership is None:
+                await _drain(
+                    _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema
+                )
+                return _refresh_denial_result(DENIED_MEMBERSHIP_MISSING)
+            if not await WorkspaceTenant.objects.filter(
+                workspace_id=new_schema.refresh_workspace_id,
+                tenant_id=new_schema.tenant_id,
+            ).aexists():
+                await _drain(
+                    _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema
+                )
+                return _refresh_denial_result(DENIED_WORKSPACE_UNLINKED)
+            # The wait for T can outlast the proof (up to the lock timeout), and
+            # the fetch must not run on stale authority: check again under T.
+            outcome = await _refresh_access_denial(
+                membership, workspace_id, new_schema, context.job.id
+            ) or await _run_claimed_refresh(context, new_schema, membership)
+    except DataLockTimeout:
+        logger.warning("Refresh of '%s' timed out waiting for its tenant", new_schema.schema_name)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema)
+        return {
+            "error": "Another load of this source is still running. Retry the refresh later.",
+            "retry_required": True,
+        }
+    if outcome.get("status") != "active":
+        return outcome
+
+    # The tenant data schema is SHARED across workspaces; this refresh swapped in a
+    # NEW physical schema. Dependent multi-tenant view schemas still point at the OLD
+    # schema, so rebuild them against the new ACTIVE one (the old schema is retired
+    # only once nothing reads it).
+    await _rebuild_dependent_view_schemas([new_schema.tenant_id])
+
+    # Single-tenant workspaces query the tenant schema directly (no view schema),
+    # so the sibling rebuild above skips them. The generated Cube YAML is
+    # schema-agnostic, but refreshed data may add or remove columns, which only a
+    # semantic-model rebuild picks up.
+    await _rebuild_single_tenant_semantic_models([new_schema.tenant_id])
+
+    logger.info("Refresh complete: schema '%s' is now active", new_schema.schema_name)
+    return outcome
+
+
+async def _run_claimed_refresh(context, new_schema, membership) -> dict:
+    """Load and publish one claimed refresh candidate; the caller holds its T."""
+    job_id = context.job.id
+    manager = SchemaManager()
+    try:
+        await run_data_thread(manager.create_physical_schema, new_schema)
+    except Exception:
+        logger.exception("Failed to create schema '%s'", new_schema.schema_name)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        return {"error": "Failed to create schema"}
+    except BaseException:
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        raise
+
+    generation_result = {}
+
+    def begin_and_remember():
+        generation = begin_load_generation(new_schema.tenant_id)
+        generation_result["generation"] = generation
+        return generation
+
+    try:
+        credential = await aresolve_credential(membership)
+        if credential is None:
+            await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+            return {"error": "No credential available"}
+
+        registry = get_registry()
+        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+        pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
+        if pipeline_name is None:
+            await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+            return {"error": no_pipeline_message(registry, membership.tenant.provider)}
+        pipeline_config = registry.get(pipeline_name)
+        generation = await _to_thread_fresh_db(begin_and_remember)
+    except CredentialResolutionError as e:
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        return {"error": e.message, "error_code": e.code}
+    except Exception:
+        logger.exception("Failed to start refresh for schema '%s'", new_schema.schema_name)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        return {"error": "Failed to start the refresh", "retry_required": True}
+    except BaseException:
+        # An abort may hide the return value after the generation commits.
+        cleanup = (
+            _end_refresh_load(new_schema, job_id, generation_result["generation"])
+            if "generation" in generation_result
+            else _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+        )
+        await _drain(cleanup, new_schema)
+        raise
+
+    try:
+        # target_schema forces the load into the new "_r" schema; without it
+        # run_pipeline re-resolves the old active base schema and data lands there.
+        result = await _to_thread_fresh_db(
+            run_pipeline,
+            membership,
+            credential,
+            pipeline_config,
+            target_schema=new_schema,
+            procrastinate_job_id=job_id,
+            defer_schema_promotion=True,
+        )
+    except Exception:
+        logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        return {"error": "Materialization failed"}
+    except BaseException:
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        raise
+
+    # Reset last_accessed_at so the fresh schema starts with a clean inactivity
+    # TTL; otherwise expire_inactive_schemas could drop it before first use.
+    try:
+        promotion = await _to_thread_fresh_db(
+            _promote_and_queue_retirement,
+            new_schema.id,
+            accessed_at=timezone.now(),
+            refresh_job_id=job_id,
+            loading_generation=generation,
+            run_id=result.get("run_id") if isinstance(result, dict) else None,
+            fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
+        )
+    except Exception:
+        # It rolled back, so the candidate is still ours and handled as unpublished.
+        logger.exception("Publishing refresh schema '%s' failed", new_schema.schema_name)
+        promotion = Promotion(promoted=False)
+    except BaseException:
+        # A no-op if the promotion committed: both steps CAS on the unpublished state.
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        raise
+    if not promotion.promoted:
+        try:
+            still_ours = await TenantSchema.objects.filter(
+                id=new_schema.id,
+                state=SchemaState.PROVISIONING,
+                refresh_job_id=job_id,
+            ).aexists()
+        finally:
+            await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        if still_ours:
+            return {
+                "error": (
+                    "The refresh finished without a complete result to publish; the "
+                    "previous data is still being served."
+                ),
+                "retry_required": True,
+            }
+        return {"status": "ignored"}
+    return {"status": "active", "schema_id": str(new_schema.id)}
+
+
+async def _refresh_access_denial(membership, workspace_id, schema, job_id) -> dict | None:
+    """Fail the candidate and return the denial if the actor's authority lapsed.
+
+    A denial fails the candidate like any other refresh failure, with its own
+    code (an outage says retry).
+    """
     access = await aresolve_workspace_access_ex(
         membership.user,
         workspace_id,
         minimum_role=WorkspaceRole.READ_WRITE,
         verification=VerificationBudget.BACKGROUND,
     )
-    if not access.granted:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        if access.denied_reason in FRESHNESS_ERROR_CODES:
-            return _refresh_denial_result(access.denied_reason)
-        return _refresh_denial_result(DENIED_ROLE_REQUIRED)
+    if access.granted:
+        return None
+    await _drain(_drop_claimed_refresh_schema_and_fail(schema, job_id), schema)
+    if access.denied_reason in FRESHNESS_ERROR_CODES:
+        return _refresh_denial_result(access.denied_reason)
+    return _refresh_denial_result(DENIED_ROLE_REQUIRED)
 
-    manager = SchemaManager()
+
+async def _end_refresh_load(schema, job_id: int, generation: int) -> None:
     try:
-        await run_data_thread(manager.create_physical_schema, new_schema)
-    except asyncio.CancelledError:
-        await _drain_cancelled_refresh_cleanup(new_schema, context.job.id)
-        raise
-    except Exception:
-        logger.exception("Failed to create schema '%s'", new_schema.schema_name)
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": "Failed to create schema"}
-
-    # Async job: must use the async resolver — the sync one raises
-    # SynchronousOnlyOperation here.
-    try:
-        credential = await aresolve_credential(membership)
-    except CredentialResolutionError as e:
-        # Surface the distinct message + code so the user is told to re-connect
-        # rather than the generic "No credential available" (arch #245 finding 07#3).
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": e.message, "error_code": e.code}
-    if credential is None:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": "No credential available"}
-
-    try:
-        registry = get_registry()
-        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
-        pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
-        if pipeline_name is None:
-            await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-            return {
-                "error": no_pipeline_message(registry, membership.tenant.provider),
-            }
-        pipeline_config = registry.get(pipeline_name)
-        # target_schema forces the load into the new "_r" schema; without it
-        # run_pipeline re-resolves the old active base schema and data lands there.
-        await _to_thread_fresh_db(
-            run_pipeline,
-            membership,
-            credential,
-            pipeline_config,
-            target_schema=new_schema,
-            procrastinate_job_id=context.job.id,
-            defer_schema_promotion=True,
-        )
-    except asyncio.CancelledError:
-        await _drain_cancelled_refresh_cleanup(new_schema, context.job.id)
-        raise
-    except Exception:
-        logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": "Materialization failed"}
-
-    # Reset last_accessed_at so the fresh schema starts with a clean inactivity
-    # TTL — otherwise expire_inactive_schemas could drop it before first use.
-    activated = await _to_thread_fresh_db(
-        activate_claimed_refresh_candidate,
-        new_schema.id,
-        context.job.id,
-        timezone.now(),
-    )
-    if not activated:
-        # Whoever took the candidate may have settled it FAILED while this job was
-        # still loading, so any drop it queued could have run before our writes.
-        try:
-            await _drop_failed_refresh_schema(new_schema.id)
-        except Exception:
-            logger.exception("Failed to drop lost refresh schema '%s'", new_schema.schema_name)
-        return {"status": "ignored"}
-    new_schema.state = SchemaState.ACTIVE
-
-    # The tenant data schema is SHARED across workspaces; this refresh swapped in a
-    # NEW physical schema. Dependent multi-tenant view schemas still point at the OLD
-    # (about-to-be-torn-down) schema, so rebuild them against the new ACTIVE schema —
-    # mirroring the sibling rebuild materialize_workspace performs (PR #230).
-    await _rebuild_dependent_view_schemas([new_schema.tenant_id])
-
-    # Step 3c: Single-tenant workspaces query the tenant schema directly (no
-    # view schema), so the sibling rebuild above skips them. The generated Cube
-    # YAML is schema-agnostic (tables resolve via per-query search_path), so
-    # the swap itself doesn't break them — but the refreshed data may have new
-    # or removed columns, which only a semantic-model rebuild picks up.
-    await _rebuild_single_tenant_semantic_models([new_schema.tenant_id])
-
-    # Delay teardown of previously active schemas so in-flight queries can drain.
-    old_schemas = TenantSchema.objects.filter(
-        tenant=new_schema.tenant,
-        state=SchemaState.ACTIVE,
-    ).exclude(id=new_schema.id)
-    async for old_schema in old_schemas:
-        old_schema.state = SchemaState.TEARDOWN
-        await old_schema.asave(update_fields=["state"])
-        await teardown_schema.configure(
-            schedule_in={"seconds": int(timedelta(minutes=30).total_seconds())},
-        ).defer_async(schema_id=str(old_schema.id))
-
-    logger.info("Refresh complete: schema '%s' is now active", new_schema.schema_name)
-    return {"status": "active", "schema_id": schema_id}
+        await _to_thread_fresh_db(end_load_generation, schema.tenant_id, generation)
+    finally:
+        # Paired: a failure clearing the marker must not leave the candidate live.
+        await _drop_claimed_refresh_schema_and_fail(schema, job_id)
 
 
 def _preflight_failure(tenant, error: str, code: str = "") -> dict:
@@ -1762,23 +1851,6 @@ async def reconcile_refresh_candidates(timestamp: int = 0) -> dict:
         settled += len(result.settled_schema_ids)
         recovery_needed += result.recovery_needed
     return {"settled": settled, "recovery_needed": recovery_needed}
-
-
-async def _drain_cancelled_refresh_cleanup(schema, job_id: int) -> None:
-    """Finish exact-claim cleanup before propagating worker cancellation."""
-    cleanup = asyncio.create_task(_drop_claimed_refresh_schema_and_fail(schema, job_id))
-    while True:
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            if cleanup.cancelled():
-                return
-            continue
-        except Exception:
-            logger.exception(
-                "Refresh cancellation cleanup failed for schema %s, job %s", schema.id, job_id
-            )
-        return
 
 
 @app.periodic(cron="*/30 * * * *")

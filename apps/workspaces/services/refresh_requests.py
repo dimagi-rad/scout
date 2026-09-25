@@ -194,20 +194,6 @@ def fail_claimed_refresh_candidate(schema_id: uuid.UUID, job_id: int) -> TenantS
     return schema
 
 
-def activate_claimed_refresh_candidate(
-    schema_id: uuid.UUID, job_id: int, accessed_at: datetime
-) -> bool:
-    """Publish only the candidate claimed by this exact queue job."""
-    return bool(
-        TenantSchema.objects.filter(
-            id=schema_id,
-            refresh_job_id=job_id,
-            state=SchemaState.PROVISIONING,
-            refresh_claimed_at__isnull=False,
-        ).update(state=SchemaState.ACTIVE, last_accessed_at=accessed_at)
-    )
-
-
 def _job_was_pruned(candidate: TenantSchema, pruned_before: datetime) -> bool:
     """Whether a candidate's missing queue job is explained by retention pruning.
 
