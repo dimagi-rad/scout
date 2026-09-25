@@ -420,15 +420,6 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
             return {"error": no_pipeline_message(registry, membership.tenant.provider)}
         pipeline_config = registry.get(pipeline_name)
         generation = await _to_thread_fresh_db(begin_and_remember)
-    except asyncio.CancelledError:
-        # The transaction may commit before cancellation hides its return value.
-        cleanup = (
-            _end_refresh_load(new_schema, job_id, generation_result["generation"])
-            if "generation" in generation_result
-            else _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
-        )
-        await _drain(cleanup, new_schema)
-        raise
     except CredentialResolutionError as e:
         await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
         return {"error": e.message, "error_code": e.code}
@@ -436,6 +427,15 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
         logger.exception("Failed to start refresh for schema '%s'", new_schema.schema_name)
         await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
         return {"error": "Failed to start the refresh", "retry_required": True}
+    except BaseException:
+        # An abort may hide the return value after the generation commits.
+        cleanup = (
+            _end_refresh_load(new_schema, job_id, generation_result["generation"])
+            if "generation" in generation_result
+            else _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+        )
+        await _drain(cleanup, new_schema)
+        raise
 
     try:
         # target_schema forces the load into the new "_r" schema; without it

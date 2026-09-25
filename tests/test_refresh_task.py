@@ -33,7 +33,7 @@ from apps.workspaces.services.refresh_requests import (
     fail_claimed_refresh_candidate,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.tasks import refresh_tenant_schema
+from apps.workspaces.tasks import _to_thread_fresh_db, refresh_tenant_schema
 from mcp_server.context import load_tenant_context
 from mcp_server.pipeline_registry import PipelineConfig
 from tests.pipeline_doubles import completed_refresh_run
@@ -1186,3 +1186,38 @@ async def test_refresh_cancelled_during_failure_cleanup_finishes_drop(
     if failure != "create":
         ledger = await TenantLoadGeneration.objects.aget(tenant_id=provisioning_schema.tenant_id)
         assert ledger.loading_generation == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_startup_abort_clears_committed_generation(
+    provisioning_schema, tenant_membership_obj
+):
+    class WorkerAborted(BaseException):
+        pass
+
+    async def abort_after_begin(function, *args, **kwargs):
+        result = await _to_thread_fresh_db(function, *args, **kwargs)
+        if function.__name__ == "begin_and_remember":
+            raise WorkerAborted
+        return result
+
+    patches = _refresh_patches()
+    with contextlib.ExitStack() as stack:
+        mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+        stack.enter_context(patch("apps.workspaces.tasks._to_thread_fresh_db", abort_after_begin))
+        teardown = stack.enter_context(patch("apps.workspaces.tasks.SchemaManager.teardown"))
+        with pytest.raises(WorkerAborted):
+            await refresh_tenant_schema.func(
+                context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+                schema_id=str(provisioning_schema.id),
+                membership_id=str(tenant_membership_obj.id),
+                **await _refresh_auth_kwargs(tenant_membership_obj),
+            )
+
+    mocks["pipeline"].assert_not_called()
+    ledger = await TenantLoadGeneration.objects.aget(tenant_id=provisioning_schema.tenant_id)
+    assert ledger.loading_generation == 0
+    await provisioning_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.FAILED
+    teardown.assert_called_once()
