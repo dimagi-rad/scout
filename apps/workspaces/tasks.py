@@ -391,13 +391,13 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
     manager = SchemaManager()
     try:
         await run_data_thread(manager.create_physical_schema, new_schema)
-    except asyncio.CancelledError:
-        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
-        raise
     except Exception:
         logger.exception("Failed to create schema '%s'", new_schema.schema_name)
         await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
         return {"error": "Failed to create schema"}
+    except BaseException:
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        raise
 
     generation_result = {}
 
@@ -449,13 +449,13 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
             procrastinate_job_id=job_id,
             defer_schema_promotion=True,
         )
-    except asyncio.CancelledError:
-        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
-        raise
     except Exception:
         logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
         await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
         return {"error": "Materialization failed"}
+    except BaseException:
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        raise
 
     # Reset last_accessed_at so the fresh schema starts with a clean inactivity
     # TTL; otherwise expire_inactive_schemas could drop it before first use.
@@ -469,14 +469,14 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
             run_id=result.get("run_id") if isinstance(result, dict) else None,
             fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
         )
-    except asyncio.CancelledError:
-        # A no-op if the promotion committed: both steps CAS on the unpublished state.
-        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
-        raise
     except Exception:
         # It rolled back, so the candidate is still ours and handled as unpublished.
         logger.exception("Publishing refresh schema '%s' failed", new_schema.schema_name)
         promotion = Promotion(promoted=False)
+    except BaseException:
+        # A no-op if the promotion committed: both steps CAS on the unpublished state.
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        raise
     if not promotion.promoted:
         try:
             still_ours = await TenantSchema.objects.filter(

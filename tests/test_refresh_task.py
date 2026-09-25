@@ -33,7 +33,11 @@ from apps.workspaces.services.refresh_requests import (
     fail_claimed_refresh_candidate,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.tasks import _to_thread_fresh_db, refresh_tenant_schema
+from apps.workspaces.tasks import (
+    _promote_and_queue_retirement,
+    _to_thread_fresh_db,
+    refresh_tenant_schema,
+)
 from mcp_server.context import load_tenant_context
 from mcp_server.pipeline_registry import PipelineConfig
 from tests.pipeline_doubles import completed_refresh_run
@@ -1221,3 +1225,59 @@ async def test_refresh_startup_abort_clears_committed_generation(
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.FAILED
     teardown.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("phase", ["create", "pipeline", "promotion", "promotion_committed"])
+async def test_refresh_abnormal_abort_settles_only_unpublished_candidate(
+    provisioning_schema, old_active_schema, tenant_membership_obj, phase
+):
+    class WorkerAborted(BaseException):
+        pass
+
+    def abort_after_promotion(*args, **kwargs):
+        result = _promote_and_queue_retirement(*args, **kwargs)
+        assert result.promoted
+        raise WorkerAborted
+
+    targets = {
+        "create": "apps.workspaces.tasks.SchemaManager.create_physical_schema",
+        "pipeline": "apps.workspaces.tasks.run_pipeline",
+        "promotion": "apps.workspaces.tasks._promote_and_queue_retirement",
+        "promotion_committed": "apps.workspaces.tasks._promote_and_queue_retirement",
+    }
+    patches = _refresh_patches()
+    with contextlib.ExitStack() as stack:
+        for p in patches.values():
+            stack.enter_context(p)
+        stack.enter_context(
+            patch(
+                targets[phase],
+                side_effect=abort_after_promotion
+                if phase == "promotion_committed"
+                else WorkerAborted,
+            )
+        )
+        teardown = stack.enter_context(patch("apps.workspaces.tasks.SchemaManager.teardown"))
+        with pytest.raises(WorkerAborted):
+            await refresh_tenant_schema.func(
+                context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+                schema_id=str(provisioning_schema.id),
+                membership_id=str(tenant_membership_obj.id),
+                **await _refresh_auth_kwargs(tenant_membership_obj),
+            )
+
+    await provisioning_schema.arefresh_from_db()
+    await old_active_schema.arefresh_from_db()
+    published = phase == "promotion_committed"
+    assert provisioning_schema.state == (SchemaState.ACTIVE if published else SchemaState.FAILED)
+    assert old_active_schema.state == (SchemaState.TEARDOWN if published else SchemaState.ACTIVE)
+    if published:
+        teardown.assert_not_called()
+    else:
+        teardown.assert_called_once()
+    if phase != "create":
+        ledger = await TenantLoadGeneration.objects.aget(tenant_id=provisioning_schema.tenant_id)
+        assert ledger.loading_generation == 0
+        assert ledger.published_generation == (1 if published else 0)
