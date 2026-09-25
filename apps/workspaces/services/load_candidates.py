@@ -210,8 +210,10 @@ def promote_candidate_schema(
         ):
             return Promotion(promoted=False)
 
-        # Under T every other run on the candidate is an earlier attempt's,
-        # including a dead writer's run stuck in an active state.
+        # Every other run on the candidate is an earlier attempt's, including a
+        # dead writer's run stuck in an active state: a workspace candidate is
+        # written only under T (asserted above), and a refresh candidate only by
+        # the one job its unique refresh_job_id binds it to.
         MaterializationRun.objects.filter(tenant_schema_id=candidate.id).exclude(id=run.id).exclude(
             state=MaterializationRun.RunState.STALE
         ).update(state=MaterializationRun.RunState.STALE)
@@ -219,7 +221,10 @@ def promote_candidate_schema(
         TenantSchema.objects.filter(id__in=retired).update(state=SchemaState.TEARDOWN)
         candidate.state = SchemaState.ACTIVE
         candidate.last_accessed_at = accessed_at
-        candidate.save(update_fields=["state", "last_accessed_at"])
+        # This marker identifies an unpublished candidate. Clear it on publish
+        # so a later EXPIRED state cannot make a once-served run look unpublished.
+        candidate.load_workspace_id = None
+        candidate.save(update_fields=["state", "last_accessed_at", "load_workspace_id"])
         publish_generation(tenant_id, loading_generation, run, candidate, fingerprint)
         return Promotion(promoted=True, retired_schema_ids=retired)
 

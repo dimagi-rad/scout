@@ -9,16 +9,22 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from django.conf import settings
 from django.db import models
 
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
-from apps.workspaces.models import MaterializationRun
+from apps.workspaces.models import MaterializationRun, SchemaState, WorkspaceViewSchema
+from apps.workspaces.services.view_sources import (
+    parse_view_sources,
+    validate_published_views,
+)
 from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
+from mcp_server.source_identity import source_identity, unverified_source_identity
 
 if TYPE_CHECKING:
     from apps.workspaces.models import TenantMetadata, TenantSchema
@@ -72,6 +78,7 @@ async def pipeline_list_tables(
     sources_result: dict[str, Any] = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
+    auxiliary_tables = {s.name: s.auxiliary_tables for s in pipeline_config.sources}
 
     live_table_names = await _live_tables_in_schema(tenant_schema.schema_name)
 
@@ -92,6 +99,18 @@ async def pipeline_list_tables(
                 "materialized_at": materialized_at,
             }
         )
+        for table_name, description in auxiliary_tables.get(source_name, {}).items():
+            if table_name in live_table_names:
+                tables.append(
+                    {
+                        "name": table_name,
+                        "type": "table",
+                        "description": description,
+                        "materialized_row_count": None,
+                        "row_count_verified": False,
+                        "materialized_at": materialized_at,
+                    }
+                )
 
     for model_name in pipeline_config.dbt_models:
         if live_table_names and model_name not in live_table_names:
@@ -251,7 +270,14 @@ async def pipeline_describe_table(
         return None
 
     source_descriptions = (
-        {s.physical_table_name: s.description for s in pipeline_config.sources}
+        {
+            name: description
+            for source in pipeline_config.sources
+            for name, description in {
+                source.physical_table_name: source.description,
+                **source.auxiliary_tables,
+            }.items()
+        }
         if pipeline_config is not None
         else {}
     )
@@ -270,11 +296,49 @@ async def pipeline_describe_table(
             }
         )
 
+    identity = source_identity(
+        pipeline_config.provider if pipeline_config else None, table_name, columns
+    )
     return {
         "name": table_name,
         "description": source_descriptions.get(table_name, ""),
         "columns": columns,
+        **({"identity": identity} if identity else {}),
     }
+
+
+async def workspace_table_identity(
+    workspace_id: UUID | str, ctx: QueryContext, table_name: str, columns: list[dict]
+) -> dict | None:
+    """Resolve a view's source from publication provenance, never its fitted name."""
+    unknown = unverified_source_identity()
+    view_schema = (
+        await WorkspaceViewSchema.objects.filter(
+            workspace_id=workspace_id, schema_name=ctx.schema_name, state=SchemaState.ACTIVE
+        )
+        .select_related("workspace")
+        .afirst()
+    )
+    if view_schema is None:
+        return unknown
+    tenants = {str(tenant.id): tenant async for tenant in view_schema.workspace.tenants.all()}
+    try:
+        sources = parse_view_sources(view_schema.view_sources, set(tenants))
+        if sources is not None:
+            published = await workspace_list_tables(ctx)
+            validate_published_views(sources, {table["name"] for table in published})
+    except Exception:
+        logger.warning(
+            "Could not verify source identity for workspace %s table %s",
+            workspace_id,
+            table_name,
+            exc_info=True,
+        )
+        return unknown
+    source = sources.get(table_name) if sources else None
+    if source is None:
+        return unknown
+    return source_identity(tenants[source.tenant_id].provider, source.source_table_name, columns)
 
 
 def _build_jsonb_annotations(
@@ -393,6 +457,9 @@ async def pipeline_get_metadata(
             "to_table": r.to_table,
             "to_column": r.to_column,
             "description": r.description,
+            "key_pairs": r.key_pairs,
+            "relationship_type": r.relationship_type,
+            "require_unique_target": r.require_unique_target,
         }
         for r in pipeline_config.relationships
     ]

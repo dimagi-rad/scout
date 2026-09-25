@@ -133,6 +133,8 @@ def test_write_ocs_messages_creates_table_and_rows(tenant_schema):
                         [
                             {
                                 "message_id": "s1:0",
+                                "snapshot_revision": "snapshot-fixture",
+                                "message_version": "content-fixture",
                                 "session_id": "s1",
                                 "message_index": 0,
                                 "role": "user",
@@ -170,6 +172,8 @@ def test_write_ocs_messages_reports_session_progress(tenant_schema):
     def msg(session_id: str, idx: int) -> dict:
         return {
             "message_id": f"{session_id}:{idx}",
+            "snapshot_revision": "snapshot-fixture",
+            "message_version": "content-fixture",
             "session_id": session_id,
             "message_index": idx,
             "role": "user",
