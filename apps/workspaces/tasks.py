@@ -2194,9 +2194,12 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
         try:
             acquired = await stack.enter_async_context(tenant_data_lock_if_free(schema.tenant_id))
             if not acquired:
-                await teardown_schema.configure(
-                    schedule_in={"seconds": _RETIRE_RETRY_BASE_SECONDS}
-                ).defer_async(schema_id=str(schema.id), attempt=attempt)
+                await _retry_retirement(
+                    schema,
+                    [],
+                    attempt,
+                    "tenant lock T is held by an active writer",
+                )
                 return False
             await schema.arefresh_from_db()
         except TenantSchema.DoesNotExist:

@@ -1,6 +1,7 @@
 """Tests for schema TTL tasks."""
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,7 +22,6 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services import data_operation
 from apps.workspaces.services.data_operation import DataLockTimeout
 from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
 from apps.workspaces.tasks import (
@@ -710,7 +710,7 @@ async def test_a_tenant_lock_timeout_reschedules_instead_of_stranding(active_sch
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_a_busy_tenant_lock_defers_retirement_without_waiting_or_spending_an_attempt(
+async def test_a_busy_tenant_lock_defers_retirement_without_waiting_and_spends_an_attempt(
     active_schema,
 ):
     active_schema.state = SchemaState.TEARDOWN
@@ -718,7 +718,6 @@ async def test_a_busy_tenant_lock_defers_retirement_without_waiting_or_spending_
 
     with (
         try_tenant_data_lock(active_schema.tenant_id) as held,
-        patch.object(data_operation, "_LOCK_TIMEOUT", "1s"),
         patch("apps.workspaces.tasks.SchemaManager") as MockManager,
         patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
     ):
@@ -729,8 +728,33 @@ async def test_a_busy_tenant_lock_defers_retirement_without_waiting_or_spending_
     MockManager.return_value.retire_tenant_schema.assert_not_called()
     retry.assert_called_once_with(schedule_in={"seconds": _RETIRE_RETRY_BASE_SECONDS})
     retry.return_value.defer_async.assert_awaited_once_with(
-        schema_id=str(active_schema.id), attempt=0
+        schema_id=str(active_schema.id), attempt=1
     )
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_busy_tenant_lock_gives_up_at_the_retirement_attempt_cap(active_schema, caplog):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    @asynccontextmanager
+    async def busy_lock(_tenant_id):
+        yield False
+
+    with (
+        patch("apps.workspaces.tasks.tenant_data_lock_if_free", busy_lock),
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        caplog.at_level(logging.ERROR, logger="apps.workspaces.tasks"),
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await teardown_schema(schema_id=str(active_schema.id), attempt=_RETIRE_MAX_ATTEMPTS - 1)
+
+    retry.return_value.defer_async.assert_not_awaited()
+    assert "giving up retiring schema" in caplog.text
+    assert "tenant lock T is held by an active writer" in caplog.text
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.TEARDOWN
 
