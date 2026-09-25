@@ -108,6 +108,7 @@ export interface DictionarySlice {
   dataDictionary: DataDictionary | null
   dictionaryStatus: DictionaryStatus
   dictionaryError: string | null
+  dictionaryWarning: string | null
   selectedTable: TableDetail | null
   dictionaryActions: {
     fetchDictionary: () => Promise<void>
@@ -170,11 +171,12 @@ export const createDictionarySlice: StateCreator<
     dataDictionary: null,
     dictionaryStatus: "idle",
     dictionaryError: null,
+    dictionaryWarning: null,
     selectedTable: null,
     dictionaryActions: {
       fetchDictionary: async () => {
         const isCurrent = requests.start("dictionary")
-        set({ dictionaryStatus: "loading", dictionaryError: null })
+        set({ dictionaryStatus: "loading", dictionaryError: null, dictionaryWarning: null })
         try {
           const activeDomainId = get().activeDomainId
           if (!activeDomainId) throw new Error("No active domain selected.")
@@ -197,7 +199,7 @@ export const createDictionarySlice: StateCreator<
 
       refreshSchema: async () => {
         const isCurrent = requests.start("dictionary")
-        set({ dictionaryStatus: "loading", dictionaryError: null })
+        set({ dictionaryStatus: "loading", dictionaryError: null, dictionaryWarning: null })
         let warning: string | null = null
         try {
           const activeDomainId = get().activeDomainId
@@ -218,7 +220,7 @@ export const createDictionarySlice: StateCreator<
           )
           if (!isCurrent()) return
           const data = transformBackendResponse(raw)
-          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: warning })
+          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null, dictionaryWarning: warning })
         } catch (error) {
           if (!isCurrent()) return
           const status =
@@ -226,7 +228,8 @@ export const createDictionarySlice: StateCreator<
           const message = error instanceof Error ? error.message : "Failed to refresh schema"
           set({
             dictionaryStatus: status,
-            dictionaryError: warning ? `${warning} ${message}` : message,
+            dictionaryError: message,
+            dictionaryWarning: warning,
           })
         }
       },
@@ -290,7 +293,7 @@ export const createDictionarySlice: StateCreator<
 
       clearDictionary: () => {
         requests.invalidate()
-        set({ dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, selectedTable: null })
+        set({ dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, dictionaryWarning: null, selectedTable: null })
       },
     },
   }
