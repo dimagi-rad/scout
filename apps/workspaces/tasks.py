@@ -1276,20 +1276,49 @@ async def _load_workspace_candidate(
     # Off the loop: the first call hashes the implementation source tree.
     config = await asyncio.to_thread(raw_load_fingerprint, pipeline_config)
     await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tm.tenant_id)
-    generation = await _to_thread_fresh_db(begin_load_generation, tm.tenant_id)
+    generation_result = {}
+
+    def begin_and_remember():
+        generation = begin_load_generation(tm.tenant_id)
+        generation_result["generation"] = generation
+        return generation
+
     try:
-        opened = await _to_thread_fresh_db(
-            open_workspace_candidate,
+        generation = await _to_thread_fresh_db(begin_and_remember)
+    except BaseException:
+        # Cancellation can hide the return value after the transaction commits.
+        # Capture it in the worker so the marker can still be cleared.
+        if "generation" in generation_result:
+            await _drain(
+                _end_load(tm.tenant_id, generation_result["generation"]),
+                f"tenant {tm.tenant_id}",
+            )
+        raise
+    opened_result = {}
+
+    def open_and_remember():
+        opened = open_workspace_candidate(
             tm.tenant,
             workspace_id=workspace.id,
             job_id=owner,
             generation=generation,
             config_fingerprint=config,
         )
+        opened_result["opened"] = opened
+        return opened
+
+    try:
+        opened = await _to_thread_fresh_db(open_and_remember)
     except BaseException:
-        # No candidate yet, but the generation is marked loading: clear it, or
-        # later requests stop joining it and its resumable candidate is lost.
-        await _drain(_end_load(tm.tenant_id, generation), f"tenant {tm.tenant_id}")
+        # Cancellation may arrive after a candidate commits but before its return
+        # reaches this task. Fail that candidate under the caller's T lock so it
+        # remains resumable; otherwise only the loading marker needs clearing.
+        opened = opened_result.get("opened")
+        if opened is None:
+            cleanup = _end_load(tm.tenant_id, generation)
+        else:
+            cleanup = _fail_workspace_candidate(opened.schema, workspace.id, owner, generation)
+        await _drain(cleanup, opened.schema if opened is not None else f"tenant {tm.tenant_id}")
         raise
     candidate = opened.schema
     if opened.resumed:

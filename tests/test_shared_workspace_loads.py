@@ -7,6 +7,7 @@ are stubbed.
 """
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -207,6 +208,43 @@ async def test_a_failed_load_keeps_last_good_serving_and_the_retry_resumes_its_c
     [active] = await _active_schemas(tenant)
     assert active.id == first_candidate
     drop.assert_not_called()
+
+
+@pytest.mark.parametrize("phase", ["begin", "open"])
+async def test_cancellation_during_candidate_setup_clears_committed_state(
+    workspace, tenant, user, phase
+):
+    operation_name = "begin_load_generation" if phase == "begin" else "open_workspace_candidate"
+    original = getattr(workspaces_tasks, operation_name)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def commit_then_wait(*args, **kwargs):
+        result = original(*args, **kwargs)
+        entered.set()
+        release.wait(5)
+        return result
+
+    async with _loads(_Pipeline()):
+        with patch(f"apps.workspaces.tasks.{operation_name}", side_effect=commit_then_wait):
+            task = asyncio.create_task(_run(workspace, user))
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    generation = await TenantLoadGeneration.objects.aget(tenant=tenant)
+    assert generation.loading_generation == 0
+    candidates = [
+        schema
+        async for schema in TenantSchema.objects.filter(
+            tenant=tenant, load_workspace_id=workspace.id
+        )
+    ]
+    assert [schema.state for schema in candidates] == (
+        [SchemaState.FAILED] if phase == "open" else []
+    )
 
 
 async def test_a_resumed_generation_is_reused_by_a_request_that_joined_it(workspace, tenant, user):
