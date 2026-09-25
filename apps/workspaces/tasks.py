@@ -1629,6 +1629,14 @@ async def sweep_workspace_load_candidates(timestamp: int = 0) -> dict:
                     counts["skipped_busy"] += 1
                     continue
                 orphans = await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tenant_id)
+                for orphan in orphans:
+                    logger.error(
+                        "Settled orphaned load candidate %s (%s) for tenant %s: its writer died",
+                        orphan.id,
+                        orphan.schema_name,
+                        tenant_id,
+                    )
+                counts["settled"] += len(orphans)
                 abandoned = await _to_thread_fresh_db(
                     unresumable_workspace_candidates,
                     tenant_id,
@@ -1637,14 +1645,6 @@ async def sweep_workspace_load_candidates(timestamp: int = 0) -> dict:
         except Exception:
             logger.exception("sweep_workspace_load_candidates: tenant %s failed", tenant_id)
             continue
-        for orphan in orphans:
-            logger.error(
-                "Settled orphaned load candidate %s (%s) for tenant %s: its writer died",
-                orphan.id,
-                orphan.schema_name,
-                tenant_id,
-            )
-        counts["settled"] += len(orphans)
         for schema in abandoned:
             try:
                 await _queue_candidate_drop(schema)

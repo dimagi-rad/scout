@@ -297,9 +297,9 @@ async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old
     assert retried["all_succeeded"] is True
     first_candidate, second_candidate = (call[1] for call in pipeline.calls)
     assert first_candidate != second_candidate
+    drop.assert_called_once()
     [(queued,), _] = drop.call_args
     assert queued.id == first_candidate
-    drop.assert_called_once()
 
 
 async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(

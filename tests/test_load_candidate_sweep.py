@@ -325,3 +325,24 @@ async def test_duplicate_sync_defer_preserves_outer_transaction(tenant, workspac
     await candidate.arefresh_from_db()
     assert candidate.load_config_fingerprint == ""
     assert candidate.load_job_id == 42
+
+
+async def test_committed_settlement_is_reported_when_abandonment_scan_fails(
+    tenant, workspace, caplog
+):
+    await _ledger(tenant, requested=2, published=1, loading=2)
+    orphan = await _candidate(tenant, workspace, state=SchemaState.PROVISIONING, generation=2)
+
+    with patch.object(
+        workspaces_tasks,
+        "unresumable_workspace_candidates",
+        side_effect=RuntimeError("scan failed"),
+    ):
+        counts, queued = await _sweep()
+
+    await orphan.arefresh_from_db()
+    assert orphan.state == SchemaState.FAILED
+    assert counts["settled"] == 1
+    assert queued == set()
+    assert f"Settled orphaned load candidate {orphan.id}" in caplog.text
+    assert "scan failed" in caplog.text
