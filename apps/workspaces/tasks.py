@@ -342,13 +342,17 @@ async def refresh_tenant_schema(
                 .afirst()
             )
             if membership is None:
-                await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
+                await _drain(
+                    _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema
+                )
                 return _refresh_denial_result(DENIED_MEMBERSHIP_MISSING)
             if not await WorkspaceTenant.objects.filter(
                 workspace_id=new_schema.refresh_workspace_id,
                 tenant_id=new_schema.tenant_id,
             ).aexists():
-                await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
+                await _drain(
+                    _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema
+                )
                 return _refresh_denial_result(DENIED_WORKSPACE_UNLINKED)
             # The wait for T can outlast the proof (up to the lock timeout), and
             # the fetch must not run on stale authority: check again under T.
@@ -357,7 +361,7 @@ async def refresh_tenant_schema(
             ) or await _run_claimed_refresh(context, new_schema, membership)
     except DataLockTimeout:
         logger.warning("Refresh of '%s' timed out waiting for its tenant", new_schema.schema_name)
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema)
         return {
             "error": "Another load of this source is still running. Retry the refresh later.",
             "retry_required": True,
@@ -392,7 +396,7 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
         raise
     except Exception:
         logger.exception("Failed to create schema '%s'", new_schema.schema_name)
-        await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
         return {"error": "Failed to create schema"}
 
     generation_result = {}
@@ -405,14 +409,14 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
     try:
         credential = await aresolve_credential(membership)
         if credential is None:
-            await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+            await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
             return {"error": "No credential available"}
 
         registry = get_registry()
         provider_pipeline_map = {p.provider: p.name for p in registry.list()}
         pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
         if pipeline_name is None:
-            await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+            await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
             return {"error": no_pipeline_message(registry, membership.tenant.provider)}
         pipeline_config = registry.get(pipeline_name)
         generation = await _to_thread_fresh_db(begin_and_remember)
@@ -450,7 +454,7 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
         raise
     except Exception:
         logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
-        await _end_refresh_load(new_schema, job_id, generation)
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
         return {"error": "Materialization failed"}
 
     # Reset last_accessed_at so the fresh schema starts with a clean inactivity
@@ -474,14 +478,15 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
         logger.exception("Publishing refresh schema '%s' failed", new_schema.schema_name)
         promotion = Promotion(promoted=False)
     if not promotion.promoted:
-        await _to_thread_fresh_db(end_load_generation, new_schema.tenant_id, generation)
-        still_ours = await TenantSchema.objects.filter(
-            id=new_schema.id,
-            state=SchemaState.PROVISIONING,
-            refresh_job_id=job_id,
-        ).aexists()
+        try:
+            still_ours = await TenantSchema.objects.filter(
+                id=new_schema.id,
+                state=SchemaState.PROVISIONING,
+                refresh_job_id=job_id,
+            ).aexists()
+        finally:
+            await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
         if still_ours:
-            await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
             return {
                 "error": (
                     "The refresh finished without a complete result to publish; the "
@@ -489,12 +494,6 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
                 ),
                 "retry_required": True,
             }
-        # Whoever took the candidate may have settled it FAILED while this job was
-        # still loading, so any drop it queued could have run before our writes.
-        try:
-            await _drop_failed_refresh_schema(new_schema.id)
-        except Exception:
-            logger.exception("Failed to drop lost refresh schema '%s'", new_schema.schema_name)
         return {"status": "ignored"}
     return {"status": "active", "schema_id": str(new_schema.id)}
 
@@ -513,7 +512,7 @@ async def _refresh_access_denial(membership, workspace_id, schema, job_id) -> di
     )
     if access.granted:
         return None
-    await _drop_claimed_refresh_schema_and_fail(schema, job_id)
+    await _drain(_drop_claimed_refresh_schema_and_fail(schema, job_id), schema)
     if access.denied_reason in FRESHNESS_ERROR_CODES:
         return _refresh_denial_result(access.denied_reason)
     return _refresh_denial_result(DENIED_ROLE_REQUIRED)
