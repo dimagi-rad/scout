@@ -332,6 +332,24 @@ async def refresh_tenant_schema(
     # wait on another workspace's lock while holding a tenant lock.
     try:
         async with tenant_data_lock([new_schema.tenant_id]):
+            membership = (
+                await TenantMembership.objects.select_related("tenant", "user", "connection")
+                .filter(
+                    id=new_schema.refresh_membership_id,
+                    user_id=new_schema.refresh_actor_user_id,
+                    tenant_id=new_schema.tenant_id,
+                )
+                .afirst()
+            )
+            if membership is None:
+                await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
+                return _refresh_denial_result(DENIED_MEMBERSHIP_MISSING)
+            if not await WorkspaceTenant.objects.filter(
+                workspace_id=new_schema.refresh_workspace_id,
+                tenant_id=new_schema.tenant_id,
+            ).aexists():
+                await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
+                return _refresh_denial_result(DENIED_WORKSPACE_UNLINKED)
             # The wait for T can outlast the proof (up to the lock timeout), and
             # the fetch must not run on stale authority: check again under T.
             outcome = await _refresh_access_denial(
@@ -377,28 +395,44 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
         await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
         return {"error": "Failed to create schema"}
 
-    # Async job: must use the async resolver — the sync one raises
-    # SynchronousOnlyOperation here.
+    generation_result = {}
+
+    def begin_and_remember():
+        generation = begin_load_generation(new_schema.tenant_id)
+        generation_result["generation"] = generation
+        return generation
+
     try:
         credential = await aresolve_credential(membership)
+        if credential is None:
+            await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+            return {"error": "No credential available"}
+
+        registry = get_registry()
+        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+        pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
+        if pipeline_name is None:
+            await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+            return {"error": no_pipeline_message(registry, membership.tenant.provider)}
+        pipeline_config = registry.get(pipeline_name)
+        generation = await _to_thread_fresh_db(begin_and_remember)
+    except asyncio.CancelledError:
+        # The transaction may commit before cancellation hides its return value.
+        cleanup = (
+            _end_refresh_load(new_schema, job_id, generation_result["generation"])
+            if "generation" in generation_result
+            else _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+        )
+        await _drain(cleanup, new_schema)
+        raise
     except CredentialResolutionError as e:
-        # Surface the distinct message + code so the user is told to re-connect
-        # rather than the generic "No credential available" (arch #245 finding 07#3).
-        await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
         return {"error": e.message, "error_code": e.code}
-    if credential is None:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
-        return {"error": "No credential available"}
+    except Exception:
+        logger.exception("Failed to start refresh for schema '%s'", new_schema.schema_name)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        return {"error": "Failed to start the refresh", "retry_required": True}
 
-    registry = get_registry()
-    provider_pipeline_map = {p.provider: p.name for p in registry.list()}
-    pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
-    if pipeline_name is None:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
-        return {"error": no_pipeline_message(registry, membership.tenant.provider)}
-    pipeline_config = registry.get(pipeline_name)
-
-    generation = await _to_thread_fresh_db(begin_load_generation, new_schema.tenant_id)
     try:
         # target_schema forces the load into the new "_r" schema; without it
         # run_pipeline re-resolves the old active base schema and data lands there.

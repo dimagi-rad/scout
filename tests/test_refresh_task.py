@@ -28,6 +28,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services import data_operation
 from apps.workspaces.services.data_operation import tenant_data_lock
 from apps.workspaces.services.load_candidates import promote_candidate_schema
+from apps.workspaces.services.load_generations import begin_load_generation
 from apps.workspaces.services.refresh_requests import (
     fail_claimed_refresh_candidate,
 )
@@ -343,7 +344,6 @@ async def test_refresh_task_schedules_old_schema_teardown(
 ):
     """Old ACTIVE schemas are moved to TEARDOWN and a delayed teardown is scheduled."""
     deferrer = MagicMock()
-    deferrer.defer_async = AsyncMock(return_value=1)
 
     with (
         patch(
@@ -613,10 +613,11 @@ async def test_refresh_loads_into_new_schema_not_old_active(
     def fake_run_pipeline(tenant_membership, credential, pipeline, target_schema=None, **kwargs):
         schema = target_schema or SchemaManager().provision(tenant_membership.tenant)
         loaded_schema_ids.append(str(schema.id))
-        return {"status": "ok"}
+        return completed_refresh_run(
+            tenant_membership, credential, pipeline, target_schema=schema, **kwargs
+        )
 
     deferrer = MagicMock()
-    deferrer.defer_async = AsyncMock(return_value=1)
 
     with (
         patch(
@@ -634,7 +635,7 @@ async def test_refresh_loads_into_new_schema_not_old_active(
         patch("apps.workspaces.tasks.run_pipeline", side_effect=fake_run_pipeline),
         patch("apps.workspaces.tasks.teardown_schema.configure", return_value=deferrer),
     ):
-        await refresh_tenant_schema(
+        result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
@@ -646,6 +647,12 @@ async def test_refresh_loads_into_new_schema_not_old_active(
         f"{provisioning_schema.schema_name!r}, but the pipeline targeted the old "
         "active base schema (the refresh-data-loss bug)."
     )
+
+    assert result["status"] == "active"
+    await provisioning_schema.arefresh_from_db()
+    await old_active_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.ACTIVE
+    assert old_active_schema.state == SchemaState.TEARDOWN
 
 
 # ---------------------------------------------------------------------------
@@ -820,10 +827,13 @@ async def test_refresh_waits_for_its_tenant_and_fails_visibly_on_timeout(
 
     holder = asyncio.create_task(hold_tenant())
     ready = asyncio.create_task(holder_ready.wait())
-    # Bounded, and over both tasks: a holder that fails before set() surfaces here.
-    done, _ = await asyncio.wait({holder, ready}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
-    assert ready in done, "the tenant-lock holder never became ready"
     try:
+        done, _ = await asyncio.wait(
+            {holder, ready}, timeout=10, return_when=asyncio.FIRST_COMPLETED
+        )
+        if holder in done:
+            await holder
+        assert ready in done, "the tenant-lock holder never became ready"
         with (
             patch.object(data_operation, "_LOCK_TIMEOUT", "300ms"),
             patch("apps.workspaces.tasks.aresolve_credential", new=AsyncMock()),
@@ -841,7 +851,9 @@ async def test_refresh_waits_for_its_tenant_and_fails_visibly_on_timeout(
             )
     finally:
         release.set()
-        await holder
+        ready.cancel()
+        holder.cancel()
+        await asyncio.gather(holder, ready, return_exceptions=True)
 
     assert result["retry_required"] is True
     pipeline.assert_not_called()
@@ -938,6 +950,150 @@ async def test_a_refresh_rechecks_authority_once_it_holds_the_tenant_lock(
 
     assert result["status"] == "denied"
     assert access.await_count == 2
+    mocks["pipeline"].assert_not_called()
+    await provisioning_schema.arefresh_from_db()
+    await old_active_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.FAILED
+    assert old_active_schema.state == SchemaState.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure", ["credential", "registry", "config", "generation"])
+async def test_refresh_startup_failure_fails_candidate(
+    provisioning_schema, old_active_schema, tenant_membership_obj, failure
+):
+    patches = _refresh_patches()
+    targets = {
+        "credential": "apps.workspaces.tasks.aresolve_credential",
+        "registry": "apps.workspaces.tasks.get_registry",
+        "generation": "apps.workspaces.tasks.begin_load_generation",
+    }
+    with contextlib.ExitStack() as stack:
+        mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+        if failure == "config":
+            mocks["registry"].return_value.get.side_effect = RuntimeError("startup failed")
+        else:
+            stack.enter_context(patch(targets[failure], side_effect=RuntimeError("startup failed")))
+        result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+            **await _refresh_auth_kwargs(tenant_membership_obj),
+        )
+
+    assert result["retry_required"] is True
+    mocks["pipeline"].assert_not_called()
+    await provisioning_schema.arefresh_from_db()
+    await old_active_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.FAILED
+    assert old_active_schema.state == SchemaState.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_cancelled_during_generation_start_clears_committed_marker(
+    provisioning_schema, tenant_membership_obj
+):
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_begin(tenant_id):
+        generation = begin_load_generation(tenant_id)
+        started.set()
+        assert release.wait(timeout=10)
+        return generation
+
+    patches = _refresh_patches()
+    with contextlib.ExitStack() as stack:
+        mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+        stack.enter_context(patch("apps.workspaces.tasks.begin_load_generation", blocked_begin))
+        work = asyncio.create_task(
+            refresh_tenant_schema.func(
+                context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+                schema_id=str(provisioning_schema.id),
+                membership_id=str(tenant_membership_obj.id),
+                **await _refresh_auth_kwargs(tenant_membership_obj),
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            work.cancel()
+            await asyncio.sleep(0)
+            assert not work.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await work
+        finally:
+            release.set()
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+
+    mocks["pipeline"].assert_not_called()
+    ledger = await TenantLoadGeneration.objects.aget(tenant_id=provisioning_schema.tenant_id)
+    assert ledger.loading_generation == 0
+    await provisioning_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("change", ["unlink", "archive", "delete"])
+async def test_refresh_rechecks_exact_source_after_waiting_for_tenant(
+    provisioning_schema, old_active_schema, tenant_membership_obj, change
+):
+    sibling = await Tenant.objects.acreate(
+        provider="commcare", external_id="still-linked", canonical_name="Still linked"
+    )
+    await type(tenant_membership_obj).objects.acreate(
+        user_id=tenant_membership_obj.user_id, tenant=sibling
+    )
+    await WorkspaceTenant.objects.acreate(
+        workspace_id=provisioning_schema.refresh_workspace_id, tenant=sibling
+    )
+
+    @contextlib.asynccontextmanager
+    async def lock_after_access_change(_tenant_ids):
+        if change == "unlink":
+            await WorkspaceTenant.objects.filter(
+                workspace_id=provisioning_schema.refresh_workspace_id,
+                tenant_id=provisioning_schema.tenant_id,
+            ).adelete()
+        elif change == "archive":
+            await (
+                type(tenant_membership_obj)
+                .objects.filter(id=tenant_membership_obj.id)
+                .aupdate(archived_at=timezone.now())
+            )
+        else:
+            await type(tenant_membership_obj).objects.filter(id=tenant_membership_obj.id).adelete()
+        yield
+
+    patches = _refresh_patches()
+    with contextlib.ExitStack() as stack:
+        mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+        stack.enter_context(
+            patch("apps.workspaces.tasks.tenant_data_lock", lock_after_access_change)
+        )
+        stack.enter_context(
+            patch(
+                "apps.workspaces.tasks.aresolve_workspace_access_ex",
+                new=AsyncMock(return_value=MagicMock(granted=True)),
+            )
+        )
+        create = stack.enter_context(
+            patch("apps.workspaces.tasks.SchemaManager.create_physical_schema")
+        )
+        result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+            **await _refresh_auth_kwargs(tenant_membership_obj),
+        )
+
+    assert result["status"] == "denied"
+    create.assert_not_called()
+    mocks["credential"].assert_not_called()
     mocks["pipeline"].assert_not_called()
     await provisioning_schema.arefresh_from_db()
     await old_active_schema.arefresh_from_db()
