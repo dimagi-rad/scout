@@ -632,6 +632,8 @@ async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, 
     [
         ({"status": "denied", "error": "role changed", "tenants": []}, True),
         ({"tenants": [], "all_succeeded": True, "view_schema": None}, False),
+        ({"view_schema": {"ok": True}}, False),
+        ({"view_schema": {"ok": False, "error": "transient publication failure"}}, True),
         (RuntimeError("worker lost the database"), True),
     ],
 )

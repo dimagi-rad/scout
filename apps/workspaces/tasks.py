@@ -1183,8 +1183,11 @@ async def materialize_workspace(
         preflight_failures = _resume_records(result)
         return result
     finally:
-        # Only a run that reached the end of the core body reports view_schema.
-        if only_unserved and not (isinstance(result, dict) and "view_schema" in result):
+        reported_publication = isinstance(result, dict) and "view_schema" in result
+        outcome = result.get("view_schema") if reported_publication else None
+        # None means a single-source workspace needed no view publication.
+        published = reported_publication and (outcome is None or outcome.get("ok"))
+        if only_unserved and not published:
             try:
                 await rebuild_workspace_view_schema.defer_async(workspace_id=str(workspace_id))
             except Exception:
