@@ -65,6 +65,10 @@ class ErrorCode(StrEnum):
     # provider admin. Retrying as the same user cannot succeed.
     WORKSPACE_ROLE_INSUFFICIENT = "WORKSPACE_ROLE_INSUFFICIENT"
 
+    # Not attempted because the requester can't use some *other* source of the
+    # workspace (#380); this source itself is fine, so it carries no remedy.
+    WORKSPACE_TENANT_SKIPPED = "WORKSPACE_TENANT_SKIPPED"
+
     # The acting user may not read this workspace now (not a member, or missing
     # one of its sources). A Scout authorization decision re-checked per tool
     # call, not an upstream 403: it must not share AUTH_ACCESS_DENIED, which

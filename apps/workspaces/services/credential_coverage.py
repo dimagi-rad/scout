@@ -504,3 +504,142 @@ async def aget_workspace_credential_coverage(
         workspace_tenants,
         readiness,
     )
+
+
+class CoverageRecovery(StrEnum):
+    """What a member has to do to become usable for one tenant.
+
+    The contract distinguishes these because the fixes differ: a member who
+    never had the source must connect it, a member whose access was removed
+    must have it restored upstream, an expired sign-in only needs a reconnect,
+    and an OCS credential for the wrong or an unknown team needs that team
+    connected specifically.
+    """
+
+    CONNECT_SOURCE = "connect_source"
+    ACCESS_REMOVED = "access_removed"
+    RECONNECT = "reconnect"
+    CONNECT_TEAM = "connect_team"
+    LEGACY_TEAM_UNKNOWN = "legacy_team_unknown"
+
+
+_TEAM_GAPS = frozenset(
+    {
+        CredentialGapCode.OCS_API_KEY_TEAM_AMBIGUOUS,
+        CredentialGapCode.OAUTH_SCOPE_MISMATCH,
+        CredentialGapCode.OCS_CONNECTION_SCOPE_MISSING,
+        CredentialGapCode.OCS_CONNECTION_SCOPE_MISMATCH,
+        CredentialGapCode.OCS_ACCOUNT_SCOPE_MISSING,
+        CredentialGapCode.OCS_ACCOUNT_SCOPE_MISMATCH,
+    }
+)
+
+
+@dataclass(frozen=True)
+class MissingTenant:
+    """One workspace tenant a member cannot currently use, with its remedy.
+
+    Carries only source identity and team labels — never credential material —
+    because it is returned verbatim to the member being denied.
+    """
+
+    tenant_id: str
+    tenant_name: str
+    provider: str
+    recovery: CoverageRecovery
+    team_slug: str = ""
+    team_name: str = ""
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def _recovery(item: TenantCredentialReadiness, removed_pairs) -> CoverageRecovery:
+    gap = item.gap
+    if gap.code == CredentialGapCode.MISSING_LIVE_MEMBERSHIP:
+        if (item.user_id, item.tenant_id) in removed_pairs:
+            return CoverageRecovery.ACCESS_REMOVED
+        return CoverageRecovery.CONNECT_SOURCE
+    if gap.code == CredentialGapCode.OCS_TEAM_MISSING:
+        return CoverageRecovery.LEGACY_TEAM_UNKNOWN
+    if gap.code in _TEAM_GAPS:
+        return CoverageRecovery.CONNECT_TEAM
+    return CoverageRecovery.RECONNECT
+
+
+def _missing_tenant(item: TenantCredentialReadiness, removed_pairs) -> MissingTenant:
+    return MissingTenant(
+        tenant_id=item.gap.tenant_id,
+        tenant_name=item.gap.tenant_name,
+        provider=item.gap.provider,
+        recovery=_recovery(item, removed_pairs),
+        team_slug=item.gap.team_slug,
+        team_name=item.gap.team_name,
+    )
+
+
+def _unmembered(readiness) -> list[TenantCredentialReadiness]:
+    return [
+        item
+        for item in readiness
+        if item.gap is not None and item.gap.code == CredentialGapCode.MISSING_LIVE_MEMBERSHIP
+    ]
+
+
+def _removed_pairs_queryset(unmembered):
+    # An archived row is the tombstone an authoritative upstream denial (or the
+    # member disconnecting that account) leaves behind; no row means never had.
+    return TenantMembership.all_objects.filter(
+        user_id__in={item.user_id for item in unmembered},
+        tenant_id__in={item.tenant_id for item in unmembered},
+        archived_at__isnull=False,
+    ).values_list("user_id", "tenant_id")
+
+
+def _gaps_by_pair(readiness, removed_pairs) -> dict[tuple[int, str], MissingTenant]:
+    removed = {(user_id, str(tenant_id)) for user_id, tenant_id in removed_pairs}
+    return {
+        (item.user_id, item.tenant_id): _missing_tenant(item, removed)
+        for item in readiness
+        if item.gap is not None
+    }
+
+
+def coverage_gaps(
+    user_tenant_pairs: Iterable[tuple[int, Tenant]],
+) -> dict[tuple[int, str], MissingTenant]:
+    """Pairs whose user cannot use the tenant with their own credential.
+
+    Keyed by ``(user_id, tenant id string)``; absent pairs are covered. This is
+    the all-of predicate behind the workspace authorizer and admission checks.
+    It evaluates local readiness only and never borrows another user's
+    credential: one user's coverage says nothing about another's.
+    """
+    readiness = get_tenant_credential_readiness(user_tenant_pairs)
+    unmembered = _unmembered(readiness)
+    removed = list(_removed_pairs_queryset(unmembered)) if unmembered else []
+    return _gaps_by_pair(readiness, removed)
+
+
+async def acoverage_gaps(
+    user_tenant_pairs: Iterable[tuple[int, Tenant]],
+) -> dict[tuple[int, str], MissingTenant]:
+    """Async twin of :func:`coverage_gaps`."""
+    readiness = await aget_tenant_credential_readiness(user_tenant_pairs)
+    unmembered = _unmembered(readiness)
+    removed = await _alist(_removed_pairs_queryset(unmembered)) if unmembered else []
+    return _gaps_by_pair(readiness, removed)
+
+
+def member_coverage_gaps(user_id: int, tenants: Iterable[Tenant]) -> dict[str, MissingTenant]:
+    """:func:`coverage_gaps` for one user, keyed by tenant id string."""
+    gaps = coverage_gaps((user_id, tenant) for tenant in tenants)
+    return {tenant_id: missing for (_user_id, tenant_id), missing in gaps.items()}
+
+
+async def amember_coverage_gaps(
+    user_id: int, tenants: Iterable[Tenant]
+) -> dict[str, MissingTenant]:
+    """Async twin of :func:`member_coverage_gaps`."""
+    gaps = await acoverage_gaps((user_id, tenant) for tenant in tenants)
+    return {tenant_id: missing for (_user_id, tenant_id), missing in gaps.items()}

@@ -17,7 +17,6 @@ from apps.workspaces.access import (
     resolve_workspace_access_ex,
 )
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
-from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 from tests.tenant_access import grant_tenant_access
 
 User = get_user_model()
@@ -135,10 +134,13 @@ def test_member_without_live_tenant_gets_tenant_access_lost(cause):
     assert result.lost_tenant_names == ("skelly",)
     body = access_denied_body(result)
     assert body["reason"] == TENANT_ACCESS_LOST
-    assert CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in body["error"]
-    assert "if you disconnected it" in body["error"]
-    assert "If access was removed or restricted at the provider" in body["error"]
-    assert "reconnecting alone cannot restore those permissions" in body["error"]
+    # Per-source remedies (#380): a lost source names both causes, since the
+    # tombstone can't tell a disconnect from upstream removal.
+    if cause == "not_connected":
+        assert "connect an account on CommCare HQ" in body["error"]
+    else:
+        assert "reconnect it in Connected Accounts" in body["error"]
+        assert "ask an admin there to restore it" in body["error"]
     assert "A workspace admin can help remove" in body["error"]
     assert body["lost_tenants"] == ["skelly"]
     assert "skelly" in body["error"]

@@ -22,7 +22,13 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.workspaces.access import _live_tenant_ids, _shares_live_tenant
+from apps.workspaces.access import (
+    _live_tenant_ids,
+    _shares_live_tenant,
+    missing_tenants_by_workspace,
+    missing_tenants_for_member,
+    missing_tenants_payload,
+)
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
     MaterializationRun,
@@ -260,13 +266,11 @@ class WorkspaceListView(APIView):
         memberships = list(memberships)
         schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
 
-        # Bulk live-access check, one query for the whole list. A workspace is
-        # accessible iff it has no tenants OR the user shares a live tenant with
-        # it — the same rule apps/workspaces/access.py enforces per request. We
-        # surface it here (rather than filtering rows out) so the client can keep
-        # orphaned workspaces addressable by URL while gating them in the UI.
-        user_live_tenant_ids = set(
-            TenantMembership.objects.filter(user=request.user).values_list("tenant_id", flat=True)
+        # Surfaced per row (rather than filtering rows out) so the client can keep
+        # denied workspaces addressable by URL while gating them in the UI and
+        # telling the member which sources to connect.
+        missing_by_ws = missing_tenants_by_workspace(
+            request.user, [m.workspace for m in memberships]
         )
 
         results = []
@@ -279,8 +283,7 @@ class WorkspaceListView(APIView):
                 }
                 for wt in m.workspace.workspace_tenants.all()
             ]
-            ws_tenant_ids = [wt.tenant_id for wt in m.workspace.workspace_tenants.all()]
-            has_access = not ws_tenant_ids or bool(set(ws_tenant_ids) & user_live_tenant_ids)
+            missing = missing_by_ws[m.workspace.id]
             results.append(
                 {
                     "id": str(m.workspace.id),
@@ -289,7 +292,8 @@ class WorkspaceListView(APIView):
                     "is_auto_created": m.workspace.is_auto_created,
                     "role": m.role,
                     "tenants": tenants,
-                    "has_access": has_access,
+                    "has_access": not missing,
+                    "missing_tenants": missing_tenants_payload(missing),
                     "member_count": m.member_count,
                     "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),
                     "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
@@ -371,9 +375,14 @@ class WorkspaceDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        # Metadata only, and the page that offers remove-source/leave/delete loads
+        # it first, so it must stay reachable without coverage.
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
+        missing = missing_tenants_for_member(request.user, workspace)
 
         tenants = list(workspace.tenants.all())
         active_schemas = TenantSchema.objects.filter(
@@ -421,7 +430,9 @@ class WorkspaceDetailView(APIView):
                 "display_name": display_name,
                 "is_auto_created": workspace.is_auto_created,
                 "role": membership.role,
-                "system_prompt": workspace.system_prompt,
+                # Agent configuration is workspace content, not page metadata.
+                "system_prompt": "" if missing else workspace.system_prompt,
+                "missing_tenants": missing_tenants_payload(missing),
                 "schema_status": schema_status,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
@@ -463,7 +474,9 @@ class WorkspaceDetailView(APIView):
         )
 
     def delete(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
         if membership.role != WorkspaceRole.MANAGE:
@@ -471,9 +484,27 @@ class WorkspaceDetailView(APIView):
                 {"error": "Only workspace managers can delete a workspace."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # Deleting destroys every member's content, so without coverage it is a
+        # remediation only for a workspace nobody else is in.
+        missing = {t.tenant_id for t in missing_tenants_for_member(request.user, workspace)}
+        if missing and workspace.memberships.exclude(user=request.user).exists():
+            return Response(
+                {
+                    "error": "You can't delete a shared workspace while you're missing one "
+                    "of its sources. Remove that source, or make another member a "
+                    "manager and leave."
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-        # Check this is not the user's last workspace covering any tenant
-        tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
+        # Check this is not the user's last workspace covering any tenant. A source
+        # they can no longer use isn't "covered" by keeping this workspace, and
+        # counting it would trap them in a workspace they can't open.
+        tenant_ids = [
+            tid
+            for tid in workspace.workspace_tenants.values_list("tenant_id", flat=True)
+            if str(tid) not in missing
+        ]
         for tid in tenant_ids:
             other_workspaces = Workspace.objects.filter(
                 workspace_tenants__tenant_id=tid,
@@ -501,11 +532,19 @@ class WorkspaceMemberListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        # The only source of the membership ids that leaving and handing over the
+        # manager role need, so reachable without coverage; but then it names only
+        # the caller, and only a manager (who can hand over) sees others' id and role.
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
+        covered = not missing_tenants_for_member(request.user, workspace)
 
         memberships = WorkspaceMembership.objects.filter(workspace=workspace).select_related("user")
+        if not covered and membership.role != WorkspaceRole.MANAGE:
+            memberships = memberships.filter(user=request.user)
         members = [
             {
                 "id": str(m.id),
@@ -515,6 +554,8 @@ class WorkspaceMemberListView(APIView):
                 "role": m.role,
                 "created_at": m.created_at.isoformat(),
             }
+            if covered or m.user_id == request.user.id
+            else {"id": str(m.id), "role": m.role}
             for m in memberships
         ]
         live_invites = WorkspaceInvite.objects.filter(
@@ -522,7 +563,7 @@ class WorkspaceMemberListView(APIView):
             status__in=LIVE_INVITE_STATUSES,
             expires_at__gt=timezone.now(),
         )
-        invites = [_serialize_invite(i) for i in live_invites]
+        invites = [_serialize_invite(i) for i in live_invites] if covered else []
         return Response({"members": members, "invites": invites})
 
     def post(self, request, workspace_id):
@@ -625,7 +666,9 @@ class WorkspaceMemberDetailView(APIView):
             return None
 
     def patch(self, request, workspace_id, membership_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
         if membership.role != WorkspaceRole.MANAGE:
@@ -640,6 +683,14 @@ class WorkspaceMemberDetailView(APIView):
         new_role = request.data.get("role")
         if new_role not in WorkspaceRole.values:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Without coverage the only role change is handing over: making another
+        # member a manager, so a last manager who lost a source can then leave.
+        handing_over = new_role == WorkspaceRole.MANAGE and target.user_id != request.user.id
+        if not handing_over:
+            _workspace, _membership, err = resolve_workspace(request, workspace_id)
+            if err:
+                return err
 
         # Prevent demoting the last manager
         if (
@@ -657,7 +708,9 @@ class WorkspaceMemberDetailView(APIView):
         return Response({"id": str(target.id), "role": target.role})
 
     def delete(self, request, workspace_id, membership_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
 
@@ -672,6 +725,11 @@ class WorkspaceMemberDetailView(APIView):
                 {"error": "Only managers can remove other members."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if not is_self:
+            # Only leaving is exempt from coverage; acting on others still needs it.
+            _workspace, _membership, err = resolve_workspace(request, workspace_id)
+            if err:
+                return err
 
         # Prevent removing the last manager
         if _is_last_manager(workspace, target):
@@ -788,7 +846,9 @@ class WorkspaceTenantView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
 
@@ -853,7 +913,9 @@ class WorkspaceTenantView(APIView):
     def delete(self, request, workspace_id, wt_id):
         from apps.workspaces.services.workspace_service import remove_workspace_tenant
 
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, membership, err = resolve_workspace(
+            request, workspace_id, require_coverage=False
+        )
         if err:
             return err
         if membership.role != WorkspaceRole.MANAGE:
@@ -867,6 +929,20 @@ class WorkspaceTenantView(APIView):
         except WorkspaceTenant.DoesNotExist:
             return Response(
                 {"error": "Tenant not found in workspace."}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Without coverage a manager may only remove a source they are missing;
+        # removing one they can still read would change the workspace for members
+        # with full access. Removing the missing one is allowed even when shared:
+        # it is how they regain access, and a covered manager could do the same,
+        # unlike deleting the whole workspace.
+        missing = {t.tenant_id for t in missing_tenants_for_member(request.user, workspace)}
+        if missing and str(wt.tenant_id) not in missing:
+            return Response(
+                {
+                    "error": "You can only remove a source you're missing until you can use them all."
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         try:

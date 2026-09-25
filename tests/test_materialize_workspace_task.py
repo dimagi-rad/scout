@@ -1376,15 +1376,45 @@ async def _materialize_as(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
+async def test_partially_covering_requester_is_refused_before_loading(
     workspace, tenant, tenant_membership_obj, user
+):
+    """Under all-of access (#380) a requester missing a tenant never reaches the
+    loader, so #364's partial load cannot start. Every tenant keeps a recorded
+    not-run entry for the resume path; the summary names the missing one."""
+    other = await _add_second_tenant(workspace)
+
+    result, cube = await _materialize_as(
+        user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
+    )
+
+    cube.assert_not_called()
+    assert result["status"] == "denied"
+    assert result["all_succeeded"] is False
+    assert other.canonical_name in result["error"]
+    assert tenant.canonical_name not in result["error"]
+    assert {r["tenant"] for r in result["tenants"]} == {tenant.external_id, other.external_id}
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    # The covered tenant must not inherit the "connect that account" guidance.
+    assert by_tenant[tenant.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_SKIPPED
+    assert by_tenant[tenant.external_id]["error"].startswith("not attempted")
+    assert not any(tenant.external_id in line for line in result["guidance"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
+    settings, workspace, tenant, tenant_membership_obj, user
 ):
     """The production path — user_id is always populated — had zero coverage.
 
     A workspace tenant with no membership for the acting user never entered
     tenant_results, so `all(...)` over a list it was absent from returned True
     and the run reported success while loading a subset of the workspace (#364).
+    Reachable with all-of off, or when access is lost after the gate passed.
     """
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     other = await _add_second_tenant(workspace)
 
     result, _ = await _materialize_as(user, workspace)
@@ -1408,7 +1438,7 @@ async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
-    workspace, tenant, tenant_membership_obj, user, django_user_model
+    settings, workspace, tenant, tenant_membership_obj, user, django_user_model
 ):
     """Never resolve a credential from another member to satisfy this user's run.
 
@@ -1417,6 +1447,8 @@ async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
     teammate's token only ever verifies the teammate's own access. Pins that the
     `user_id` filter stays, rather than being relaxed to any-member resolution.
     """
+    # Pins the loader's own narrowing, reachable only with all-of off.
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     mate = await django_user_model.objects.acreate_user(email="mate@example.com", password="pass")
     other = await _add_second_tenant(workspace, external_id="mates-bot")
     await agrant_tenant_access(mate, other)
@@ -1432,9 +1464,11 @@ async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_archived_membership_does_not_make_a_tenant_reachable(
-    workspace, tenant, tenant_membership_obj, user
+    settings, workspace, tenant, tenant_membership_obj, user
 ):
     """An archived membership is upstream access that was removed — not access."""
+    # Pins the loader's own narrowing, reachable only with all-of off.
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     other = await _add_second_tenant(workspace, external_id="revoked-domain")
     await TenantMembership.objects.acreate(user=user, tenant=other, archived_at=timezone.now())
 
@@ -1524,9 +1558,11 @@ async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("retained_schema", [False, True])
 async def test_unreachable_tenant_cube_build_uses_available_workspace_sources(
-    workspace, tenant, tenant_membership_obj, user, retained_schema
+    settings, workspace, tenant, tenant_membership_obj, user, retained_schema
 ):
     """Missing schemas are disclosed; retained schemas remain in the shared view."""
+    # A partially covering requester only runs with all-of off (see above).
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     other = await _add_second_tenant(workspace, external_id="unreachable-for-cube")
     await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="refreshed_tenant", state=SchemaState.ACTIVE

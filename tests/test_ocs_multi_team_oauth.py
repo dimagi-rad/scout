@@ -35,9 +35,9 @@ from apps.users.services.token_refresh import (
 )
 from apps.users.views import _arefresh_all_identities
 from apps.workspaces.access import (
-    _ashares_live_tenant,
-    acovers_live_tenants,
-    covers_live_tenants,
+    TENANT_ACCESS_LOST,
+    aresolve_workspace_access_ex,
+    resolve_workspace_access_ex,
 )
 from apps.workspaces.models import (
     Workspace,
@@ -45,7 +45,9 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.credential_coverage import CoverageRecovery
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
+from tests.tenant_access import agrant_tenant_access, record_fresh_oauth_proof
 
 
 @pytest.fixture
@@ -350,18 +352,13 @@ async def test_every_team_token_is_enumerable(user):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_two_team_user_covers_an_all_of_workspace(user, mocker):
-    """The reason #156 gates #380: a two-team user now passes a covering-all check.
+    """The reason #156 gated #380: a two-team user passes the all-of gate.
 
-    #380 will change `_shares_live_tenant` from "shares at least one of the
-    workspace's tenants" to "has a live membership for every one of them". That
-    was blocked because `unique_oauth_connection_per_user_provider` let a user
-    prove only one OCS team, so a workspace spanning two would have denied them
-    with no self-remediation — trading a data-exposure bug for a lockout.
-
-    This drives the whole flow for real (two OAuth authorisations, no stubbed
-    memberships) and asserts the covering predicate the flip will use. The gate
-    itself is deliberately untouched and still any-of; this asserts the flip is
-    now *safe*, not that it has happened.
+    All-of was blocked because one OCS connection per user meant a workspace
+    spanning two teams would deny its owner with no self-remediation. This drives
+    two real OAuth authorisations (no stubbed memberships) through the real
+    workspace authorizer, and pins that it is a genuine all-of: losing one team's
+    tenant denies the whole workspace and names that tenant.
     """
     app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
 
@@ -404,6 +401,8 @@ async def test_two_team_user_covers_an_all_of_workspace(user, mocker):
         )
         assert tm.archived_at is None
         assert tm.connection.scope_key == team
+        # The listing just succeeded: what upstream freshness admission reads.
+        await sync_to_async(record_fresh_oauth_proof)(tm.connection, tenant)
 
     workspace = await Workspace.objects.acreate(name="Both teams", created_by=user)
     await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant_a)
@@ -412,36 +411,41 @@ async def test_two_team_user_covers_an_all_of_workspace(user, mocker):
         workspace=workspace, user=user, role=WorkspaceRole.MANAGE
     )
 
-    tenant_ids = [tenant_a.id, tenant_b.id]
+    granted = await aresolve_workspace_access_ex(user, workspace.id)
+    assert granted.granted
+    assert (await sync_to_async(resolve_workspace_access_ex)(user, workspace.id)).granted
 
-    # THE PROOF: covering-all now passes for a user who holds both teams.
-    assert await acovers_live_tenants(user, tenant_ids) is True
-    assert await sync_to_async(covers_live_tenants)(user, tenant_ids) is True
-
-    # And it is a real all-of check, not a tautology: losing one tenant fails it
-    # while today's any-of gate would still grant access.
     await TenantMembership.objects.filter(user=user, tenant=tenant_b).aupdate(
         archived_at=timezone.now()
     )
-    assert await acovers_live_tenants(user, tenant_ids) is False
-    assert await _ashares_live_tenant(user, tenant_ids) is True
+    denied = await aresolve_workspace_access_ex(user, workspace.id)
+    assert denied.denied_reason == TENANT_ACCESS_LOST
+    assert [(t.tenant_id, t.recovery) for t in denied.missing_tenants] == [
+        (str(tenant_b.id), CoverageRecovery.ACCESS_REMOVED)
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_a_single_team_user_still_fails_a_covering_check(user, other_user):
-    """The predicate must not be satisfiable by a teammate's membership.
-
-    A credential is never borrowed across users, so one member covering a tenant
-    says nothing about another's coverage (#380's standing security decision).
-    """
+async def test_a_teammates_coverage_never_satisfies_the_gate(user, other_user):
+    """A credential is never borrowed across users (#380's standing decision): one
+    member covering a tenant says nothing about another member's coverage."""
     tenant_a = await Tenant.objects.acreate(provider="ocs", external_id="a", canonical_name="a")
     tenant_b = await Tenant.objects.acreate(provider="ocs", external_id="b", canonical_name="b")
-    await TenantMembership.objects.acreate(user=user, tenant=tenant_a)
-    await TenantMembership.objects.acreate(user=other_user, tenant=tenant_b)
+    await agrant_tenant_access(user, tenant_a)
+    await agrant_tenant_access(other_user, tenant_b)
+    workspace = await Workspace.objects.acreate(name="Shared", created_by=user)
+    for tenant in (tenant_a, tenant_b):
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    for member in (user, other_user):
+        await WorkspaceMembership.objects.acreate(
+            workspace=workspace, user=member, role=WorkspaceRole.READ
+        )
 
-    assert await acovers_live_tenants(user, [tenant_a.id, tenant_b.id]) is False
-    assert await acovers_live_tenants(user, [tenant_a.id]) is True
+    for member, lacking in ((user, tenant_b), (other_user, tenant_a)):
+        result = await aresolve_workspace_access_ex(member, workspace.id)
+        assert result.denied_reason == TENANT_ACCESS_LOST
+        assert [t.tenant_id for t in result.missing_tenants] == [str(lacking.id)]
 
 
 # --- self-remediation surface ------------------------------------------------

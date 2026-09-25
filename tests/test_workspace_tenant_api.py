@@ -39,13 +39,14 @@ def test_add_tenant_to_workspace(api_client, user, workspace, tenant2, tenant_me
     assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant2).exists()
 
 
-def test_add_tenant_requires_manage_role(api_client, user, workspace, tenant2):
+def test_add_tenant_requires_manage_role(api_client, user, workspace, tenant, tenant2):
     from django.contrib.auth import get_user_model
 
     other = get_user_model().objects.create_user(email="other@example.com", password="pass")
     WorkspaceMembership.objects.create(
         workspace=workspace, user=other, role=WorkspaceRole.READ_WRITE
     )
+    grant_tenant_access(other, tenant)
     api_client.force_login(other)
     resp = api_client.post(
         f"/api/workspaces/{workspace.id}/tenants/",
@@ -53,6 +54,7 @@ def test_add_tenant_requires_manage_role(api_client, user, workspace, tenant2):
         format="json",
     )
     assert resp.status_code == 403
+    assert resp.data["error"] == "Only workspace managers can add tenants."
 
 
 def test_add_tenant_user_lacks_tenant_membership_is_rejected(api_client, user, workspace, tenant2):
@@ -94,10 +96,10 @@ def test_cannot_remove_last_tenant_from_workspace(api_client, user, workspace, t
     assert "last" in resp.data["error"].lower()
 
 
-def test_add_tenant_already_in_workspace_requires_membership(
+def test_add_tenant_refused_when_member_lacks_a_workspace_tenant(
     api_client, user, workspace, tenant, tenant2
 ):
-    """Idempotent re-add must still verify the user holds TenantMembership for that tenant."""
+    """A member lacking one of the workspace's tenants cannot manage its sources at all."""
     # tenant2 is already in workspace via ORM, but user has NO TenantMembership for tenant2
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
 
@@ -108,7 +110,26 @@ def test_add_tenant_already_in_workspace_requires_membership(
         format="json",
     )
 
-    # User lacks TenantMembership for tenant2 — must be rejected even though it's already in workspace
+    # Under all-of access a member lacking tenant2 cannot reach the workspace at
+    # all, so the re-add is refused before it gets to the tenant check.
+    assert resp.status_code == 403
+    assert resp.data["reason"] == "tenant_access_lost"
+
+
+def test_add_tenant_already_in_workspace_still_checks_the_requester_under_any_of(
+    settings, api_client, user, workspace, tenant, tenant2
+):
+    """With the rollout switch off the gate lets them in; the re-add still checks."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    api_client.force_login(user)
+
+    resp = api_client.post(
+        f"/api/workspaces/{workspace.id}/tenants/",
+        {"tenant_id": str(tenant2.id)},
+        format="json",
+    )
+
     assert resp.status_code == 400
     assert "do not have access" in resp.data["error"]
 
