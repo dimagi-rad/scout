@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from django.core.cache import cache
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 from apps.workspaces.services.access_freshness import (
@@ -50,6 +51,7 @@ from apps.workspaces.services.access_freshness import (
     final_denial_reason,
     freshness_enforced,
 )
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 
 NOT_MEMBER = "not_member"
 TENANT_ACCESS_LOST = "tenant_access_lost"
@@ -135,8 +137,7 @@ _FRESHNESS_MESSAGES = {
         "Reconnect it under Connected Accounts."
     ),
     UPSTREAM_ACCESS_LOST: (
-        "Your access to one of this workspace's sources was removed upstream. "
-        "Reconnect or ask an admin to restore it."
+        "For one of this workspace's sources: " + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
     ),
     VERIFICATION_UNAVAILABLE: (
         "We couldn't verify your access to this workspace right now. Please retry shortly."
@@ -158,8 +159,8 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
         projects = ", ".join(result.lost_tenant_names)
         return {
             "error": (
-                f"You no longer have access to: {projects}. "
-                "Access may have been removed upstream — reconnect or ask an admin."
+                f"You no longer have access to {projects}: "
+                + CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE]
             ),
             "reason": TENANT_ACCESS_LOST,
             "lost_tenants": list(result.lost_tenant_names),

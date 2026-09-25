@@ -6,7 +6,8 @@ For environments where Docker is not available or not desired, you can run Scout
 
 - Python 3.12+
 - PostgreSQL 14+
-- Redis
+- Redis for shared caching/rate limits when running multiple API workers
+- A reachable Cube runtime and schema validator, built from Scout's `cube_config/`
 - Node.js 18+ or Bun
 - [uv](https://docs.astral.sh/uv/)
 - A reverse proxy (nginx, Caddy) for production
@@ -22,6 +23,22 @@ uv sync --no-dev
 ### Configure environment
 
 Create a `.env` file or export environment variables. See [Configuration](configuration.md) for the full reference.
+
+The API, MCP server, and background worker need `CUBE_API_URL`,
+`CUBE_VALIDATOR_URL`, and `CUBEJS_API_SECRET`. Set the URLs to your private Cube
+services and use the same signing secret on Scout and Cube. Cube must be able
+to reach Scout's platform and managed databases. Deploy the runtime and validator
+from this repository's `cube_config/`; an unconfigured upstream Cube service is
+not a substitute. See the [Docker guide](docker.md) for the bundled services.
+
+Before starting Scout, verify both services' `/readyz` endpoints. Django's local
+missing-configuration warning is not a network health check. Redis is not
+required for background jobs; the job queue uses PostgreSQL.
+
+Set [`REDIS_URL`](configuration.md#cache) to a shared Redis service when running
+multiple API processes, including the four-worker command below. Without it,
+login lockouts and request rate limits use separate per-process memory caches,
+which multiplies their effective limits and resets them on process restart.
 
 ### Run migrations
 
@@ -49,10 +66,22 @@ The MCP server runs as a separate process and provides tool-based data access (S
 
 ```bash
 DJANGO_SETTINGS_MODULE=config.settings.production \
-  uv run python -m mcp_server
+  uv run python -m mcp_server --transport streamable-http
 ```
 
 By default it listens on port 8100. Set `MCP_SERVER_URL` on the backend to point to the MCP server if it runs on a different host.
+
+## Background worker
+
+Run a separate persistent Procrastinate worker for materialization and chat-resume
+jobs, with the same environment as the API:
+
+```bash
+DJANGO_SETTINGS_MODULE=config.settings.production \
+  uv run python manage.py procrastinate worker
+```
+
+Manage it with the same process supervisor as the API and MCP server.
 
 ## Frontend
 

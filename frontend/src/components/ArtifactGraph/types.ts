@@ -9,6 +9,7 @@ export interface ArtifactDetail {
   semantic_queries: Array<Record<string, unknown>>
   semantic_query_manifest?: Record<string, unknown>
   version: number
+  date_context?: DateContext
 }
 
 export interface StoryDoc {
@@ -84,6 +85,19 @@ export interface DateRange {
   preset?: string
 }
 
+export interface DateContext {
+  as_of: string
+  timezone: string
+  today: string
+  presets: Record<string, DateRange & { comparisons: Record<string, DateRange> }>
+}
+
+export interface ArtifactQueryContext {
+  as_of?: string
+  timezone?: string
+  sources: Record<string, DateRange | null>
+}
+
 export interface CompareRanges {
   current: DateRange
   previous: DateRange
@@ -100,6 +114,8 @@ export interface SemanticQuerySpec {
   filters?: Array<{ field: string; operator?: string; value?: unknown; values?: unknown[] }>
   order_by?: Array<{ field: string; direction?: string }>
   limit?: number
+  date_range?: DateRange
+  query_context?: { as_of: string; timezone: string }
 }
 
 export interface ResolvedQuery extends SemanticQuerySpec {
@@ -136,6 +152,7 @@ export interface StoryEngineApi {
   subscribe: (ref: string, callback: () => void) => () => void
   subscribeAll: (callback: () => void) => () => void
   setSourceOutputs: (blockId: string, outputs: Record<string, unknown>) => void
+  setSourceError: (blockId: string, error: string) => void
   getDiagnostics: () => Diagnostic[]
 }
 

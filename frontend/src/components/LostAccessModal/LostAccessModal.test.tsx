@@ -25,9 +25,9 @@ const ws = (id: string, has_access: boolean, provider = "commcare") => ({
   created_at: "2026-01-01T00:00:00Z",
 })
 
-function renderModal() {
+function renderModal(path = "/") {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <LostAccessModal />
     </MemoryRouter>,
   )
@@ -90,6 +90,21 @@ describe("LostAccessModal", () => {
     expect(screen.getByTestId("lost-access-modal")).toBeInTheDocument()
     expect(screen.queryByTestId("lost-access-picker")).toBeNull()
     expect(screen.getByText(/don’t have access to any workspaces/)).toBeInTheDocument()
+    expect(screen.getByText(/If you disconnected your account/)).toBeInTheDocument()
+    expect(screen.getByText(/reconnecting alone won’t restore those permissions/)).toBeInTheDocument()
+  })
+
+  it("lets a disconnected user reach connection management without another workspace", async () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal()
+    await userEvent.click(screen.getByRole("button", { name: "Open Connected Accounts" }))
+    expect(navigate).toHaveBeenCalledWith("/settings/connections")
+  })
+
+  it.each(["/settings/connections", "/settings/connections/"])("does not cover the recovery page %s", (path) => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    renderModal(path)
+    expect(screen.queryByTestId("lost-access-modal")).not.toBeInTheDocument()
   })
 
   it("links to the workspace's own page, where the user can leave or remove a source", async () => {
@@ -180,6 +195,7 @@ describe("LostAccessModal with missing sources", () => {
     expect(screen.getByTestId("lost-access-missing-t-bot-b")).toHaveTextContent(
       "Bot B: connect Open Chat Studio team 'Team B' in Connected Accounts",
     )
+    expect(screen.queryByText(/If you disconnected your account/)).not.toBeInTheDocument()
   })
 
   it("links to Connected Accounts", async () => {
