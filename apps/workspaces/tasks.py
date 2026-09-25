@@ -692,6 +692,7 @@ async def materialize_workspace_core(
     *,
     load_intent: dict[str, int] | None = None,
     locked_tenant_ids: frozenset[str] | None = None,
+    only_unserved: bool = False,
 ) -> dict:
     """Run materialization for all tenants in a workspace and rebuild view schemas.
 
@@ -710,6 +711,7 @@ async def materialize_workspace_core(
     tenant_results: list[dict] = []
     attempted_tenant_ids: set[str] = set()
     successful_attempted_tenant_ids: set[str] = set()
+    loaded_tenant_ids: set[str] = set()
 
     try:
         workspace = await Workspace.objects.aget(id=workspace_id)
@@ -803,6 +805,29 @@ async def materialize_workspace_core(
                 )
             )
             continue
+        served = (
+            await TenantSchema.objects.filter(
+                tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
+            ).afirst()
+            if only_unserved
+            else None
+        )
+        if served is not None:
+            # A source added to the workspace loads before publication; sources
+            # already serving data are only published, never reloaded for it.
+            # The views about to be published read this schema, so it counts as
+            # used; otherwise the inactivity sweep could drop it from under them.
+            await served.atouch()
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
+                    "provider": tm.tenant.provider,
+                    "success": True,
+                    "result": {"status": "already_loaded"},
+                }
+            )
+            continue
         attempted_tenant_ids.add(str(tm.tenant_id))
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
         if pipeline_name is None:
@@ -869,6 +894,7 @@ async def materialize_workspace_core(
                 }
             )
             continue
+        loaded_tenant_ids.add(str(tm.tenant_id))
         try:
             result = await _load_workspace_candidate(
                 workspace, tm, credential, pipeline_config, job_id
@@ -1047,8 +1073,14 @@ async def materialize_workspace_core(
     # raw_* tables, cascade-dropping the namespaced views in every OTHER workspace's
     # view schema (leaving them ACTIVE but empty). Rebuild each sibling multi-tenant
     # workspace's views against the new tables.
+    # A new-source load leaves already-serving sources untouched, so only the
+    # sources it actually loaded can have invalidated sibling views.
     await _rebuild_dependent_view_schemas(
-        [tm.tenant_id for tm in memberships],
+        [
+            tm.tenant_id
+            for tm in memberships
+            if not only_unserved or str(tm.tenant_id) in loaded_tenant_ids
+        ],
         exclude_workspace_id=str(workspace.id),
     )
 
@@ -1121,6 +1153,8 @@ async def materialize_workspace(
     workspace_id: str,
     user_id: str = "",
     load_intent: dict | None = None,
+    only_unserved: bool = False,
+    notify_thread: bool = True,
 ) -> dict:
     """Procrastinate task: run materialization for a workspace, then ALWAYS
     defer the chat-resume task so an interactive user is never left with a
@@ -1129,17 +1163,37 @@ async def materialize_workspace(
 
     The actual work lives in ``materialize_workspace_core`` so headless callers
     (recipes) can reuse it without the fire-and-resume machinery.
+    ``notify_thread=False`` is for dispatches no chat thread waits on (adding a
+    source), which have no ThreadJob to resume. ``only_unserved`` loads every
+    workspace source that serves nothing (typically the one just added) and
+    republishes the views; if the run stops before publishing, a plain view
+    rebuild is queued instead so the views reflect the sources that do serve.
     """
     job_id = context.job.id
     preflight_failures = None
+    result = None
     try:
         result = await materialize_workspace_core(
-            workspace_id, user_id, job_id, load_intent=load_intent
+            workspace_id,
+            user_id,
+            job_id,
+            load_intent=load_intent,
+            only_unserved=only_unserved,
         )
         preflight_failures = _resume_records(result)
         return result
     finally:
-        await _defer_resume_for_job(job_id, preflight_failures)
+        reported_publication = isinstance(result, dict) and "view_schema" in result
+        outcome = result.get("view_schema") if reported_publication else None
+        # None means a single-source workspace needed no view publication.
+        published = reported_publication and (outcome is None or outcome.get("ok"))
+        if only_unserved and not published:
+            try:
+                await rebuild_workspace_view_schema.defer_async(workspace_id=str(workspace_id))
+            except Exception:
+                logger.exception("Could not queue the view rebuild for workspace %s", workspace_id)
+        if notify_thread:
+            await _defer_resume_for_job(job_id, preflight_failures)
 
 
 def _resume_records(result: dict) -> list[dict]:

@@ -835,7 +835,7 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        wt, created = add_workspace_tenant(workspace, tenant)
+        wt, created = add_workspace_tenant(workspace, tenant, actor_id=request.user.id)
         if not created:
             return Response(
                 {
