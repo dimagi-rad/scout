@@ -201,20 +201,23 @@ export const createDictionarySlice: StateCreator<
         try {
           const activeDomainId = get().activeDomainId
           if (!activeDomainId) throw new Error("No active domain selected.")
-          const result = await api.post<{ status: string; error?: string }>(
+          const result = await api.post<{
+            status: "provisioning" | "partial" | "not_started"
+            error?: string
+          }>(
             `/api/workspaces/${activeDomainId}/refresh/`
           )
           if (!isCurrent()) return
-          if (result.status === "partial") {
-            throw new Error(result.error ?? "Some sources could not be refreshed.")
-          }
+          const warning = result.status === "partial"
+            ? result.error ?? "Some sources could not be refreshed."
+            : null
           // Materialization runs in the background — re-fetch to pick up any already-available data
           const raw = await api.get<BackendDictionaryResponse>(
             `/api/workspaces/${activeDomainId}/data-dictionary/`
           )
           if (!isCurrent()) return
           const data = transformBackendResponse(raw)
-          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
+          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: warning })
         } catch (error) {
           if (!isCurrent()) return
           const status =
