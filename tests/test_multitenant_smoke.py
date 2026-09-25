@@ -67,8 +67,7 @@ def test_adding_a_tenant_that_already_serves_data_only_rebuilds_views(api_client
 
 @pytest.mark.django_db(transaction=True)
 def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup):
-    """A new source is loaded first; the load then publishes the views and Cube,
-    so it is never published as a missing source."""
+    """Coverage reports the new source as missing until its load publishes data."""
     user, ws, t2 = setup
     view = WorkspaceViewSchema.objects.create(
         workspace=ws, schema_name="ws_smoke_view", state=SchemaState.ACTIVE
