@@ -768,6 +768,7 @@ async def materialize_workspace_core(
     tenant_results: list[dict] = []
     attempted_tenant_ids: set[str] = set()
     successful_attempted_tenant_ids: set[str] = set()
+    loaded_tenant_ids: set[str] = set()
 
     try:
         workspace = await Workspace.objects.aget(id=workspace_id)
@@ -950,6 +951,7 @@ async def materialize_workspace_core(
                 }
             )
             continue
+        loaded_tenant_ids.add(str(tm.tenant_id))
         try:
             result = await _load_workspace_candidate(
                 workspace, tm, credential, pipeline_config, job_id
@@ -1134,7 +1136,7 @@ async def materialize_workspace_core(
         [
             tm.tenant_id
             for tm in memberships
-            if not only_unserved or str(tm.tenant_id) in attempted_tenant_ids
+            if not only_unserved or str(tm.tenant_id) in loaded_tenant_ids
         ],
         exclude_workspace_id=str(workspace.id),
     )

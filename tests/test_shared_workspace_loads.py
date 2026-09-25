@@ -425,6 +425,43 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
     assert len(await _active_schemas(new_source)) == 1
 
 
+async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, tenant, user):
+    for index in range(2):
+        source = await Tenant.objects.acreate(
+            provider="commcare", external_id=f"denied-source-{index}"
+        )
+        await agrant_tenant_access(user, source)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=source)
+    for source in [source async for source in workspace.tenants.all()]:
+        await TenantSchema.objects.acreate(
+            tenant=source, schema_name=f"serving_{source.id.hex}", state=SchemaState.ACTIVE
+        )
+    denial = {
+        "tenants": [],
+        "error": "Verification unavailable",
+        "error_code": "verification_unavailable",
+    }
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(side_effect=[None, None, None, denial]),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()
+            ) as dependents,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await workspaces_tasks.materialize_workspace_core(
+                str(workspace.id), str(user.id), None, only_unserved=True
+            )
+    assert result["all_succeeded"] is False
+    assert pipeline.calls == []
+    assert list(dependents.await_args.args[0]) == []
+
+
 async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(workspace, tenant, user):
     """The reusing job has no run of its own; the resume must read the reused run,
     not report the tenant as "the run recorded nothing for it"."""
