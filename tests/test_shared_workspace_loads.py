@@ -85,10 +85,10 @@ async def _loads(pipeline: _Pipeline):
         ),
         patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
-        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop,
+        patch("apps.workspaces.tasks._queue_candidate_drop_sync") as drop,
     ):
         retire.return_value.defer_async = AsyncMock(return_value=1)
-        yield drop.return_value.defer
+        yield drop
 
 
 async def _sibling(user, tenant, name="Sibling"):
@@ -297,7 +297,9 @@ async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old
     assert retried["all_succeeded"] is True
     first_candidate, second_candidate = (call[1] for call in pipeline.calls)
     assert first_candidate != second_candidate
-    drop.assert_called_once_with(schema_id=str(first_candidate))
+    drop.assert_called_once()
+    [(queued,), _] = drop.call_args
+    assert queued.id == first_candidate
 
 
 async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
@@ -411,9 +413,12 @@ async def test_a_candidate_drop_defers_without_waiting_while_a_writer_holds_t(wo
 
     teardown.assert_not_called()
     retry.assert_called_once_with(
-        schedule_in={"seconds": workspaces_tasks._CANDIDATE_DROP_DELAY_SECONDS}
+        schedule_in={"seconds": workspaces_tasks._CANDIDATE_DROP_DELAY_SECONDS},
+        queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
     )
-    retry.return_value.defer_async.assert_awaited_once_with(schema_id=str(candidate.id), attempt=2)
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(candidate.id), attempt=2, last_attempt_at="", load_job_id=None, busy_count=1
+    )
 
 
 async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenant):
@@ -428,9 +433,16 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=2)
-        retry.assert_called_once_with(schedule_in={"seconds": 240})
+        retry.assert_called_once_with(
+            schedule_in={"seconds": 240},
+            queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
+        )
         retry.return_value.defer_async.assert_awaited_once_with(
-            schema_id=str(candidate.id), attempt=3
+            schema_id=str(candidate.id),
+            attempt=3,
+            last_attempt_at="",
+            load_job_id=None,
+            busy_count=0,
         )
 
         retry.reset_mock()
@@ -558,7 +570,7 @@ async def test_reusing_a_generation_resets_its_inactivity_clock(workspace, tenan
 
 async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace, tenant, user):
     pipeline = _Pipeline()
-    async with _loads(pipeline):
+    async with _loads(pipeline) as queue:
         await _run(workspace, user)
         old = await TenantSchema.objects.acreate(
             tenant=tenant,
@@ -568,11 +580,12 @@ async def test_an_abandoned_candidate_drop_waits_out_the_writers_lock(workspace,
             load_generation=1,
             load_config_fingerprint="old",
         )
-        with patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop:
-            await _run(workspace, user)
+        queue.reset_mock()
+        await _run(workspace, user)
 
-    drop.assert_called_once_with(schedule_in={"seconds": 15 * 60})
-    drop.return_value.defer.assert_called_once_with(schema_id=str(old.id))
+    [(queued,)] = [call.args for call in queue.call_args_list]
+    assert queued.id == old.id
+    assert queue.call_args.kwargs == {"delay": 15 * 60}
 
 
 async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspace, tenant):
@@ -686,8 +699,10 @@ async def test_abandoning_a_candidate_is_undone_if_its_drop_cannot_be_queued(
             load_generation=1,
             load_config_fingerprint="old",
         )
-        with patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as drop:
-            drop.return_value.defer.side_effect = RuntimeError("queue unavailable")
+        with patch(
+            "apps.workspaces.tasks._queue_candidate_drop_sync",
+            side_effect=RuntimeError("queue unavailable"),
+        ):
             await _run(workspace, user)
 
     await old.arefresh_from_db()

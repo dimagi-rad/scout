@@ -271,9 +271,9 @@ def begin_load_generation(tenant_id) -> int:
     ends, a new refresh request asks for the next generation instead of joining.
     Any loading marker already set is stale here (T is exclusive, so its writer
     died), but capture_load_intent reads the marker without T and cannot tell: a
-    writer that dies before end_load_generation costs one extra generation, and
-    its FAILED candidate is then abandoned rather than resumed. Every exit that
-    doesn't publish must therefore call end_load_generation.
+    refresh captured before orphan settlement may request an extra generation.
+    Settlement clears the marker so a later request can join the pending retry.
+    Every normal exit that does not publish must call end_load_generation.
     """
     with transaction.atomic():
         generation = _locked_generation(tenant_id)

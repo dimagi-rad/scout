@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections.abc import Iterable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import wraps
 
 import psycopg
@@ -21,6 +21,7 @@ from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
+from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
@@ -78,11 +79,13 @@ from apps.workspaces.services.failure_guidance import summary_failures as _summa
 from apps.workspaces.services.load_candidates import (
     Promotion,
     abandoned_workspace_candidates,
+    candidate_last_attempt_at,
     fail_workspace_candidate,
     load_owner_token,
     open_workspace_candidate,
     promote_candidate_schema,
     settle_orphaned_workspace_candidates,
+    unresumable_workspace_candidates,
 )
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
@@ -1419,13 +1422,47 @@ def _abandon_and_queue_drops(tenant_id, keep_id) -> None:
     with transaction.atomic():
         for schema in abandoned_workspace_candidates(tenant_id, keep_id=keep_id):
             # Delayed: this writer holds T until its whole load publishes, and the
-            # drop needs T, so an immediate job would only sit in a lock wait.
-            drop_abandoned_candidate.configure(
-                schedule_in={"seconds": _CANDIDATE_DROP_DELAY_SECONDS}
-            ).defer(schema_id=str(schema.id))
+            # drop needs T, so an immediate job would only find it busy.
+            _queue_candidate_drop_sync(schema, delay=_CANDIDATE_DROP_DELAY_SECONDS)
+
+
+def _drop_lock(schema_id) -> str:
+    return f"drop_abandoned_candidate:{schema_id}"
+
+
+def _drop_job(schema, delay: int):
+    """One drop per candidate, pinned to the attempt it was judged on."""
+    schedule = {"schedule_in": {"seconds": delay}} if delay else {}
+    job = drop_abandoned_candidate.configure(queueing_lock=_drop_lock(schema.id), **schedule)
+    args = {
+        "schema_id": str(schema.id),
+        "last_attempt_at": schema.last_attempt_at.isoformat(),
+        "load_job_id": schema.load_job_id,
+    }
+    return job, args
+
+
+async def _queue_candidate_drop(schema, *, delay: int = 0) -> None:
+    job, args = _drop_job(schema, delay)
+    await job.defer_async(**args)
+
+
+def _queue_candidate_drop_sync(schema, *, delay: int = 0) -> None:
+    """Queue inside the caller's transaction; an already-queued drop covers it."""
+    job, args = _drop_job(schema, delay)
+    try:
+        # Savepoint: the queueing-lock violation must not abort the outer commit.
+        with transaction.atomic():
+            job.defer(**args)
+    except AlreadyEnqueued:
+        return
 
 
 _CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
+
+
+class _TenantBusy(Exception):
+    """A writer holds the tenant's T; the drop is retried later rather than waiting."""
 
 
 async def _recovery_intent(workspace) -> str:
@@ -1455,30 +1492,44 @@ _CANDIDATE_DROP_RETRYABLE = (
 _CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
 _CANDIDATE_DROP_RETRY_MAX_SECONDS = 3600
 _CANDIDATE_DROP_MAX_ATTEMPTS = 10
+_CANDIDATE_DROP_BUSY_WARNING_INTERVAL = 96  # One day of 15-minute busy checks.
 
 
 @task
-async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
+async def drop_abandoned_candidate(
+    schema_id: str,
+    attempt: int = 0,
+    last_attempt_at: str = "",
+    load_job_id: int | None = None,
+    busy_count: int = 0,
+) -> None:
     """Drop the partial data of a failed candidate no load will resume.
 
-    Holds T so a writer cannot be resuming this candidate while it is dropped.
-    A failed drop is retried with backoff and then left for an operator.
+    Holds T so a writer cannot be resuming this candidate while it is dropped,
+    but never waits for it: a load can hold T for hours, so a busy tenant is
+    simply re-queued. ``last_attempt_at`` and ``load_job_id`` pin the attempt
+    the candidate was judged abandoned on; if a load has resumed it since (a
+    resume rewrites the owner, and a new run moves the attempt time), it is the
+    pending generation's resume point and is kept. A failed drop is retried
+    with backoff; after the last attempt the next sweep queues a fresh one.
     """
     schema = await TenantSchema.objects.filter(id=schema_id).afirst()
     if schema is None:
         return
     try:
-        async with tenant_data_lock_if_free(schema.tenant_id) as acquired:
-            if not acquired:
-                # A live load owns T for its full duration; don't occupy a worker
-                # or spend a teardown retry waiting for that load to finish.
-                await drop_abandoned_candidate.configure(
-                    schedule_in={"seconds": _CANDIDATE_DROP_DELAY_SECONDS}
-                ).defer_async(schema_id=str(schema_id), attempt=attempt)
-                return
+        async with tenant_data_lock_if_free(schema.tenant_id) as locked:
+            if not locked:
+                raise _TenantBusy(f"tenant {schema.tenant_id} is being loaded")
             await schema.arefresh_from_db()
             if schema.state != SchemaState.FAILED or schema.load_workspace_id is None:
                 return
+            if load_job_id is not None and schema.load_job_id != load_job_id:
+                return
+            # Run reconciliation also moves this pin; the next sweep re-judges it.
+            if last_attempt_at:
+                current = await _to_thread_fresh_db(candidate_last_attempt_at, schema.id)
+                if current is None or current != datetime.fromisoformat(last_attempt_at):
+                    return
             await run_data_thread(SchemaManager().teardown, schema)
             await (
                 MaterializationRun.objects.filter(tenant_schema=schema)
@@ -1489,12 +1540,34 @@ async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
             await schema.asave(update_fields=["state"])
     except TenantSchema.DoesNotExist:
         return
+    except _TenantBusy:
+        # Normal while a load runs: re-queue at a fixed delay without spending
+        # the retry budget, which is for drops that actually failed.
+        busy_count += 1
+        if busy_count % _CANDIDATE_DROP_BUSY_WARNING_INTERVAL == 0:
+            logger.warning(
+                "Abandoned candidate %s still blocked by tenant %s after %d consecutive busy checks",
+                schema_id,
+                schema.tenant_id,
+                busy_count,
+            )
+        await _requeue_candidate_drop(
+            schema_id,
+            _CANDIDATE_DROP_DELAY_SECONDS,
+            attempt,
+            last_attempt_at,
+            load_job_id,
+            busy_count=busy_count,
+        )
     except _CANDIDATE_DROP_RETRYABLE as exc:
         # A query bug (ProgrammingError and friends) is deliberately absent: it
         # must surface, not be retried as contention.
         if attempt + 1 >= _CANDIDATE_DROP_MAX_ATTEMPTS:
             logger.exception(
-                "Giving up dropping abandoned candidate %s after attempt %d", schema_id, attempt + 1
+                "Giving up dropping abandoned candidate %s after attempt %d; the next "
+                "sweep queues it again",
+                schema_id,
+                attempt + 1,
             )
             return
         logger.warning(
@@ -1503,9 +1576,85 @@ async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
         delay = min(
             _CANDIDATE_DROP_RETRY_BASE_SECONDS * (2**attempt), _CANDIDATE_DROP_RETRY_MAX_SECONDS
         )
-        await drop_abandoned_candidate.configure(schedule_in={"seconds": delay}).defer_async(
-            schema_id=str(schema_id), attempt=attempt + 1
+        await _requeue_candidate_drop(schema_id, delay, attempt + 1, last_attempt_at, load_job_id)
+
+
+async def _requeue_candidate_drop(
+    schema_id, delay, attempt, last_attempt_at, load_job_id, *, busy_count=0
+):
+    # The running job holds no queueing lock once doing, so the re-queue can take
+    # it; a drop the sweep queued meanwhile already covers this one.
+    try:
+        await drop_abandoned_candidate.configure(
+            schedule_in={"seconds": delay}, queueing_lock=_drop_lock(schema_id)
+        ).defer_async(
+            schema_id=str(schema_id),
+            attempt=attempt,
+            last_attempt_at=last_attempt_at,
+            load_job_id=load_job_id,
+            busy_count=busy_count,
         )
+    except AlreadyEnqueued:
+        return
+
+
+# How long a failed candidate of the still-pending generation waits for a retry
+# to resume it before the sweep treats it as abandoned.
+_UNRESUMED_CANDIDATE_TTL = timedelta(hours=24)
+
+
+@app.periodic(cron="7,22,37,52 * * * *")
+@task
+async def sweep_workspace_load_candidates(timestamp: int = 0) -> dict:
+    """Reclaim workspace-load candidates whose writer died or no load will resume.
+
+    A load settles orphans only when the same tenant loads again, so a tenant
+    that is never reloaded would otherwise keep a dead candidate's schema
+    forever. A tenant whose T is held has a live writer and is skipped.
+    """
+    tenant_ids = [
+        tenant_id
+        async for tenant_id in TenantSchema.objects.filter(
+            load_workspace_id__isnull=False,
+            state__in=[SchemaState.PROVISIONING, SchemaState.FAILED],
+        )
+        .values_list("tenant_id", flat=True)
+        .distinct()
+    ]
+    counts = {"settled": 0, "drops_queued": 0, "skipped_busy": 0}
+    for tenant_id in tenant_ids:
+        try:
+            async with tenant_data_lock_if_free(tenant_id) as locked:
+                if not locked:
+                    counts["skipped_busy"] += 1
+                    continue
+                orphans = await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tenant_id)
+                for orphan in orphans:
+                    logger.error(
+                        "Settled orphaned load candidate %s (%s) for tenant %s: its writer died",
+                        orphan.id,
+                        orphan.schema_name,
+                        tenant_id,
+                    )
+                counts["settled"] += len(orphans)
+                abandoned = await _to_thread_fresh_db(
+                    unresumable_workspace_candidates,
+                    tenant_id,
+                    stale_before=timezone.now() - _UNRESUMED_CANDIDATE_TTL,
+                )
+        except Exception:
+            logger.exception("sweep_workspace_load_candidates: tenant %s failed", tenant_id)
+            continue
+        for schema in abandoned:
+            try:
+                await _queue_candidate_drop(schema)
+            except AlreadyEnqueued:
+                continue
+            except Exception:
+                logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
+                continue
+            counts["drops_queued"] += 1
+    return counts
 
 
 def _refresh_denial_result(reason: str) -> dict:
