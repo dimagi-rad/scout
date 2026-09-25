@@ -9,7 +9,7 @@ import { TableDetail } from "./TableDetail"
 export function DataDictionaryPage() {
   const dataDictionary = useAppStore((s) => s.dataDictionary)
   const dictionaryStatus = useAppStore((s) => s.dictionaryStatus)
-  const dictionaryError = useAppStore((s) => s.dictionaryError)
+  const dictionaryWarning = useAppStore((s) => s.dictionaryWarning)
   const selectedTable = useAppStore((s) => s.selectedTable)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const { fetchDictionary, refreshSchema, fetchTable, clearDictionary } =
@@ -61,8 +61,8 @@ export function DataDictionaryPage() {
           <p className="mt-2 text-sm text-muted-foreground">
             Start a chat to automatically fetch your schema data.
           </p>
-          {dictionaryError && (
-            <p role="alert" className="mt-2 text-sm text-muted-foreground">{dictionaryError}</p>
+          {dictionaryWarning && (
+            <p role="status" className="mt-2 text-sm text-muted-foreground">{dictionaryWarning}</p>
           )}
         </div>
       </div>
@@ -76,8 +76,11 @@ export function DataDictionaryPage() {
           <Database className="mx-auto h-12 w-12 text-muted-foreground" />
           <h2 className="mt-4 text-lg font-medium">Failed to load dictionary</h2>
           <p className="mt-2 text-sm text-muted-foreground">
-            {dictionaryError ?? "There was an error loading the data dictionary"}
+            There was an error loading the data dictionary
           </p>
+          {dictionaryWarning && (
+            <p role="status" className="mt-2 text-sm text-muted-foreground">{dictionaryWarning}</p>
+          )}
           <Button onClick={() => fetchDictionary()} className="mt-4">
             Try Again
           </Button>
@@ -88,9 +91,9 @@ export function DataDictionaryPage() {
 
   return (
     <div className="flex h-full flex-col">
-      {dictionaryStatus === "loaded" && dictionaryError && (
+      {dictionaryWarning && (
         <div role="status" data-testid="refresh-schema-warning" className="border-b bg-muted px-4 py-3 text-sm">
-          {dictionaryError}
+          {dictionaryWarning}
         </div>
       )}
       <div className="flex min-h-0 flex-1">
