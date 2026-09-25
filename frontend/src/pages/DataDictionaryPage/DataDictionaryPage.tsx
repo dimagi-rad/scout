@@ -9,6 +9,7 @@ import { TableDetail } from "./TableDetail"
 export function DataDictionaryPage() {
   const dataDictionary = useAppStore((s) => s.dataDictionary)
   const dictionaryStatus = useAppStore((s) => s.dictionaryStatus)
+  const dictionaryError = useAppStore((s) => s.dictionaryError)
   const selectedTable = useAppStore((s) => s.selectedTable)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const { fetchDictionary, refreshSchema, fetchTable, clearDictionary } =
@@ -72,7 +73,7 @@ export function DataDictionaryPage() {
           <Database className="mx-auto h-12 w-12 text-muted-foreground" />
           <h2 className="mt-4 text-lg font-medium">Failed to load dictionary</h2>
           <p className="mt-2 text-sm text-muted-foreground">
-            There was an error loading the data dictionary
+            {dictionaryError ?? "There was an error loading the data dictionary"}
           </p>
           <Button onClick={() => fetchDictionary()} className="mt-4">
             Try Again

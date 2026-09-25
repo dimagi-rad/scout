@@ -7,7 +7,7 @@ from asgiref.sync import async_to_sync
 from django.db import connection
 from rest_framework.test import APIClient
 
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
@@ -32,8 +32,6 @@ def manage_client(api_client, user):
 
 @pytest.fixture
 def tenant_membership_for_user(db, user, tenant):
-    from apps.users.models import TenantMembership
-
     # Use get_or_create since the workspace signal may have already created one
     tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
     return tm
@@ -194,6 +192,23 @@ def test_refresh_covers_every_source_of_a_multi_source_workspace(
     assert resp.status_code == 202
     assert resp.data["status"] == "provisioning"
     assert defer.call_count == 2
+    memberships = {
+        str(m.tenant_id): str(m.id)
+        for m in TenantMembership.objects.filter(user=user, tenant__in=(tenant, second))
+    }
+    assert {tuple(sorted(call.kwargs.items())) for call in defer.call_args_list} == {
+        tuple(
+            sorted(
+                {
+                    "schema_id": source["schema_id"],
+                    "membership_id": memberships[source["tenant_id"]],
+                    "actor_user_id": str(user.id),
+                    "workspace_id": str(workspace.id),
+                }.items()
+            )
+        )
+        for source in resp.data["tenants"]
+    }
     assert {t["tenant_id"] for t in resp.data["tenants"]} == {str(tenant.id), str(second.id)}
     assert all(t["status"] == "provisioning" for t in resp.data["tenants"])
     for source in (tenant, second):
@@ -295,3 +310,79 @@ def test_refresh_status_aggregate_is_deterministic_and_matches_its_error(
 
     assert resp.data["state"] == aggregate
     assert (resp.data["error"] is not None) == (aggregate == SchemaState.FAILED)
+
+
+@pytest.mark.django_db
+def test_refresh_status_timestamp_describes_the_failed_source(
+    manage_client, workspace, tenant, user
+):
+    second = _add_source(workspace, user, "newer-success")
+    failed = TenantSchema.objects.create(
+        tenant=tenant, schema_name="old_failure", state=SchemaState.FAILED
+    )
+    TenantSchema.objects.create(tenant=second, schema_name="new_success", state=SchemaState.ACTIVE)
+
+    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
+
+    assert resp.data["state"] == SchemaState.FAILED
+    assert resp.data["started_at"] == failed.created_at.isoformat()
+
+
+@pytest.mark.django_db
+def test_partial_refresh_surfaces_recovery_message_and_code(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    blocked = _add_source(workspace, user, "recovery-source")
+    with (
+        patch("apps.workspaces.api.views.settle_finished_refresh_candidates") as settle,
+        patch(
+            "apps.workspaces.api.views.refresh_tenant_schema.defer", return_value=MagicMock(id=710)
+        ),
+    ):
+        settle.side_effect = lambda source, jobs: MagicMock(recovery_needed=source.id == blocked.id)
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 202
+    assert resp.data["status"] == "partial"
+    assert resp.data["code"] == "REFRESH_RECOVERY_REQUIRED"
+    assert "recovery-source" in resp.data["error"]
+    assert "operator" in resp.data["error"]
+
+
+@pytest.mark.django_db
+def test_refresh_handles_sources_deleted_before_lock(manage_client, workspace):
+    with patch("apps.workspaces.api.views.Tenant.objects.select_for_update") as lock:
+        lock.return_value.filter.return_value.order_by.return_value = []
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+    assert resp.status_code == 400
+    assert resp.data == {"error": "Workspace has no associated tenant."}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("recovery", [False, True])
+def test_refresh_reports_each_refused_source(
+    manage_client, workspace, tenant, user, tenant_membership_for_user, recovery
+):
+    second = _add_source(workspace, user, "refused-source")
+    # Model membership disappearing after the access gate accepted the request.
+    with (
+        patch("apps.workspaces.api.views.resolve_workspace", return_value=(workspace, None, None)),
+        patch("apps.workspaces.api.views.settle_finished_refresh_candidates") as settle,
+        patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer,
+    ):
+        TenantMembership.objects.filter(user=user, tenant=second).delete()
+        if not recovery:
+            TenantMembership.objects.filter(user=user, tenant=tenant).delete()
+        settle.return_value.recovery_needed = True
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+    defer.assert_not_called()
+    assert resp.status_code == (409 if recovery else 400)
+    assert resp.data["status"] == "not_started"
+    outcomes = {entry["status"] for entry in resp.data["tenants"]}
+    assert outcomes == ({"no_membership", "recovery_required"} if recovery else {"no_membership"})
+    if recovery:
+        assert resp.data["code"] == "REFRESH_RECOVERY_REQUIRED"
+        assert "operator" in resp.data["error"]
+        assert "refused-source" in resp.data["error"]
+    else:
+        assert resp.data["error"] == "No tenant membership found for this workspace."
