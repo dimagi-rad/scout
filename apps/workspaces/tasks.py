@@ -68,6 +68,7 @@ from apps.workspaces.services.data_operation import (
     run_data_thread,
     serialized_workspace_data,
     tenant_data_lock,
+    tenant_data_lock_if_free,
     workspace_data_lock,
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
@@ -1438,7 +1439,14 @@ async def drop_abandoned_candidate(schema_id: str, attempt: int = 0) -> None:
     if schema is None:
         return
     try:
-        async with tenant_data_lock([schema.tenant_id]):
+        async with tenant_data_lock_if_free(schema.tenant_id) as acquired:
+            if not acquired:
+                # A live load owns T for its full duration; don't occupy a worker
+                # or spend a teardown retry waiting for that load to finish.
+                await drop_abandoned_candidate.configure(
+                    schedule_in={"seconds": _CANDIDATE_DROP_DELAY_SECONDS}
+                ).defer_async(schema_id=str(schema_id), attempt=attempt)
+                return
             await schema.arefresh_from_db()
             if schema.state != SchemaState.FAILED or schema.load_workspace_id is None:
                 return

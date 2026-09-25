@@ -219,7 +219,10 @@ def promote_candidate_schema(
         TenantSchema.objects.filter(id__in=retired).update(state=SchemaState.TEARDOWN)
         candidate.state = SchemaState.ACTIVE
         candidate.last_accessed_at = accessed_at
-        candidate.save(update_fields=["state", "last_accessed_at"])
+        # This marker identifies an unpublished candidate. Clear it on publish
+        # so a later EXPIRED state cannot make a once-served run look unpublished.
+        candidate.load_workspace_id = None
+        candidate.save(update_fields=["state", "last_accessed_at", "load_workspace_id"])
         publish_generation(tenant_id, loading_generation, run, candidate, fingerprint)
         return Promotion(promoted=True, retired_schema_ids=retired)
 

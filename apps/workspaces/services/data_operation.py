@@ -288,6 +288,39 @@ async def tenant_data_lock(tenant_ids):
             _held_tenants.reset(token)
 
 
+@asynccontextmanager
+async def tenant_data_lock_if_free(tenant_id):
+    """Take one tenant's T only if nobody holds it; yield whether it was taken.
+
+    For sweeps: a held T means a live writer, so they skip the tenant rather
+    than queue behind a load that can run for hours.
+    """
+    (key,) = tenant_lock_keys([tenant_id])
+    owner, inherited = _held_tenants.get()
+    task = asyncio.current_task()
+    held = inherited if owner is task else frozenset()
+    if held:
+        if key in held:
+            yield True
+            return
+        raise LockOrderError(_EXPAND_TENANTS)
+    async with await psycopg.AsyncConnection.connect(
+        **_connection_params(), autocommit=True
+    ) as conn:
+        cursor = await conn.execute(
+            "SELECT pg_try_advisory_lock(%s, %s)", (_TENANT_LOCK_NAMESPACE, key)
+        )
+        (acquired,) = await cursor.fetchone()
+        if not acquired:
+            yield False
+            return
+        token = _held_tenants.set((task, frozenset({key})))
+        try:
+            yield True
+        finally:
+            _held_tenants.reset(token)
+
+
 def serialized_workspace_data(function):
     @wraps(function)
     async def wrapped(workspace_id, *args, **kwargs):

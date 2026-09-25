@@ -36,6 +36,7 @@ from apps.workspaces.services.load_generations import (
 )
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import agrant_tenant_access
+from tests.tenant_lock_probe import try_tenant_data_lock
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.django_db(transaction=True)]
 
@@ -358,6 +359,25 @@ async def test_a_candidate_resumed_before_its_drop_ran_is_left_alone(workspace, 
     assert candidate.state == SchemaState.PROVISIONING
 
 
+async def test_a_candidate_drop_defers_without_waiting_while_a_writer_holds_t(workspace, tenant):
+    candidate = await _failed_workspace_candidate(tenant, workspace)
+
+    with (
+        try_tenant_data_lock(tenant.id) as held,
+        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as retry,
+    ):
+        assert held
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=2)
+
+    teardown.assert_not_called()
+    retry.assert_called_once_with(
+        schedule_in={"seconds": workspaces_tasks._CANDIDATE_DROP_DELAY_SECONDS}
+    )
+    retry.return_value.defer_async.assert_awaited_once_with(schema_id=str(candidate.id), attempt=2)
+
+
 async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenant):
     candidate = await _failed_workspace_candidate(tenant, workspace)
 
@@ -533,15 +553,16 @@ async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspa
     retry.assert_not_called()
 
 
+@pytest.mark.parametrize("state", [SchemaState.FAILED, SchemaState.EXPIRED])
 async def test_the_resume_never_reports_rows_of_an_unpublished_candidate_as_loaded(
-    workspace, tenant, user
+    workspace, tenant, user, state
 ):
     """A failed load's run records its committed sources, but they live in a
     candidate nothing serves; the resume must not present them as loaded."""
     candidate = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="failed_candidate",
-        state=SchemaState.FAILED,
+        state=state,
         load_workspace_id=workspace.id,
         load_generation=1,
     )
@@ -567,6 +588,29 @@ async def test_the_resume_never_reports_rows_of_an_unpublished_candidate_as_load
     assert entry["published"] is False
     assert entry["materialized_row_counts"] == {}
     assert entry["sources"]["users"]["state"] == "not_published"
+
+
+async def test_the_resume_reports_a_retired_published_candidate_as_published(
+    workspace, tenant, user
+):
+    async with _loads(_Pipeline()):
+        await _run(workspace, user, job_id=405)
+    [schema] = await _active_schemas(tenant)
+    schema.state = SchemaState.EXPIRED
+    await schema.asave(update_fields=["state"])
+    run = await MaterializationRun.objects.aget(tenant_schema=schema, procrastinate_job_id=405)
+    run.result = {"sources": {"users": {"state": "completed", "rows": 100}}}
+    await run.asave(update_fields=["result"])
+
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        405, workspace, str(user.id)
+    )
+
+    [entry] = summary
+    assert status == "completed"
+    assert entry["materialized_row_counts"] == {"users": 100}
+    assert entry.get("published") is not False
+    assert entry["sources"]["users"]["state"] == "completed"
 
 
 async def test_an_abort_while_queuing_drops_still_settles_the_candidate(workspace, tenant, user):
