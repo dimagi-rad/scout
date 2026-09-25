@@ -33,6 +33,7 @@ from django.core.cache import cache
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
+from apps.workspaces import access_cache
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_EXPIRED,
@@ -312,8 +313,24 @@ def resolve_workspace_access_ex(
 
     ``verification`` selects the upstream-freshness budget for protected data;
     ``None`` is the recovery-metadata mode, which needs membership but must stay
-    reachable while upstream verification is failing.
+    reachable while upstream verification is failing. Repeats within one request
+    reuse the decision (``access_cache``), except a retryable freshness denial,
+    which must be free to succeed on the very next check.
     """
+    options = (minimum_role, verification)
+    cached = access_cache.lookup(user, workspace_id, options)
+    if cached is None:
+        cached = _resolve_workspace_access_ex(
+            user, workspace_id, minimum_role=minimum_role, verification=verification
+        )
+        if not cached.retryable:
+            access_cache.store(user, workspace_id, options, cached)
+    return cached
+
+
+def _resolve_workspace_access_ex(
+    user, workspace_id, *, minimum_role: str, verification: VerificationBudget | None
+) -> WorkspaceAccess:
     result = _resolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
     if verification is None or not result.granted or not freshness_enforced():
         return result
@@ -335,6 +352,20 @@ async def aresolve_workspace_access_ex(
     verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
 ) -> WorkspaceAccess:
     """Async twin of ``resolve_workspace_access_ex``."""
+    options = (minimum_role, verification)
+    cached = access_cache.lookup(user, workspace_id, options)
+    if cached is None:
+        cached = await _aresolve_workspace_access_ex(
+            user, workspace_id, minimum_role=minimum_role, verification=verification
+        )
+        if not cached.retryable:
+            access_cache.store(user, workspace_id, options, cached)
+    return cached
+
+
+async def _aresolve_workspace_access_ex(
+    user, workspace_id, *, minimum_role: str, verification: VerificationBudget | None
+) -> WorkspaceAccess:
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
     if verification is None or not result.granted or not freshness_enforced():
         return result
