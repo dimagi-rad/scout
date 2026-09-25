@@ -29,6 +29,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.data_operation import LockOrderError, sync_tenant_data_lock
 from apps.workspaces.services.load_candidates import promote_candidate_schema
 from apps.workspaces.services.load_generations import begin_load_generation
 from apps.workspaces.services.refresh_requests import (
@@ -370,10 +371,13 @@ def test_only_the_owning_job_can_activate_or_fail_a_claimed_candidate(
             fingerprint="receipt",
         ).promoted
 
-    assert promote(job_id + 1) is False
-    assert fail_claimed_refresh_candidate(candidate.id, job_id + 1) is None
-    assert promote(job_id) is True
-    assert fail_claimed_refresh_candidate(candidate.id, job_id) is None
+    with pytest.raises(LockOrderError):
+        promote(job_id)
+    with sync_tenant_data_lock([tenant.id]):
+        assert promote(job_id + 1) is False
+        assert fail_claimed_refresh_candidate(candidate.id, job_id + 1) is None
+        assert promote(job_id) is True
+        assert fail_claimed_refresh_candidate(candidate.id, job_id) is None
 
     candidate.refresh_from_db()
     assert candidate.state == SchemaState.ACTIVE

@@ -34,6 +34,7 @@ from apps.agents.subagents.events import (
 )
 from apps.agents.subagents.forwarding import NestedEventForwarder
 from apps.agents.tools.canvas_tool import create_canvas_tools
+from apps.semantic.services.date_context import agent_date_context
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -145,7 +146,15 @@ shared with the user in a side panel. Your tools:
   coverage; new messages do not automatically receive snapshot labels.
   Reusable keyword-rule SQL is NOT a fixed snapshot: it evaluates the current
   materialized rows, including newly materialized messages. Reviewed message-ID
-  label mappings remain limited to their snapshot.
+  label mappings remain limited to their snapshot. Inspect the source dataset's
+  `metadata.identity` before persisting reviewed labels. Missing or unknown
+  identity is not proof of stability: establish the source's key contract first.
+  If legacy snapshot identity is unsafe for reviewed labels, stop and request
+  an authorized source refresh.
+  For snapshot-local identity, retain the full versioned key, snapshot column,
+  and content-version column; never strip the revision or join labels by row
+  position. Match reviewed labels by key AND content version, keep unmatched
+  rows unclassified, and disclose that any history change requires re-review.
 
 ## canvas_apply op reference
 - {"op": "add_existing", "object_type": "dataset", "ref": "raw_visits"}
@@ -314,7 +323,10 @@ def _build_canvas_manager_graph(
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
         state_messages = [m for m in list(state["messages"]) if not isinstance(m, SystemMessage)]
-        messages = [SystemMessage(content=CANVAS_MANAGER_SYSTEM_PROMPT), *state_messages]
+        messages = [
+            SystemMessage(content=CANVAS_MANAGER_SYSTEM_PROMPT + agent_date_context()),
+            *state_messages,
+        ]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 

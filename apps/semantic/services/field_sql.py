@@ -14,6 +14,7 @@ from sqlglot.errors import TokenError
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlglot.tokens import TokenType
 
+from apps.semantic.services.cube_sql import embed_cube_sql
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
 _ROW_ALIAS = "__scout_dimension_row"
@@ -82,6 +83,8 @@ _SCALAR_FUNCTIONS = frozenset(
         "or",
         "pad",
         "position",
+        "pg_input_is_valid",
+        "pg_typeof",
         "pow",
         "power",
         "regexp_extract",
@@ -185,46 +188,7 @@ def compile_dimension_sql(value: str, *, columns: set[str]) -> str:
             )
         column.set("this", exp.to_identifier(column.name, quoted=True))
         column.set("table", exp.Var(this="{CUBE}"))
-    return _escape_cube_literals(expression.sql(dialect="postgres", comments=False))
-
-
-def _escape_cube_literals(sql: str) -> str:
-    """Escape literal text through Cube's Jinja and YAML f-string compilers.
-
-    Cube interpolates the entire SQL string, including SQL string literals and
-    quoted identifiers. Encode braces as Unicode escapes, except the actual
-    unquoted {CUBE} reference tokens emitted above. Doubling braces is NOT safe:
-    that would invoke the Jinja pass that runs before the f-string compiler.
-    Preserve preexisting backslashes/control characters through that same
-    f-string pass. Authored comments have already been removed by the SQL
-    generator so their contents cannot become Cube expressions.
-    """
-    tokens = Postgres().tokenize(sql)
-    parts: list[str] = []
-    position = 0
-    for index, token in enumerate(tokens):
-        if (
-            token.token_type == TokenType.L_BRACE
-            and index + 2 < len(tokens)
-            and tokens[index + 1].text == "CUBE"
-            and tokens[index + 2].token_type == TokenType.R_BRACE
-        ):
-            parts.append(_escape_cube_text(sql[position : token.start]))
-            parts.append("{CUBE}")
-            position = tokens[index + 2].end + 1
-    parts.append(_escape_cube_text(sql[position:]))
-    return "".join(parts)
-
-
-def _escape_cube_text(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-        .replace("{", "\\u007b")
-        .replace("}", "\\u007d")
-    )
+    return embed_cube_sql(expression.sql(dialect="postgres", comments=False), references={"CUBE"})
 
 
 def _replace_cube_reference(value: str) -> str:
