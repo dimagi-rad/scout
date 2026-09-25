@@ -322,8 +322,8 @@ def unresumable_workspace_candidates(tenant_id, *, stale_before) -> list[TenantS
     """FAILED workspace candidates no pending load will resume.
 
     Resume needs the tenant's pending generation, so a candidate of any other
-    generation is abandoned. One of the pending generation is kept for a retry
-    until its last attempt ended before ``stale_before``; past that nobody is
+    generation is abandoned. One of the pending generation with resume evidence
+    is kept until its last attempt ended before ``stale_before``; past that nobody is
     coming back for it, and a later load simply starts fresh. Each returned row
     carries ``last_attempt_at`` and has lost its resume evidence. Requires T.
     """
@@ -340,6 +340,7 @@ def unresumable_workspace_candidates(tenant_id, *, stale_before) -> list[TenantS
                 schema
                 for schema in failed
                 if schema.load_generation != generation.requested_generation
+                or not schema.load_config_fingerprint
                 or schema.last_attempt_at < stale_before
             ]
         _forget_resume_evidence(failed)

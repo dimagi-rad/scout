@@ -413,9 +413,12 @@ async def test_a_candidate_drop_defers_without_waiting_while_a_writer_holds_t(wo
 
     teardown.assert_not_called()
     retry.assert_called_once_with(
-        schedule_in={"seconds": workspaces_tasks._CANDIDATE_DROP_DELAY_SECONDS}
+        schedule_in={"seconds": workspaces_tasks._CANDIDATE_DROP_DELAY_SECONDS},
+        queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
     )
-    retry.return_value.defer_async.assert_awaited_once_with(schema_id=str(candidate.id), attempt=2)
+    retry.return_value.defer_async.assert_awaited_once_with(
+        schema_id=str(candidate.id), attempt=2, last_attempt_at="", load_job_id=None, busy_count=1
+    )
 
 
 async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenant):
@@ -435,7 +438,11 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
             queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
         )
         retry.return_value.defer_async.assert_awaited_once_with(
-            schema_id=str(candidate.id), attempt=3, last_attempt_at="", load_job_id=None
+            schema_id=str(candidate.id),
+            attempt=3,
+            last_attempt_at="",
+            load_job_id=None,
+            busy_count=0,
         )
 
         retry.reset_mock()

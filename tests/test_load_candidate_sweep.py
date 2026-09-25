@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
+from django.db import transaction
 from django.utils import timezone
 from procrastinate.exceptions import AlreadyEnqueued
 
@@ -159,10 +160,12 @@ async def test_a_pending_candidate_attempted_recently_is_kept_despite_its_age(te
         tenant, workspace, state=SchemaState.FAILED, generation=3, age=timedelta(days=2)
     )
     await _attempt(retried)
+    superseded = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=2)
 
-    _counts, queued = await _sweep()
+    counts, queued = await _sweep()
 
-    assert queued == set()
+    assert queued == {str(superseded.id)}
+    assert counts["drops_queued"] == 1
 
 
 async def test_a_drop_skips_a_candidate_resumed_after_it_was_queued(tenant, workspace):
@@ -271,3 +274,54 @@ def _listed_with_last_attempt(schema_id):
 def _failed_workspace_candidates_for(schema_id):
     tenant_id = TenantSchema.objects.get(id=schema_id).tenant_id
     return load_candidates._failed_workspace_candidates(tenant_id).filter(id=schema_id)
+
+
+async def test_abandoned_pending_candidate_is_requeued_without_waiting_for_ttl(tenant, workspace):
+    await _ledger(tenant, requested=3, published=2)
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=3)
+    await TenantSchema.objects.filter(id=candidate.id).aupdate(load_config_fingerprint="")
+
+    counts, queued = await _sweep()
+
+    assert queued == {str(candidate.id)}
+    assert counts["drops_queued"] == 1
+
+
+async def test_prolonged_busy_drop_warns_without_spending_error_budget(tenant, workspace, caplog):
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
+
+    async def drop_while_loading():
+        with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as retry:
+            retry.return_value.defer_async = AsyncMock(return_value=1)
+            await workspaces_tasks.drop_abandoned_candidate(
+                schema_id=str(candidate.id), attempt=4, busy_count=95
+            )
+        return retry
+
+    async with tenant_data_lock([tenant.id]):
+        retry = await asyncio.wait_for(asyncio.create_task(drop_while_loading()), 10)
+
+    args = retry.return_value.defer_async.await_args.kwargs
+    assert args["attempt"] == 4
+    assert args["busy_count"] == 96
+    assert str(candidate.id) in caplog.text
+    assert "96 consecutive busy checks" in caplog.text
+
+
+async def test_duplicate_sync_defer_preserves_outer_transaction(tenant, workspace):
+    candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
+    [listed] = await sync_to_async(_listed_with_last_attempt)(candidate.id)
+
+    @sync_to_async
+    def enqueue_twice():
+        with transaction.atomic():
+            TenantSchema.objects.filter(id=candidate.id).update(load_config_fingerprint="")
+            workspaces_tasks._queue_candidate_drop_sync(listed, delay=900)
+            workspaces_tasks._queue_candidate_drop_sync(listed, delay=900)
+            # A real unique violation must be rolled back to the inner savepoint.
+            TenantSchema.objects.filter(id=candidate.id).update(load_job_id=42)
+
+    await enqueue_twice()
+    await candidate.arefresh_from_db()
+    assert candidate.load_config_fingerprint == ""
+    assert candidate.load_job_id == 42

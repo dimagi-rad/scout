@@ -1483,7 +1483,6 @@ async def _recovery_intent(workspace) -> str:
 
 
 _CANDIDATE_DROP_RETRYABLE = (
-    _TenantBusy,
     DataLockTimeout,
     psycopg.OperationalError,
     psycopg.InterfaceError,
@@ -1493,11 +1492,16 @@ _CANDIDATE_DROP_RETRYABLE = (
 _CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
 _CANDIDATE_DROP_RETRY_MAX_SECONDS = 3600
 _CANDIDATE_DROP_MAX_ATTEMPTS = 10
+_CANDIDATE_DROP_BUSY_WARNING_INTERVAL = 96  # One day of 15-minute busy checks.
 
 
 @task
 async def drop_abandoned_candidate(
-    schema_id: str, attempt: int = 0, last_attempt_at: str = "", load_job_id: int | None = None
+    schema_id: str,
+    attempt: int = 0,
+    last_attempt_at: str = "",
+    load_job_id: int | None = None,
+    busy_count: int = 0,
 ) -> None:
     """Drop the partial data of a failed candidate no load will resume.
 
@@ -1521,6 +1525,7 @@ async def drop_abandoned_candidate(
                 return
             if load_job_id is not None and schema.load_job_id != load_job_id:
                 return
+            # Run reconciliation also moves this pin; the next sweep re-judges it.
             if last_attempt_at:
                 current = await _to_thread_fresh_db(candidate_last_attempt_at, schema.id)
                 if current is None or current != datetime.fromisoformat(last_attempt_at):
@@ -1538,8 +1543,21 @@ async def drop_abandoned_candidate(
     except _TenantBusy:
         # Normal while a load runs: re-queue at a fixed delay without spending
         # the retry budget, which is for drops that actually failed.
+        busy_count += 1
+        if busy_count % _CANDIDATE_DROP_BUSY_WARNING_INTERVAL == 0:
+            logger.warning(
+                "Abandoned candidate %s still blocked by tenant %s after %d consecutive busy checks",
+                schema_id,
+                schema.tenant_id,
+                busy_count,
+            )
         await _requeue_candidate_drop(
-            schema_id, _CANDIDATE_DROP_DELAY_SECONDS, attempt, last_attempt_at, load_job_id
+            schema_id,
+            _CANDIDATE_DROP_DELAY_SECONDS,
+            attempt,
+            last_attempt_at,
+            load_job_id,
+            busy_count=busy_count,
         )
     except _CANDIDATE_DROP_RETRYABLE as exc:
         # A query bug (ProgrammingError and friends) is deliberately absent: it
@@ -1561,7 +1579,9 @@ async def drop_abandoned_candidate(
         await _requeue_candidate_drop(schema_id, delay, attempt + 1, last_attempt_at, load_job_id)
 
 
-async def _requeue_candidate_drop(schema_id, delay, attempt, last_attempt_at, load_job_id):
+async def _requeue_candidate_drop(
+    schema_id, delay, attempt, last_attempt_at, load_job_id, *, busy_count=0
+):
     # The running job holds no queueing lock once doing, so the re-queue can take
     # it; a drop the sweep queued meanwhile already covers this one.
     try:
@@ -1572,6 +1592,7 @@ async def _requeue_candidate_drop(schema_id, delay, attempt, last_attempt_at, lo
             attempt=attempt,
             last_attempt_at=last_attempt_at,
             load_job_id=load_job_id,
+            busy_count=busy_count,
         )
     except AlreadyEnqueued:
         return
