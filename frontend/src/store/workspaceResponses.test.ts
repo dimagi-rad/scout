@@ -223,11 +223,12 @@ it("a missing-workspace detail call leaves no orphaned loading state", async () 
   expect(state().selectedDataset).toBeNull()
 })
 
-it("surfaces a partial refresh instead of silently reloading the dictionary", async () => {
+it("keeps the dictionary usable while surfacing a partial refresh warning", async () => {
   vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "Some sources could not be refreshed: source B needs operator recovery." })
   const get = vi.spyOn(api, "get").mockResolvedValue({ tables: {} })
   await state().dictionaryActions.refreshSchema()
-  expect(state().dictionaryStatus).toBe("error")
+  expect(state().dictionaryStatus).toBe("loaded")
   expect(state().dictionaryError).toContain("source B needs operator recovery")
-  expect(get).not.toHaveBeenCalled()
+  expect(state().dataDictionary).not.toBeNull()
+  expect(get).toHaveBeenCalledTimes(1)
 })

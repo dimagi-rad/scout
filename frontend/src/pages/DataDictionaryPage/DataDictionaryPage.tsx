@@ -84,53 +84,60 @@ export function DataDictionaryPage() {
   }
 
   return (
-    <div className="flex h-full">
-      <div className="w-64 flex-shrink-0 border-r bg-muted/30" data-testid="schema-panel">
-        <div className="flex items-center justify-between border-b p-3">
-          <h2 className="text-sm font-medium">Tables</h2>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            data-testid="refresh-schema-btn"
-          >
-            <RefreshCw
-              className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
-            />
-          </Button>
+    <div className="flex h-full flex-col">
+      {dictionaryError && (
+        <div role="status" data-testid="refresh-schema-warning" className="border-b bg-muted px-4 py-3 text-sm">
+          {dictionaryError}
         </div>
-        {dataDictionary && (
-          <SchemaTree
-            dictionary={dataDictionary}
-            selectedTable={
-              selectedTable
-                ? { schema: selectedTable.schema, table: selectedTable.table }
-                : null
-            }
-            onSelectTable={handleSelectTable}
-          />
-        )}
-      </div>
-
-      <div className="flex-1 overflow-hidden" data-testid="table-detail-panel">
-        {selectedTable ? (
-          <TableDetail
-            key={`${selectedTable.schema}.${selectedTable.table}`}
-            table={selectedTable}
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center">
-            <div className="text-center">
-              <Database className="mx-auto h-12 w-12 text-muted-foreground" />
-              <h2 className="mt-4 text-lg font-medium">Select a table</h2>
-              <p className="mt-2 text-sm text-muted-foreground">
-                Choose a table from the left panel to view its details
-              </p>
-            </div>
+      )}
+      <div className="flex min-h-0 flex-1">
+        <div className="w-64 flex-shrink-0 border-r bg-muted/30" data-testid="schema-panel">
+          <div className="flex items-center justify-between border-b p-3">
+            <h2 className="text-sm font-medium">Tables</h2>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              data-testid="refresh-schema-btn"
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
+              />
+            </Button>
           </div>
-        )}
+          {dataDictionary && (
+            <SchemaTree
+              dictionary={dataDictionary}
+              selectedTable={
+                selectedTable
+                  ? { schema: selectedTable.schema, table: selectedTable.table }
+                  : null
+              }
+              onSelectTable={handleSelectTable}
+            />
+          )}
+        </div>
+
+        <div className="flex-1 overflow-hidden" data-testid="table-detail-panel">
+          {selectedTable ? (
+            <TableDetail
+              key={`${selectedTable.schema}.${selectedTable.table}`}
+              table={selectedTable}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center">
+              <div className="text-center">
+                <Database className="mx-auto h-12 w-12 text-muted-foreground" />
+                <h2 className="mt-4 text-lg font-medium">Select a table</h2>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Choose a table from the left panel to view its details
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
