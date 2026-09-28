@@ -943,13 +943,15 @@ async def test_a_slow_failing_provider_does_not_starve_the_failure_marker(
 
         async def slow_error(self, url, *args, **kwargs):
             clock.advance(0.4)
-            return httpx.Response(503, json={}, request=httpx.Request("POST", url))
+            return httpx.Response(
+                400, json={"error": "invalid_grant"}, request=httpx.Request("POST", url)
+            )
 
         with mock.patch.object(httpx.AsyncClient, "post", slow_error):
-            with pytest.raises(TokenRefreshUnavailable):
+            with pytest.raises(TokenRefreshRejected):
                 await refresh_oauth_token_result(token, URL, db_timeout=0.2, clock=clock)
     else:
-        requests_mock.post(URL, status_code=503)
+        requests_mock.post(URL, status_code=400, json={"error": "invalid_grant"})
         original = token_refresh.requests.post
 
         def slow_error(*args, **kwargs):
@@ -957,7 +959,7 @@ async def test_a_slow_failing_provider_does_not_starve_the_failure_marker(
             return original(*args, **kwargs)
 
         with mock.patch.object(token_refresh.requests, "post", slow_error):
-            with pytest.raises(TokenRefreshUnavailable):
+            with pytest.raises(TokenRefreshRejected):
                 await sync_to_async(refresh_oauth_token_result_sync)(
                     token, URL, db_timeout=0.2, clock=clock
                 )

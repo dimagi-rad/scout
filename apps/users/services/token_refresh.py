@@ -214,6 +214,17 @@ def _is_invalid_client(response) -> bool:
     return _reports_oauth_error(response, "invalid_client")
 
 
+def _is_transient_status(status: int | None) -> bool:
+    """A provider hiccup, not a verdict on the grant.
+
+    Transient failures never write the refresh-failure marker: the all-of gate reads
+    that marker as "reconnect", which cannot fix a blip and would lock the member out
+    of every workspace sharing the source (#551 review M1). Upstream reachability is
+    the freshness gate's call, and it already denies temporarily and retryably.
+    """
+    return status is not None and (status in (408, 429) or status >= 500)
+
+
 def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
     """Check if a token needs refreshing based on its expiry time.
 
@@ -727,35 +738,39 @@ async def refresh_oauth_token_result(
             )
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        try:
-            # Deliberately not the caller's deadline: it may already be exhausted, and
-            # starving the marker is how a diagnosable failure becomes a silent one.
-            await _arecord_refresh_failure(
-                preflight,
-                fingerprint,
-                deadline=_phase_deadline(None, db_timeout, clock),
-                clock=clock,
-            )
-        except TokenRefreshUnavailable:
-            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
+        transient = _is_transient_status(e.response.status_code)
+        if not transient:
+            try:
+                # Deliberately not the caller's deadline: it may already be exhausted, and
+                # starving the marker is how a diagnosable failure becomes a silent one.
+                await _arecord_refresh_failure(
+                    preflight,
+                    fingerprint,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshUnavailable:
+                logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         if rejected:
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
-        if e.response.status_code in (408, 429) or e.response.status_code >= 500:
+        if transient:
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        try:
-            await _arecord_refresh_failure(
-                preflight,
-                fingerprint,
-                deadline=_phase_deadline(None, db_timeout, clock),
-                clock=clock,
-            )
-        except TokenRefreshUnavailable:
-            # Losing the marker must not erase the real cause; it is already logged.
-            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-        if isinstance(e, (httpx.RequestError, requests.RequestException)):
+        transient = isinstance(e, (httpx.RequestError, requests.RequestException))
+        if not transient:
+            try:
+                await _arecord_refresh_failure(
+                    preflight,
+                    fingerprint,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshUnavailable:
+                # Losing the marker must not erase the real cause; it is already logged.
+                logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
+        if transient:
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
 
@@ -880,33 +895,37 @@ def refresh_oauth_token_result_sync(
             )
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        try:
-            _record_refresh_failure(
-                preflight,
-                fingerprint,
-                deadline=_phase_deadline(None, db_timeout, clock),
-                clock=clock,
-            )
-        except TokenRefreshUnavailable:
-            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
+        transient = _is_transient_status(status)
+        if not transient:
+            try:
+                _record_refresh_failure(
+                    preflight,
+                    fingerprint,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshUnavailable:
+                logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         if rejected:
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
-        if status is not None and (status in (408, 429) or status >= 500):
+        if transient:
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        try:
-            _record_refresh_failure(
-                preflight,
-                fingerprint,
-                deadline=_phase_deadline(None, db_timeout, clock),
-                clock=clock,
-            )
-        except TokenRefreshUnavailable:
-            # Losing the marker must not erase the real cause; it is already logged.
-            logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-        if isinstance(e, (httpx.RequestError, requests.RequestException)):
+        transient = isinstance(e, (httpx.RequestError, requests.RequestException))
+        if not transient:
+            try:
+                _record_refresh_failure(
+                    preflight,
+                    fingerprint,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshUnavailable:
+                # Losing the marker must not erase the real cause; it is already logged.
+                logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
+        if transient:
             raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
 
