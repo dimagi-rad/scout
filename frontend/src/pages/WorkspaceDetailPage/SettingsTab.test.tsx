@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -41,6 +41,14 @@ describe("workspace settings saves", () => {
     expect(workspaceApi.update).not.toHaveBeenCalled()
   })
 
+  it("does not send an unedited system prompt when the form is submitted directly", () => {
+    renderTab()
+
+    fireEvent.submit(screen.getByTestId("settings-system-prompt").closest("form")!)
+
+    expect(workspaceApi.update).not.toHaveBeenCalled()
+  })
+
   it("sends only the prompt once it is edited", async () => {
     renderTab()
 
@@ -63,7 +71,7 @@ describe("workspace settings saves", () => {
     expect(workspaceApi.update).toHaveBeenCalledExactlyOnceWith("ws-1", { name: "Renamed" })
   })
 
-  it("offers no prompt editor while the server has blanked it for missing sources", () => {
+  it("offers no settings edits while the server has blanked the prompt for missing sources", () => {
     renderTab({
       system_prompt: "",
       missing_tenants: [
@@ -77,8 +85,13 @@ describe("workspace settings saves", () => {
       ],
     })
 
-    expect(screen.getByTestId("settings-system-prompt-unavailable")).toBeInTheDocument()
+    expect(screen.getByTestId("settings-system-prompt-unavailable")).toHaveTextContent(
+      "Source Two: Reconnect CommCare.",
+    )
     expect(screen.queryByTestId("settings-system-prompt")).not.toBeInTheDocument()
     expect(screen.queryByTestId("settings-save-prompt")).not.toBeInTheDocument()
+    // Every PATCH is refused in this state, so rename is not offered either.
+    expect(screen.getByTestId("settings-name-input")).toBeDisabled()
+    expect(screen.queryByTestId("settings-save-name")).not.toBeInTheDocument()
   })
 })

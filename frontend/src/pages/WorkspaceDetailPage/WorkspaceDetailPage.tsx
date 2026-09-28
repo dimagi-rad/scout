@@ -892,7 +892,10 @@ export function SettingsTab({
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const isManager = workspace.role === "manage"
-  const promptRedacted = (workspace.missing_tenants?.length ?? 0) > 0
+  // The server blanks the prompt and refuses every PATCH while sources are missing.
+  const missingTenants = workspace.missing_tenants ?? []
+  const promptRedacted = missingTenants.length > 0
+  const canEdit = isManager && !promptRedacted
   const promptChanged = systemPrompt !== savedPrompt
 
   async function handleSaveName(e: React.SyntheticEvent<HTMLFormElement>) {
@@ -948,12 +951,12 @@ export function SettingsTab({
               className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={!isManager}
+              disabled={!canEdit}
               data-testid="settings-name-input"
             />
             {nameError && <p className="mt-1 text-xs text-destructive">{nameError}</p>}
           </div>
-          {isManager && (
+          {canEdit && (
             <Button
               type="submit"
               size="sm"
@@ -972,12 +975,19 @@ export function SettingsTab({
           Custom instructions for the AI agent in this workspace.
         </p>
         {promptRedacted ? (
-          <p
+          <div
             className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
             data-testid="settings-system-prompt-unavailable"
           >
-            Unavailable until you have access to every data source in this workspace.
-          </p>
+            <p>Settings can't be viewed or changed until you regain access. Still needed:</p>
+            <ul className="mt-1 space-y-1">
+              {missingTenants.map((t) => (
+                <li key={t.tenant_id}>
+                  <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
+                </li>
+              ))}
+            </ul>
+          </div>
         ) : (
           <form onSubmit={handleSavePrompt} className="space-y-2">
             <textarea
