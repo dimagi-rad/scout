@@ -238,8 +238,11 @@ async def test_prompt_does_not_reference_params_absent_from_tool_schema(db):
     # No TenantSchema => the "no data loaded" branch that emits the pipeline= text.
     prompt_section = "\n".join(
         [
-            await _fetch_semantic_model_context(workspace, interactive=i, write_capable=True)
-            for i in (True, False)
+            await _fetch_semantic_model_context(
+                workspace, interactive=interactive, write_capable=write_capable
+            )
+            for interactive in (True, False)
+            for write_capable in (True, False)
         ]
     )
 
