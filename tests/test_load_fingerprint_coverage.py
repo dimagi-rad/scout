@@ -5,6 +5,11 @@ module reuse a published generation, or resume a FAILED candidate, built by the
 old code. This walks the static first-party imports of the materializer (the
 entry point every load runs through) and requires each module it reaches to be
 hashed or explicitly excluded below with a reason.
+
+Orchestration reached only from apps/workspaces/tasks.py (candidate bookkeeping,
+pipeline resolution, credentials) is out of scope: it decides when and where a
+load runs, not what it writes, and hashing it would churn the fingerprint on
+nearly every deploy.
 """
 
 import ast
@@ -21,6 +26,7 @@ _FIRST_PARTY = ("apps", "config", "mcp_server")
 _NOT_LOAD_SHAPING = {
     "apps/common/error_codes.py": "Failure codes; decide how a failure is reported.",
     "apps/common/errors.py": "Exception types; decide how a failure is reported.",
+    "apps/knowledge/services/__init__.py": "Re-exports KnowledgeRetriever for the agent.",
     "apps/knowledge/services/column_note_generator.py": (
         "Writes knowledge notes outside the tenant schema after the load."
     ),
@@ -28,6 +34,7 @@ _NOT_LOAD_SHAPING = {
     "apps/users/models.py": "ORM state; its schema changes ship as migrations.",
     "apps/users/services/upstream_denial.py": "Records an upstream access denial.",
     "apps/workspaces/models.py": "ORM state; its schema changes ship as migrations.",
+    "apps/workspaces/services/__init__.py": "Re-exports SchemaManager, excluded below.",
     "apps/workspaces/services/load_generations.py": "The fingerprint itself.",
     "apps/workspaces/services/schema_manager.py": (
         "Provisions and names schemas and roles; never decides their rows."
@@ -58,6 +65,10 @@ def _imported_modules(path: pathlib.Path, module: str) -> set[str]:
             found.add(source)
             # ``from pkg import submodule`` imports a module, not just a name.
             found.update(f"{source}.{alias.name}" for alias in node.names)
+    # Importing a submodule also executes every ancestor package's __init__.py.
+    for name in list(found):
+        parts = name.split(".")
+        found.update(".".join(parts[:depth]) for depth in range(1, len(parts)))
     return {name for name in found if name.split(".")[0] in _FIRST_PARTY}
 
 
@@ -78,6 +89,12 @@ def _load_path_files() -> set[str]:
     return reached
 
 
+def _has_code(relative: str) -> bool:
+    """False for a file holding at most a docstring, such as an empty package init."""
+    tree = ast.parse(_REPO_ROOT.joinpath(relative).read_text())
+    return len(tree.body) > (ast.get_docstring(tree) is not None)
+
+
 def _is_hashed(relative: str) -> bool:
     return any(
         relative == root or relative.startswith(f"{root.rstrip('/')}/")
@@ -89,7 +106,7 @@ def test_every_module_on_the_load_path_is_fingerprinted_or_excluded():
     unaccounted = sorted(
         path
         for path in _load_path_files()
-        if not _is_hashed(path) and path not in _NOT_LOAD_SHAPING
+        if _has_code(path) and not _is_hashed(path) and path not in _NOT_LOAD_SHAPING
     )
     assert not unaccounted, (
         "These modules are imported by the load path but not hashed into the load "
