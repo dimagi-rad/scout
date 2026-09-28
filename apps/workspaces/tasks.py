@@ -699,6 +699,25 @@ _SOURCE_ADDED_DURING_LOAD = (
 )
 
 
+async def _served_schema(tm):
+    return await TenantSchema.objects.filter(
+        tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
+    ).afirst()
+
+
+async def _already_loaded(tm, served) -> dict:
+    # The views about to be published read this schema, so it counts as used;
+    # otherwise the inactivity sweep could drop it from under them.
+    await served.atouch()
+    return {
+        "tenant": tm.tenant.external_id,
+        "tenant_id": str(tm.tenant_id),
+        "provider": tm.tenant.provider,
+        "success": True,
+        "result": {"status": "already_loaded"},
+    }
+
+
 @serialized_workspace_materialization
 async def materialize_workspace_core(
     workspace_id: str,
@@ -780,7 +799,16 @@ async def materialize_workspace_core(
         if index:
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
-                pending = memberships[index:]
+                pending = []
+                for later in memberships[index:]:
+                    # A new-source load would have skipped a serving sibling, not
+                    # loaded it: reporting it denied would fail the Cube gate over
+                    # data this run never touched.
+                    served = await _served_schema(later) if only_unserved else None
+                    if served is not None:
+                        tenant_results.append(await _already_loaded(later, served))
+                    else:
+                        pending.append(later)
                 attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
                 denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
                 tenant_results.extend(
@@ -820,28 +848,11 @@ async def materialize_workspace_core(
                 )
             )
             continue
-        served = (
-            await TenantSchema.objects.filter(
-                tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
-            ).afirst()
-            if only_unserved
-            else None
-        )
+        served = await _served_schema(tm) if only_unserved else None
         if served is not None:
             # A source added to the workspace loads before publication; sources
             # already serving data are only published, never reloaded for it.
-            # The views about to be published read this schema, so it counts as
-            # used; otherwise the inactivity sweep could drop it from under them.
-            await served.atouch()
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "tenant_id": str(tm.tenant_id),
-                    "provider": tm.tenant.provider,
-                    "success": True,
-                    "result": {"status": "already_loaded"},
-                }
-            )
+            tenant_results.append(await _already_loaded(tm, served))
             continue
         attempted_tenant_ids.add(str(tm.tenant_id))
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)

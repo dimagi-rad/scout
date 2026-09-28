@@ -30,7 +30,11 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services.data_operation import LockOrderError
+from apps.workspaces.services.data_operation import (
+    LockOrderError,
+    tenant_data_lock,
+    workspace_data_lock,
+)
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     capture_load_intent,
@@ -495,6 +499,46 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
     assert len(await _active_schemas(new_source)) == 1
 
 
+_DENIAL = {
+    "tenants": [],
+    "error": "Verification unavailable",
+    "error_code": "verification_unavailable",
+}
+
+
+async def _run_new_source_load_denied_after_first_tenant(workspace, user):
+    """Run a new-source load whose authority recheck fails from the second tenant on.
+
+    Calls the core without its locking wrapper (the locks are taken here), so
+    every denial check comes from the per-tenant loop and none is spent on the
+    wrapper's own checks, however many it makes.
+    """
+    tenant_ids = [t async for t in workspace.tenants.values_list("id", flat=True)]
+    async with workspace_data_lock(workspace.id), tenant_data_lock(tenant_ids):
+        return await workspaces_tasks.materialize_workspace_core.__wrapped__(
+            str(workspace.id),
+            str(user.id),
+            None,
+            load_intent={},
+            locked_tenant_ids=frozenset(str(t) for t in tenant_ids),
+            only_unserved=True,
+        )
+
+
+async def _add_sources(workspace, user, *, serving, unserved):
+    added = {}
+    for name, is_serving in [(n, True) for n in serving] + [(n, False) for n in unserved]:
+        source = await Tenant.objects.acreate(provider="commcare", external_id=name)
+        await agrant_tenant_access(user, source)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=source)
+        if is_serving:
+            await TenantSchema.objects.acreate(
+                tenant=source, schema_name=f"serving_{source.id.hex}", state=SchemaState.ACTIVE
+            )
+        added[name] = source
+    return added
+
+
 async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, tenant, user):
     for index in range(2):
         source = await Tenant.objects.acreate(
@@ -527,9 +571,58 @@ async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, 
             result = await workspaces_tasks.materialize_workspace_core(
                 str(workspace.id), str(user.id), None, only_unserved=True
             )
-    assert result["all_succeeded"] is False
+    # Every source already serves: the denial stops no load, so nothing failed.
+    assert result["all_succeeded"] is True
     assert pipeline.calls == []
     assert list(dependents.await_args.args[0]) == []
+
+
+async def test_a_transient_denial_never_fails_siblings_the_new_source_load_would_skip(
+    workspace, tenant, user
+):
+    """A denial part-way through a new-source load stops further loads, but a
+    sibling that already serves data would have been skipped, not loaded: it
+    must not be reported failed, or the Cube gate refuses a model over data the
+    run never touched."""
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    added = await _add_sources(workspace, user, serving=["sibling"], unserved=["new-source"])
+    serving_ids = {str(tenant.id), str(added["sibling"].id)}
+    new_id = str(added["new-source"].id)
+    coverage = {
+        "included_tenants": [{"tenant_id": t} for t in sorted(serving_ids)],
+        "excluded_tenants": [{"tenant_id": new_id}],
+    }
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(return_value=_DENIAL),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._included_tenant_snapshot_state",
+                AsyncMock(return_value="safe"),
+            ),
+            patch("apps.workspaces.tasks.record_cube_schema_build_failure") as cube_failure,
+        ):
+            build.return_value.tenant_coverage = coverage
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
+
+    # Keyed by external id: every entry carries it, loaded or not.
+    by_source = {entry["tenant"]: entry for entry in result["tenants"]}
+    for serving in (tenant.external_id, "sibling"):
+        assert by_source[serving]["success"] is True
+        assert by_source[serving]["result"] == {"status": "already_loaded"}
+    new_source_loaded = bool(pipeline.calls)
+    assert by_source["new-source"]["success"] is new_source_loaded
+    # Only the new source can have failed, and it is excluded from the views,
+    # so the Cube build goes ahead over the sources that serve.
+    cube_failure.assert_not_called()
+    assert result["cube_schema"]["ok"] is True
+    assert result["all_succeeded"] is new_source_loaded
 
 
 async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(workspace, tenant, user):
