@@ -816,6 +816,7 @@ def _load_and_commit_source(
             conn,
             provider=provider,
             on_page=on_page,
+            resumable=resumable,
             start_cursor=start_cursor,
             cursor_callback=cursor_callback,
         )
@@ -846,6 +847,7 @@ def _load_source(
     conn: Any,
     provider: str = "commcare",
     on_page: OnPage | None = None,
+    resumable: bool = False,
     start_cursor: int | None = None,
     cursor_callback: CursorCallback | None = None,
 ) -> int:
@@ -857,6 +859,7 @@ def _load_source(
             schema_name,
             conn,
             on_page,
+            resumable=resumable,
             start_cursor=start_cursor,
             cursor_callback=cursor_callback,
         )
@@ -889,6 +892,7 @@ def _load_connect_source(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    resumable: bool = False,
     start_cursor: int | None = None,
     cursor_callback: CursorCallback | None = None,
 ) -> int:
@@ -908,7 +912,7 @@ def _load_connect_source(
 
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(opportunity_id=opp_id, credential=credential)
-    if source_name in _RESUMABLE_CONNECT_SOURCES:
+    if resumable:
         pages = loader.load_pages(start_last_id=start_cursor)
         return writer_fn(
             pages,
