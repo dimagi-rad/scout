@@ -552,6 +552,22 @@ async def _catalog_denial(user, workspace_id) -> str | None:
     return CREDENTIAL_MISSING if check.unbound else VERIFICATION_UNAVAILABLE
 
 
+async def _catalog_denials(candidates, active_workspace_id, requested_ids=()) -> list:
+    """``_catalog_denial`` for each membership, rechecking upstream only the active and
+    explicitly requested workspaces so one listing never fans out to every provider.
+    """
+    if not candidates:
+        return []
+    verifiable_ids = set(requested_ids)
+    with contextlib.suppress(ValueError, AttributeError, TypeError):
+        verifiable_ids.add(str(uuid.UUID(str(active_workspace_id))))
+    actor = candidates[0].user
+    await _recheck_catalog_workspaces(
+        actor, {str(m.workspace_id) for m in candidates} & verifiable_ids
+    )
+    return [await _catalog_denial(actor, m.workspace_id) for m in candidates]
+
+
 async def _resolve_accessible_workspace(workspace_id: str, user_id: str = "") -> Workspace:
     if user_id:
         try:
@@ -586,6 +602,10 @@ async def list_workspaces(
         workspace_id: Active workspace UUID (injected server-side by the agent graph).
         user_id: Acting user UUID (injected server-side; used for access control).
         thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
+
+    Only workspaces the user can currently read are listed. The response names the
+    rest in ``inaccessible_workspace_ids`` (access denied) and, separately,
+    ``unverified_workspace_ids`` (access not yet confirmed upstream; retry shortly).
     """
     limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_WORKSPACE_DISCOVERY_LIMIT)
     async with tool_context(
@@ -602,7 +622,7 @@ async def list_workspaces(
             return tc["result"]
 
         qs = (
-            WorkspaceMembership.objects.select_related("workspace")
+            WorkspaceMembership.objects.select_related("workspace", "user")
             .filter(user_id=user_id)
             .order_by("workspace__name", "workspace_id")
         )
@@ -614,16 +634,31 @@ async def list_workspaces(
                 | Q(workspace__tenants__provider__icontains=search)
             ).distinct()
 
-        total = await qs.acount()
-        items = []
-        async for membership in qs[offset : offset + limit]:
-            items.append(
-                await _workspace_summary(
-                    membership.workspace,
-                    role=membership.role,
-                    active_workspace_id=workspace_id,
-                )
+        # Membership alone isn't access (#567): listing a workspace every data tool
+        # would refuse steers the agent into it. Same split as list_datasets.
+        candidates = [membership async for membership in qs]
+        denials = await _catalog_denials(candidates, workspace_id)
+        accessible = [m for m, denial in zip(candidates, denials, strict=True) if not denial]
+        unverified_workspace_ids = sorted(
+            str(m.workspace_id)
+            for m, denial in zip(candidates, denials, strict=True)
+            if denial in RETRYABLE_REASONS
+        )
+        inaccessible_workspace_ids = sorted(
+            str(m.workspace_id)
+            for m, denial in zip(candidates, denials, strict=True)
+            if denial and denial not in RETRYABLE_REASONS
+        )
+
+        total = len(accessible)
+        items = [
+            await _workspace_summary(
+                membership.workspace,
+                role=membership.role,
+                active_workspace_id=workspace_id,
             )
+            for membership in accessible[offset : offset + limit]
+        ]
 
         tc["result"] = success_response(
             {
@@ -632,6 +667,8 @@ async def list_workspaces(
                 "limit": limit,
                 "offset": offset,
                 "has_more": offset + len(items) < total,
+                "inaccessible_workspace_ids": inaccessible_workspace_ids,
+                "unverified_workspace_ids": unverified_workspace_ids,
             },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
@@ -732,18 +769,7 @@ async def list_datasets(
         workspace_roles: dict[str, str] = {}
         if user_id:
             candidates = await _accessible_workspace_memberships(user_id, requested_workspace_ids)
-            verifiable_ids = set(requested_workspace_ids)
-            with contextlib.suppress(ValueError, AttributeError, TypeError):
-                verifiable_ids.add(str(uuid.UUID(str(workspace_id))))
-            denials = []
-            if candidates:
-                actor = candidates[0].user
-                await _recheck_catalog_workspaces(
-                    actor,
-                    {str(m.workspace_id) for m in candidates} & verifiable_ids,
-                )
-                for membership in candidates:
-                    denials.append(await _catalog_denial(actor, membership.workspace_id))
+            denials = await _catalog_denials(candidates, workspace_id, requested_workspace_ids)
             memberships = [m for m, denial in zip(candidates, denials, strict=True) if not denial]
             # Retryable denials are named separately so the agent can say "retry
             # shortly" instead of reporting that the datasets do not exist.
