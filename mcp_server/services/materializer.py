@@ -1597,8 +1597,9 @@ def _write_connect_visits(
     already be positioned past ``start_cursor`` (the caller passes
     ``start_last_id`` to the loader).
 
-    Resumable writers commit per page (rather than once per source) so a
-    mid-source crash leaves a partial table the next run can continue.
+    With a ``cursor_callback`` the writer commits per page (rather than once
+    per source) so a mid-source crash leaves a partial table the next run can
+    continue. Without one it leaves the single commit to the caller.
 
     Column types mirror the Django model + DRF serializer output:
     - ``flag_reason`` is a JSONField, serialized as a dict → JSONB
@@ -1643,7 +1644,9 @@ def _write_connect_visits(
         """
         ).format(schema=sid)
     )
-    conn.commit()
+    resuming_by_page = cursor_callback is not None
+    if resuming_by_page:
+        conn.commit()
 
     ins_sql = _CONNECT_VISITS_INSERT.format(schema=sid)
     total = 0
@@ -1682,10 +1685,11 @@ def _write_connect_visits(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        max_id = _max_id(page, "visit_id")
-        conn.commit()
-        if cursor_callback is not None and max_id is not None:
-            cursor_callback(max_id, total)
+        if resuming_by_page:
+            conn.commit()
+            max_id = _max_id(page, "visit_id")
+            if max_id is not None:
+                cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 

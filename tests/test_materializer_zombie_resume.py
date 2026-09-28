@@ -198,3 +198,29 @@ def test_a_failed_identity_pk_source_rolls_back_to_the_previous_table(managed_co
     # Never resumed, so committed pages would only be a partial table: the DROP
     # and every page roll back together.
     assert _count(managed_conn, candidate, "raw_completed_works") == 3
+
+
+def test_visits_loaded_without_resume_also_rolls_back_as_one_transaction(managed_conn, candidate):
+    previous = [_visit(1), _visit(2), _visit(3)]
+    _write_connect_visits(iter([(previous, None)]), candidate.schema_name, managed_conn)
+
+    def pages_then_crash():
+        yield [_visit(4), _visit(5)], None
+        raise RuntimeError("Connect 500 mid-load")
+
+    loader_cls = MagicMock()
+    loader_cls.return_value.load_pages.return_value = pages_then_crash()
+    with (
+        patch("mcp_server.services.materializer.ConnectVisitLoader", loader_cls),
+        pytest.raises(RuntimeError, match="mid-load"),
+    ):
+        _load_and_commit_source(
+            "visits",
+            SimpleNamespace(tenant=candidate.tenant),
+            {"type": "api_key", "value": "x"},
+            candidate.schema_name,
+            provider="commcare_connect",
+            resumable=False,
+        )
+
+    assert _count(managed_conn, candidate, "raw_visits") == 3
