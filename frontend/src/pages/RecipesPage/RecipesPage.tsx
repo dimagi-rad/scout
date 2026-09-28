@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, type ReactNode } from "react"
-import { useNavigate, useParams } from "react-router-dom"
+import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
@@ -23,6 +23,9 @@ import type { Recipe } from "@/store/recipeSlice"
 export function RecipesPage() {
   const { id, runId } = useParams<{ id: string; runId: string }>()
   const navigate = useNavigate()
+  const { pathname } = useLocation()
+  // Mounted at /recipes and /embed/recipes; root paths would leave the embed app.
+  const recipesPath = pathname.replace(/(\/recipes)(\/.*)?$/, "$1")
   const isCurrentAccount = useIsCurrentAccount()
 
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -99,14 +102,14 @@ export function RecipesPage() {
 
   const handleView = useCallback(
     (recipe: Recipe) => {
-      navigate(`/recipes/${recipe.id}`)
+      navigate(`${recipesPath}/${recipe.id}`)
     },
-    [navigate]
+    [navigate, recipesPath]
   )
 
   const handleBack = useCallback(() => {
-    navigate("/recipes")
-  }, [navigate])
+    navigate(recipesPath)
+  }, [navigate, recipesPath])
 
   const handleRun = useCallback(
     async (recipe: Recipe) => {
@@ -130,14 +133,14 @@ export function RecipesPage() {
   }, [currentRecipe])
 
   const handleBackFromRun = useCallback(() => {
-    navigate(`/recipes/${id}`)
-  }, [navigate, id])
+    navigate(`${recipesPath}/${id}`)
+  }, [navigate, recipesPath, id])
 
   const handleViewRun = useCallback(
     (runId: string) => {
-      navigate(`/recipes/${id}/runs/${runId}`)
+      navigate(`${recipesPath}/${id}/runs/${runId}`)
     },
-    [navigate, id],
+    [navigate, recipesPath, id],
   )
 
   const handleDelete = useCallback((recipe: Recipe) => {
@@ -162,9 +165,18 @@ export function RecipesPage() {
     setDeleteDialogRecipe(null)
 
     if (id === deleteDialogRecipe.id) {
-      navigate("/recipes")
+      navigate(recipesPath)
     }
-  }, [deleteDialogRecipe, isDeleting, deleteRecipe, id, navigate, isCurrentAccount, canWrite])
+  }, [
+    deleteDialogRecipe,
+    isDeleting,
+    deleteRecipe,
+    id,
+    navigate,
+    recipesPath,
+    isCurrentAccount,
+    canWrite,
+  ])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {
@@ -194,9 +206,9 @@ export function RecipesPage() {
 
   const handleRunComplete = useCallback(
     (recipeId: string, runId: string) => {
-      navigate(`/recipes/${recipeId}/runs/${runId}`)
+      navigate(`${recipesPath}/${recipeId}/runs/${runId}`)
     },
-    [navigate],
+    [navigate, recipesPath],
   )
 
   let body: ReactNode = null
