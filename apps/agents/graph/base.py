@@ -51,15 +51,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.pipeline_resolver import (
-    PipelineResolutionError,
-    select_pipeline_config,
-)
 from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
-from mcp_server.services.metadata import (
-    pipeline_list_tables,
-    transformation_aware_list_tables,
-)
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -282,10 +274,10 @@ def _system_prompt_cache_key(
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
-    Includes user.id conservatively: the reason given for it — that
-    _fetch_schema_context scoped TenantMetadata per user — no longer holds
-    (TenantMetadata is per tenant, #305, and that function does not read it at
-    all), but sharing one prompt across a workspace's users needs its own audit.
+    Includes user.id conservatively: the original reason — per-user
+    TenantMetadata in the prompt — no longer holds (TenantMetadata is per
+    tenant, #305, and the prompt does not read it), but sharing one prompt
+    across a workspace's users needs its own audit.
     Includes workspace.system_prompt hash
     so edits invalidate immediately. Includes ``interactive`` because the
     materialization guidance differs between interactive (fire-and-resume) and
@@ -508,86 +500,6 @@ _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
 )
 
 
-# Deliberately mode-agnostic: no "end your turn" (the headless runs have no
-# resume path) and no retry hint, because no amount of waiting or re-running
-# fixes a missing pipeline definition.
-_PIPELINE_UNRESOLVED_GUIDANCE = (
-    "This workspace's data cannot be described: Scout cannot determine which "
-    "pipeline loaded it, which is a configuration error on Scout's side. Do NOT "
-    "call data tools or `run_materialization` — they will fail the same way. "
-    "Tell the user their workspace needs an administrator to configure its "
-    "provider pipeline, and stop there."
-)
-
-
-async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
-    """Fetch database schema state and build a ## Data Availability prompt section.
-
-    Reports availability state without embedding table or dataset names. Runtime
-    dataset discovery belongs in MCP tools such as ``list_datasets``.
-
-    ``interactive`` selects the materialization guidance: fire-and-resume (chat)
-    vs blocking (headless recipe runs).
-    """
-    ts = await TenantSchema.objects.filter(
-        tenant=tenant,
-        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-    ).afirst()
-
-    if ts is None:
-        if not interactive:
-            return _HEADLESS_MATERIALIZE_GUIDANCE
-        return _INTERACTIVE_MATERIALIZE_GUIDANCE
-
-    if ts.state == SchemaState.MATERIALIZING:
-        if not interactive:
-            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
-
-    try:
-        pipeline_config = select_pipeline_config(provider=tenant.provider)
-    except PipelineResolutionError:
-        # Guidance, not a raise: this builds the system prompt on every turn, so
-        # raising would take the whole chat down. The detail stays in the log —
-        # the agent only needs to know the workspace is not describable and that
-        # no tool call will change that (#155).
-        logger.exception("Pipeline resolution failed for the agent prompt")
-        return _PIPELINE_UNRESOLVED_GUIDANCE
-
-    # transformation-aware listing prefers terminal models over replaced ones
-    from apps.transformations.services.lineage import aget_terminal_assets
-
-    terminal_assets = await aget_terminal_assets(tenant_ids=[tenant.id])
-
-    if terminal_assets:
-        tables = await transformation_aware_list_tables(ts, pipeline_config, tenant_ids=[tenant.id])
-    else:
-        tables = await pipeline_list_tables(ts, pipeline_config)
-
-    if not tables:
-        return (
-            "Data is loaded but no semantic datasets are available yet. The "
-            "materialization may still be completing. Retry `list_datasets` shortly."
-        )
-
-    last_materialized_at = tables[0].get("materialized_at") if tables else None
-    if last_materialized_at:
-        loaded = f"Data is loaded and ready. Last updated: {last_materialized_at}."
-    else:
-        loaded = "Data is loaded and ready."
-    compact = (
-        f"{loaded} Use `list_datasets` to page through dataset summaries, "
-        "`describe_dataset` for one dataset's members, and `semantic_query` "
-        "for analysis."
-    )
-    if terminal_assets:
-        compact += (
-            "\n\nThese tables are produced by a transformation pipeline. "
-            "Use the `get_lineage` tool to explore how any table was built."
-        )
-    return compact
-
-
 _MULTI_TENANT_NAMESPACE_HINT = (
     "This is a multi-tenant workspace. Prefer the semantic catalog — semantic "
     "datasets already handle the workspace scope. If you fall back to raw SQL, "
@@ -595,72 +507,6 @@ _MULTI_TENANT_NAMESPACE_HINT = (
     "double underscore: `{tenant_name}__{table_name}`, and querying across "
     "tenants needs explicit JOINs between namespaced tables."
 )
-
-
-async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool = True) -> str:
-    """Build the ## Data Availability block for a multi-tenant workspace.
-
-    Mirrors `_fetch_schema_context` but consults `WorkspaceViewSchema` plus the
-    per-tenant `MaterializationRun` records, so the agent knows up front whether
-    data is loaded, still materializing, or missing — without having to call
-    `list_tables` first to discover the state.
-    """
-    vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
-
-    tenant_ids = [t.id async for t in workspace.tenants.all()]
-
-    active_run = None
-    if tenant_ids:
-        active_run = await MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=tenant_ids,
-            state__in=list(MaterializationRun.ACTIVE_STATES),
-        ).afirst()
-
-    if active_run is not None or (vs is not None and vs.state == SchemaState.MATERIALIZING):
-        if not interactive:
-            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
-
-    if vs is None or vs.state != SchemaState.ACTIVE:
-        if not interactive:
-            return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{_HEADLESS_MATERIALIZE_GUIDANCE}"
-        return (
-            f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
-            "No data has been loaded yet. Call `run_materialization` to start "
-            "loading data for all tenants in this workspace. This tool returns "
-            "IMMEDIATELY with `status: started` — do NOT call other data tools "
-            "in the same turn. Acknowledge to the user in ONE sentence and end "
-            "your turn. The system will resume the conversation automatically "
-            "when materialization completes."
-        )
-
-    last_run = None
-    if tenant_ids:
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema__tenant_id__in=tenant_ids,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
-    last_materialized_at = (
-        last_run.completed_at.isoformat() if last_run and last_run.completed_at else None
-    )
-
-    lines: list[str] = []
-    if last_materialized_at:
-        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}")
-    else:
-        lines.append("Data is loaded and ready.")
-    lines.append("")
-    lines.append(_MULTI_TENANT_NAMESPACE_HINT)
-    lines.append("")
-    lines.append("Use `list_datasets` and `describe_dataset` for dataset details.")
-    return "\n".join(lines)
 
 
 def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:

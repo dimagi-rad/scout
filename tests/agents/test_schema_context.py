@@ -8,8 +8,6 @@ from django.utils import timezone
 
 from apps.agents.graph import base as graph_base
 from apps.agents.graph.base import (
-    _fetch_multi_tenant_schema_context,
-    _fetch_schema_context,
     _fetch_semantic_model_context,
 )
 from apps.semantic.models import SemanticModel
@@ -21,20 +19,6 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-
-
-@pytest.fixture
-def mock_tenant():
-    m = MagicMock()
-    m.external_id = "test-domain"
-    m.canonical_name = "Test Domain"
-    m.provider = "commcare"
-    return m
-
-
-@pytest.fixture
-def mock_user():
-    return MagicMock()
 
 
 @pytest.mark.asyncio
@@ -258,160 +242,6 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_fetch_schema_context_not_provisioned(mock_tenant, mock_user):
-    """Returns 'no data' block when TenantSchema does not exist."""
-    with patch("apps.agents.graph.base.TenantSchema") as MockTS:
-        MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        result = await _fetch_schema_context(mock_tenant, mock_user)
-
-    assert "No data has been loaded yet" in result
-    assert "run_materialization" in result
-    # Finding 02#6: the prompt must NOT instruct a `pipeline=` argument — the
-    # run_materialization MCP tool has no pipeline parameter (routing moved into
-    # materialize_workspace per-provider) and its LLM-facing schema is empty.
-    # The multi-tenant branch already omits it; the single-tenant branch must too.
-    assert "pipeline=" not in result
-    assert 'pipeline="' not in result
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_schema_context_materializing(mock_tenant, mock_user):
-    """Returns 'currently loading' block when schema state is materializing."""
-    from apps.workspaces.models import SchemaState
-
-    mock_ts = MagicMock()
-    mock_ts.state = SchemaState.MATERIALIZING
-
-    with patch("apps.agents.graph.base.TenantSchema") as MockTS:
-        MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-        result = await _fetch_schema_context(mock_tenant, mock_user)
-
-    assert "loading" in result.lower()
-    assert "run_materialization" not in result
-    assert "resume" not in result.lower()
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
-    """Active schema guidance does not embed table names in the prompt."""
-    from apps.workspaces.models import SchemaState
-
-    mock_ts = MagicMock()
-    mock_ts.state = SchemaState.ACTIVE
-
-    mock_tables = [
-        {
-            "name": "cases",
-            "description": "CommCare cases",
-            "materialized_row_count": 1000,
-            "row_count_verified": False,
-            "materialized_at": "2026-03-02T10:00:00",
-        },
-        {
-            "name": "forms",
-            "description": "CommCare forms",
-            "materialized_row_count": 500,
-            "row_count_verified": False,
-            "materialized_at": "2026-03-02T10:00:00",
-        },
-    ]
-
-    with (
-        patch("apps.agents.graph.base.TenantSchema") as MockTS,
-        patch(
-            "apps.agents.graph.base.pipeline_list_tables",
-            new=AsyncMock(return_value=mock_tables),
-        ),
-        patch(
-            "apps.transformations.services.lineage.aget_terminal_assets",
-            new=AsyncMock(return_value=[]),
-        ),
-    ):
-        MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-
-        result = await _fetch_schema_context(mock_tenant, mock_user)
-
-    assert "Data is loaded and ready" in result
-    assert "2026-03-02T10:00:00" in result
-    assert "list_datasets" in result
-    assert "describe_dataset" in result
-    assert "cases" not in result
-    assert "forms" not in result
-    assert "1,000" not in result and "1000" not in result
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
-    """Active schema guidance does not embed column details."""
-    from apps.workspaces.models import SchemaState
-
-    mock_ts = MagicMock()
-    mock_ts.state = SchemaState.ACTIVE
-
-    mock_tables = [
-        {
-            "name": "cases",
-            "description": "CommCare cases",
-            "materialized_row_count": 100,
-            "row_count_verified": False,
-            "materialized_at": "2026-03-02T10:00:00",
-        },
-    ]
-
-    with (
-        patch("apps.agents.graph.base.TenantSchema") as MockTS,
-        patch(
-            "apps.agents.graph.base.pipeline_list_tables",
-            new=AsyncMock(return_value=mock_tables),
-        ),
-        patch(
-            "apps.transformations.services.lineage.aget_terminal_assets",
-            new=AsyncMock(return_value=[]),
-        ),
-    ):
-        MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-
-        result = await _fetch_schema_context(mock_tenant, mock_user)
-
-    assert "Data is loaded and ready" in result
-    assert "list_datasets" in result
-    assert "case_id" not in result
-    assert "cases" not in result
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant, mock_user):
-    """The returned text must NOT instruct the agent to call get_schema_status."""
-    from apps.workspaces.models import SchemaState
-
-    mock_ts = MagicMock()
-    mock_ts.state = SchemaState.ACTIVE
-
-    with (
-        patch("apps.agents.graph.base.TenantSchema") as MockTS,
-        patch(
-            "apps.agents.graph.base.pipeline_list_tables",
-            new=AsyncMock(return_value=[]),
-        ),
-        patch(
-            "apps.transformations.services.lineage.aget_terminal_assets",
-            new=AsyncMock(return_value=[]),
-        ),
-    ):
-        MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-
-        result = await _fetch_schema_context(mock_tenant, mock_user)
-
-    assert "call `get_schema_status`" not in result
-    assert "start of every conversation" not in result
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
 async def test_build_system_prompt_no_schema_status_call():
     """The assembled system prompt must not instruct the agent to call get_schema_status."""
     from apps.agents.graph.base import _build_system_prompt
@@ -439,9 +269,6 @@ async def test_build_system_prompt_no_schema_status_call():
     assert "list_datasets" in prompt
 
 
-# --- Multi-tenant ---
-
-
 class _AsyncIter:
     """Re-iterable async iterator over a fixed list, for mocking Django async QuerySets."""
 
@@ -455,119 +282,6 @@ class _AsyncIter:
     async def __aiter_inner__(self):
         for item in self._items:
             yield item
-
-
-@pytest.fixture
-def mock_multi_workspace():
-    """Workspace with 2 tenants. Subclass tunes `tenants` queryset behavior per test."""
-    ws = MagicMock()
-    ws.id = "11111111-1111-1111-1111-111111111111"
-    t1 = MagicMock()
-    t1.id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    t2 = MagicMock()
-    t2.id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    ws.tenants.all.return_value = _AsyncIter([t1, t2])
-    return ws
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_multi_tenant_no_view_schema_no_runs(mock_multi_workspace, mock_user):
-    """No view schema and no active runs -> agent told to call run_materialization."""
-    with (
-        patch("apps.agents.graph.base.WorkspaceViewSchema") as MockVS,
-        patch("apps.agents.graph.base.MaterializationRun") as MockMR,
-    ):
-        MockVS.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        MockMR.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        MockMR.ACTIVE_STATES = frozenset({"started", "discovering", "loading", "transforming"})
-
-        result = await _fetch_multi_tenant_schema_context(mock_multi_workspace, mock_user)
-
-    assert "No data has been loaded yet" in result
-    assert "run_materialization" in result
-    assert "multi-tenant" in result.lower()
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_multi_tenant_view_schema_materializing(mock_multi_workspace, mock_user):
-    """View schema in MATERIALIZING -> 'still loading' message."""
-    from apps.workspaces.models import SchemaState
-
-    vs = MagicMock()
-    vs.state = SchemaState.MATERIALIZING
-
-    with (
-        patch("apps.agents.graph.base.WorkspaceViewSchema") as MockVS,
-        patch("apps.agents.graph.base.MaterializationRun") as MockMR,
-    ):
-        MockVS.objects.filter.return_value.afirst = AsyncMock(return_value=vs)
-        MockMR.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        MockMR.ACTIVE_STATES = frozenset({"started", "discovering", "loading", "transforming"})
-
-        result = await _fetch_multi_tenant_schema_context(mock_multi_workspace, mock_user)
-
-    assert "in progress" in result.lower()
-    assert "run_materialization" not in result
-    assert "resume" not in result.lower()
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_multi_tenant_active_materialization_run(mock_multi_workspace, mock_user):
-    """An active MaterializationRun for a tenant -> 'still loading' message, even if
-    the view schema is not present yet."""
-    active_run = MagicMock()
-
-    with (
-        patch("apps.agents.graph.base.WorkspaceViewSchema") as MockVS,
-        patch("apps.agents.graph.base.MaterializationRun") as MockMR,
-    ):
-        MockVS.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        MockMR.objects.filter.return_value.afirst = AsyncMock(return_value=active_run)
-        MockMR.ACTIVE_STATES = frozenset({"started", "discovering", "loading", "transforming"})
-
-        result = await _fetch_multi_tenant_schema_context(mock_multi_workspace, mock_user)
-
-    assert "in progress" in result.lower()
-    assert "run_materialization" not in result
-    assert "resume" not in result.lower()
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db
-async def test_fetch_multi_tenant_active_with_tables(mock_multi_workspace, mock_user):
-    """View schema ACTIVE -> emits status and discovery-tool guidance, not view names."""
-    from apps.workspaces.models import SchemaState
-
-    vs = MagicMock()
-    vs.state = SchemaState.ACTIVE
-
-    completed_run = MagicMock()
-    completed_run.completed_at.isoformat.return_value = "2026-05-22T10:00:00"
-
-    with (
-        patch("apps.agents.graph.base.WorkspaceViewSchema") as MockVS,
-        patch("apps.agents.graph.base.MaterializationRun") as MockMR,
-    ):
-        MockVS.objects.filter.return_value.afirst = AsyncMock(return_value=vs)
-        MockMR.ACTIVE_STATES = frozenset({"started", "discovering", "loading", "transforming"})
-        # filter(...).afirst() resolves the active-run check (None);
-        # filter(...).order_by(...).afirst() resolves the last-completed-run lookup.
-        MockMR.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        MockMR.objects.filter.return_value.order_by.return_value.afirst = AsyncMock(
-            return_value=completed_run
-        )
-
-        result = await _fetch_multi_tenant_schema_context(mock_multi_workspace, mock_user)
-
-    assert "Data is loaded and ready" in result
-    assert "2026-05-22T10:00:00" in result
-    assert "tenant_a__raw_cases" not in result
-    assert "tenant_b__raw_forms" not in result
-    assert "list_datasets" in result
-    assert "describe_dataset" in result
 
 
 @pytest.mark.asyncio
