@@ -18,7 +18,7 @@ from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from apps.agents.graph.base import HEADLESS_ESCALATION_MESSAGE, READ_ONLY_ESCALATION_MESSAGE
+from apps.agents.graph.base import HEADLESS_ESCALATION_MESSAGE
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner
 from mcp_server.server import mcp as scout_mcp
@@ -182,6 +182,6 @@ async def test_run_ending_in_escalation_is_recorded_failed(recipe, user):
     assert run.status == RecipeRunStatus.FAILED, run.step_results
     step = run.step_results[0]
     assert step["success"] is False
-    assert step["error"] in {HEADLESS_ESCALATION_MESSAGE, READ_ONLY_ESCALATION_MESSAGE}
+    assert step["error"] == HEADLESS_ESCALATION_MESSAGE
     assert step["response"] == ""
     assert "query" in step["tools_used"]
