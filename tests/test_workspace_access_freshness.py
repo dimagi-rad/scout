@@ -14,7 +14,7 @@ from django.db import transaction
 from django.test import Client
 from django.utils import timezone
 
-from apps.users.models import TenantMembership, UpstreamAccessProof, VerificationControl
+from apps.users.models import Tenant, TenantMembership, UpstreamAccessProof, VerificationControl
 from apps.users.services.access_verification import PROOF_MAX_AGE, proofs_are_fresh
 from apps.workspaces import access as access_module
 from apps.workspaces.access import (
@@ -184,14 +184,29 @@ def test_outage_response_body_is_structured_and_retryable(
 
 @pytest.mark.django_db(transaction=True)
 def test_unbound_legacy_membership_needs_reconnect_not_a_provider_call(
-    user, workspace, tenant, upstream_provider
+    settings, user, workspace, tenant, upstream_provider
 ):
+    # With all-of off the local decision is any-of, so freshness reports it.
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     TenantMembership.objects.filter(user=user, tenant=tenant).update(connection=None)
 
     result = resolve_workspace_access_ex(user, workspace.id)
 
     assert result.denied_reason == CREDENTIAL_MISSING
     assert not result.retryable
+    assert upstream_provider.requests == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_all_of_coverage_decides_before_freshness_runs(user, workspace, tenant, upstream_provider):
+    """Both switches on: an unusable credential fails the local coverage decision,
+    which names the remedy, and freshness never makes a provider call for it."""
+    TenantMembership.objects.filter(user=user, tenant=tenant).update(connection=None)
+
+    result = resolve_workspace_access_ex(user, workspace.id)
+
+    assert result.denied_reason == TENANT_ACCESS_LOST
+    assert [t.recovery for t in result.missing_tenants] == ["reconnect"]
     assert upstream_provider.requests == []
 
 
@@ -325,3 +340,48 @@ def test_no_provider_call_inside_a_callers_transaction(user, workspace, tenant, 
 
 def test_every_freshness_denial_reason_has_a_public_message():
     assert set(access_module._FRESHNESS_MESSAGES) == set(FRESHNESS_DENIAL_REASONS)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_both_switches_on_partial_coverage_is_denied_locally_first(
+    user, workspace, tenant, upstream_provider
+):
+    """All-of is the local decision; freshness only runs once it grants."""
+    second = Tenant.objects.create(provider="commcare", external_id="second", canonical_name="Two")
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+    make_proof_stale(user, tenant)
+
+    result = resolve_workspace_access_ex(user, workspace.id)
+
+    assert result.denied_reason == TENANT_ACCESS_LOST
+    assert [t.tenant_name for t in result.missing_tenants] == ["Two"]
+    assert upstream_provider.requests == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_both_switches_off_keep_the_pre_380_decision(
+    settings, user, workspace, tenant, upstream_provider
+):
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    settings.UPSTREAM_ACCESS_FRESHNESS_ENFORCED = False
+    second = Tenant.objects.create(provider="commcare", external_id="second", canonical_name="Two")
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+    make_proof_stale(user, tenant)
+
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    assert upstream_provider.requests == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_covered_callers_of_exempt_paths_still_pass_freshness(
+    client, user, workspace, tenant, upstream_provider
+):
+    """The coverage exemption must not switch freshness off for covered members."""
+    make_proof_stale(user, tenant)
+    upstream_provider.failure = 503
+    client.force_login(user)
+
+    resp = client.get(f"/api/workspaces/{workspace.id}/members/")
+
+    assert resp.status_code == 403
+    assert resp.json()["reason"] == VERIFICATION_UNAVAILABLE

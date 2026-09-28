@@ -100,7 +100,12 @@ def test_deleting_last_membership_retains_hidden_storage(md_tenant):
 
 
 @pytest.mark.django_db
-def test_workspace_access_via_second_tenant_does_not_expose_revoked_first(user, workspace):
+def test_workspace_access_via_second_tenant_does_not_expose_revoked_first(
+    settings, user, workspace
+):
+    # Only reachable under the pre-#380 any-of rule; the all-of gate refuses the
+    # whole workspace, which the first request pins. The metadata scope check
+    # stays pinned for as long as the rollout switch can turn all-of off.
     revoked = Tenant.objects.create(
         provider="commcare", external_id="revoked-first", canonical_name="Revoked"
     )
@@ -123,6 +128,8 @@ def test_workspace_access_via_second_tenant_does_not_expose_revoked_first(user, 
             "apps.workspaces.api.views._sync_pipeline_list_tables", return_value=[{"name": "cases"}]
         ),
     ):
+        assert client.get(f"/api/workspaces/{workspace.id}/data-dictionary/").status_code == 403
+        settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
         response = client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
         assert response.status_code == 200
         assert "source_metadata" not in response.json()["tables"][f"{schema.schema_name}.cases"]
