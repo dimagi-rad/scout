@@ -25,7 +25,11 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.tasks import reconcile_stale_thread_job
+from apps.workspaces.tasks import (
+    _materialization_write_denial,
+    _resume_records,
+    reconcile_stale_thread_job,
+)
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -39,6 +43,7 @@ User = get_user_model()
         (ErrorCode.AUTH_CREDENTIAL_MISSING, True),
         (ErrorCode.WORKSPACE_TENANT_UNREACHABLE, True),
         (ErrorCode.PIPELINE_UNRESOLVED, False),
+        (ErrorCode.WORKSPACE_ROLE_INSUFFICIENT, False),
         (ErrorCode.AUTH_REFRESH_FAILED, True),
         (ErrorCode.CONNECTION_ERROR, True),
         (ErrorCode.INTERNAL_ERROR, True),
@@ -192,6 +197,50 @@ async def test_retry_policy_loads_run_results_and_preflight_failures_by_job():
         for item in response.json()["recent_terminations"]
     }
     assert flags == {"7001": True, "7002": True, "7003": False, "7004": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_role_denied_job_hides_retry_the_retry_endpoint_would_refuse():
+    user = await User.objects.acreate_user(email="role-denied@example.com", password="x")
+    workspace = await Workspace.objects.acreate(name="Role denied", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=workspace, user=user, role=WorkspaceRole.READ
+    )
+    tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="role-denied", canonical_name="Role denied"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
+    denial = await _materialization_write_denial(str(workspace.id), str(user.id))
+    assert denial["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        procrastinate_job_id=7101,
+        job_type="materialization",
+        tool_call_id="role-denied",
+        state=ThreadJob.State.FAILED,
+        failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
+        completed_at=timezone.now(),
+        materialization_preflight_failures=_resume_records(denial),
+    )
+    client = AsyncClient()
+    await client.alogin(email=user.email, password="x")
+
+    response = await client.get(f"/api/workspaces/{workspace.id}/jobs/active/")
+
+    assert response.status_code == 200
+    [termination] = response.json()["recent_terminations"]
+    assert termination["retry_available"] is False
+    retry = await client.post(
+        f"/api/workspaces/{workspace.id}/materialize/retry/",
+        data=json.dumps({"thread_id": str(thread.id)}),
+        content_type="application/json",
+    )
+    assert retry.status_code == 403
 
 
 @pytest.mark.asyncio

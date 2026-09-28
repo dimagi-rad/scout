@@ -45,11 +45,13 @@ CREDENTIAL_GUIDANCE: dict[str, str] = {
 }
 
 # Stored credential failures must not permanently hide Retry after reconnecting.
-# Only an authoritative denial or pipeline configuration defect blocks it here.
+# Only an authoritative denial, a pipeline configuration defect, or a Scout role
+# the retry endpoint itself requires (READ_WRITE) blocks it here.
 BLOCKS_IMMEDIATE_RETRY = frozenset(
     {
         ErrorCode.AUTH_ACCESS_DENIED,
         ErrorCode.PIPELINE_UNRESOLVED,
+        ErrorCode.WORKSPACE_ROLE_INSUFFICIENT,
     }
 )
 
