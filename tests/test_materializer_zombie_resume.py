@@ -22,6 +22,7 @@ from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 from apps.workspaces.tasks import _fail_zombie_materialization_run
 from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
 from mcp_server.services.materializer import (
+    _load_and_commit_source,
     _write_connect_completed_works,
     _write_connect_visits,
     run_pipeline,
@@ -170,3 +171,30 @@ def test_resuming_a_zombie_run_replays_visits_without_duplicating(managed_conn, 
     # Visits upserts on visit_id, so it keeps resuming from the zombie's cursor.
     assert load_call.kwargs["start_last_id"] == 2
     assert _count(managed_conn, candidate, "raw_visits") == 4
+
+
+def test_a_failed_identity_pk_source_rolls_back_to_the_previous_table(managed_conn, candidate):
+    previous = [_completed_work(1), _completed_work(2), _completed_work(3)]
+    _write_connect_completed_works(iter([(previous, None)]), candidate.schema_name, managed_conn)
+
+    def pages_then_crash():
+        yield [_completed_work(4), _completed_work(5)], None
+        raise RuntimeError("Connect 500 mid-load")
+
+    loader_cls = MagicMock()
+    loader_cls.return_value.load_pages.return_value = pages_then_crash()
+    with (
+        patch("mcp_server.services.materializer.ConnectCompletedWorkLoader", loader_cls),
+        pytest.raises(RuntimeError, match="mid-load"),
+    ):
+        _load_and_commit_source(
+            "completed_works",
+            SimpleNamespace(tenant=candidate.tenant),
+            {"type": "api_key", "value": "x"},
+            candidate.schema_name,
+            provider="commcare_connect",
+        )
+
+    # Never resumed, so committed pages would only be a partial table: the DROP
+    # and every page roll back together.
+    assert _count(managed_conn, candidate, "raw_completed_works") == 3

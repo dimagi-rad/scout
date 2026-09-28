@@ -1798,8 +1798,6 @@ def _write_connect_completed_works(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_COMPLETED_WORKS_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -1832,7 +1830,6 @@ def _write_connect_completed_works(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        conn.commit()
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1877,8 +1874,6 @@ def _write_connect_payments(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_PAYMENTS_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -1907,7 +1902,6 @@ def _write_connect_payments(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        conn.commit()
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1947,8 +1941,6 @@ def _write_connect_invoices(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_INVOICES_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -1971,7 +1963,6 @@ def _write_connect_invoices(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        conn.commit()
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -2009,8 +2000,6 @@ def _write_connect_assessments(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_ASSESSMENTS_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -2033,7 +2022,6 @@ def _write_connect_assessments(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        conn.commit()
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -2069,8 +2057,6 @@ def _write_connect_completed_modules(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_COMPLETED_MODULES_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -2091,7 +2077,6 @@ def _write_connect_completed_modules(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        conn.commit()
         if on_page is not None:
             on_page(total, rows_total)
 
