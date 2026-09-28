@@ -443,6 +443,8 @@ class WorkspaceDetailView(APIView):
         )
 
     def patch(self, request, workspace_id):
+        # Must keep requiring coverage: get() blanks system_prompt for an uncovered
+        # member, so accepting their write would let them save that blank over it.
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
