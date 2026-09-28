@@ -870,7 +870,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   )
 }
 
-function SettingsTab({
+export function SettingsTab({
   workspace,
   onRename,
   onDelete,
@@ -881,7 +881,8 @@ function SettingsTab({
 }) {
   const isCurrentAccount = useIsCurrentAccount()
   const [name, setName] = useState(workspace.name)
-  const [systemPrompt, setSystemPrompt] = useState(workspace.system_prompt ?? "")
+  const [savedPrompt, setSavedPrompt] = useState(workspace.system_prompt ?? "")
+  const [systemPrompt, setSystemPrompt] = useState(savedPrompt)
   const [savingName, setSavingName] = useState(false)
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -891,6 +892,8 @@ function SettingsTab({
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const isManager = workspace.role === "manage"
+  const promptRedacted = (workspace.missing_tenants?.length ?? 0) > 0
+  const promptChanged = systemPrompt !== savedPrompt
 
   async function handleSaveName(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -910,10 +913,12 @@ function SettingsTab({
 
   async function handleSavePrompt(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
+    if (promptRedacted || !promptChanged) return
     setSavingPrompt(true)
     setPromptError(null)
     try {
       await workspaceApi.update(workspace.id, { system_prompt: systemPrompt })
+      setSavedPrompt(systemPrompt)
     } catch (err) {
       setPromptError(err instanceof ApiError ? err.message : "Failed to save system prompt")
     } finally {
@@ -966,28 +971,37 @@ function SettingsTab({
         <p className="mb-3 text-xs text-muted-foreground">
           Custom instructions for the AI agent in this workspace.
         </p>
-        <form onSubmit={handleSavePrompt} className="space-y-2">
-          <textarea
-            className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
-            rows={6}
-            value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            disabled={!isManager}
-            placeholder="Leave blank for default behavior…"
-            data-testid="settings-system-prompt"
-          />
-          {promptError && <p className="text-xs text-destructive">{promptError}</p>}
-          {isManager && (
-            <Button
-              type="submit"
-              size="sm"
-              disabled={savingPrompt}
-              data-testid="settings-save-prompt"
-            >
-              {savingPrompt ? "Saving…" : "Save system prompt"}
-            </Button>
-          )}
-        </form>
+        {promptRedacted ? (
+          <p
+            className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+            data-testid="settings-system-prompt-unavailable"
+          >
+            Unavailable until you have access to every data source in this workspace.
+          </p>
+        ) : (
+          <form onSubmit={handleSavePrompt} className="space-y-2">
+            <textarea
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
+              rows={6}
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              disabled={!isManager}
+              placeholder="Leave blank for default behavior…"
+              data-testid="settings-system-prompt"
+            />
+            {promptError && <p className="text-xs text-destructive">{promptError}</p>}
+            {isManager && (
+              <Button
+                type="submit"
+                size="sm"
+                disabled={savingPrompt || !promptChanged}
+                data-testid="settings-save-prompt"
+              >
+                {savingPrompt ? "Saving…" : "Save system prompt"}
+              </Button>
+            )}
+          </form>
+        )}
       </section>
 
       {isManager && (
