@@ -242,6 +242,14 @@ async def test_role_denied_job_hides_retry_the_retry_endpoint_would_refuse():
     )
     assert retry.status_code == 403
 
+    # An admin restoring write access re-enables Retry on the same failure card.
+    await WorkspaceMembership.objects.filter(workspace=workspace, user=user).aupdate(
+        role=WorkspaceRole.READ_WRITE
+    )
+    response = await client.get(f"/api/workspaces/{workspace.id}/jobs/active/")
+    [termination] = response.json()["recent_terminations"]
+    assert termination["retry_available"] is True
+
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)

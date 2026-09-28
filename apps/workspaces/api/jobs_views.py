@@ -11,8 +11,12 @@ from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
 from apps.workspaces import tasks as workspace_tasks
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
-from apps.workspaces.models import MaterializationRun, WorkspaceRole
-from apps.workspaces.services.failure_guidance import BLOCKS_IMMEDIATE_RETRY, summary_failures
+from apps.workspaces.models import MaterializationRun, WorkspaceMembership, WorkspaceRole
+from apps.workspaces.services.failure_guidance import (
+    BLOCKS_IMMEDIATE_RETRY,
+    BLOCKS_RETRY_WITHOUT_WRITE_ROLE,
+    summary_failures,
+)
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -69,7 +73,9 @@ def _needs_materialization_retry_check(job: ThreadJob) -> bool:
     return bool(job.failure_phase) or job.started_at is None
 
 
-def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
+def _termination_to_dict(
+    job: ThreadJob, run_results: list[dict], *, viewer_can_write: bool = False
+) -> dict:
     """Serialize a terminal ThreadJob for the ``recent_terminations`` payload.
 
     Retry stays available if it can recover any source or a failed follow-up.
@@ -83,6 +89,9 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
         retry_available = False
     elif _needs_materialization_retry_check(job):
         failures = summary_failures([*job.materialization_preflight_failures, *run_results])
+        blocking = BLOCKS_IMMEDIATE_RETRY | (
+            frozenset() if viewer_can_write else BLOCKS_RETRY_WITHOUT_WRITE_ROLE
+        )
         completed_source = any(
             isinstance(result, dict)
             and isinstance(result.get("sources"), dict)
@@ -93,9 +102,7 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
             for result in run_results
         )
         retry_available = (
-            completed_source
-            or not failures
-            or any(f.code not in BLOCKS_IMMEDIATE_RETRY for f in failures)
+            completed_source or not failures or any(f.code not in blocking for f in failures)
         )
     return {
         "thread_job_id": str(job.id),
@@ -192,8 +199,18 @@ async def active_jobs_view(request, workspace_id):
     ).only("procrastinate_job_id", "result"):
         if isinstance(run.result, dict):
             results_by_job.setdefault(run.procrastinate_job_id, []).append(run.result)
+    viewer_role = await (
+        WorkspaceMembership.objects.filter(workspace=workspace, user=user)
+        .values_list("role", flat=True)
+        .afirst()
+    )
+    viewer_can_write = viewer_role in {WorkspaceRole.READ_WRITE, WorkspaceRole.MANAGE}
     recent_terminations = [
-        _termination_to_dict(job, results_by_job.get(job.procrastinate_job_id, []))
+        _termination_to_dict(
+            job,
+            results_by_job.get(job.procrastinate_job_id, []),
+            viewer_can_write=viewer_can_write,
+        )
         for job in terminated_jobs
     ]
 
