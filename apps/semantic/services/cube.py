@@ -42,6 +42,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         "to_dataset",
     )
     joins_by_dataset: dict[str, list[dict[str, Any]]] = {}
+    diagnostics: list[dict[str, Any]] = []
     join_references = references | {"CUBE"}
     for relationship in relationships:
         if (
@@ -57,12 +58,30 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         try:
             join_sql = embed_cube_sql(relationship.join_expression, references=join_references)
         except CubeSQLReferenceError as exc:
-            if exc.reference not in known_references:
-                raise
+            if exc.reference in known_references:
+                logger.warning(
+                    "Skipping relationship %s referencing hidden member %s",
+                    relationship.id,
+                    exc.reference,
+                )
+                continue
+            # A join only adds a path between cubes, so dropping a stale one
+            # changes no metric; failing here would take every cube down with it.
             logger.warning(
-                "Skipping relationship %s referencing hidden member %s",
+                "Skipping relationship %s referencing unknown member %s",
                 relationship.id,
                 exc.reference,
+            )
+            diagnostics.append(
+                {
+                    "level": "warning",
+                    "code": "relationship_stale_reference",
+                    "relationship": relationship.name,
+                    "message": (
+                        f"Relationship '{relationship.name}' was skipped: it references "
+                        f"'{exc.reference}', which is not in the semantic catalog."
+                    ),
+                }
             )
             continue
         joins_by_dataset.setdefault(relationship.from_dataset.name, []).append(
@@ -122,12 +141,17 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             "version": model.version,
         },
         "cubes": cubes,
+        "diagnostics": diagnostics,
     }
 
 
 def generate_cube_schema_yaml(model: SemanticModel) -> str:
     """Return Cube YAML content for the active semantic model."""
-    schema = generate_cube_schema(model)
+    return cube_schema_yaml(generate_cube_schema(model))
+
+
+def cube_schema_yaml(schema: dict[str, Any]) -> str:
+    """Serialize a generated schema's cubes; model info and diagnostics stay out of Cube."""
     return yaml.safe_dump(
         {"cubes": schema["cubes"]},
         sort_keys=False,

@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.catalog import ensure_semantic_model
-from apps.semantic.services.cube import generate_cube_schema_yaml
+from apps.semantic.services.cube import cube_schema_yaml, generate_cube_schema
 from apps.semantic.services.cube_client import CubeClient
 from mcp_server.context import QueryContext, load_workspace_context
 
@@ -150,7 +150,8 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
 
 def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
     try:
-        content = generate_cube_schema_yaml(model)
+        schema = generate_cube_schema(model)
+        content = cube_schema_yaml(schema)
     except ValueError as exc:
         # Never remove a broken filter/measure silently: that changes the metric.
         # The normal failed-build path retains the previous active publication.
@@ -161,6 +162,7 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
     validation_diagnostics = _diagnostics_from_validation(validation)
     diagnostics = [
         *(model.metadata or {}).get("catalog_diagnostics", []),
+        *schema["diagnostics"],
         *validation_diagnostics,
     ]
 

@@ -1,6 +1,10 @@
 """All SQL-bearing Cube properties share one literal/reference boundary."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
+import yaml
 
 from apps.semantic.models import (
     CubeSchema,
@@ -9,6 +13,7 @@ from apps.semantic.models import (
     SemanticModel,
     SemanticRelationship,
 )
+from apps.semantic.services import cube_schema
 from apps.semantic.services.cube import generate_cube_schema
 from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
 from apps.semantic.services.cube_sql import embed_cube_sql
@@ -137,7 +142,7 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("broken_part", ["measure", "filter", "join", "malformed_sql"])
+@pytest.mark.parametrize("broken_part", ["measure", "filter", "malformed_sql"])
 def test_invalid_sql_is_a_typed_build_failure_and_preserves_active_schema(workspace, broken_part):
     model = SemanticModel.objects.create(
         workspace=workspace, name="Last known good", status="active"
@@ -154,16 +159,6 @@ def test_invalid_sql_is_a_typed_build_failure_and_preserves_active_schema(worksp
         metadata = {"filters": [{"sql": "{missing} = 1"}]}
     elif broken_part == "malformed_sql":
         metadata = {"cube_sql": "'unterminated"}
-    elif broken_part == "join":
-        metadata = {}
-        SemanticRelationship.objects.create(
-            workspace=workspace,
-            name="stale_join",
-            from_dataset=dataset,
-            to_dataset=dataset,
-            relationship_type="many_to_one",
-            join_expression="{visits.deleted} = {visits.id}",
-        )
     SemanticField.objects.create(
         dataset=dataset, name="count", field_type="measure", measure_type="count", metadata=metadata
     )
@@ -186,3 +181,90 @@ def test_invalid_sql_is_a_typed_build_failure_and_preserves_active_schema(worksp
     assert model.status == SemanticModel.Status.ACTIVE
     assert model.metadata["last_build"]["ok"] is False
     assert model.diagnostics
+
+
+def _stale_relationship_catalog(workspace) -> SemanticModel:
+    model = SemanticModel.objects.create(workspace=workspace, name="Stale join", status="active")
+    datasets = {}
+    for name in ("visits", "users", "cases"):
+        datasets[name] = SemanticDataset.objects.create(
+            workspace=workspace,
+            semantic_model=model,
+            name=name,
+            table_name=f"raw_{name}",
+            primary_key="id",
+        )
+        for field in ("id", "user_id"):
+            SemanticField.objects.create(
+                dataset=datasets[name], name=field, expression=field, field_type="dimension"
+            )
+    SemanticRelationship.objects.create(
+        workspace=workspace,
+        name="visits_to_users",
+        from_dataset=datasets["visits"],
+        to_dataset=datasets["users"],
+        relationship_type="many_to_one",
+        join_expression="{visits.user_id} = {users.id}",
+    )
+    return model
+
+
+@pytest.mark.django_db
+def test_valid_relationships_build_without_diagnostics(workspace):
+    schema = generate_cube_schema(_stale_relationship_catalog(workspace))
+
+    assert schema["diagnostics"] == []
+    cubes = {cube["name"]: cube for cube in schema["cubes"]}
+    assert cubes["visits"]["joins"] == [
+        {"name": "users", "relationship": "many_to_one", "sql": "{visits.user_id} = {users.id}"}
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_stale_relationship_is_skipped_and_reported_without_failing_the_build(
+    workspace, monkeypatch
+):
+    model = _stale_relationship_catalog(workspace)
+    visits, cases = model.datasets.get(name="visits"), model.datasets.get(name="cases")
+    SemanticRelationship.objects.create(
+        workspace=workspace,
+        name="cases_to_visits",
+        from_dataset=cases,
+        to_dataset=visits,
+        relationship_type="many_to_one",
+        join_expression="{cases.renamed_visit_id} = {visits.id}",
+    )
+    monkeypatch.setattr(
+        cube_schema.CubeClient, "validate_schema", AsyncMock(return_value={"valid": True})
+    )
+    monkeypatch.setattr(cube_schema.CubeClient, "invalidate_schema_cache", AsyncMock())
+    monkeypatch.setattr(
+        cube_schema,
+        "load_workspace_context",
+        AsyncMock(return_value=SimpleNamespace(schema_name="fixture", readonly_role="role")),
+    )
+
+    active = build_and_promote_cube_schema(workspace, model=model)
+
+    cubes = {cube["name"]: cube for cube in yaml.safe_load(active.content)["cubes"]}
+    assert set(cubes) == {"visits", "users", "cases"}
+    assert cubes["visits"]["joins"][0]["name"] == "users"
+    assert "joins" not in cubes["cases"]
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is True
+    stale = [d for d in model.diagnostics if d.get("code") == "relationship_stale_reference"]
+    assert (
+        stale
+        == active.diagnostics
+        == [
+            {
+                "level": "warning",
+                "code": "relationship_stale_reference",
+                "relationship": "cases_to_visits",
+                "message": (
+                    "Relationship 'cases_to_visits' was skipped: it references "
+                    "'cases.renamed_visit_id', which is not in the semantic catalog."
+                ),
+            }
+        ]
+    )
