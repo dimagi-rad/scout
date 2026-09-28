@@ -3,6 +3,7 @@ Django production settings for Scout data agent platform.
 """
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 env = environ.Env()
 
@@ -29,6 +30,12 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_HSTS_SECONDS = 31536000  # 1 year
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
+
+# Without this secret the MCP server is unauthenticated or unreachable (#51):
+# refuse to start rather than discover it at the first agent tool call.
+MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="")
+if not MCP_SHARED_SECRET.strip():
+    raise ImproperlyConfigured("MCP_SHARED_SECRET must be set in production.")
 
 # Amazon SES. region_name is required: the container has no AWS_REGION, so boto3
 # raises NoRegionError without it (SCOUT-DJANGO-22).
