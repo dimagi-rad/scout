@@ -605,7 +605,9 @@ async def list_workspaces(
 
     Only workspaces the user can currently read are listed. The response names the
     rest in ``inaccessible_workspace_ids`` (access denied) and, separately,
-    ``unverified_workspace_ids`` (access not yet confirmed upstream; retry shortly).
+    ``unverified_workspace_ids`` (access not yet confirmed upstream). Only the active
+    workspace is rechecked here; to verify another, pass its id to ``list_datasets``
+    in ``workspace_ids``.
     """
     limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_WORKSPACE_DISCOVERY_LIMIT)
     async with tool_context(
@@ -1185,10 +1187,8 @@ async def get_materialization_status(
             except _WorkspaceAccessDenied as e:
                 tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
                 return tc["result"]
-            except (ValueError, _ValidationError):
-                tc["result"] = error_response(
-                    NOT_FOUND, f"Materialization run '{run_id}' not found"
-                )
+            except (ValueError, _ValidationError) as e:
+                tc["result"] = error_response(VALIDATION_ERROR, str(e))
                 return tc["result"]
 
         try:

@@ -122,7 +122,7 @@ async def test_get_lineage_rechecks(workspace):
     lineage.assert_not_awaited()
 
 
-async def _status_run(workspace, tenant):
+async def _status_run(tenant):
     tenant_schema = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="t_secret_schema", state=SchemaState.ACTIVE
     )
@@ -135,7 +135,7 @@ async def _status_run(workspace, tenant):
 
 
 async def test_materialization_status_reads_for_a_member_with_access(workspace, user, tenant):
-    run = await _status_run(workspace, tenant)
+    run = await _status_run(tenant)
 
     result = await server.get_materialization_status(
         str(run.id), workspace_id=str(workspace.id), user_id=str(user.id)
@@ -146,7 +146,7 @@ async def test_materialization_status_reads_for_a_member_with_access(workspace, 
 
 
 async def test_materialization_status_denies_a_member_who_lost_the_source(workspace, user, tenant):
-    run = await _status_run(workspace, tenant)
+    run = await _status_run(tenant)
     await TenantMembership.objects.filter(user=user, tenant=tenant).aupdate(
         archived_at=timezone.now()
     )
@@ -161,7 +161,7 @@ async def test_materialization_status_denies_a_member_who_lost_the_source(worksp
 
 
 async def test_materialization_status_denies_a_thread_job_lookup_too(workspace, user, tenant):
-    run = await _status_run(workspace, tenant)
+    run = await _status_run(tenant)
     thread = await Thread.objects.acreate(workspace=workspace, user=user)
     job = await ThreadJob.objects.acreate(
         thread=thread,
