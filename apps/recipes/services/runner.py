@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from apps.agents.graph.base import build_agent_graph
+from apps.agents.graph.base import ESCALATION_METADATA_KEY, build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.workspaces.models import Workspace
@@ -137,6 +137,8 @@ class RecipeRunner:
             if isinstance(msg, AIMessage) and msg.content:
                 if hasattr(msg, "tool_calls") and msg.tool_calls and not msg.content.strip():
                     continue
+                if msg.response_metadata.get(ESCALATION_METADATA_KEY):
+                    continue
                 return str(msg.content)
 
         return ""
@@ -209,7 +211,22 @@ class RecipeRunner:
             result["response"] = self._extract_response_content(messages)
             result["tools_used"] = self._extract_tools_used(messages)
             result["artifacts_created"] = self._extract_artifacts_created(messages)
-            result["success"] = True
+            # The escalation node ends the turn without answering the recipe, so
+            # the run must not read as COMPLETED.
+            last = messages[-1] if messages else None
+            if isinstance(last, AIMessage) and (
+                reason := last.response_metadata.get(ESCALATION_METADATA_KEY)
+            ):
+                # The access-denied escalation is logged nowhere else.
+                logger.warning(
+                    "Recipe %s run %s ended on escalation (%s)",
+                    self.recipe.name,
+                    self._run.id,
+                    reason,
+                )
+                result["error"] = str(last.content)
+            else:
+                result["success"] = True
 
         except Exception as e:
             logger.exception("Error executing recipe %s (async)", self.recipe.name)
