@@ -347,8 +347,9 @@ MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
 # Shared secret authenticating callers of the internal MCP HTTP server (arch
 # #253, finding 01#6). Sent by the API/worker in the X-Scout-MCP-Secret header
-# and verified by mcp_server.auth.SharedSecretMiddleware. Empty in local dev
-# (loopback only) disables the check; production deploy configs set it.
+# and verified by mcp_server.auth.SharedSecretMiddleware, which rejects every
+# request when it is empty (#51). development.py supplies a local default and
+# production.py refuses to start without it.
 MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="")
 
 
