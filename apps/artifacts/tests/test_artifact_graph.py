@@ -1,3 +1,4 @@
+import threading
 from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
@@ -5,13 +6,16 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
-from django.test import AsyncClient
+from django.db import connection
+from django.test import AsyncClient, Client
+from django.test.utils import CaptureQueriesContext
 
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactSemanticQuery, ArtifactType
 from apps.artifacts.services.graph_doc import GraphDocError, apply_ops, validate_doc
 from apps.artifacts.services.graph_manifest import (
+    backfill_missing_semantic_query_manifest,
     semantic_query_summary,
     sync_artifact_semantic_query_manifest,
 )
@@ -1305,3 +1309,137 @@ async def test_dependency_tool_and_api_page_in_the_same_order(
     tool_keys = [r["query_key"] for r in from_tool["semantic_queries"]]
     assert tool_keys == [r["query_key"] for r in from_api["semantic_queries"]]
     assert tool_keys == persisted
+
+
+WRITE_STATEMENTS = ("INSERT", "UPDATE", "DELETE")
+
+
+def _manifest_less_story(workspace, user):
+    """A story saved before manifests existed: both manifest fields empty."""
+    return Artifact.objects.create(
+        workspace=workspace,
+        created_by=user,
+        title="Legacy",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": graph_doc()},
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("endpoint", ["data", "query-data", "recovery"])
+def test_read_member_get_of_manifest_less_story_writes_nothing(workspace, member_user, endpoint):
+    WorkspaceMembership.objects.filter(workspace=workspace, user=member_user).update(
+        role=WorkspaceRole.READ
+    )
+    artifact = _manifest_less_story(workspace, member_user)
+    before = list(Artifact.objects.filter(pk=artifact.pk).values())
+    client = Client()
+    user_logged_in.disconnect(update_last_login)
+    try:
+        client.force_login(member_user)
+    finally:
+        user_logged_in.connect(update_last_login)
+
+    async def execute(_workspace, query, **kwargs):
+        return {"columns": ["visits_count"], "rows": [[3]], "row_count": 1, "semantic_query": query}
+
+    url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/{endpoint}/"
+    with (
+        patch("apps.artifacts.views.run_semantic_query", side_effect=execute),
+        patch(
+            "apps.artifacts.views._current_artifact_data_state",
+            new=AsyncMock(return_value={"queryable": True, "status": "ready"}),
+        ),
+        CaptureQueriesContext(connection) as captured,
+    ):
+        response = client.get(url)
+
+    assert response.status_code == 200, response.content
+    writes = [q["sql"] for q in captured if q["sql"].lstrip().upper().startswith(WRITE_STATEMENTS)]
+    assert writes == []
+    assert list(Artifact.objects.filter(pk=artifact.pk).values()) == before
+    assert not ArtifactSemanticQuery.objects.filter(artifact=artifact).exists()
+
+    payload = response.json()
+    if endpoint == "data":
+        assert [q["name"] for q in payload["semantic_queries"]] == ["q.visits_by_day"]
+        entries = payload["semantic_query_manifest"]["entries"]
+        assert [e["key"] for e in entries] == ["q.visits_by_day"]
+    elif endpoint == "query-data":
+        assert [(q["name"], q["rows"]) for q in payload["queries"]] == [("q.visits_by_day", [[3]])]
+        assert payload["semantic_query_manifest"]["entries"][0]["key"] == "q.visits_by_day"
+    else:
+        assert payload == {"queryable": True, "status": "ready"}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_recovery_post_persists_the_missing_manifest(workspace, member_user):
+    artifact = _manifest_less_story(workspace, member_user)
+    client = Client()
+    client.force_login(member_user)
+
+    with patch(
+        "apps.artifacts.views._current_artifact_data_state",
+        new=AsyncMock(return_value={"status": "ready", "queryable": True}),
+    ):
+        response = client.post(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/recovery/")
+
+    assert response.status_code == 200, response.content
+    artifact.refresh_from_db()
+    assert [q["name"] for q in artifact.semantic_queries] == ["q.visits_by_day"]
+    assert list(
+        ArtifactSemanticQuery.objects.filter(artifact=artifact).values_list("query_key", flat=True)
+    ) == ["q.visits_by_day"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("persist", "expected_inserts"),
+    [
+        (sync_artifact_semantic_query_manifest, 2),
+        # The loser re-checks under the lock, finds the winner's manifest, and skips.
+        (backfill_missing_semantic_query_manifest, 1),
+    ],
+)
+def test_concurrent_manifest_persistence_does_not_collide(
+    workspace, member_user, persist, expected_inserts
+):
+    artifact = _manifest_less_story(workspace, member_user)
+    # Holds each writer between its DELETE and its INSERT until the other arrives: the
+    # interleaving that collides on unique_artifact_semantic_query_key. While writes
+    # are serialised the other writer can't arrive, so the wait times out instead.
+    both_deleted = threading.Barrier(2, timeout=2)
+    bulk_create = ArtifactSemanticQuery.objects.bulk_create
+    inserts = []
+    errors = []
+
+    def rendezvous_then_insert(records, *args, **kwargs):
+        inserts.append(len(records))
+        try:
+            both_deleted.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return bulk_create(records, *args, **kwargs)
+
+    def writer():
+        try:
+            persist(Artifact.objects.get(pk=artifact.pk))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            connection.close()
+
+    with patch.object(
+        ArtifactSemanticQuery.objects, "bulk_create", side_effect=rendezvous_then_insert
+    ):
+        threads = [threading.Thread(target=writer) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+    assert errors == []
+    assert len(inserts) == expected_inserts
+    assert list(
+        ArtifactSemanticQuery.objects.filter(artifact=artifact).values_list("query_key", flat=True)
+    ) == ["q.visits_by_day"]

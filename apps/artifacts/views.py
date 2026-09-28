@@ -42,11 +42,12 @@ from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_works
 from .models import Artifact, ArtifactSemanticQuery, ArtifactType
 from .services.export import ArtifactExporter
 from .services.graph_manifest import (
+    backfill_missing_semantic_query_manifest,
     build_artifact_semantic_query_manifest,
+    derive_missing_semantic_query_manifest,
     manifest_entry_summary,
     semantic_query_summary,
     sort_manifest_entries,
-    sync_artifact_semantic_query_manifest,
 )
 from .services.versioning import latest_visible_version_ids
 
@@ -823,6 +824,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
 
         csp_nonce = secrets.token_urlsafe(16)
 
+        derive_missing_semantic_query_manifest(artifact)
         has_live_queries = bool(artifact.semantic_queries)
 
         artifact_json = json.dumps(
@@ -869,12 +871,7 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
-        if (
-            artifact.artifact_type == ArtifactType.STORY
-            and not artifact.semantic_queries
-            and not artifact.semantic_query_manifest
-        ):
-            sync_artifact_semantic_query_manifest(artifact)
+        derive_missing_semantic_query_manifest(artifact)
         return JsonResponse(self._serialize_artifact(artifact))
 
     def _serialize_artifact(self, artifact: Artifact) -> dict[str, Any]:
@@ -934,15 +931,7 @@ class ArtifactQueryDataView(View):
         except Artifact.DoesNotExist:
             raise Http404 from None
 
-        if (
-            artifact.artifact_type == ArtifactType.STORY
-            and not artifact.semantic_queries
-            and not artifact.semantic_query_manifest
-        ):
-            await sync_to_async(
-                sync_artifact_semantic_query_manifest,
-                thread_sensitive=True,
-            )(artifact)
+        derive_missing_semantic_query_manifest(artifact)
 
         if not artifact.source_queries and not artifact.semantic_queries:
             return JsonResponse(
@@ -1110,15 +1099,7 @@ class ArtifactDataRecoveryView(View):
             )
         except Artifact.DoesNotExist:
             return None, None, JsonResponse({"error": "Artifact not found"}, status=404)
-        if (
-            artifact.artifact_type == ArtifactType.STORY
-            and not artifact.semantic_queries
-            and not artifact.semantic_query_manifest
-        ):
-            await sync_to_async(
-                sync_artifact_semantic_query_manifest,
-                thread_sensitive=True,
-            )(artifact)
+        derive_missing_semantic_query_manifest(artifact)
         return user, artifact, None
 
     async def get(self, request: HttpRequest, workspace_id, artifact_id) -> JsonResponse:
@@ -1136,6 +1117,11 @@ class ArtifactDataRecoveryView(View):
         )
         if err:
             return err
+        # The recovery task re-reads the artifact from the DB, so it needs the
+        # manifest persisted rather than the in-memory copy _resolve derived.
+        await sync_to_async(backfill_missing_semantic_query_manifest, thread_sensitive=True)(
+            artifact
+        )
 
         state = await _current_artifact_data_state(artifact)
         if state["status"] in {"ready", "not_required"} and not state.get("recovery_action"):
