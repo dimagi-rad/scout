@@ -84,6 +84,8 @@ class MaterializationRun(models.Model):
         PARTIAL = "partial"
         FAILED = "failed"
         CANCELLED = "cancelled"
+        # Superseded: its schema was dropped, or a later run on the same
+        # candidate was published. Neither resume nor reuse reads a STALE run.
         STALE = "stale"
 
     ACTIVE_STATES = frozenset(

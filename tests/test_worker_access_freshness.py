@@ -12,11 +12,17 @@ from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import WorkspaceTenant
+from tests.pipeline_doubles import completed_pipeline_run
 from tests.upstream_proofs import (
     agrant_fresh_upstream_access,
     amake_proof_stale,
     make_proof_stale,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_candidate_ddl(no_candidate_ddl):
+    """Shared stub: see tests.pipeline_doubles.no_candidate_ddl."""
 
 
 def _registry():
@@ -82,11 +88,11 @@ async def test_proof_expiring_mid_run_stops_before_the_next_tenant(
     upstream_provider.domains = []
     loaded = []
 
-    def expire_during_first_load(membership, *_args, **_kwargs):
+    def expire_during_first_load(membership, *args, **kwargs):
         loaded.append(membership.tenant_id)
         make_proof_stale(user, tenant)
         make_proof_stale(user, second)
-        return {"status": "completed"}
+        return completed_pipeline_run(membership, *args, **kwargs)
 
     with (
         patch(
@@ -124,10 +130,10 @@ async def test_one_tenant_revoked_mid_run_is_skipped_while_the_other_stays_loade
     upstream_provider.domains = [tenant.external_id]
     loaded = []
 
-    def expire_during_first_load(membership, *_args, **_kwargs):
+    def expire_during_first_load(membership, *args, **kwargs):
         loaded.append(membership.tenant_id)
         make_proof_stale(user, second)
-        return {"status": "completed"}
+        return completed_pipeline_run(membership, *args, **kwargs)
 
     with (
         patch(
@@ -165,7 +171,7 @@ async def test_fresh_actor_loads_without_any_provider_call(
         patch("apps.workspaces.tasks.get_registry", return_value=_registry()),
         patch(
             "apps.workspaces.tasks._run_pipeline_with_progress",
-            return_value={"status": "completed"},
+            side_effect=completed_pipeline_run,
         ),
     ):
         result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))

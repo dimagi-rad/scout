@@ -222,3 +222,30 @@ it("a missing-workspace detail call leaves no orphaned loading state", async () 
   expect(state().selectedDatasetStatus).toBe("idle")
   expect(state().selectedDataset).toBeNull()
 })
+
+it("keeps the dictionary usable while surfacing a partial refresh warning", async () => {
+  vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "Some sources could not be refreshed: source B needs operator recovery." })
+  const get = vi.spyOn(api, "get").mockResolvedValue({ tables: {} })
+  await state().dictionaryActions.refreshSchema()
+  expect(state().dictionaryStatus).toBe("loaded")
+  expect(state().dictionaryWarning).toContain("source B needs operator recovery")
+  expect(state().dataDictionary).not.toBeNull()
+  expect(get).toHaveBeenCalledTimes(1)
+})
+
+it("preserves partial refresh guidance when the dictionary is not available yet", async () => {
+  vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "source B needs operator recovery" })
+  vi.spyOn(api, "get").mockRejectedValue(new ApiError(503, "Data unavailable"))
+  await state().dictionaryActions.refreshSchema()
+  expect(state().dictionaryStatus).toBe("not_materialized")
+  expect(state().dictionaryWarning).toContain("source B needs operator recovery")
+})
+
+
+it("clears refresh warnings when switching workspaces", async () => {
+  vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "source B needs operator recovery" })
+  vi.spyOn(api, "get").mockResolvedValue({ tables: {} })
+  await state().dictionaryActions.refreshSchema()
+  switchTo("b")
+  expect(state().dictionaryWarning).toBeNull()
+})

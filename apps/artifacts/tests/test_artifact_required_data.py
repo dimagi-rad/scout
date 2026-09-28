@@ -432,7 +432,7 @@ async def test_partial_worker_result_is_success_only_when_requested_artifact_rep
     setup = required_setup
     recovery = await make_recovery(setup)
 
-    async def materialize(*_args):
+    async def materialize(*_args, **_kwargs):
         if required_source_repaired:
             await restore_b(setup)
         # A partial result alone is not failure: a different/unreferenced load

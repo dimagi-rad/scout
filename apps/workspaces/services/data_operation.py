@@ -118,6 +118,26 @@ def _sync_lock_owner():
     return threading.current_thread()
 
 
+def assert_tenant_lock_held(tenant_id) -> None:
+    """Raise LockOrderError unless the calling task (or its data thread) holds T.
+
+    For code whose safety rests on T rather than on a row lock: a row lock is
+    released at commit, while T spans a writer's whole load.
+    """
+    owner, keys = _held_tenants.get()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        current = _sync_lock_owner()
+    else:
+        current = asyncio.current_task()
+    # A thread reached without run_data_thread sees its task's locks but not its
+    # ownership; say so rather than claiming T is not held.
+    _refuse_unbridged_thread(current, owner, keys)
+    if owner is None or owner is not current or tenant_lock_key(tenant_id) not in keys:
+        raise LockOrderError(f"This operation requires holding the tenant lock T for {tenant_id}")
+
+
 def _refuse_unbridged_thread(owner, inherited_owner, inherited) -> None:
     # A bare asyncio.to_thread copies the task's context but not its ownership,
     # so it would open a second session and wait out _LOCK_TIMEOUT on a lock
@@ -264,6 +284,39 @@ async def tenant_data_lock(tenant_ids):
         token = _held_tenants.set((task, frozenset(keys)))
         try:
             yield
+        finally:
+            _held_tenants.reset(token)
+
+
+@asynccontextmanager
+async def tenant_data_lock_if_free(tenant_id):
+    """Take one tenant's T only if nobody holds it; yield whether it was taken.
+
+    For sweeps: a held T means a live writer, so they skip the tenant rather
+    than queue behind a load that can run for hours.
+    """
+    (key,) = tenant_lock_keys([tenant_id])
+    owner, inherited = _held_tenants.get()
+    task = asyncio.current_task()
+    held = inherited if owner is task else frozenset()
+    if held:
+        if key in held:
+            yield True
+            return
+        raise LockOrderError(_EXPAND_TENANTS)
+    async with await psycopg.AsyncConnection.connect(
+        **_connection_params(), autocommit=True
+    ) as conn:
+        cursor = await conn.execute(
+            "SELECT pg_try_advisory_lock(%s, %s)", (_TENANT_LOCK_NAMESPACE, key)
+        )
+        (acquired,) = await cursor.fetchone()
+        if not acquired:
+            yield False
+            return
+        token = _held_tenants.set((task, frozenset({key})))
+        try:
+            yield True
         finally:
             _held_tenants.reset(token)
 

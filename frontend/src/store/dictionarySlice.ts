@@ -108,6 +108,7 @@ export interface DictionarySlice {
   dataDictionary: DataDictionary | null
   dictionaryStatus: DictionaryStatus
   dictionaryError: string | null
+  dictionaryWarning: string | null
   selectedTable: TableDetail | null
   dictionaryActions: {
     fetchDictionary: () => Promise<void>
@@ -170,11 +171,12 @@ export const createDictionarySlice: StateCreator<
     dataDictionary: null,
     dictionaryStatus: "idle",
     dictionaryError: null,
+    dictionaryWarning: null,
     selectedTable: null,
     dictionaryActions: {
       fetchDictionary: async () => {
         const isCurrent = requests.start("dictionary")
-        set({ dictionaryStatus: "loading", dictionaryError: null })
+        set({ dictionaryStatus: "loading", dictionaryError: null, dictionaryWarning: null })
         try {
           const activeDomainId = get().activeDomainId
           if (!activeDomainId) throw new Error("No active domain selected.")
@@ -197,26 +199,37 @@ export const createDictionarySlice: StateCreator<
 
       refreshSchema: async () => {
         const isCurrent = requests.start("dictionary")
-        set({ dictionaryStatus: "loading", dictionaryError: null })
+        set({ dictionaryStatus: "loading", dictionaryError: null, dictionaryWarning: null })
+        let warning: string | null = null
         try {
           const activeDomainId = get().activeDomainId
           if (!activeDomainId) throw new Error("No active domain selected.")
-          await api.post(`/api/workspaces/${activeDomainId}/refresh/`)
+          const result = await api.post<{
+            status: "provisioning" | "partial"
+            error?: string
+          }>(
+            `/api/workspaces/${activeDomainId}/refresh/`
+          )
           if (!isCurrent()) return
+          warning = result.status === "partial"
+            ? result.error ?? "Some sources could not be refreshed."
+            : null
           // Materialization runs in the background — re-fetch to pick up any already-available data
           const raw = await api.get<BackendDictionaryResponse>(
             `/api/workspaces/${activeDomainId}/data-dictionary/`
           )
           if (!isCurrent()) return
           const data = transformBackendResponse(raw)
-          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
+          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null, dictionaryWarning: warning })
         } catch (error) {
           if (!isCurrent()) return
           const status =
             error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
+          const message = error instanceof Error ? error.message : "Failed to refresh schema"
           set({
             dictionaryStatus: status,
-            dictionaryError: error instanceof Error ? error.message : "Failed to refresh schema",
+            dictionaryError: message,
+            dictionaryWarning: warning,
           })
         }
       },
@@ -280,7 +293,7 @@ export const createDictionarySlice: StateCreator<
 
       clearDictionary: () => {
         requests.invalidate()
-        set({ dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, selectedTable: null })
+        set({ dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, dictionaryWarning: null, selectedTable: null })
       },
     },
   }
