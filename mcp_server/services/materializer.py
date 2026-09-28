@@ -1458,8 +1458,17 @@ _CONNECT_VISITS_INSERT = psql.SQL(
          justification, date_created, completed_work_id, deliver_unit_id, images)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (visit_id) DO UPDATE SET
-        status=EXCLUDED.status, form_json=EXCLUDED.form_json,
-        review_status=EXCLUDED.review_status, images=EXCLUDED.images
+        opportunity_id=EXCLUDED.opportunity_id, username=EXCLUDED.username,
+        deliver_unit=EXCLUDED.deliver_unit, entity_id=EXCLUDED.entity_id,
+        entity_name=EXCLUDED.entity_name, visit_date=EXCLUDED.visit_date,
+        status=EXCLUDED.status, reason=EXCLUDED.reason, location=EXCLUDED.location,
+        flagged=EXCLUDED.flagged, flag_reason=EXCLUDED.flag_reason,
+        form_json=EXCLUDED.form_json, completed_work=EXCLUDED.completed_work,
+        status_modified_date=EXCLUDED.status_modified_date,
+        review_status=EXCLUDED.review_status, review_created_on=EXCLUDED.review_created_on,
+        justification=EXCLUDED.justification, date_created=EXCLUDED.date_created,
+        completed_work_id=EXCLUDED.completed_work_id, deliver_unit_id=EXCLUDED.deliver_unit_id,
+        images=EXCLUDED.images
     """
 )
 

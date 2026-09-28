@@ -1676,7 +1676,15 @@ class TestConnectPageReplayIdempotency:
             )
 
             # Replay with an updated status (DO UPDATE should apply the change).
-            updated_page = [{**page[0], "status": "approved"}]
+            updated_page = [
+                {
+                    **page[0],
+                    "status": "approved",
+                    "flagged": True,
+                    "justification": "reviewed",
+                    "status_modified_date": "2026-01-02T00:00:00Z",
+                }
+            ]
             _write_connect_visits(
                 pages=iter([(updated_page, 1)]),
                 schema_name=test_schema,
@@ -1685,13 +1693,19 @@ class TestConnectPageReplayIdempotency:
             )
 
             with conn.cursor() as cur:
-                cur.execute(f"SELECT COUNT(*), MAX(status) FROM {test_schema}.raw_visits")
-                count, status = cur.fetchone()
+                cur.execute(
+                    f"SELECT COUNT(*), MAX(status), BOOL_AND(flagged), MAX(justification), "
+                    f"MAX(status_modified_date) IS NOT NULL FROM {test_schema}.raw_visits"
+                )
+                count, status, flagged, justification, has_modified = cur.fetchone()
 
             assert count == 1, f"Expected 1 row after visit page replay, got {count}"
             assert status == "approved", (
                 f"Expected status='approved' after DO UPDATE, got '{status}'"
             )
+            # A replay must not leave the row half-updated: the fields that change
+            # alongside status come from the same fetch.
+            assert (flagged, justification, has_modified) == (True, "reviewed", True)
         finally:
             conn.rollback()
             conn.autocommit = True
