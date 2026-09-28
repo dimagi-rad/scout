@@ -540,27 +540,16 @@ async def _add_sources(workspace, user, *, serving, unserved):
 
 
 async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, tenant, user):
-    for index in range(2):
-        source = await Tenant.objects.acreate(
-            provider="commcare", external_id=f"denied-source-{index}"
-        )
-        await agrant_tenant_access(user, source)
-        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=source)
-    for source in [source async for source in workspace.tenants.all()]:
-        await TenantSchema.objects.acreate(
-            tenant=source, schema_name=f"serving_{source.id.hex}", state=SchemaState.ACTIVE
-        )
-    denial = {
-        "tenants": [],
-        "error": "Verification unavailable",
-        "error_code": "verification_unavailable",
-    }
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    await _add_sources(workspace, user, serving=["denied-0", "denied-1"], unserved=[])
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with (
             patch(
                 "apps.workspaces.tasks._materialization_write_denial",
-                AsyncMock(side_effect=[None, None, None, denial]),
+                AsyncMock(return_value=_DENIAL),
             ),
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
@@ -568,9 +557,7 @@ async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, 
             ) as dependents,
         ):
             build.return_value.tenant_coverage = {}
-            result = await workspaces_tasks.materialize_workspace_core(
-                str(workspace.id), str(user.id), None, only_unserved=True
-            )
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
     # Every source already serves: the denial stops no load, so nothing failed.
     assert result["all_succeeded"] is True
     assert pipeline.calls == []
