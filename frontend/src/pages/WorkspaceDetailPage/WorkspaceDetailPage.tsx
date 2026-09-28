@@ -943,6 +943,25 @@ export function SettingsTab({
 
   return (
     <div className="max-w-2xl space-y-8" data-testid="settings-tab">
+      {promptRedacted && (
+        <div
+          className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+          data-testid="settings-access-notice"
+        >
+          <p>
+            The workspace name and system prompt can't be changed, and the prompt is hidden,
+            until you regain access. Still needed:
+          </p>
+          <ul className="mt-1 space-y-1">
+            {missingTenants.map((t) => (
+              <li key={t.tenant_id} data-testid={`settings-missing-${t.tenant_id}`}>
+                <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <section>
         <h3 className="mb-3 text-sm font-medium">Workspace name</h3>
         <form onSubmit={handleSaveName} className="flex items-start gap-3">
@@ -975,19 +994,12 @@ export function SettingsTab({
           Custom instructions for the AI agent in this workspace.
         </p>
         {promptRedacted ? (
-          <div
-            className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+          <p
+            className="text-sm text-muted-foreground"
             data-testid="settings-system-prompt-unavailable"
           >
-            <p>Settings can't be viewed or changed until you regain access. Still needed:</p>
-            <ul className="mt-1 space-y-1">
-              {missingTenants.map((t) => (
-                <li key={t.tenant_id}>
-                  <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
-                </li>
-              ))}
-            </ul>
-          </div>
+            Hidden until you regain access.
+          </p>
         ) : (
           <form onSubmit={handleSavePrompt} className="space-y-2">
             <textarea

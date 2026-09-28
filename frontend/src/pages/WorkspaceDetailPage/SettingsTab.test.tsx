@@ -80,14 +80,15 @@ describe("workspace settings saves", () => {
           tenant_name: "Source Two",
           provider: "commcare",
           recovery: "reconnect",
-          remedy: "Reconnect CommCare.",
+          remedy: "reconnect CommCare in Connected Accounts",
         },
       ],
     })
 
-    expect(screen.getByTestId("settings-system-prompt-unavailable")).toHaveTextContent(
-      "Source Two: Reconnect CommCare.",
+    expect(screen.getByTestId("settings-missing-t2")).toHaveTextContent(
+      "Source Two: reconnect CommCare in Connected Accounts",
     )
+    expect(screen.getByTestId("settings-system-prompt-unavailable")).toBeInTheDocument()
     expect(screen.queryByTestId("settings-system-prompt")).not.toBeInTheDocument()
     expect(screen.queryByTestId("settings-save-prompt")).not.toBeInTheDocument()
     // Every PATCH is refused in this state, so rename is not offered either.
