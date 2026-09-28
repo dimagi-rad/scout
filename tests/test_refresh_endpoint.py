@@ -7,8 +7,16 @@ from asgiref.sync import async_to_sync
 from django.db import connection
 from rest_framework.test import APIClient
 
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceMembership, WorkspaceRole
+from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from apps.workspaces.tasks import refresh_tenant_schema
+from tests.tenant_access import grant_tenant_access
 
 
 @pytest.fixture
@@ -24,8 +32,6 @@ def manage_client(api_client, user):
 
 @pytest.fixture
 def tenant_membership_for_user(db, user, tenant):
-    from apps.users.models import TenantMembership
-
     # Use get_or_create since the workspace signal may have already created one
     tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
     return tm
@@ -158,3 +164,225 @@ def test_refresh_status_no_schema_returns_unavailable(manage_client, workspace):
     resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
     assert resp.status_code == 200
     assert resp.data["state"] == "unavailable"
+
+
+def _add_source(workspace, user, external_id):
+    extra = Tenant.objects.create(
+        provider="commcare", external_id=external_id, canonical_name=external_id
+    )
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=extra)
+    grant_tenant_access(user, extra)
+    return extra
+
+
+@pytest.mark.django_db
+def test_refresh_covers_every_source_of_a_multi_source_workspace(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    """Manual refresh used to refresh only the workspace's first tenant."""
+    second = _add_source(workspace, user, "second-source")
+
+    job_ids = iter([501, 502])
+    with patch(
+        "apps.workspaces.api.views.refresh_tenant_schema.defer",
+        side_effect=lambda **_: MagicMock(id=next(job_ids)),
+    ) as defer:
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 202
+    assert resp.data["status"] == "provisioning"
+    assert defer.call_count == 2
+    memberships = {
+        str(m.tenant_id): str(m.id)
+        for m in TenantMembership.objects.filter(user=user, tenant__in=(tenant, second))
+    }
+    assert {tuple(sorted(call.kwargs.items())) for call in defer.call_args_list} == {
+        tuple(
+            sorted(
+                {
+                    "schema_id": source["schema_id"],
+                    "membership_id": memberships[source["tenant_id"]],
+                    "actor_user_id": str(user.id),
+                    "workspace_id": str(workspace.id),
+                }.items()
+            )
+        )
+        for source in resp.data["tenants"]
+    }
+    assert {t["tenant_id"] for t in resp.data["tenants"]} == {str(tenant.id), str(second.id)}
+    assert all(t["status"] == "provisioning" for t in resp.data["tenants"])
+    for source in (tenant, second):
+        assert TenantSchema.objects.filter(tenant=source, state=SchemaState.PROVISIONING).exists()
+
+
+@pytest.mark.django_db
+def test_refresh_reports_each_source_that_could_not_start(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    busy = _add_source(workspace, user, "busy-source")
+    # A workspace load is filling a candidate for this source under its tenant lock.
+    TenantSchema.objects.create(
+        tenant=busy,
+        schema_name="busy_r1",
+        state=SchemaState.PROVISIONING,
+        load_workspace_id=workspace.id,
+    )
+
+    with patch(
+        "apps.workspaces.api.views.refresh_tenant_schema.defer", return_value=MagicMock(id=610)
+    ) as defer:
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 202
+    # Some sources were not refreshed, and the top level says so.
+    assert resp.data["status"] == "partial"
+    defer.assert_called_once()
+    by_tenant = {t["tenant_id"]: t for t in resp.data["tenants"]}
+    assert by_tenant[str(tenant.id)]["status"] == "provisioning"
+    assert by_tenant[str(busy.id)]["status"] == "in_progress"
+    # Each source carries its own schema id; none is promoted to the top level.
+    assert "schema_id" not in resp.data
+    assert by_tenant[str(tenant.id)]["schema_id"]
+    assert not any({"body", "http_status"} & set(t) for t in resp.data["tenants"])
+
+
+@pytest.mark.django_db
+def test_refresh_status_reports_each_source_and_never_hides_a_failure(
+    manage_client, workspace, tenant, user
+):
+    failed = _add_source(workspace, user, "failed-source")
+    TenantSchema.objects.create(tenant=tenant, schema_name="ok_live", state=SchemaState.ACTIVE)
+    TenantSchema.objects.create(tenant=failed, schema_name="bad_r1", state=SchemaState.FAILED)
+
+    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
+
+    assert resp.data["state"] == SchemaState.FAILED
+    assert {t["tenant_id"]: t["state"] for t in resp.data["tenants"]} == {
+        str(tenant.id): SchemaState.ACTIVE,
+        str(failed.id): SchemaState.FAILED,
+    }
+
+
+@pytest.mark.django_db
+def test_a_refresh_where_no_source_could_start_is_a_conflict(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    second = _add_source(workspace, user, "second-busy")
+    for source in (tenant, second):
+        TenantSchema.objects.create(
+            tenant=source,
+            schema_name=f"busy_{source.external_id}",
+            state=SchemaState.PROVISIONING,
+            load_workspace_id=workspace.id,
+        )
+
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 409
+    defer.assert_not_called()
+    assert resp.data["status"] == "not_started"
+    assert {t["status"] for t in resp.data["tenants"]} == {"in_progress"}
+    assert "code" not in resp.data
+    # The shared reason is the message clients show.
+    assert resp.data["error"] == "A refresh is already in progress."
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("states", "aggregate"),
+    [
+        ((SchemaState.PROVISIONING, SchemaState.FAILED), SchemaState.FAILED),
+        ((SchemaState.ACTIVE, SchemaState.EXPIRED), SchemaState.EXPIRED),
+        ((SchemaState.EXPIRED, SchemaState.ACTIVE), SchemaState.EXPIRED),
+    ],
+)
+def test_refresh_status_aggregate_is_deterministic_and_matches_its_error(
+    manage_client, workspace, tenant, user, states, aggregate
+):
+    second = _add_source(workspace, user, "second-status")
+    for source, state in zip((tenant, second), states, strict=True):
+        TenantSchema.objects.create(
+            tenant=source, schema_name=f"s_{source.external_id}", state=state
+        )
+
+    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
+
+    assert resp.data["state"] == aggregate
+    assert (resp.data["error"] is not None) == (aggregate == SchemaState.FAILED)
+
+
+@pytest.mark.django_db
+def test_refresh_status_timestamp_describes_the_failed_source(
+    manage_client, workspace, tenant, user
+):
+    second = _add_source(workspace, user, "newer-success")
+    failed = TenantSchema.objects.create(
+        tenant=tenant, schema_name="old_failure", state=SchemaState.FAILED
+    )
+    TenantSchema.objects.create(tenant=second, schema_name="new_success", state=SchemaState.ACTIVE)
+
+    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
+
+    assert resp.data["state"] == SchemaState.FAILED
+    assert resp.data["started_at"] == failed.created_at.isoformat()
+
+
+@pytest.mark.django_db
+def test_partial_refresh_surfaces_recovery_message_and_code(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    blocked = _add_source(workspace, user, "recovery-source")
+    with (
+        patch("apps.workspaces.api.views.settle_finished_refresh_candidates") as settle,
+        patch(
+            "apps.workspaces.api.views.refresh_tenant_schema.defer", return_value=MagicMock(id=710)
+        ),
+    ):
+        settle.side_effect = lambda source, jobs: MagicMock(recovery_needed=source.id == blocked.id)
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 202
+    assert resp.data["status"] == "partial"
+    assert resp.data["code"] == "REFRESH_RECOVERY_REQUIRED"
+    assert "recovery-source" in resp.data["error"]
+    assert "operator" in resp.data["error"]
+
+
+@pytest.mark.django_db
+def test_refresh_handles_sources_deleted_before_lock(manage_client, workspace):
+    with patch("apps.workspaces.api.views.Tenant.objects.select_for_update") as lock:
+        lock.return_value.filter.return_value.order_by.return_value = []
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+    assert resp.status_code == 400
+    assert resp.data == {"error": "Workspace has no associated tenant."}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("recovery", [False, True])
+def test_refresh_reports_each_refused_source(
+    manage_client, workspace, tenant, user, tenant_membership_for_user, recovery
+):
+    second = _add_source(workspace, user, "refused-source")
+    # Model membership disappearing after the access gate accepted the request.
+    with (
+        patch("apps.workspaces.api.views.resolve_workspace", return_value=(workspace, None, None)),
+        patch("apps.workspaces.api.views.settle_finished_refresh_candidates") as settle,
+        patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer,
+    ):
+        TenantMembership.objects.filter(user=user, tenant=second).delete()
+        if not recovery:
+            TenantMembership.objects.filter(user=user, tenant=tenant).delete()
+        settle.return_value.recovery_needed = True
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+    defer.assert_not_called()
+    assert resp.status_code == (409 if recovery else 400)
+    assert resp.data["status"] == "not_started"
+    outcomes = {entry["status"] for entry in resp.data["tenants"]}
+    assert outcomes == ({"no_membership", "recovery_required"} if recovery else {"no_membership"})
+    if recovery:
+        assert resp.data["code"] == "REFRESH_RECOVERY_REQUIRED"
+        assert "operator" in resp.data["error"]
+        assert "refused-source" in resp.data["error"]
+    else:
+        assert resp.data["error"] == "No tenant membership found for this workspace."
