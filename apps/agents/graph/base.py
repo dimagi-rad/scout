@@ -242,6 +242,10 @@ READ_ONLY_ESCALATION_MESSAGE = (
     "workspace member with write access can do."
 )
 
+# Marks the escalation node's message so headless callers (recipe runs) can tell
+# an ended-on-escalation turn from a real answer without matching its prose.
+ESCALATION_METADATA_KEY = "scout_escalation"
+
 
 def _should_escalate(messages: list) -> bool:
     """Detect a panic loop: last N trailing tool messages all returned an
@@ -1053,7 +1057,12 @@ async def build_agent_graph(
             message = HEADLESS_ESCALATION_MESSAGE
         else:
             message = ESCALATION_MESSAGE
-        return {"messages": [AIMessage(content=message)]}
+        reason = "workspace_access_denied" if denial is not None else "schema_errors"
+        return {
+            "messages": [
+                AIMessage(content=message, response_metadata={ESCALATION_METADATA_KEY: reason})
+            ]
+        }
 
     graph = StateGraph(AgentState)
 
@@ -1329,6 +1338,7 @@ currency, explain that a read-write workspace role is required.
 
 __all__ = [
     "ESCALATION_MESSAGE",
+    "ESCALATION_METADATA_KEY",
     "ESCALATION_TRIGGER_COUNT",
     "HEADLESS_ESCALATION_MESSAGE",
     "READ_ONLY_ESCALATION_MESSAGE",

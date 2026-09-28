@@ -9,13 +9,16 @@ the workspace_id injection path all run for real. Every other recipe test mocks
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from apps.agents.graph.base import HEADLESS_ESCALATION_MESSAGE, READ_ONLY_ESCALATION_MESSAGE
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner
 from mcp_server.server import mcp as scout_mcp
@@ -127,3 +130,58 @@ async def test_execute_async_builds_real_graph_and_flows_workspace_id(recipe, us
     # never the VALIDATION_ERROR that an empty workspace_id would have produced.
     assert "not_provisioned" in step["response"]
     assert "VALIDATION_ERROR" not in step["response"]
+
+
+def _fake_llm_looping_on_query():
+    """A fake model that keeps calling ``query`` until the graph stops it."""
+    calls = iter(range(100))
+
+    async def fake_ainvoke(messages, *args, **kwargs):
+        n = next(calls)
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": "query", "args": {"sql": "select 1"}, "id": f"call_{n}"}],
+            id=f"ai-{n}",
+        )
+
+    mock_bound = MagicMock()
+    mock_bound.ainvoke = AsyncMock(side_effect=fake_ainvoke)
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_bound
+    return mock_llm
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_ending_in_escalation_is_recorded_failed(recipe, user):
+    """The panic-loop escalation ends the turn without answering the recipe; a run
+    that stops there must not be recorded COMPLETED."""
+
+    async def query(sql: str) -> str:
+        return json.dumps(
+            {"success": False, "error": {"code": "NOT_FOUND", "message": "no such table"}}
+        )
+
+    tools = [StructuredTool.from_function(coroutine=query, name="query", description="Query")]
+    values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
+    with (
+        patch("apps.recipes.services.runner.get_mcp_tools", new=AsyncMock(return_value=tools)),
+        patch("apps.agents.graph.base.ChatAnthropic", return_value=_fake_llm_looping_on_query()),
+    ):
+        run_row = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(
+            recipe=recipe, variable_values=values, user=user, run=run_row
+        ).execute_async()
+
+    assert run.status == RecipeRunStatus.FAILED, run.step_results
+    step = run.step_results[0]
+    assert step["success"] is False
+    assert step["error"] in {HEADLESS_ESCALATION_MESSAGE, READ_ONLY_ESCALATION_MESSAGE}
+    assert step["response"] == ""
+    assert "query" in step["tools_used"]
