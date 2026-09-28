@@ -50,7 +50,8 @@ categories were recovered by substring-matching prose (#388 review).
    changed.
 3. **Raise sites describe; they never advise.** A loader says what the provider
    reported. What the user should *do* is presentation, and lives in exactly one
-   place keyed by code (``_CREDENTIAL_GUIDANCE`` in ``apps/workspaces/tasks.py``).
+   place keyed by code (``CREDENTIAL_GUIDANCE`` in
+   ``apps/workspaces/services/failure_guidance.py``).
    While both layers wrote advice, the user got it twice in two phrasings.
 4. **Guidance is attributed.** One block per distinct code, naming the sources it
    applies to. A run can need opposite advice for two sources, and an

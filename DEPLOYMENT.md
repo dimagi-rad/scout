@@ -483,6 +483,15 @@ forward, or choose a rollback version with the same publication contract and use
 the full drain/migrate/health sequence. Keep the additive database column in
 place; a bare `kamal rollback` of old workers is not a safe rollback procedure.
 
+OCS message IDs change to snapshot-local v2 IDs on the next authorized messages
+refresh. Deployment alone does not reload data. Existing positional label maps
+must be reviewed again; do not migrate them by message index. Even appending a
+message invalidates the session's old labels. Keep unmatched rows unclassified
+and inspect saved custom datasets for stale ID literals: an `ELSE 'Other'` rule
+can otherwise conceal that every old label stopped matching. Unknown source
+provenance is not evidence that a dataset uses positional IDs; resolve its source
+contract before choosing a refresh or relabeling operation.
+
 > Always `source config/staging.env` before staging commands — it points
 > `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)
 > would deploy staging containers against the **production** database.

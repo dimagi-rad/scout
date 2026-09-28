@@ -9,7 +9,7 @@ import {
   Minus,
   ScanText,
 } from "lucide-react"
-import { useId, useState } from "react"
+import { useContext, useId, useState } from "react"
 import type React from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -28,6 +28,7 @@ import {
 } from "./recharts"
 import {
   buildSemanticQueryInput,
+  ArtifactDateContext,
   COMPARISON_LABELS,
   comparisonPeriod,
   isRecord,
@@ -42,6 +43,7 @@ import {
   type BlockSpec,
   type CompareRanges,
   type DateRange,
+  type DateContext,
   type EvaluateArgs,
   type OutputState,
   type Row,
@@ -222,17 +224,20 @@ function dateDraftErrors(draft: DateFilterDraft) {
 }
 
 function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
+  const dateContext = useContext(ArtifactDateContext)
   const state = useOutput(engine, outputKey(block.id, "value"))
-  const value = asDateRange(state.value) ?? resolvePresetRange(stringValue(config.default))
   const [draft, setDraft] = useState<DateFilterDraft | null>(null)
   const hintId = useId()
+  if (state.status !== "ready") return <DateControlStatus state={state} />
+  const value = asDateRange(state.value)
+  if (!value) return <DateControlStatus state={{ ...state, status: "error", error: "The date range is incomplete" }} />
   // Source outputs survive data refreshes. A genuinely new source value (for
   // example, a changed block config) supersedes a draft without remounting inputs.
   const pending = draft?.source === state.value ? draft : null
   const displayed = pending?.value ?? value
   const errors = pending ? dateDraftErrors(pending) : null
 
-  function editDate(field: "start" | "end", text: string, invalid: boolean) {
+  const editDate = (field: "start" | "end", text: string, invalid: boolean) => {
     const next: DateFilterDraft = {
       source: state.value,
       value: { ...displayed, [field]: text, preset: "custom" },
@@ -263,7 +268,11 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
             value={displayed.preset ?? "custom"}
             onChange={(event) => {
               setDraft(null)
-              engine.setSourceOutputs(block.id, { value: resolvePresetRange(event.target.value) })
+              try {
+                engine.setSourceOutputs(block.id, { value: resolvePresetRange(event.target.value, dateContext) })
+              } catch (error) {
+                engine.setSourceError(block.id, error instanceof Error ? error.message : String(error))
+              }
             }}
           >
             <option value="last_30_days">Last 30 days</option>
@@ -295,6 +304,7 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
           {errors?.message
             ? `${errors.message} Last applied range: ${formatDateRange(value)}.`
             : "Dates apply automatically when the range is valid."}
+          {dateContext && ` Reporting timezone: ${dateContext.timezone}.`}
         </p>
       </div>
     </div>
@@ -302,11 +312,15 @@ function DateFilterComponent({ block, config, engine }: BlockComponentProps) {
 }
 
 function PeriodSelectorComponent({ block, config, engine }: BlockComponentProps) {
+  const dateContext = useContext(ArtifactDateContext)
   const currentState = useOutput(engine, outputKey(block.id, "current"))
   const previousState = useOutput(engine, outputKey(block.id, "previous"))
-  const value = asDateRange(currentState.value) ?? resolvePresetRange(stringValue(config.default_range) ?? "last_30_days")
+  if (currentState.status !== "ready") return <DateControlStatus state={currentState} />
+  if (previousState.status !== "ready") return <DateControlStatus state={previousState} />
+  const value = asDateRange(currentState.value)
+  const previous = asDateRange(previousState.value)
+  if (!value || !previous) return <DateControlStatus state={{ ...currentState, status: "error", error: "The comparison dates are incomplete" }} />
   const comparison = normalizeComparisonPreset(config.default_comparison)
-  const previous = asDateRange(previousState.value) ?? comparisonPeriod(value, comparison)
   const comparisonLabel = COMPARISON_LABELS[comparison]
 
   return (
@@ -320,19 +334,41 @@ function PeriodSelectorComponent({ block, config, engine }: BlockComponentProps)
           <select
             className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
             value={value.preset ?? "last_30_days"}
-            onChange={(event) => publishPeriodOutputs(engine, block.id, event.target.value, comparison)}
+            onChange={(event) => {
+              try {
+                publishPeriodOutputs(engine, block.id, event.target.value, comparison, dateContext)
+              } catch (error) {
+                engine.setSourceError(block.id, error instanceof Error ? error.message : String(error))
+              }
+            }}
           >
             <option value="last_7_days">Last 7 days</option>
             <option value="last_30_days">Last 30 days</option>
             <option value="last_90_days">Last 90 days</option>
             <option value="month_to_date">Month to date</option>
+            <option value="today">Today</option>
+            <option value="yesterday">Yesterday</option>
           </select>
         </label>
         <dl className="grid gap-3 border-t border-border pt-3 sm:grid-cols-2">
           <PeriodSummary label="Selected period" range={value} />
           <PeriodSummary label={comparisonLabel} range={previous} />
         </dl>
+        {dateContext && <p className="text-sm text-muted-foreground">Reporting timezone: {dateContext.timezone}.</p>}
       </div>
+    </div>
+  )
+}
+
+function DateControlStatus({ state }: { state: OutputState }) {
+  if (state.status !== "error" && state.status !== "blocked") {
+    return <div aria-busy="true" data-testid="artifact-date-control-loading" className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">Loading date control…</div>
+  }
+  return (
+    <div role="alert" data-testid="artifact-date-control-error" className="rounded-xl border border-border bg-card p-4 text-sm text-card-foreground">
+      <p className="font-medium">Date control needs updating</p>
+      <p className="mt-1 break-words text-muted-foreground">{state.error}</p>
+      <p className="mt-2">Ask Scout to set a supported date preset for this block. Queries using this control are paused.</p>
     </div>
   )
 }
@@ -756,17 +792,18 @@ function publishPeriodOutputs(
   blockId: string,
   preset: string,
   comparison: ReturnType<typeof normalizeComparisonPreset>,
+  dateContext?: DateContext,
 ) {
-  const current = resolvePresetRange(preset)
-  const previous = comparisonPeriod(current, comparison)
+  const current = resolvePresetRange(preset, dateContext)
+  const previous = comparisonPeriod(current, comparison, dateContext)
   const pair: CompareRanges = { current, previous, label: COMPARISON_LABELS[comparison] }
   engine.setSourceOutputs(blockId, { current, previous, pair })
 }
 
-function periodInitialOutputs(config: Record<string, unknown>) {
-  const current = resolvePresetRange(stringValue(config.default_range) ?? "last_30_days")
+function periodInitialOutputs(config: Record<string, unknown>, dateContext?: DateContext) {
+  const current = resolvePresetRange(stringValue(config.default_range) ?? "last_30_days", dateContext)
   const comparison = normalizeComparisonPreset(config.default_comparison)
-  const previous = comparisonPeriod(current, comparison)
+  const previous = comparisonPeriod(current, comparison, dateContext)
   const pair: CompareRanges = { current, previous, label: COMPARISON_LABELS[comparison] }
   return { current, previous, pair }
 }
@@ -828,7 +865,7 @@ function asCompare(value: unknown): CompareRanges | undefined {
   return current && previous ? { current, previous, label: stringValue(value.label) } : undefined
 }
 
-export function buildStoryRegistry(): Map<string, BlockSpec> {
+export function buildStoryRegistry(dateContext?: DateContext): Map<string, BlockSpec> {
   const specs: BlockSpec[] = [
     {
       type: "title",
@@ -870,7 +907,7 @@ export function buildStoryRegistry(): Map<string, BlockSpec> {
       displayName: "Date Filter",
       kind: "source",
       ports: () => ({ inputs: [], outputs: [{ name: "value", type: "date_range" }] }),
-      initialOutputs: (config) => ({ value: resolvePresetRange(stringValue(config.default)) }),
+      initialOutputs: (config) => ({ value: resolvePresetRange(stringValue(config.default), dateContext) }),
       component: DateFilterComponent,
     },
     {
@@ -885,7 +922,7 @@ export function buildStoryRegistry(): Map<string, BlockSpec> {
           { name: "pair", type: "compare_ranges" },
         ],
       }),
-      initialOutputs: periodInitialOutputs,
+      initialOutputs: (config) => periodInitialOutputs(config, dateContext),
       component: PeriodSelectorComponent,
     },
     {

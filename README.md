@@ -19,7 +19,8 @@ A self-hosted platform for deploying AI agents that can query project-specific P
 - **MCP Server**: Model Context Protocol server for tool-based data access (SQL execution, metadata)
 - **Frontend**: React 19, Vite, Tailwind CSS 4, Zustand, Vercel AI SDK v6
 - **Database**: PostgreSQL with per-project connection pooling
-- **Cache/Queue**: Redis (caching, rate limiting, Celery broker)
+- **Semantic Runtime**: Cube (query API and schema validator)
+- **Task Queue**: Procrastinate (PostgreSQL-backed; no Redis required)
 - **Auth**: Session cookies, django-allauth (Google, GitHub, CommCare, CommCare Connect)
 
 ## Quick Start
@@ -35,7 +36,7 @@ Install the following tools before cloning:
 | [Bun](https://bun.sh/) | `curl -fsSL https://bun.sh/install \| bash` |
 | [invoke](https://www.pyinvoke.org/) | Installed automatically via `uv sync` |
 
-You also need a running **PostgreSQL 14+** and **Redis** instance (or use `inv deps` to start them via Docker).
+You also need Docker Compose for **PostgreSQL 16** and **Cube** (`inv deps` starts them).
 
 ### 1. Clone and allow direnv
 
@@ -59,10 +60,23 @@ uv run prek install
 ### 4. Configure environment
 
 ```bash
-cp .env.example .env
+cp -n .env.example .env  # Do not overwrite an existing .env
 # Edit .env — at minimum set DATABASE_URL, DJANGO_SECRET_KEY,
-# ANTHROPIC_API_KEY, and DB_CREDENTIAL_KEY
+# ANTHROPIC_API_KEY, DB_CREDENTIAL_KEY, and the three Cube settings below
 ```
+
+For local Compose, keep `DATABASE_URL` and `PLATFORM_DB_PASSWORD` consistent
+with each other; `.env.example` provides a matching pair. If you change the
+password or published PostgreSQL port, update the host URL too. Existing
+PostgreSQL volumes keep their original password; editing `.env` does not rotate
+it. Restore the matching configuration or explicitly rotate the database
+password—do not delete a volume containing data you need.
+
+Returning developers: compare your existing `.env` with `.env.example` and add
+`CUBE_API_URL=http://localhost:4000`, `CUBE_VALIDATOR_URL=http://localhost:4010`,
+and `CUBEJS_API_SECRET` if missing. Use the same signing secret for the host
+processes and the Compose Cube service, which reads it from `.env`. If you
+override `CUBE_PORT` or `CUBE_VALIDATOR_PORT`, adjust the URLs accordingly.
 
 ### 5. Install frontend dependencies
 
@@ -70,19 +84,17 @@ cp .env.example .env
 inv frontend-install   # runs: cd frontend && bun install
 ```
 
-### 6. Start PostgreSQL and Redis
-
-Install PostgreSQL 14+ and Redis via your platform's package manager (e.g. `apt`, `brew`, Postgres.app) and ensure both are running. Then create the database:
+### 6. Start PostgreSQL and Cube
 
 ```bash
-createdb agent_platform
+inv deps   # docker compose up -d --build --wait platform-db cube
 ```
 
-Alternatively, use Docker for just the backing services:
-
-```bash
-inv deps   # docker compose up platform-db redis
-```
+These backing services stay in Docker; do not also launch the Compose MCP/API
+when using Honcho below. The host `DATABASE_URL` must point at the published
+PostgreSQL port and database. See [local setup details](CLAUDE.md#local-development-setup-including-returning-developers).
+After stopping Honcho, `docker compose stop platform-db cube` stops these
+dependencies without deleting their data. `inv deps` starts them again.
 
 ### 7. Run migrations
 
@@ -99,8 +111,13 @@ inv createsuperuser   # prompts for email and password
 ### 9. Start all dev servers
 
 ```bash
-inv dev   # Django :8000, MCP :8100, Vite :5173
+inv dev   # Django :8000, MCP :8100, background worker, Vite :5173
 ```
+
+The web process runs Django system checks before starting and warns about missing
+Cube settings. Check both Cube services with `curl --fail http://localhost:4000/readyz`
+and `curl --fail http://localhost:4010/readyz`. These checks must succeed before
+semantic queries can work.
 
 Open http://localhost:5173 in your browser.
 
@@ -110,7 +127,12 @@ Open http://localhost:5173 in your browser.
 docker compose up --build
 ```
 
-This starts five services: backend API (port 8000), frontend (port 3000), MCP server (port 8100), PostgreSQL, and Redis.
+This starts backend API (port 8000), frontend (port 3000), MCP server,
+PostgreSQL, and Cube (ports 4000 and 4010). The automatically loaded local
+`docker-compose.override.yml` publishes MCP on port 8100; without that override,
+MCP is internal to the Compose network. This Compose stack does not start a
+background worker; see the [Docker setup guide](docs/docs/deployment/docker.md)
+for materialization jobs.
 
 ## Project Setup
 
@@ -143,7 +165,7 @@ This starts five services: backend API (port 8000), frontend (port 3000), MCP se
 |          PostgreSQL (per-project isolation)                 |
 |  Encrypted credentials, read-only, schema-scoped           |
 +------------------------------------------------------------+
-                Redis (caching, rate limiting, Celery broker)
+                Cube (semantic queries and schema validation)
 ```
 
 ## Security

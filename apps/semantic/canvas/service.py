@@ -31,6 +31,7 @@ import uuid
 from typing import Any
 
 from django.db import transaction
+from django.utils import timezone
 
 from apps.semantic.canvas.objects import (
     CANVAS_SOURCE,
@@ -59,7 +60,11 @@ from apps.semantic.models import (
     SemanticCanvasChange,
     SemanticDataset,
 )
-from apps.semantic.services.catalog import get_active_semantic_model, semantic_name
+from apps.semantic.services.catalog import (
+    SemanticCatalogUnavailable,
+    get_active_semantic_model,
+    semantic_name,
+)
 from apps.semantic.services.custom_datasets import (
     CustomDatasetError,
     compile_custom_dataset_sql,
@@ -68,6 +73,7 @@ from apps.semantic.services.custom_datasets import (
 
 ObjectType = SemanticCanvasChange.ObjectType
 ChangeType = SemanticCanvasChange.ChangeType
+CUSTOM_DATASET_FAILURE_CACHE_SECONDS = 30
 
 SUPPORTED_OPS = {
     "add_existing",
@@ -819,25 +825,55 @@ def allowed_custom_dataset_tables(model) -> dict[str, str]:
     return allowed
 
 
-def validate_custom_dataset_draft(canvas, change: SemanticCanvasChange) -> dict[str, Any]:
+def custom_dataset_catalog_revision(model) -> str:
+    """Physical refresh revision, unaffected by Cube build-status writes."""
+    return f"{model.pk}:{model.version}"
+
+
+def validate_custom_dataset_draft(
+    canvas, change: SemanticCanvasChange, *, retry_failed: bool = False
+) -> dict[str, Any]:
     """Compile + probe a custom-dataset draft; cache the result on the row.
 
-    Column inference runs a LIMIT 0 probe against the workspace DB, so the
-    result is cached on the change row keyed by the SQL's hash and only
-    recomputed when the definition changes.
+    Column inference runs a LIMIT 0 probe against the workspace DB. Successful
+    probes are reusable only for the same SQL and catalog revision. Failed
+    probes have a short TTL for polling; explicit commit bypasses that TTL.
+    The workspace has one model, refreshed in place; its cached Python instance
+    and the SQL text alone cannot tell us whether a rebuild changed the tables.
     """
     fields = dict(change.fields)
     definition_sql = fields.get("definition_sql", "")
     sql_hash = hashlib.sha256(definition_sql.encode("utf-8")).hexdigest()[:16]
     cached = fields.get("_validation") or {}
-    if cached.get("sql_hash") == sql_hash:
-        return cached
-
+    checked_at = timezone.now().timestamp()
     result: dict[str, Any] = {"sql_hash": sql_hash, "error": "", "columns": [], "compiled_sql": ""}
     try:
+        model = get_active_semantic_model(canvas.workspace)
+    except SemanticCatalogUnavailable as exc:
+        # A temporarily unavailable catalog does not invalidate the saved SQL probe.
+        return {
+            **result,
+            "error": f"Semantic catalog unavailable: {exc}",
+            "error_code": "CATALOG_UNAVAILABLE",
+        }
+    try:
+        revision = custom_dataset_catalog_revision(model)
+        cached_at = cached.get("checked_at")
+        recent_failure = (
+            not retry_failed
+            and isinstance(cached_at, (int, float))
+            and 0 <= checked_at - cached_at < CUSTOM_DATASET_FAILURE_CACHE_SECONDS
+        )
+        if (
+            cached.get("sql_hash") == sql_hash
+            and cached.get("catalog_revision") == revision
+            and (not cached.get("error") or recent_failure)
+        ):
+            return cached
+        result["catalog_revision"] = revision
         compiled = compile_custom_dataset_sql(
             definition_sql,
-            allowed_tables=allowed_custom_dataset_tables(canvas.semantic_model),
+            allowed_tables=allowed_custom_dataset_tables(model),
         )
         columns = infer_custom_dataset_columns(canvas.workspace, compiled)
         result["compiled_sql"] = compiled
@@ -847,6 +883,7 @@ def validate_custom_dataset_draft(canvas, change: SemanticCanvasChange) -> dict[
     except Exception as exc:  # workspace context/schema unavailable, etc.
         result["error"] = f"Could not validate SQL: {exc}"
 
+    result["checked_at"] = checked_at
     fields["_validation"] = result
     change.fields = fields
     change.save(update_fields=["fields", "updated_at"])

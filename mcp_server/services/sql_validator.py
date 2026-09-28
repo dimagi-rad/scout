@@ -244,6 +244,8 @@ ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
         "to_jsonb",
         "to_number",
         "to_timestamp",
+        "pg_input_is_valid",
+        "pg_typeof",
         "translate",
         "trim",
         "trunc",
@@ -803,6 +805,19 @@ class SQLValidator:
                     sql=sql,
                     error_type="function_not_allowed",
                 )
+            if func_name == "pg_input_is_valid":
+                arguments = func.expressions
+                if (
+                    len(arguments) != 2
+                    or not isinstance(arguments[1], exp.Literal)
+                    or not arguments[1].is_string
+                    or arguments[1].this != "timestamp with time zone"
+                ):
+                    raise SQLValidationError(
+                        "pg_input_is_valid only supports the literal type 'timestamp with time zone'.",
+                        sql=sql,
+                        error_type="function_not_allowed",
+                    )
 
     def _validate_table_access(self, statement: exp.Expression, sql: str) -> None:
         """Validate that only allowed schemas are accessed."""

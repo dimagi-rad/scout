@@ -1,4 +1,5 @@
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -87,7 +88,7 @@ class TestRunPipeline:
                 "form_definitions": {},
             }
             mock_cases.return_value.load_pages.return_value = iter([])
-            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -142,7 +143,7 @@ class TestRunPipeline:
                 "form_definitions": {},
             }
             mock_cases.return_value.load_pages.return_value = iter([])
-            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -363,10 +364,12 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
             patch("mcp_server.services.materializer._run_transform_phase") as mock_transform,
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
             self._setup_run_mock(mock_run_cls)
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             mock_meta.return_value.load.return_value = {
                 "app_definitions": [],
                 "case_types": [],
@@ -415,7 +418,7 @@ class TestRunPipeline:
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
             self._setup_run_mock(mock_run_cls)
-            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -444,7 +447,7 @@ class TestRunPipeline:
         ):
             mock_mgr.return_value.provision.return_value = self._make_schema()
             self._setup_run_mock(mock_run_cls)
-            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             result = run_pipeline(self._make_tm(tenant_id="123"), {}, pipeline)
 
         assert result["status"] == "completed"
@@ -540,7 +543,9 @@ class TestRunPipeline:
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
-            mock_asset_cls.objects.filter.return_value.exists.return_value = True
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = [
+                SimpleNamespace(name="asset", scope="tenant", sql_content="select 1", test_yaml="")
+            ]
             mock_transform.side_effect = RuntimeError("dbt compilation error")
 
             result = run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
@@ -586,7 +591,9 @@ class TestRunPipeline:
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
-            mock_asset_cls.objects.filter.return_value.exists.return_value = True
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = [
+                SimpleNamespace(name="asset", scope="tenant", sql_content="select 1", test_yaml="")
+            ]
             mock_transform.return_value = {
                 "run_id": "abc",
                 "status": "tests_failed",
@@ -765,7 +772,7 @@ class TestRunPipeline:
             fake_tenant_meta.metadata = {"form_definitions": {"visit_form": {}}}
             mock_get_tenant_meta.return_value = fake_tenant_meta
 
-            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             mock_upsert.return_value = {"created": 1, "updated": 0, "deleted": 0, "total": 1}
 
             conn = MagicMock()
@@ -912,7 +919,7 @@ class TestRunPipeline:
                 "form_definitions": {},
             }
             mock_cases.return_value.load_pages.return_value = iter([])
-            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -963,7 +970,7 @@ class TestRunPipeline:
                 "form_definitions": {},
             }
             mock_cases.return_value.load_pages.return_value = iter([])
-            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -1054,10 +1061,14 @@ class TestResumableMaterialization:
                 loader_mocks.get("payments", MagicMock()),
             ),
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
             run = self._setup_run_mock(mock_run_cls, prior_run=prior_run)
+            # Unpatched, the asset query fails on the mock tenant and the swallowed
+            # error would skip the completion path these tests exist to cover.
+            mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
             mock_meta.return_value.load.return_value = {}
             conn = MagicMock()
             mock_conn.return_value = conn

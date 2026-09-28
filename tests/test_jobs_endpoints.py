@@ -1,5 +1,6 @@
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,9 +12,11 @@ from procrastinate.contrib.django.procrastinate_app import FutureApp
 from procrastinate.manager import JobManager
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api import jobs_cancel
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
+from apps.workspaces.api.jobs_views import _termination_to_dict
 from apps.workspaces.models import (
     MaterializationRun,
     TenantSchema,
@@ -26,6 +29,169 @@ from apps.workspaces.tasks import reconcile_stale_thread_job
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
+
+
+@pytest.mark.parametrize(
+    "code,retry",
+    [
+        (ErrorCode.AUTH_ACCESS_DENIED, False),
+        (ErrorCode.AUTH_TOKEN_EXPIRED, True),
+        (ErrorCode.AUTH_CREDENTIAL_MISSING, True),
+        (ErrorCode.WORKSPACE_TENANT_UNREACHABLE, True),
+        (ErrorCode.PIPELINE_UNRESOLVED, False),
+        (ErrorCode.AUTH_REFRESH_FAILED, True),
+        (ErrorCode.CONNECTION_ERROR, True),
+        (ErrorCode.INTERNAL_ERROR, True),
+        ("", True),
+    ],
+)
+@pytest.mark.parametrize("surface", ["preflight", "run", "source"])
+def test_retry_policy_uses_codes_at_every_failure_surface(code, retry, surface):
+    failure = {"error": "intentionally misleading reconnect / 403 prose", "error_code": code}
+    results = (
+        [{"sources": {"sessions": {"state": "failed", **failure}}}]
+        if surface == "source"
+        else [failure]
+    )
+    job = SimpleNamespace(
+        id="job",
+        thread_id="thread",
+        tool_call_id="tool",
+        state=ThreadJob.State.FAILED,
+        completed_at=None,
+        error_summary="Try again",
+        failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
+        started_at=None,
+        materialization_preflight_failures=results if surface == "preflight" else [],
+    )
+    response = _termination_to_dict(job, [] if surface == "preflight" else results)
+    assert response["retry_available"] is retry
+
+
+@pytest.mark.parametrize(
+    "sources,phase,started,retry",
+    [
+        ({}, "materialization", False, False),
+        (
+            {"sessions": {"state": "failed", "error_code": ErrorCode.CONNECTION_ERROR}},
+            "materialization",
+            False,
+            True,
+        ),
+        ({"sessions": {"state": "completed"}}, "materialization", True, True),
+        ({"sessions": {"state": "cancelled"}}, "materialization", False, True),
+        (
+            {"sessions": {"state": "failed", "error": "uncoded failure"}},
+            "materialization",
+            False,
+            True,
+        ),
+        ({"sessions": {"state": "completed"}}, "resume", True, True),
+        ({"sessions": {"state": "completed"}}, "", True, True),
+    ],
+)
+def test_retry_keeps_partial_recovery_and_failed_followups_available(
+    sources, phase, started, retry
+):
+    job = SimpleNamespace(
+        id="job",
+        thread_id="thread",
+        tool_call_id="tool",
+        state=ThreadJob.State.FAILED,
+        completed_at=None,
+        error_summary="Advice must not be parsed as a failure code",
+        failure_phase=phase,
+        started_at=timezone.now() if started else None,
+        materialization_preflight_failures=[
+            {"tenant": "blocked", "error_code": ErrorCode.AUTH_ACCESS_DENIED}
+        ],
+    )
+    assert _termination_to_dict(job, [{"sources": sources}])["retry_available"] is retry
+
+
+@pytest.mark.parametrize("phase,retry", [("query_build", False), ("resume", True), ("", True)])
+def test_completed_source_runs_do_not_offer_reload_for_a_query_build_failure(phase, retry):
+    job = SimpleNamespace(
+        id="job",
+        thread_id="thread",
+        tool_call_id="tool",
+        state=ThreadJob.State.FAILED,
+        completed_at=None,
+        error_summary="Reload everything now",  # Prose must not override the phase.
+        failure_phase=phase,
+        started_at=timezone.now(),
+        materialization_preflight_failures=[],
+    )
+    results = [{"sources": {"sessions": {"state": "completed"}}}]
+    assert _termination_to_dict(job, results)["retry_available"] is retry
+
+
+def test_cancelled_job_can_retry_even_with_recorded_remediation_failure():
+    job = SimpleNamespace(
+        id="job",
+        thread_id="thread",
+        tool_call_id="tool",
+        state=ThreadJob.State.CANCELLED,
+        completed_at=None,
+        error_summary="Stopped",
+        failure_phase="",
+        started_at=None,
+        materialization_preflight_failures=[{"error_code": ErrorCode.AUTH_ACCESS_DENIED}],
+    )
+    assert _termination_to_dict(job, [])["retry_available"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retry_policy_loads_run_results_and_preflight_failures_by_job():
+    user = await User.objects.acreate_user(email="retry-policy@example.com", password="x")
+    workspace = await Workspace.objects.acreate(name="Retry policy", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=workspace, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="retry-policy", canonical_name="Policy"
+    )
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="retry_policy")
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    for job_id in (7001, 7002, 7003, 7004):
+        await ThreadJob.objects.acreate(
+            thread=thread,
+            procrastinate_job_id=job_id,
+            job_type="materialization",
+            tool_call_id=str(job_id),
+            state=ThreadJob.State.FAILED,
+            failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
+            completed_at=timezone.now(),
+            materialization_preflight_failures=[{"error_code": str(ErrorCode.AUTH_ACCESS_DENIED)}]
+            if job_id == 7003
+            else [],
+        )
+    for job_id, codes in (
+        (7001, [ErrorCode.AUTH_ACCESS_DENIED, ErrorCode.CONNECTION_ERROR]),
+        (7002, [ErrorCode.CONNECTION_ERROR]),
+    ):
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.FAILED,
+            procrastinate_job_id=job_id,
+            result={
+                "sources": {
+                    str(i): {"state": "failed", "error_code": str(code)}
+                    for i, code in enumerate(codes)
+                }
+            },
+        )
+    client = AsyncClient()
+    await client.alogin(email=user.email, password="x")
+    response = await client.get(f"/api/workspaces/{workspace.id}/jobs/active/")
+    assert response.status_code == 200
+    flags = {
+        item["tool_call_id"]: item["retry_available"]
+        for item in response.json()["recent_terminations"]
+    }
+    assert flags == {"7001": True, "7002": True, "7003": False, "7004": True}
 
 
 @pytest.mark.asyncio
@@ -218,7 +384,11 @@ async def test_recent_terminations_completed_state_has_no_retry():
 
     client = AsyncClient()
     await client.alogin(email="ok@b.c", password="x")
-    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    with patch.object(
+        MaterializationRun.objects, "filter", wraps=MaterializationRun.objects.filter
+    ) as runs:
+        resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert all(not call.kwargs.get("procrastinate_job_id__in") for call in runs.call_args_list)
     body = resp.json()
     assert len(body["recent_terminations"]) == 1
     assert body["recent_terminations"][0]["retry_available"] is False

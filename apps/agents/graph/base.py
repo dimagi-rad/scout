@@ -42,6 +42,7 @@ from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.common.error_codes import ErrorCode
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
+from apps.semantic.services.date_context import agent_date_context
 from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import (
     MaterializationRun,
@@ -946,6 +947,7 @@ async def build_agent_graph(
         canvas_write=canvas_write,
         write_capable=write_capable,
     )
+    volatile_prompt += agent_date_context()
     logger.debug(
         "System prompt assembled: %d stable + %d volatile chars for workspace %s",
         len(stable_prompt),
@@ -1001,7 +1003,10 @@ async def build_agent_graph(
                         )
                         answered_ids.add(tc_id)
 
-        messages = [_build_cached_system_message(stable_prompt, volatile_prompt), *repaired]
+        messages = [
+            _build_cached_system_message(stable_prompt, volatile_prompt),
+            *repaired,
+        ]
         # cache_control lands on the last eligible message block, caching the
         # (pruned) conversation-history prefix (arch #254, 02#3).
         response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)

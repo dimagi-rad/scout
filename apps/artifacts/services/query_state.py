@@ -338,7 +338,7 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
                 else "Showing the last available data. The latest data model rebuild did not complete."
             ),
         }
-    if surface["queryable"]:
+    if surface["queryable"] and artifact.id is not None:
         previous = (
             await WorkspaceDataRecovery.objects.filter(
                 workspace=artifact.workspace,

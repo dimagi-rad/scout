@@ -197,7 +197,7 @@ async def test_worker_reassesses_partial_missing_source_under_lock(published_sou
     )
     real_rebuild = rebuild_workspace_view_schema.func
 
-    async def restore_source(workspace_id, user_id, job_id):
+    async def restore_source(workspace_id, user_id, job_id, **_kwargs):
         assert workspace_id == str(setup.workspace.id)
         assert user_id == str(setup.user.id)
         assert job_id == 1703

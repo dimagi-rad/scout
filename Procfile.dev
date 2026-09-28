@@ -1,4 +1,5 @@
-web: uv run uvicorn config.asgi:application --reload --port 8000 --lifespan off
+# PostgreSQL and Cube run in Docker; see CLAUDE.md's local development setup.
+web: uv run python manage.py check && uv run uvicorn config.asgi:application --reload --port 8000 --lifespan off
 mcp: DJANGO_SETTINGS_MODULE=config.settings.development uv run python -m mcp_server --transport streamable-http --reload
 worker: watchfiles --filter python 'uv run python manage.py procrastinate worker' apps config mcp_server
 frontend: bash -c "cd frontend && bun dev"

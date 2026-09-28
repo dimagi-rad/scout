@@ -159,7 +159,10 @@ async def test_runtime_accepts_actual_cube_projection(query, time_key, row_forma
     assert runtime["queries"][0]["result_keys"] == sorted(expected_result_keys(query))
     assert execute.await_args.args[0] is workspace
     assert execute.await_args.args[1]["time_dimension"] == "topics.created_at"
-    assert execute.await_args.kwargs == {"user_id": "synthetic-user"}
+    assert execute.await_args.kwargs["user_id"] == "synthetic-user"
+    assert execute.await_args.kwargs["readiness"].subject.semantic_queries == [
+        execute.await_args.args[1]
+    ]
 
 
 @pytest.mark.asyncio

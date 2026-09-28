@@ -55,7 +55,7 @@ export function createAppStore() {
       threadId: crypto.randomUUID(),
       artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
       activeArtifactId: null,
-      dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, selectedTable: null,
+      dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, dictionaryWarning: null, selectedTable: null,
       threads: [], threadsStatus: "idle", threadsAccessLostMessage: null,
       threadsAccessRetryable: false,
       datasetCatalog: null, datasetStatus: "idle", datasetError: null,

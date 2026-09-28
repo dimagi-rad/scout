@@ -14,6 +14,7 @@ from django.http import HttpResponse, StreamingHttpResponse
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext
 
+from apps.users.models import Tenant
 from apps.workspaces import access as access_module
 from apps.workspaces import access_cache
 from apps.workspaces.access import (
@@ -21,9 +22,15 @@ from apps.workspaces.access import (
     aresolve_workspace_access_ex,
     resolve_workspace_access_ex,
 )
-from apps.workspaces.models import Workspace, WorkspaceRole
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from apps.workspaces.services.access_freshness import VerificationBudget
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
+from tests.tenant_access import grant_tenant_access
 
 READ_KEY = (WorkspaceRole.READ, VerificationBudget.INTERACTIVE)
 
@@ -82,7 +89,7 @@ def test_verification_budget_is_part_of_the_key(scope, user, workspace, monkeypa
     protected-data one, or a stale proof would read as fresh."""
     assert resolve_workspace_access_ex(user, workspace.id, verification=None).granted
     denied = WorkspaceAccess(denied_reason="verification_unavailable")
-    monkeypatch.setattr(access_module, "_resolve_workspace_access_ex", lambda *a, **k: denied)
+    monkeypatch.setattr(access_module, "_resolve_with_freshness", lambda *a, **k: denied)
 
     assert resolve_workspace_access_ex(user, workspace.id) is denied
 
@@ -91,11 +98,31 @@ def test_verification_budget_is_part_of_the_key(scope, user, workspace, monkeypa
 def test_retryable_denials_are_not_cached(scope, user, workspace, monkeypatch):
     denied = WorkspaceAccess(denied_reason="verification_unavailable")
     assert denied.retryable
-    monkeypatch.setattr(access_module, "_resolve_workspace_access_ex", lambda *a, **k: denied)
+    monkeypatch.setattr(access_module, "_resolve_with_freshness", lambda *a, **k: denied)
     resolve_workspace_access_ex(user, workspace.id)
     monkeypatch.undo()
 
     assert resolve_workspace_access_ex(user, workspace.id).granted
+
+
+@pytest.mark.django_db
+def test_the_coverage_exemption_never_reaches_a_data_path_through_the_cache(scope, user):
+    t1 = Tenant.objects.create(provider="commcare", external_id="c1", canonical_name="One")
+    t2 = Tenant.objects.create(provider="commcare", external_id="c2", canonical_name="Two")
+    ws = Workspace.objects.create(name="Partial", created_by=user)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    for tenant in (t1, t2):
+        WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    grant_tenant_access(user, t1)
+
+    exempt = resolve_workspace_access_ex(user, ws.id, require_coverage=False)
+    gated = resolve_workspace_access_ex(user, ws.id)
+    exempt_again = resolve_workspace_access_ex(user, ws.id, require_coverage=False)
+
+    assert exempt.granted
+    assert not gated.granted
+    assert [t.tenant_name for t in gated.missing_tenants] == ["Two"]
+    assert exempt_again.granted
 
 
 @pytest.mark.django_db

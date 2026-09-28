@@ -95,13 +95,12 @@ export function LostAccessModal() {
             {source ? (
               <>
                 This is a <span className="font-medium text-foreground">{source}</span> workspace.
-                Your access appears to have been removed upstream. Check your access on {source}, or
-                if you think this is a mistake, reach out to the workspace owner or an admin.
+                Scout no longer has an active connection to its data. Check your connection
+                and your access on {source}.
               </>
             ) : (
               <>
-                Your access to this workspace appears to have been removed upstream. If you think
-                this is a mistake, reach out to the workspace owner or an admin.
+                Scout no longer has an active connection to this workspace’s data.
               </>
             )}
           </p>
@@ -145,6 +144,12 @@ export function LostAccessModal() {
           </button>
         </div>
 
+        {missing.length === 0 && <p className="mt-3 text-sm text-muted-foreground">
+          If you disconnected your account, reconnect it in Connected Accounts. If your provider
+          removed or restricted your access, ask a provider admin to restore it;
+          reconnecting alone won’t restore those permissions.
+        </p>}
+
         {accessible.length > 0 ? (
           <div className="mt-5">
             <p className="mb-2 text-sm font-medium">Go to a workspace you can access:</p>
@@ -167,8 +172,7 @@ export function LostAccessModal() {
           </div>
         ) : (
           <p className="mt-5 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
-            You don’t have access to any workspaces right now. Reconnect your account or ask an
-            admin to restore access.
+            You don’t have access to any workspaces right now. You can still manage your connections.
           </p>
         )}
       </div>

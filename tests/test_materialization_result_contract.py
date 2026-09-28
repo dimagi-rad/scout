@@ -91,7 +91,7 @@ def _capture_writer_result() -> dict:
             "form_definitions": {},
         }
         mock_cases.return_value.load_pages.return_value = iter([([{"case_id": "c1"}], 1)])
-        mock_asset_cls.objects.filter.return_value.exists.return_value = False
+        mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
         conn = MagicMock()
         mock_conn.return_value = conn
         conn.cursor.return_value = MagicMock()

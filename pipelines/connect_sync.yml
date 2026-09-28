@@ -38,24 +38,29 @@ relationships:
     from_column: username
     to_table: raw_users
     to_column: username
+    relationship_type: many_to_one
     description: "Visits reference the FLW who performed them"
   - from_table: raw_completed_works
     from_column: username
     to_table: raw_users
     to_column: username
+    relationship_type: many_to_one
     description: "Completed works reference the FLW"
   - from_table: raw_payments
     from_column: username
     to_table: raw_users
     to_column: username
+    relationship_type: many_to_one
     description: "Payments reference the FLW who earned them"
   - from_table: raw_assessments
     from_column: username
     to_table: raw_users
     to_column: username
+    relationship_type: many_to_one
     description: "Assessments reference the FLW"
   - from_table: raw_completed_modules
     from_column: username
     to_table: raw_users
     to_column: username
+    relationship_type: many_to_one
     description: "Module completions reference the FLW"

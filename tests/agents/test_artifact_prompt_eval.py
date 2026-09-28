@@ -1,6 +1,13 @@
 """Prompt contract checks for semantic graph artifact creation."""
 
+import pytest
+
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
+from apps.agents.prompts.base_system import (
+    BASE_SYSTEM_PROMPT,
+    HEADLESS_BASE_SYSTEM_PROMPT,
+    READ_ONLY_BASE_SYSTEM_PROMPT,
+)
 from apps.agents.tools.artifact_manager_agent import (
     ARTIFACT_MANAGER_SYSTEM_PROMPT,
     NESTED_MCP_TOOL_NAMES,
@@ -53,15 +60,60 @@ def test_artifact_manager_prompt_requires_reading_the_full_doc_before_complex_ed
     assert "preserve existing config exactly" in ARTIFACT_MANAGER_SYSTEM_PROMPT
 
 
-def test_topic_dashboards_have_an_explicit_data_model_handoff():
+def test_provider_neutral_artifacts_have_an_explicit_data_model_handoff():
     for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
         assert 'status: "needs_data_model"' in prompt
         assert "data_requirements" in prompt
         assert "`canvas_manager`" in prompt
     assert "prepare the data model first" in ARTIFACT_PROMPT_ADDITION
     assert "Only after the user requests or approves creating/saving" in ARTIFACT_PROMPT_ADDITION
-    assert "Do not infer permission to change the model from a chart" in ARTIFACT_PROMPT_ADDITION
-    assert "examined versus eligible rows" in ARTIFACT_PROMPT_ADDITION
-    assert "Keyword rules are\nnot NLP clustering" in ARTIFACT_PROMPT_ADDITION
+    assert "permission to change the model from a chart request alone" in ARTIFACT_PROMPT_ADDITION
+    assert "examined versus\neligible rows" in ARTIFACT_PROMPT_ADDITION
+    assert "keyword rules are not NLP" in ARTIFACT_PROMPT_ADDITION
+    assert "identity/version guard" in ARTIFACT_PROMPT_ADDITION
+    for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
+        assert "OCS" not in prompt
+        prose = prompt.split("Data requirements JSON Schema:")[0]
+        assert "grain" in prose
+        assert "provider\nname" in prompt or "provider name" in prompt
+    assert "dimension, measure, dataset, or relationship" in ARTIFACT_MANAGER_SYSTEM_PROMPT
+    assert "reports the same `needs_data_model` gap again" in ARTIFACT_PROMPT_ADDITION
     assert "Do not invent a\n  taxonomy from column names" in CANVAS_MANAGER_SYSTEM_PROMPT
     assert {"list_datasets", "describe_dataset", "semantic_query"} == NESTED_MCP_TOOL_NAMES
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        BASE_SYSTEM_PROMPT,
+        HEADLESS_BASE_SYSTEM_PROMPT,
+        READ_ONLY_BASE_SYSTEM_PROMPT,
+        ARTIFACT_PROMPT_ADDITION,
+        ARTIFACT_MANAGER_SYSTEM_PROMPT,
+    ],
+    ids=["interactive", "headless", "read_only", "artifact_parent", "artifact_manager"],
+)
+def test_missing_member_guidance_checks_catalog_before_model_changes(prompt):
+    prose = " ".join(prompt.split())
+    assert "`list_datasets` / `describe_dataset`" in prose
+    assert "existing member satisfies the requested meaning" in prose
+    assert "validate again without changing the model" in prose
+    assert "neither a typo nor a missing capability" in prose
+    assert "never substitute a similarly named member with different semantics" in prose
+    assert "Only a confirmed capability gap" in prose
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        BASE_SYSTEM_PROMPT,
+        HEADLESS_BASE_SYSTEM_PROMPT,
+        READ_ONLY_BASE_SYSTEM_PROMPT,
+        ARTIFACT_MANAGER_SYSTEM_PROMPT,
+    ],
+)
+def test_unknown_repair_is_not_presented_as_authorized_recovery(prompt):
+    prose = " ".join(prompt.split())
+    assert "repair could not be determined" in prose
+    assert "diagnostics" in prose
+    assert "do not guess" in prose

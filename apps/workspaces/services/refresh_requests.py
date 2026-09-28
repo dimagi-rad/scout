@@ -194,20 +194,6 @@ def fail_claimed_refresh_candidate(schema_id: uuid.UUID, job_id: int) -> TenantS
     return schema
 
 
-def activate_claimed_refresh_candidate(
-    schema_id: uuid.UUID, job_id: int, accessed_at: datetime
-) -> bool:
-    """Publish only the candidate claimed by this exact queue job."""
-    return bool(
-        TenantSchema.objects.filter(
-            id=schema_id,
-            refresh_job_id=job_id,
-            state=SchemaState.PROVISIONING,
-            refresh_claimed_at__isnull=False,
-        ).update(state=SchemaState.ACTIVE, last_accessed_at=accessed_at)
-    )
-
-
 def _job_was_pruned(candidate: TenantSchema, pruned_before: datetime) -> bool:
     """Whether a candidate's missing queue job is explained by retention pruning.
 
@@ -223,9 +209,14 @@ def _job_was_pruned(candidate: TenantSchema, pruned_before: datetime) -> bool:
 def _unbound_candidates(tenant):
     # provision() holds the tenant's base-named row in PROVISIONING during its
     # CREATE SCHEMA; that row never has a refresh job, so demanding queue
-    # evidence for it would misreport an initial load as a broken refresh.
+    # evidence for it would misreport an initial load as a broken refresh. A
+    # workspace-load candidate is not a refresh either: it is owned through the
+    # tenant lock and settled by the next writer that takes it.
     return TenantSchema.objects.filter(
-        tenant=tenant, state=SchemaState.PROVISIONING, refresh_job_id__isnull=True
+        tenant=tenant,
+        state=SchemaState.PROVISIONING,
+        refresh_job_id__isnull=True,
+        load_workspace_id__isnull=True,
     ).exclude(schema_name=tenant_schema_name(tenant.provider, tenant.external_id))
 
 

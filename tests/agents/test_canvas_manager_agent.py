@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.errors import GraphRecursionError
 
@@ -16,9 +16,32 @@ from apps.agents.subagents.forwarding import NestedEventForwarder
 from apps.agents.tools.canvas_manager_agent import (
     CANVAS_MANAGER_SYSTEM_PROMPT,
     NESTED_RECURSION_LIMIT,
+    _build_canvas_manager_graph,
     _summarize_result,
     create_canvas_manager_tool,
 )
+
+
+@pytest.mark.asyncio
+async def test_canvas_manager_receives_the_current_reporting_clock(monkeypatch):
+    captured = []
+
+    class Model:
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            captured.extend(messages)
+            return AIMessage(content="Done")
+
+    prefix = "apps.agents.tools.canvas_manager_agent"
+    monkeypatch.setattr(f"{prefix}.ChatAnthropic", lambda **kwargs: Model())
+    monkeypatch.setattr(f"{prefix}.create_canvas_tools", lambda *args: [])
+    monkeypatch.setattr(f"{prefix}.agent_date_context", lambda: "\nReporting clock: 2026-09-24 UTC")
+    graph = _build_canvas_manager_graph(SimpleNamespace(id="workspace"), None, [], None)
+    await graph.ainvoke({"messages": [HumanMessage(content="Inspect dates")]})
+    system = next(message for message in captured if isinstance(message, SystemMessage))
+    assert system.content == CANVAS_MANAGER_SYSTEM_PROMPT + "\nReporting clock: 2026-09-24 UTC"
 
 
 def test_canvas_manager_summary_prefers_final_json_and_commit_truth():

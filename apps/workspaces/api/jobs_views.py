@@ -12,6 +12,7 @@ from apps.users.decorators import async_login_required
 from apps.workspaces import tasks as workspace_tasks
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
+from apps.workspaces.services.failure_guidance import BLOCKS_IMMEDIATE_RETRY, summary_failures
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,44 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
     }
 
 
-def _termination_to_dict(job: ThreadJob) -> dict:
+def _needs_materialization_retry_check(job: ThreadJob) -> bool:
+    if job.state != ThreadJob.State.FAILED:
+        return False
+    if job.failure_phase in {ThreadJob.FailurePhase.RESUME, ThreadJob.FailurePhase.QUERY_BUILD}:
+        return False
+    # Historical jobs cannot distinguish a failed follow-up from failed loading.
+    # Preserve Retry for those ambiguous resumed jobs rather than infer from prose.
+    return bool(job.failure_phase) or job.started_at is None
+
+
+def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
     """Serialize a terminal ThreadJob for the ``recent_terminations`` payload.
 
-    ``retry_available`` is True only for FAILED/CANCELLED — a COMPLETED job
-    has no failure to retry from and we surface it in the payload only so the
-    frontend can clear any stale failure card it had previously rendered.
+    Retry stays available if it can recover any source or a failed follow-up.
+    Completed jobs still clear stale failure cards in the frontend.
     """
+    retry_available = job.state in {ThreadJob.State.FAILED, ThreadJob.State.CANCELLED}
+    if (
+        job.state == ThreadJob.State.FAILED
+        and job.failure_phase == ThreadJob.FailurePhase.QUERY_BUILD
+    ):
+        retry_available = False
+    elif _needs_materialization_retry_check(job):
+        failures = summary_failures([*job.materialization_preflight_failures, *run_results])
+        completed_source = any(
+            isinstance(result, dict)
+            and isinstance(result.get("sources"), dict)
+            and any(
+                isinstance(source, dict) and source.get("state") == "completed"
+                for source in result["sources"].values()
+            )
+            for result in run_results
+        )
+        retry_available = (
+            completed_source
+            or not failures
+            or any(f.code not in BLOCKS_IMMEDIATE_RETRY for f in failures)
+        )
     return {
         "thread_job_id": str(job.id),
         "thread_id": str(job.thread_id),
@@ -72,11 +104,7 @@ def _termination_to_dict(job: ThreadJob) -> dict:
         "state": job.state,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "error_summary": job.error_summary or "",
-        "retry_available": job.state
-        in {
-            ThreadJob.State.FAILED,
-            ThreadJob.State.CANCELLED,
-        },
+        "retry_available": retry_available,
     }
 
 
@@ -145,14 +173,28 @@ async def active_jobs_view(request, workspace_id):
         runs_by_job[r.procrastinate_job_id] = r.progress or {}
 
     cutoff = timezone.now() - RECENT_TERMINATION_WINDOW
-    recent_terminations = [
-        _termination_to_dict(j)
+    terminated_jobs = [
+        j
         async for j in ThreadJob.objects.filter(
             thread__workspace=workspace,
             thread__user=user,
             state__in=list(ThreadJob.TERMINAL_STATES),
             completed_at__gte=cutoff,
         ).order_by("-completed_at")
+    ]
+    results_by_job: dict[int, list[dict]] = {}
+    async for run in MaterializationRun.objects.filter(
+        procrastinate_job_id__in=[
+            job.procrastinate_job_id
+            for job in terminated_jobs
+            if _needs_materialization_retry_check(job)
+        ],
+    ).only("procrastinate_job_id", "result"):
+        if isinstance(run.result, dict):
+            results_by_job.setdefault(run.procrastinate_job_id, []).append(run.result)
+    recent_terminations = [
+        _termination_to_dict(job, results_by_job.get(job.procrastinate_job_id, []))
+        for job in terminated_jobs
     ]
 
     return JsonResponse(

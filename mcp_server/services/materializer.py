@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,8 +61,10 @@ from apps.transformations.services.executor import run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
+from apps.workspaces.services.load_generations import pipeline_fingerprint
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
+from mcp_server.event_time import normalize_event_time
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
@@ -138,6 +141,9 @@ def run_pipeline(
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
+    # The run's fingerprint must describe the config it actually executed, not a
+    # shared registry object someone else could mutate mid-load.
+    pipeline = deepcopy(pipeline)
     observed_connection = tenant_membership.connection
 
     # provision + discover + N sources + transform/skip
@@ -398,25 +404,7 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                # A resumable source that advanced its cursor has committed rows
-                # even if the source failed overall — treat as PARTIAL so the next
-                # run resumes from the watermark.
-                any_committed = any(
-                    s.get("state") == "completed" or _has_committed_cursor(s)
-                    for s in source_results.values()
-                )
-                final_state = (
-                    MaterializationRun.RunState.PARTIAL
-                    if any_committed
-                    else MaterializationRun.RunState.FAILED
-                )
-                run.state = final_state
-                run.completed_at = datetime.now(UTC)
-                run.result = {
-                    "pipeline": pipeline.name,
-                    "sources": source_results,
-                }
-                run.save(update_fields=["state", "completed_at", "result"])
+                _stamp_load_ended(run, pipeline, source_results)
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
@@ -430,6 +418,29 @@ def run_pipeline(
                 _persist_source_results(run, pipeline, source_results)
             logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
         current_source = None
+
+        # Discovery may have generated SYSTEM assets. Fingerprint and execute the
+        # same in-memory snapshot: the fingerprint is this run's receipt for what
+        # it built, and shared-load reuse and promotion accept nothing weaker.
+        # Computed inside this try so a failure (e.g. hashing the source tree)
+        # still ends the run terminal instead of stranding it in TRANSFORMING.
+        try:
+            asset_snapshot = list(
+                TransformationAsset.objects.filter(tenant=tenant_membership.tenant)
+            )
+            load_fingerprint = pipeline_fingerprint(
+                pipeline, tenant_membership.tenant, assets=asset_snapshot
+            )
+        except Exception as e:
+            # The sources are committed, so this is PARTIAL, not FAILED as if
+            # nothing had loaded.
+            _stamp_load_ended(
+                run,
+                pipeline,
+                source_results,
+                error={"error": _summarize_error(e), "error_code": code_of(e)},
+            )
+            raise
 
     except MaterializationCancelled:
         # State is already CANCELLED (set by the canceller before raising via
@@ -502,12 +513,11 @@ def run_pipeline(
     run.state = MaterializationRun.RunState.TRANSFORMING
     transform_result: dict = {}
 
-    has_assets = TransformationAsset.objects.filter(tenant=tenant_membership.tenant).exists()
-    if has_assets:
+    if asset_snapshot:
         report("Running transforms...")
         try:
             transform_result = _run_transform_phase(
-                pipeline, schema_name, tenant=tenant_membership.tenant
+                schema_name, tenant=tenant_membership.tenant, assets=asset_snapshot
             )
         except Exception as e:
             logger.exception("Transform phase failed for schema %s", schema_name)
@@ -518,6 +528,7 @@ def run_pipeline(
     # Conditional UPDATE: only transition to COMPLETED if still TRANSFORMING.
     # Preserves a CANCELLED (or FAILED) state written externally during transform.
     final_result = {
+        "load_fingerprint": load_fingerprint,
         "sources": source_results,
         "pipeline": pipeline.name,
         "transforms": transform_result,
@@ -557,6 +568,7 @@ def run_pipeline(
         )
 
     result: dict = {
+        "load_fingerprint": load_fingerprint,
         "status": "completed",
         "run_id": str(run.id),
         "schema": schema_name,
@@ -1056,6 +1068,8 @@ def _write_ocs_messages(
             """
         CREATE TABLE {schema}.raw_messages (
             message_id TEXT PRIMARY KEY,
+            snapshot_revision TEXT NOT NULL,
+            message_version TEXT NOT NULL,
             session_id TEXT,
             message_index INTEGER,
             role TEXT,
@@ -1085,6 +1099,8 @@ def _write_ocs_messages(
                     r.get("created_at"),
                     json.dumps(r.get("metadata") or {}),
                     json.dumps(r.get("tags") or []),
+                    r["snapshot_revision"],
+                    r["message_version"],
                 )
                 for r in page
             ]
@@ -1149,7 +1165,24 @@ def _write_ocs_participants(
     return total
 
 
-def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None) -> dict:
+def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None = None):
+    """End a run whose load stopped early: PARTIAL if anything committed, else FAILED.
+
+    A resumable source that advanced its cursor has committed rows even if it
+    failed overall, so it counts: PARTIAL lets the next run resume from there.
+    """
+    committed = any(
+        s.get("state") == "completed" or _has_committed_cursor(s) for s in source_results.values()
+    )
+    run.state = (
+        MaterializationRun.RunState.PARTIAL if committed else MaterializationRun.RunState.FAILED
+    )
+    run.completed_at = datetime.now(UTC)
+    run.result = {"pipeline": pipeline.name, "sources": source_results, **(error or {})}
+    run.save(update_fields=["state", "completed_at", "result"])
+
+
+def _run_transform_phase(schema_name: str, tenant=None, assets=None) -> dict:
     """Run the transformation pipeline's SYSTEM + TENANT stages for this tenant.
 
     No ``workspace`` is passed because materialization is tenant-scoped: a tenant
@@ -1165,6 +1198,7 @@ def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None
     run = run_transformation_pipeline(
         tenant=tenant,
         schema_name=schema_name,
+        asset_snapshot=assets,
     )
 
     result = {
@@ -1184,28 +1218,34 @@ _CASES_INSERT = psql.SQL(
     INSERT INTO {schema}.raw_cases
         (case_id, case_type, case_name, external_id, owner_id,
          date_opened, last_modified, server_last_modified, indexed_on,
-         closed, date_closed, properties, indices)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         closed, date_closed, properties, indices,
+         date_opened_raw, last_modified_raw, server_last_modified_raw, indexed_on_raw, date_closed_raw)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (case_id) DO UPDATE SET
         case_name=EXCLUDED.case_name, owner_id=EXCLUDED.owner_id,
         last_modified=EXCLUDED.last_modified,
         server_last_modified=EXCLUDED.server_last_modified,
         indexed_on=EXCLUDED.indexed_on, closed=EXCLUDED.closed,
         date_closed=EXCLUDED.date_closed, properties=EXCLUDED.properties,
-        indices=EXCLUDED.indices
+        indices=EXCLUDED.indices, last_modified_raw=EXCLUDED.last_modified_raw,
+        server_last_modified_raw=EXCLUDED.server_last_modified_raw,
+        indexed_on_raw=EXCLUDED.indexed_on_raw, date_closed_raw=EXCLUDED.date_closed_raw
     """
 )
 
 _FORMS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_forms
-        (form_id, xmlns, received_on, server_modified_on, app_id, form_data, case_ids)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+        (form_id, xmlns, received_on, server_modified_on, app_id, form_data, case_ids,
+         received_on_raw, server_modified_on_raw)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (form_id) DO UPDATE SET
         received_on=EXCLUDED.received_on,
         server_modified_on=EXCLUDED.server_modified_on,
         form_data=EXCLUDED.form_data,
-        case_ids=EXCLUDED.case_ids
+        case_ids=EXCLUDED.case_ids,
+        received_on_raw=EXCLUDED.received_on_raw,
+        server_modified_on_raw=EXCLUDED.server_modified_on_raw
     """
 )
 
@@ -1230,12 +1270,17 @@ def _write_cases(
             case_name TEXT,
             external_id TEXT,
             owner_id TEXT,
-            date_opened TEXT,
-            last_modified TEXT,
-            server_last_modified TEXT,
-            indexed_on TEXT,
+            date_opened TIMESTAMPTZ,
+            last_modified TIMESTAMPTZ,
+            server_last_modified TIMESTAMPTZ,
+            indexed_on TIMESTAMPTZ,
             closed BOOLEAN DEFAULT FALSE,
-            date_closed TEXT,
+            date_closed TIMESTAMPTZ,
+            date_opened_raw TEXT,
+            last_modified_raw TEXT,
+            server_last_modified_raw TEXT,
+            indexed_on_raw TEXT,
+            date_closed_raw TEXT,
             properties JSONB DEFAULT '{{}}'::jsonb,
             indices JSONB DEFAULT '{{}}'::jsonb
         )
@@ -1258,14 +1303,19 @@ def _write_cases(
                 c.get("case_name", ""),
                 c.get("external_id", ""),
                 c.get("owner_id", ""),
-                c.get("date_opened", ""),
-                c.get("last_modified", ""),
-                c.get("server_last_modified", ""),
-                c.get("indexed_on", ""),
+                normalize_event_time(c.get("date_opened")),
+                normalize_event_time(c.get("last_modified")),
+                normalize_event_time(c.get("server_last_modified")),
+                normalize_event_time(c.get("indexed_on")),
                 c.get("closed", False),
-                c.get("date_closed") or "",
+                normalize_event_time(c.get("date_closed")),
                 json.dumps(c.get("properties", {})),
                 json.dumps(c.get("indices", {})),
+                c.get("date_opened"),
+                c.get("last_modified"),
+                c.get("server_last_modified"),
+                c.get("indexed_on"),
+                c.get("date_closed"),
             )
             for c in page
         ]
@@ -1294,8 +1344,10 @@ def _write_forms(
         CREATE TABLE {schema}.raw_forms (
             form_id TEXT PRIMARY KEY,
             xmlns TEXT,
-            received_on TEXT,
-            server_modified_on TEXT,
+            received_on TIMESTAMPTZ,
+            server_modified_on TIMESTAMPTZ,
+            received_on_raw TEXT,
+            server_modified_on_raw TEXT,
             app_id TEXT,
             form_data JSONB DEFAULT '{{}}'::jsonb,
             case_ids JSONB DEFAULT '[]'::jsonb
@@ -1316,11 +1368,13 @@ def _write_forms(
             (
                 f.get("form_id", ""),
                 f.get("xmlns", ""),
-                f.get("received_on", ""),
-                f.get("server_modified_on", ""),
+                normalize_event_time(f.get("received_on")),
+                normalize_event_time(f.get("server_modified_on")),
                 f.get("app_id", ""),
                 json.dumps(f.get("form_data", {})),
                 json.dumps(f.get("case_ids", [])),
+                f.get("received_on"),
+                f.get("server_modified_on"),
             )
             for f in page
         ]
@@ -1329,6 +1383,35 @@ def _write_forms(
         if on_page is not None:
             on_page(total, rows_total)
 
+    # Keep a distinct association grain; JSONB arrays are not scalar foreign keys.
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_form_cases CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+            CREATE TABLE {schema}.raw_form_cases (
+                form_case_id TEXT PRIMARY KEY,
+                form_id TEXT NOT NULL,
+                case_id TEXT NOT NULL,
+                UNIQUE (form_id, case_id)
+            )
+            """
+        ).format(schema=sid)
+    )
+    cur.execute(
+        psql.SQL(
+            """
+            INSERT INTO {schema}.raw_form_cases (form_case_id, form_id, case_id)
+            SELECT DISTINCT jsonb_build_array(f.form_id, c.value #>> '{{}}')::text,
+                f.form_id, c.value #>> '{{}}'
+            FROM {schema}.raw_forms f
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(f.case_ids) = 'array' THEN f.case_ids ELSE '[]'::jsonb END
+            ) c(value)
+            WHERE jsonb_typeof(c.value) = 'string' AND c.value #>> '{{}}' <> ''
+            """
+        ).format(schema=sid)
+    )
+    cur.execute(psql.SQL("CREATE INDEX ON {}.raw_form_cases (case_id)").format(sid))
     return total
 
 
@@ -1461,11 +1544,9 @@ _OCS_MESSAGES_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_messages
         (message_id, session_id, message_index, role, content,
-         created_at, metadata, tags)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (message_id) DO UPDATE SET
-        role=EXCLUDED.role, content=EXCLUDED.content,
-        metadata=EXCLUDED.metadata, tags=EXCLUDED.tags
+         created_at, metadata, tags, snapshot_revision, message_version)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (message_id) DO NOTHING
     """
 )
 

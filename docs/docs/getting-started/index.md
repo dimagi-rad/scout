@@ -5,11 +5,12 @@ This section walks you through installing Scout and connecting it to your CommCa
 ## Prerequisites
 
 - Python 3.12+ (3.11+ supported)
-- PostgreSQL 14+
-- Redis
+- Docker Compose for PostgreSQL 16 and the Cube runtime/schema validator
 - Node.js 18+ or [Bun](https://bun.sh/)
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - An [Anthropic API key](https://console.anthropic.com/)
+
+Scout's background jobs use Procrastinate with PostgreSQL. Redis is not required.
 
 ## Steps
 

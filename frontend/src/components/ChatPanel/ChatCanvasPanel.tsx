@@ -174,7 +174,10 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
       if (!isCurrent(request)) return
       if (report.projection) setProjection(report.projection)
       if (report.blocked) {
-        setError("Save blocked — fix the problems listed below first.")
+        const reasons = [...new Set(report.blocking_diagnostics.map((diagnostic) => diagnostic.message).filter(Boolean))]
+        setError(reasons.length > 0
+          ? `Save blocked. ${reasons.join(" ")}`
+          : "Save blocked — review the canvas problems and try again.")
       } else if (report.conflicts.length > 0) {
         setError("Save skipped: another change landed underneath your edits. Revert to refresh.")
       } else {
@@ -284,7 +287,8 @@ function CanvasSession({ workspaceId, activeThreadId, className }: {
           <div className="space-y-3 p-3">
             {error && (
               <div
-                className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+                role="alert"
+                className="break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
                 data-testid="canvas-error"
               >
                 {error}

@@ -161,8 +161,11 @@ def test_a_retry_that_observes_revocation_names_it(user, workspace, tenant, upst
 
 @pytest.mark.django_db(transaction=True)
 def test_a_granted_retry_with_a_tombstone_stays_throttled(
-    user, workspace, tenant, upstream_provider
+    settings, user, workspace, tenant, upstream_provider
 ):
+    # A granted retry beside a tombstoned tenant exists only under any-of; all-of
+    # denies the workspace for the archived source (tests/test_workspace_all_of_access.py).
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     second = type(tenant).objects.create(
         provider="commcare", external_id="archived-domain", canonical_name="Archived"
     )

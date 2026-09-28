@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -130,9 +132,27 @@ def test_message_loader_flattens_messages_with_composite_pk():
     with patch.object(loader._session, "get", side_effect=[sessions_page, detail]):
         pages = list(loader.load_pages())
         rows = [r for pg, _ in pages for r in pg]
+
+        def digest(value):
+            return hashlib.sha256(
+                json.dumps(
+                    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode()
+            ).hexdigest()
+
+        original_messages = [
+            {key: message[key] for key in ("role", "content", "created_at", "metadata", "tags")}
+            for message in detail.json.return_value["messages"]
+        ]
+        revision = digest(["sess-1", original_messages])
+        assert rows[0]["snapshot_revision"] == revision
+        assert rows[1]["snapshot_revision"] == revision
+        assert rows[0]["message_version"] != rows[1]["message_version"]
         assert rows == [
             {
-                "message_id": "sess-1:0",
+                "message_id": f"sess-1:v2:{revision}:0",
+                "snapshot_revision": revision,
+                "message_version": digest(original_messages[0]),
                 "session_id": "sess-1",
                 "message_index": 0,
                 "role": "user",
@@ -142,7 +162,9 @@ def test_message_loader_flattens_messages_with_composite_pk():
                 "tags": [],
             },
             {
-                "message_id": "sess-1:1",
+                "message_id": f"sess-1:v2:{revision}:1",
+                "snapshot_revision": revision,
+                "message_version": digest(original_messages[1]),
                 "session_id": "sess-1",
                 "message_index": 1,
                 "role": "assistant",
@@ -155,6 +177,37 @@ def test_message_loader_flattens_messages_with_composite_pk():
         # Every per-session tuple carries the session count as its total —
         # message progress is denominated in sessions (issue #221).
         assert [total for _, total in pages] == [1]
+
+
+def test_message_loader_deduplicates_sessions_before_snapshot_fetch():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    with (
+        patch.object(
+            loader,
+            "_paginate",
+            return_value=iter(
+                [
+                    ([{"id": "sess-1"}], None),
+                    ([{"id": "sess-1"}, {"id": "sess-2"}], None),
+                ]
+            ),
+        ),
+        patch.object(
+            loader,
+            "_get_json",
+            side_effect=[
+                {"messages": [{"role": "user", "content": "one snapshot"}]},
+                {"messages": []},
+            ],
+        ) as detail,
+    ):
+        pages = list(loader.load_pages())
+    assert [total for _, total in pages] == [2, 2]
+    assert [call.args[0] for call in detail.call_args_list] == [
+        f"{BASE_URL}/api/sessions/sess-1/",
+        f"{BASE_URL}/api/sessions/sess-2/",
+    ]
+    assert [row["session_id"] for rows, _ in pages for row in rows] == ["sess-1"]
 
 
 def test_message_loader_indexes_sessions_before_fetching_details():

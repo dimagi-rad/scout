@@ -74,9 +74,9 @@ def test_pagination_does_not_serialize_all_rows(
     _seed(workspace, user, n_entries=100, n_learnings=100)
     url = reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id})
     # A small fixed budget: per-type count + per-type page slice (+ auth/session).
-    # The upstream-freshness gate adds a constant handful per request (bindings,
-    # connection, history and proof reads) that does not grow with rows.
-    with django_assert_max_num_queries(14):
+    # The upstream-freshness gate and the all-of coverage check each add a constant
+    # handful per request (credential and proof reads) that does not grow with rows.
+    with django_assert_max_num_queries(20):
         resp = api_client.get(url, {"page": 1, "page_size": 10})
     assert resp.status_code == status.HTTP_200_OK
     assert len(resp.json()["results"]) == 10

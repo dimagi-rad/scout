@@ -59,8 +59,12 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
   it("surfaces the server message when upstream tenant access was lost", async () => {
     const message =
-      "You no longer have access to: skelly. " +
-      "Access may have been removed upstream — reconnect or ask an admin."
+      "You no longer have access to skelly: " +
+      "not connected to your account — connect that account (Settings → Connections) " +
+      "if you disconnected it or have not connected it yet. If access was removed " +
+      "or restricted at the provider, ask a provider admin to restore it; " +
+      "reconnecting alone cannot restore those permissions. A workspace admin " +
+      "can help remove a source you no longer need."
     vi.spyOn(api, "get").mockRejectedValue(
       new ApiError(403, message, {
         error: message,
@@ -154,7 +158,7 @@ describe("uiSlice upstream-verification denials", () => {
   })
 
   it("offers a recheck after upstream access was removed", async () => {
-    const lost = "Your access to one of this workspace's sources was removed upstream."
+    const lost = "One or more sources: access was removed upstream or this resource is restricted — reconnecting alone does not change upstream permissions. Ask an admin on the affected provider to restore access, or remove that data source from the workspace."
     vi.spyOn(api, "get").mockRejectedValue(
       new ApiError(403, lost, { error: lost, reason: "upstream_access_lost", retryable: false }),
     )

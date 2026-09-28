@@ -4,10 +4,10 @@ import asyncio
 import contextlib
 import logging
 import time
+import uuid
 from collections.abc import Iterable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import wraps
-from typing import NamedTuple
 
 import psycopg
 import psycopg.errors
@@ -21,6 +21,7 @@ from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
+from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
@@ -64,12 +65,39 @@ from apps.workspaces.services.access_freshness import (
 )
 from apps.workspaces.services.data_operation import (
     DataLockTimeout,
+    LockOrderError,
     run_data_thread,
     serialized_workspace_data,
     tenant_data_lock,
+    tenant_data_lock_if_free,
     workspace_data_lock,
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE as _CREDENTIAL_GUIDANCE
+from apps.workspaces.services.failure_guidance import SourceFailure as _SourceFailure
+from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
+from apps.workspaces.services.load_candidates import (
+    Promotion,
+    abandoned_workspace_candidates,
+    candidate_last_attempt_at,
+    fail_workspace_candidate,
+    load_owner_token,
+    open_workspace_candidate,
+    promote_candidate_schema,
+    settle_orphaned_workspace_candidates,
+    unresumable_workspace_candidates,
+)
+from apps.workspaces.services.load_generations import (
+    INTENT_FULL_REFRESH,
+    INTENT_RECONCILE_MISSING,
+    begin_load_generation,
+    capture_load_intent,
+    end_load_generation,
+    parse_load_intent,
+    pipeline_fingerprint,
+    raw_load_fingerprint,
+    reusable_generation,
+)
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
@@ -83,7 +111,6 @@ from apps.workspaces.services.refresh_requests import (
     DENIED_WORKSPACE_UNLINKED,
     LegacyRefreshJobs,
     LegacyRefreshReconciliation,
-    activate_claimed_refresh_candidate,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
     find_legacy_refresh_jobs,
@@ -122,68 +149,6 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
-# Remediation copy for the problems a run can report, keyed by the ``error_code``
-# recorded against the thing that failed — a source inside a run, or a whole
-# tenant the run never covered (arch #252, finding 14#4).
-#
-# This copy lives here and NOT at the raise site. A loader describes what the
-# provider said; deciding what the user should do about it is a presentation
-# concern, and when both layers wrote advice the user got it twice in two
-# different phrasings.
-#
-# Fragments, not sentences: _credential_guidance prefixes each with the sources
-# it applies to. A 401 and a 403 in one run need *opposite* advice, so an
-# unattributed pair reads as a flat contradiction (#372).
-_CREDENTIAL_GUIDANCE: dict[str, str] = {
-    ErrorCode.AUTH_CREDENTIAL_MISSING: (
-        "no usable sign-in is available — open Connected Accounts and connect or "
-        "reconnect the affected account before retrying."
-    ),
-    ErrorCode.PIPELINE_UNRESOLVED: (
-        "ask an administrator to configure or repair the materialization pipeline "
-        "for this provider before retrying. Re-running cannot resolve this pipeline "
-        "configuration problem until that configuration changes."
-    ),
-    ErrorCode.AUTH_TOKEN_EXPIRED: (
-        "expired or revoked sign-in — reconnect the affected account "
-        "(Settings → Connections) and re-run materialization."
-    ),
-    ErrorCode.AUTH_REFRESH_FAILED: (
-        "sign-in refresh could not complete — retry shortly. If the problem persists, "
-        "ask an administrator to check the provider connection settings."
-    ),
-    ErrorCode.AUTH_ACCESS_DENIED: (
-        "access was removed upstream or this resource is restricted — reconnecting "
-        "alone does not change upstream permissions. "
-        "Ask an admin on the affected provider to restore access, or remove that "
-        "data source from the workspace."
-    ),
-    ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE: (
-        "access could not be confirmed with the provider just now — nothing was "
-        "removed; retry shortly."
-    ),
-    ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
-        "in this workspace but not connected to your account, so this run did not "
-        "refresh it — connect that account "
-        "(Settings → Connections) if you should have access, or ask a workspace "
-        "admin to move it to its own workspace."
-    ),
-}
-
-
-class _SourceFailure(NamedTuple):
-    """One failure to attribute guidance to.
-
-    Usually a source inside a run, as recorded in ``run.result["sources"][name]``.
-    A tenant the run never covered has no source map to sit in, so it is reported
-    the same way with the tenant's external id as ``name`` (#364).
-    """
-
-    name: str
-    error: str
-    code: str
-
-
 def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
     """Return one guidance line per distinct problem, naming what it applies to.
 
@@ -208,40 +173,6 @@ def _set_tenant_display_names(summaries: list[dict]) -> None:
     for entry in summaries:
         if len(providers_by_name[entry["tenant"]]) > 1 and entry.get("provider"):
             entry["display_name"] = f"{entry['tenant']} ({entry['provider']})"
-
-
-def _summary_failures(tenant_summaries: Iterable[dict]) -> list[_SourceFailure]:
-    """Every coded failure in a per-tenant summary, at both levels.
-
-    A tenant-level failure — an unreachable tenant, a pre-flight credential
-    refusal, a run-level error — has no entry under ``sources``, and
-    ``MaterializationRun`` rows only exist from inside ``run_pipeline``. Walking
-    ``sources`` alone therefore could not reach its guidance at all (#364).
-
-    Serves both the ``materialize_workspace_core`` return shape and
-    ``_aggregate_materialization_state``'s summary; only ``sources`` differs.
-    """
-    failures: list[_SourceFailure] = []
-    for tenant in tenant_summaries:
-        if tenant.get("error_code"):
-            failures.append(
-                _SourceFailure(
-                    name=str(tenant.get("display_name") or tenant.get("tenant") or "unknown"),
-                    error=str(tenant.get("error") or ""),
-                    code=str(tenant["error_code"]),
-                )
-            )
-        for name, src in (tenant.get("sources") or {}).items():
-            if not isinstance(src, dict):
-                continue
-            failures.append(
-                _SourceFailure(
-                    name=name,
-                    error=str(src.get("error") or ""),
-                    code=str(src.get("error_code") or ErrorCode.INTERNAL_ERROR),
-                )
-            )
-    return failures
 
 
 def _unreachable_tenant_error(tenant) -> str:
@@ -394,118 +325,208 @@ async def refresh_tenant_schema(
         }
 
     # Upstream freshness is checked here, after the claim's transaction closed, so
-    # no row lock is held across a provider call. A denial fails this candidate
-    # like any other refresh failure, with its own code (an outage says retry).
+    # no row lock is held across a provider call.
+    denial = await _refresh_access_denial(membership, workspace_id, new_schema, context.job.id)
+    if denial is not None:
+        return denial
+
+    # T serializes this refresh with every other writer of the tenant (workspace
+    # loads, retirement). Sibling work happens only after T is released: never
+    # wait on another workspace's lock while holding a tenant lock.
+    try:
+        async with tenant_data_lock([new_schema.tenant_id]):
+            membership = (
+                await TenantMembership.objects.select_related("tenant", "user", "connection")
+                .filter(
+                    id=new_schema.refresh_membership_id,
+                    user_id=new_schema.refresh_actor_user_id,
+                    tenant_id=new_schema.tenant_id,
+                )
+                .afirst()
+            )
+            if membership is None:
+                await _drain(
+                    _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema
+                )
+                return _refresh_denial_result(DENIED_MEMBERSHIP_MISSING)
+            if not await WorkspaceTenant.objects.filter(
+                workspace_id=new_schema.refresh_workspace_id,
+                tenant_id=new_schema.tenant_id,
+            ).aexists():
+                await _drain(
+                    _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema
+                )
+                return _refresh_denial_result(DENIED_WORKSPACE_UNLINKED)
+            # The wait for T can outlast the proof (up to the lock timeout), and
+            # the fetch must not run on stale authority: check again under T.
+            outcome = await _refresh_access_denial(
+                membership, workspace_id, new_schema, context.job.id
+            ) or await _run_claimed_refresh(context, new_schema, membership)
+    except DataLockTimeout:
+        logger.warning("Refresh of '%s' timed out waiting for its tenant", new_schema.schema_name)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema)
+        return {
+            "error": "Another load of this source is still running. Retry the refresh later.",
+            "retry_required": True,
+        }
+    if outcome.get("status") != "active":
+        return outcome
+
+    # The tenant data schema is SHARED across workspaces; this refresh swapped in a
+    # NEW physical schema. Dependent multi-tenant view schemas still point at the OLD
+    # schema, so rebuild them against the new ACTIVE one (the old schema is retired
+    # only once nothing reads it).
+    await _rebuild_dependent_view_schemas([new_schema.tenant_id])
+
+    # Single-tenant workspaces query the tenant schema directly (no view schema),
+    # so the sibling rebuild above skips them. The generated Cube YAML is
+    # schema-agnostic, but refreshed data may add or remove columns, which only a
+    # semantic-model rebuild picks up.
+    await _rebuild_single_tenant_semantic_models([new_schema.tenant_id])
+
+    logger.info("Refresh complete: schema '%s' is now active", new_schema.schema_name)
+    return outcome
+
+
+async def _run_claimed_refresh(context, new_schema, membership) -> dict:
+    """Load and publish one claimed refresh candidate; the caller holds its T."""
+    job_id = context.job.id
+    manager = SchemaManager()
+    try:
+        await run_data_thread(manager.create_physical_schema, new_schema)
+    except Exception:
+        logger.exception("Failed to create schema '%s'", new_schema.schema_name)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        return {"error": "Failed to create schema"}
+    except BaseException:
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        raise
+
+    generation_result = {}
+
+    def begin_and_remember():
+        generation = begin_load_generation(new_schema.tenant_id)
+        generation_result["generation"] = generation
+        return generation
+
+    try:
+        credential = await aresolve_credential(membership)
+        if credential is None:
+            await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+            return {"error": "No credential available"}
+
+        registry = get_registry()
+        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+        pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
+        if pipeline_name is None:
+            await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+            return {"error": no_pipeline_message(registry, membership.tenant.provider)}
+        pipeline_config = registry.get(pipeline_name)
+        generation = await _to_thread_fresh_db(begin_and_remember)
+    except CredentialResolutionError as e:
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        return {"error": e.message, "error_code": e.code}
+    except Exception:
+        logger.exception("Failed to start refresh for schema '%s'", new_schema.schema_name)
+        await _drain(_drop_claimed_refresh_schema_and_fail(new_schema, job_id), new_schema)
+        return {"error": "Failed to start the refresh", "retry_required": True}
+    except BaseException:
+        # An abort may hide the return value after the generation commits.
+        cleanup = (
+            _end_refresh_load(new_schema, job_id, generation_result["generation"])
+            if "generation" in generation_result
+            else _drop_claimed_refresh_schema_and_fail(new_schema, job_id)
+        )
+        await _drain(cleanup, new_schema)
+        raise
+
+    try:
+        # target_schema forces the load into the new "_r" schema; without it
+        # run_pipeline re-resolves the old active base schema and data lands there.
+        result = await _to_thread_fresh_db(
+            run_pipeline,
+            membership,
+            credential,
+            pipeline_config,
+            target_schema=new_schema,
+            procrastinate_job_id=job_id,
+            defer_schema_promotion=True,
+        )
+    except Exception:
+        logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        return {"error": "Materialization failed"}
+    except BaseException:
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        raise
+
+    # Reset last_accessed_at so the fresh schema starts with a clean inactivity
+    # TTL; otherwise expire_inactive_schemas could drop it before first use.
+    try:
+        promotion = await _to_thread_fresh_db(
+            _promote_and_queue_retirement,
+            new_schema.id,
+            accessed_at=timezone.now(),
+            refresh_job_id=job_id,
+            loading_generation=generation,
+            run_id=result.get("run_id") if isinstance(result, dict) else None,
+            fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
+        )
+    except Exception:
+        # It rolled back, so the candidate is still ours and handled as unpublished.
+        logger.exception("Publishing refresh schema '%s' failed", new_schema.schema_name)
+        promotion = Promotion(promoted=False)
+    except BaseException:
+        # A no-op if the promotion committed: both steps CAS on the unpublished state.
+        await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        raise
+    if not promotion.promoted:
+        try:
+            still_ours = await TenantSchema.objects.filter(
+                id=new_schema.id,
+                state=SchemaState.PROVISIONING,
+                refresh_job_id=job_id,
+            ).aexists()
+        finally:
+            await _drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
+        if still_ours:
+            return {
+                "error": (
+                    "The refresh finished without a complete result to publish; the "
+                    "previous data is still being served."
+                ),
+                "retry_required": True,
+            }
+        return {"status": "ignored"}
+    return {"status": "active", "schema_id": str(new_schema.id)}
+
+
+async def _refresh_access_denial(membership, workspace_id, schema, job_id) -> dict | None:
+    """Fail the candidate and return the denial if the actor's authority lapsed.
+
+    A denial fails the candidate like any other refresh failure, with its own
+    code (an outage says retry).
+    """
     access = await aresolve_workspace_access_ex(
         membership.user,
         workspace_id,
         minimum_role=WorkspaceRole.READ_WRITE,
         verification=VerificationBudget.BACKGROUND,
     )
-    if not access.granted:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        if access.denied_reason in FRESHNESS_ERROR_CODES:
-            return _refresh_denial_result(access.denied_reason)
-        return _refresh_denial_result(DENIED_ROLE_REQUIRED)
+    if access.granted:
+        return None
+    await _drain(_drop_claimed_refresh_schema_and_fail(schema, job_id), schema)
+    if access.denied_reason in FRESHNESS_ERROR_CODES:
+        return _refresh_denial_result(access.denied_reason)
+    return _refresh_denial_result(DENIED_ROLE_REQUIRED)
 
-    manager = SchemaManager()
+
+async def _end_refresh_load(schema, job_id: int, generation: int) -> None:
     try:
-        await run_data_thread(manager.create_physical_schema, new_schema)
-    except asyncio.CancelledError:
-        await _drain_cancelled_refresh_cleanup(new_schema, context.job.id)
-        raise
-    except Exception:
-        logger.exception("Failed to create schema '%s'", new_schema.schema_name)
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": "Failed to create schema"}
-
-    # Async job: must use the async resolver — the sync one raises
-    # SynchronousOnlyOperation here.
-    try:
-        credential = await aresolve_credential(membership)
-    except CredentialResolutionError as e:
-        # Surface the distinct message + code so the user is told to re-connect
-        # rather than the generic "No credential available" (arch #245 finding 07#3).
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": e.message, "error_code": e.code}
-    if credential is None:
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": "No credential available"}
-
-    try:
-        registry = get_registry()
-        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
-        pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
-        if pipeline_name is None:
-            await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-            return {
-                "error": no_pipeline_message(registry, membership.tenant.provider),
-            }
-        pipeline_config = registry.get(pipeline_name)
-        # target_schema forces the load into the new "_r" schema; without it
-        # run_pipeline re-resolves the old active base schema and data lands there.
-        await _to_thread_fresh_db(
-            run_pipeline,
-            membership,
-            credential,
-            pipeline_config,
-            target_schema=new_schema,
-            procrastinate_job_id=context.job.id,
-            defer_schema_promotion=True,
-        )
-    except asyncio.CancelledError:
-        await _drain_cancelled_refresh_cleanup(new_schema, context.job.id)
-        raise
-    except Exception:
-        logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
-        await _drop_claimed_refresh_schema_and_fail(new_schema, context.job.id)
-        return {"error": "Materialization failed"}
-
-    # Reset last_accessed_at so the fresh schema starts with a clean inactivity
-    # TTL — otherwise expire_inactive_schemas could drop it before first use.
-    activated = await _to_thread_fresh_db(
-        activate_claimed_refresh_candidate,
-        new_schema.id,
-        context.job.id,
-        timezone.now(),
-    )
-    if not activated:
-        # Whoever took the candidate may have settled it FAILED while this job was
-        # still loading, so any drop it queued could have run before our writes.
-        try:
-            await _drop_failed_refresh_schema(new_schema.id)
-        except Exception:
-            logger.exception("Failed to drop lost refresh schema '%s'", new_schema.schema_name)
-        return {"status": "ignored"}
-    new_schema.state = SchemaState.ACTIVE
-
-    # The tenant data schema is SHARED across workspaces; this refresh swapped in a
-    # NEW physical schema. Dependent multi-tenant view schemas still point at the OLD
-    # (about-to-be-torn-down) schema, so rebuild them against the new ACTIVE schema —
-    # mirroring the sibling rebuild materialize_workspace performs (PR #230).
-    await _rebuild_dependent_view_schemas([new_schema.tenant_id])
-
-    # Step 3c: Single-tenant workspaces query the tenant schema directly (no
-    # view schema), so the sibling rebuild above skips them. The generated Cube
-    # YAML is schema-agnostic (tables resolve via per-query search_path), so
-    # the swap itself doesn't break them — but the refreshed data may have new
-    # or removed columns, which only a semantic-model rebuild picks up.
-    await _rebuild_single_tenant_semantic_models([new_schema.tenant_id])
-
-    # Delay teardown of previously active schemas so in-flight queries can drain.
-    old_schemas = TenantSchema.objects.filter(
-        tenant=new_schema.tenant,
-        state=SchemaState.ACTIVE,
-    ).exclude(id=new_schema.id)
-    async for old_schema in old_schemas:
-        old_schema.state = SchemaState.TEARDOWN
-        await old_schema.asave(update_fields=["state"])
-        await teardown_schema.configure(
-            schedule_in={"seconds": int(timedelta(minutes=30).total_seconds())},
-        ).defer_async(schema_id=str(old_schema.id))
-
-    logger.info("Refresh complete: schema '%s' is now active", new_schema.schema_name)
-    return {"status": "active", "schema_id": schema_id}
+        await _to_thread_fresh_db(end_load_generation, schema.tenant_id, generation)
+    finally:
+        # Paired: a failure clearing the marker must not leave the candidate live.
+        await _drop_claimed_refresh_schema_and_fail(schema, job_id)
 
 
 def _preflight_failure(tenant, error: str, code: str = "") -> dict:
@@ -577,12 +598,27 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         )
     ]
     if access is not None and access.denied_reason == TENANT_ACCESS_LOST:
-        # Even a MANAGE member cannot fix this by changing roles. Reuse the
-        # unreachable-tenant guidance so the resume prompt and the run summary
-        # give the same per-source remedy as the pre-gate no-membership path.
+        # Even a MANAGE member cannot fix this by changing roles. Every tenant
+        # gets a recorded not-run entry (the resume path reads one per tenant),
+        # and the remedy comes once, from the code's guidance, as it did before.
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
-        results = _unreachable_tenant_results(tenants)
-        error = "No tenant memberships found"
+        missing = {t.tenant_id for t in access.missing_tenants}
+        # Covered tenants get their own code: the unreachable code's guidance
+        # ("connect that account") is for the missing ones only.
+        results = [
+            _preflight_failure(t, _unreachable_tenant_error(t), code)
+            if str(t.pk) in missing
+            else _preflight_failure(
+                t,
+                "not attempted: the requesting user can't use every data source of this workspace",
+                ErrorCode.WORKSPACE_TENANT_SKIPPED,
+            )
+            for t in tenants
+        ]
+        _set_tenant_display_names(results)
+        error = "The requesting user can't use these data sources: " + (
+            ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
+        )
     elif access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
         code = FRESHNESS_ERROR_CODES[access.denied_reason]
         error = access_denied_body(access)["error"]
@@ -600,21 +636,67 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
     }
 
 
+async def _workspace_tenant_ids(workspace_id) -> list:
+    return [
+        tenant_id
+        async for tenant_id in WorkspaceTenant.objects.filter(
+            workspace_id=workspace_id
+        ).values_list("tenant_id", flat=True)
+    ]
+
+
 def serialized_workspace_materialization(function):
-    """Serialize a user load and recheck authority on both sides of the lock wait."""
+    """Capture load intent, then take W and the sorted tenant locks T*.
+
+    Authority is rechecked after every wait. The intent is captured before the W
+    wait (or arrives from the queue), so two requests queued behind one lock join
+    the same load. T* covers every tenant of the workspace at once: a tenant added
+    after the locks are taken is reported, never loaded outside T.
+    """
 
     @wraps(function)
-    async def wrapped(workspace_id, user_id="", *args, **kwargs):
+    async def wrapped(
+        workspace_id,
+        user_id="",
+        *args,
+        load_intent=None,
+        intent_kind: str = INTENT_FULL_REFRESH,
+        **kwargs,
+    ):
         denial = await _materialization_write_denial(workspace_id, user_id)
         if denial is not None:
             return denial
+        intent = parse_load_intent(load_intent)
+        if intent is None:
+            tenant_ids = await _workspace_tenant_ids(workspace_id)
+            intent = await _to_thread_fresh_db(capture_load_intent, tenant_ids, intent_kind)
         async with workspace_data_lock(workspace_id):
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
                 return denial
-            return await function(workspace_id, user_id, *args, **kwargs)
+            tenant_ids = await _workspace_tenant_ids(workspace_id)
+            async with tenant_data_lock(tenant_ids):
+                denial = await _materialization_write_denial(workspace_id, user_id)
+                if denial is not None:
+                    return denial
+                return await function(
+                    workspace_id,
+                    user_id,
+                    *args,
+                    load_intent=intent,
+                    locked_tenant_ids=frozenset(str(t) for t in tenant_ids),
+                    **kwargs,
+                )
 
     return wrapped
+
+
+# The view build re-reads the workspace's sources and cannot expand the T set
+# this load holds, so a source added mid-run surfaces as a LockOrderError.
+_SOURCE_ADDED_DURING_LOAD = (
+    "A source was added while this load was running, so this run did not republish "
+    "the workspace's views; the follow-up queued when the source was added does."
+)
 
 
 @serialized_workspace_materialization
@@ -622,6 +704,9 @@ async def materialize_workspace_core(
     workspace_id: str,
     user_id: str = "",
     job_id: int | None = None,
+    *,
+    load_intent: dict[str, int] | None = None,
+    locked_tenant_ids: frozenset[str] | None = None,
 ) -> dict:
     """Run materialization for all tenants in a workspace and rebuild view schemas.
 
@@ -664,9 +749,9 @@ async def materialize_workspace_core(
     # drop: it never entered tenant_results, so `all(...)` was vacuous over it
     # and the run reported success having loaded a subset of the workspace (#364).
     #
-    # Current access checks can admit partially reachable workspaces. Report
-    # that transitional state without borrowing a teammate's credentials; the
-    # ALL-of authorization rollout decided in #380 is outside this reporting fix.
+    # The all-of gate (#380) refuses a requester who lacks a tenant, so this is
+    # reached only while its rollout switch is off or when access is lost after
+    # the gate passed. Report it without borrowing a teammate's credentials.
     reachable = {tm.tenant_id for tm in memberships}
     unreachable_results = _unreachable_tenant_results(
         tenant for tenant_id, tenant in workspace_tenants.items() if tenant_id not in reachable
@@ -685,6 +770,7 @@ async def materialize_workspace_core(
 
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+    load_intent = load_intent or {}
 
     for index, tm in enumerate(memberships):
         # The wrapper checked before the first tenant. A long load can outlive a
@@ -716,8 +802,23 @@ async def materialize_workspace_core(
                     )
                 )
                 continue
-        attempted_tenant_ids.add(str(tm.tenant_id))
         tenant_id = tm.tenant.external_id
+        if locked_tenant_ids is not None and str(tm.tenant_id) not in locked_tenant_ids:
+            # Added after the tenant locks were taken; loading it now would run
+            # outside T. Report it truthfully and let a re-run cover it.
+            tenant_results.append(
+                # Its own code: the access codes carry advice (reconnect an
+                # account) that would contradict "run it again", and no code at
+                # all reads as INTERNAL_ERROR on resume.
+                _preflight_failure(
+                    tm.tenant,
+                    "This source was added while the load was starting and was not "
+                    "loaded. Run the load again to include it.",
+                    ErrorCode.WORKSPACE_SOURCES_CHANGED,
+                )
+            )
+            continue
+        attempted_tenant_ids.add(str(tm.tenant_id))
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
         if pipeline_name is None:
             tenant_results.append(
@@ -749,13 +850,43 @@ async def materialize_workspace_core(
             continue
 
         pipeline_config = registry.get(pipeline_name)
+        required = load_intent.get(str(tm.tenant_id))
+        evidence = None
+        if required is not None:
+            fingerprint = await _to_thread_fresh_db(
+                pipeline_fingerprint, pipeline_config, tm.tenant
+            )
+            evidence = await _to_thread_fresh_db(
+                reusable_generation, tm.tenant_id, required, fingerprint
+            )
+        if evidence is not None:
+            # An equivalent load completed while this request waited. The requester
+            # authorized and resolved its own credential above, and still publishes
+            # its own views and Cube below; its status says what really happened.
+            # Reuse counts as use: without the touch, the inactivity sweep could
+            # retire the schema this run just reported ready.
+            await evidence.schema.atouch()
+            successful_attempted_tenant_ids.add(str(tm.tenant_id))
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
+                    "provider": tm.tenant.provider,
+                    "success": True,
+                    "reused_generation": evidence.generation,
+                    "result": {
+                        "status": "completed",
+                        "reused": True,
+                        "run_id": str(evidence.run.id),
+                        "schema": evidence.schema.schema_name,
+                        "pipeline": pipeline_config.name,
+                    },
+                }
+            )
+            continue
         try:
-            result = await run_data_thread(
-                _run_pipeline_with_progress,
-                tm,
-                credential,
-                pipeline_config,
-                job_id,
+            result = await _load_workspace_candidate(
+                workspace, tm, credential, pipeline_config, job_id
             )
             successful_attempted_tenant_ids.add(str(tm.tenant_id))
             tenant_results.append(
@@ -855,7 +986,9 @@ async def materialize_workspace_core(
             )
             view_schema_outcome = {
                 "ok": False,
-                "error": str(exc)[:500],
+                "error": (
+                    _SOURCE_ADDED_DURING_LOAD if isinstance(exc, LockOrderError) else str(exc)[:500]
+                ),
                 "tenant_coverage": tenant_coverage,
             }
 
@@ -1002,6 +1135,7 @@ async def materialize_workspace(
     context,
     workspace_id: str,
     user_id: str = "",
+    load_intent: dict | None = None,
 ) -> dict:
     """Procrastinate task: run materialization for a workspace, then ALWAYS
     defer the chat-resume task so an interactive user is never left with a
@@ -1014,20 +1148,41 @@ async def materialize_workspace(
     job_id = context.job.id
     preflight_failures = None
     try:
-        result = await materialize_workspace_core(workspace_id, user_id, job_id)
-        preflight_failures = [
-            {
-                "tenant_id": entry["tenant_id"],
-                "provider": entry["provider"],
-                "error": str(entry["error"])[:1000],
-                "error_code": str(entry.get("error_code") or ""),
-            }
-            for entry in result.get("tenants", [])
-            if entry.get("state") == TENANT_NOT_RUN
-        ]
+        result = await materialize_workspace_core(
+            workspace_id, user_id, job_id, load_intent=load_intent
+        )
+        preflight_failures = _resume_records(result)
         return result
     finally:
         await _defer_resume_for_job(job_id, preflight_failures)
+
+
+def _resume_records(result: dict) -> list[dict]:
+    """What the chat resume needs beyond this job's run rows.
+
+    Preflight failures explain tenants that never produced a run. A reused
+    tenant has no run under this job either; its entry names the reused run so
+    the resume reports what was served instead of "the run recorded nothing".
+    """
+    tenants = result.get("tenants", [])
+    return [
+        {
+            "tenant_id": entry["tenant_id"],
+            "provider": entry["provider"],
+            "error": str(entry["error"])[:1000],
+            "error_code": str(entry.get("error_code") or ""),
+        }
+        for entry in tenants
+        if entry.get("state") == TENANT_NOT_RUN
+    ] + [
+        {
+            "tenant_id": entry["tenant_id"],
+            "provider": entry["provider"],
+            "reused_run_id": str(entry["result"]["run_id"]),
+        }
+        for entry in tenants
+        if entry.get("reused_generation") and entry.get("tenant_id")
+    ]
 
 
 async def _defer_resume_for_job(job_id: int, preflight_failures: list[dict] | None = None) -> None:
@@ -1159,6 +1314,7 @@ def _run_pipeline_with_progress(
     credential: dict,
     pipeline_config,
     job_id: int,
+    target_schema=None,
 ) -> dict:
     """Synchronous entry point invoked under ``asyncio.to_thread``.
 
@@ -1186,7 +1342,423 @@ def _run_pipeline_with_progress(
         pipeline_config,
         progress_updater=updater,
         procrastinate_job_id=job_id,
+        target_schema=target_schema,
+        defer_schema_promotion=target_schema is not None,
     )
+
+
+# Old ACTIVE schemas are retired after a delay so in-flight queries can drain;
+# retirement itself then waits for dependent sibling views to move.
+_RETIRE_AFTER = timedelta(minutes=30)
+
+
+def _promote_and_queue_retirement(candidate_id, **promotion) -> Promotion:
+    """Promote a candidate and queue the demoted schemas' teardown in one commit.
+
+    Nothing sweeps a TEARDOWN row whose teardown was never queued, so a worker
+    dying between the two must not be able to strand the old schema.
+    """
+    with transaction.atomic():
+        outcome = promote_candidate_schema(candidate_id, **promotion)
+        for schema_id in outcome.retired_schema_ids:
+            teardown_schema.configure(
+                schedule_in={"seconds": int(_RETIRE_AFTER.total_seconds())},
+            ).defer(schema_id=str(schema_id))
+    return outcome
+
+
+async def _load_workspace_candidate(
+    workspace, tm, credential: dict, pipeline_config, job_id: int | None
+) -> dict:
+    """Load one tenant into a candidate and promote it; the caller holds W and T.
+
+    The serving schema is never written, so a failed or cancelled load leaves
+    last-good data readable for every workspace sharing the tenant. A failed
+    candidate keeps its data: the next load of the same pending generation with
+    the same raw-load configuration resumes it, and any other failed candidate
+    is dropped by a bounded-retry cleanup.
+    """
+    # The candidate owner; a job-less load (the agent's blocking tool) gets a token.
+    owner = load_owner_token(job_id)
+    # Off the loop: the first call hashes the implementation source tree.
+    config = await asyncio.to_thread(raw_load_fingerprint, pipeline_config)
+    await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tm.tenant_id)
+    generation_result = {}
+
+    def begin_and_remember():
+        generation = begin_load_generation(tm.tenant_id)
+        generation_result["generation"] = generation
+        return generation
+
+    try:
+        generation = await _to_thread_fresh_db(begin_and_remember)
+    except BaseException:
+        # Cancellation can hide the return value after the transaction commits.
+        # Capture it in the worker so the marker can still be cleared.
+        if "generation" in generation_result:
+            await _drain(
+                _end_load(tm.tenant_id, generation_result["generation"]),
+                f"tenant {tm.tenant_id}",
+            )
+        raise
+    opened_result = {}
+
+    def open_and_remember():
+        opened = open_workspace_candidate(
+            tm.tenant,
+            workspace_id=workspace.id,
+            job_id=owner,
+            generation=generation,
+            config_fingerprint=config,
+        )
+        opened_result["opened"] = opened
+        return opened
+
+    try:
+        opened = await _to_thread_fresh_db(open_and_remember)
+    except BaseException:
+        # Cancellation may arrive after a candidate commits but before its return
+        # reaches this task. Fail that candidate under the caller's T lock so it
+        # remains resumable; otherwise only the loading marker needs clearing.
+        opened = opened_result.get("opened")
+        if opened is None:
+            cleanup = _end_load(tm.tenant_id, generation)
+        else:
+            cleanup = _fail_workspace_candidate(opened.schema, workspace.id, owner, generation)
+        await _drain(cleanup, opened.schema if opened is not None else f"tenant {tm.tenant_id}")
+        raise
+    candidate = opened.schema
+    if opened.resumed:
+        logger.info(
+            "Resuming failed candidate '%s' for tenant %s (generation %d)",
+            candidate.schema_name,
+            tm.tenant_id,
+            generation,
+        )
+    try:
+        try:
+            await _defer_abandoned_candidate_drops(tm.tenant_id, keep_id=candidate.id)
+        except Exception:
+            # Best effort; an abort still reaches the guard below and settles the candidate.
+            logger.exception("Could not queue cleanup of abandoned candidates for %s", tm.tenant_id)
+        await run_data_thread(SchemaManager().create_physical_schema, candidate)
+        result = await run_data_thread(
+            _run_pipeline_with_progress, tm, credential, pipeline_config, job_id, candidate
+        )
+        promotion = await _to_thread_fresh_db(
+            _promote_and_queue_retirement,
+            candidate.id,
+            accessed_at=timezone.now(),
+            workspace_id=workspace.id,
+            workspace_job_id=owner,
+            loading_generation=generation,
+            run_id=result.get("run_id") if isinstance(result, dict) else None,
+            fingerprint=result.get("load_fingerprint", "") if isinstance(result, dict) else "",
+        )
+        if not promotion.promoted:
+            raise RuntimeError(
+                "The load finished without a complete, owned result to publish; "
+                "the previous data is still being served. Run the load again."
+            )
+    except BaseException:
+        # Includes a promotion that raised: it rolled back, so the candidate is
+        # still PROVISIONING and the generation still marked loading. Drained, so
+        # an abort landing during this cleanup cannot strand either.
+        await _drain(
+            _fail_workspace_candidate(candidate, workspace.id, owner, generation), candidate
+        )
+        raise
+    if isinstance(result, dict) and opened.resumed:
+        result = {**result, "resumed": True}
+    return result
+
+
+async def _end_load(tenant_id, generation: int) -> None:
+    await _to_thread_fresh_db(end_load_generation, tenant_id, generation)
+
+
+async def _fail_workspace_candidate(candidate, workspace_id, job_id, generation: int) -> None:
+    # The physical schema is kept: it is this generation's resume point, and the
+    # generation stays pending (not loading) so a retry joins and resumes it.
+    try:
+        await _to_thread_fresh_db(fail_workspace_candidate, candidate.id, workspace_id, job_id)
+    finally:
+        # Even if the CAS failed (often the same outage that failed the load),
+        # a stuck marker would stop retries joining and resuming this generation.
+        await _to_thread_fresh_db(end_load_generation, candidate.tenant_id, generation)
+
+
+async def _drain(operation, subject) -> None:
+    """Finish cleanup before propagating worker cancellation, even if aborted again.
+
+    An abort that lands during cleanup is re-raised once cleanup is done, so a
+    caller handling an ordinary error still stops instead of moving on.
+    """
+    cleanup = asyncio.create_task(operation)
+    aborted = False
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            aborted = True
+            if cleanup.cancelled():
+                break
+            continue
+        except Exception:
+            logger.exception(
+                "Cancellation cleanup failed for '%s'", getattr(subject, "schema_name", subject)
+            )
+        break
+    if aborted:
+        raise asyncio.CancelledError
+
+
+async def _defer_abandoned_candidate_drops(tenant_id, *, keep_id) -> None:
+    await _to_thread_fresh_db(_abandon_and_queue_drops, tenant_id, keep_id)
+
+
+def _abandon_and_queue_drops(tenant_id, keep_id) -> None:
+    """Take abandoned candidates out of resume and queue their drops in one commit.
+
+    Clearing the resume evidence without a queued drop would strand the schema:
+    nothing else would ever drop a FAILED candidate no load can resume.
+    """
+    with transaction.atomic():
+        for schema in abandoned_workspace_candidates(tenant_id, keep_id=keep_id):
+            # Delayed: this writer holds T until its whole load publishes, and the
+            # drop needs T, so an immediate job would only find it busy.
+            _queue_candidate_drop_sync(schema, delay=_CANDIDATE_DROP_DELAY_SECONDS)
+
+
+def _drop_lock(schema_id) -> str:
+    return f"drop_abandoned_candidate:{schema_id}"
+
+
+def _drop_job(schema, delay: int):
+    """One drop per candidate, pinned to the attempt it was judged on."""
+    schedule = {"schedule_in": {"seconds": delay}} if delay else {}
+    job = drop_abandoned_candidate.configure(queueing_lock=_drop_lock(schema.id), **schedule)
+    args = {
+        "schema_id": str(schema.id),
+        "last_attempt_at": schema.last_attempt_at.isoformat(),
+        "load_job_id": schema.load_job_id,
+    }
+    return job, args
+
+
+async def _queue_candidate_drop(schema, *, delay: int = 0) -> None:
+    job, args = _drop_job(schema, delay)
+    await job.defer_async(**args)
+
+
+def _queue_candidate_drop_sync(schema, *, delay: int = 0) -> None:
+    """Queue inside the caller's transaction; an already-queued drop covers it."""
+    job, args = _drop_job(schema, delay)
+    try:
+        # Savepoint: the queueing-lock violation must not abort the outer commit.
+        with transaction.atomic():
+            job.defer(**args)
+    except AlreadyEnqueued:
+        return
+
+
+_CANDIDATE_DROP_DELAY_SECONDS = 15 * 60
+
+
+class _TenantBusy(Exception):
+    """A writer holds the tenant's T; the drop is retried later rather than waiting."""
+
+
+async def _recovery_intent(workspace) -> str:
+    """What a data-restore repair must ask of the tenants' loads.
+
+    Missing data is reconciled: whatever is already published satisfies it. But
+    the same repair is offered when data is present and its latest load did not
+    complete, and reconciling would reuse that same published generation and
+    change nothing, so that case asks for a fresh load.
+    """
+    view = await WorkspaceViewSchema.objects.filter(
+        workspace=workspace, state=SchemaState.ACTIVE
+    ).afirst()
+    coverage = view.tenant_coverage if view is not None else None
+    if await _included_tenant_snapshot_state(workspace, coverage) == "unsafe":
+        return INTENT_FULL_REFRESH
+    return INTENT_RECONCILE_MISSING
+
+
+_CANDIDATE_DROP_RETRYABLE = (
+    DataLockTimeout,
+    psycopg.OperationalError,
+    psycopg.InterfaceError,
+    DjangoOperationalError,
+    DjangoInterfaceError,
+)
+_CANDIDATE_DROP_RETRY_BASE_SECONDS = 60
+_CANDIDATE_DROP_RETRY_MAX_SECONDS = 3600
+_CANDIDATE_DROP_MAX_ATTEMPTS = 10
+_CANDIDATE_DROP_BUSY_WARNING_INTERVAL = 96  # One day of 15-minute busy checks.
+
+
+@task
+async def drop_abandoned_candidate(
+    schema_id: str,
+    attempt: int = 0,
+    last_attempt_at: str = "",
+    load_job_id: int | None = None,
+    busy_count: int = 0,
+) -> None:
+    """Drop the partial data of a failed candidate no load will resume.
+
+    Holds T so a writer cannot be resuming this candidate while it is dropped,
+    but never waits for it: a load can hold T for hours, so a busy tenant is
+    simply re-queued. ``last_attempt_at`` and ``load_job_id`` pin the attempt
+    the candidate was judged abandoned on; if a load has resumed it since (a
+    resume rewrites the owner, and a new run moves the attempt time), it is the
+    pending generation's resume point and is kept. A failed drop is retried
+    with backoff; after the last attempt the next sweep queues a fresh one.
+    """
+    schema = await TenantSchema.objects.filter(id=schema_id).afirst()
+    if schema is None:
+        return
+    try:
+        async with tenant_data_lock_if_free(schema.tenant_id) as locked:
+            if not locked:
+                raise _TenantBusy(f"tenant {schema.tenant_id} is being loaded")
+            await schema.arefresh_from_db()
+            if schema.state != SchemaState.FAILED or schema.load_workspace_id is None:
+                return
+            if load_job_id is not None and schema.load_job_id != load_job_id:
+                return
+            # Run reconciliation also moves this pin; the next sweep re-judges it.
+            if last_attempt_at:
+                current = await _to_thread_fresh_db(candidate_last_attempt_at, schema.id)
+                if current is None or current != datetime.fromisoformat(last_attempt_at):
+                    return
+            await run_data_thread(SchemaManager().teardown, schema)
+            await (
+                MaterializationRun.objects.filter(tenant_schema=schema)
+                .exclude(state=MaterializationRun.RunState.STALE)
+                .aupdate(state=MaterializationRun.RunState.STALE)
+            )
+            schema.state = SchemaState.EXPIRED
+            await schema.asave(update_fields=["state"])
+    except TenantSchema.DoesNotExist:
+        return
+    except _TenantBusy:
+        # Normal while a load runs: re-queue at a fixed delay without spending
+        # the retry budget, which is for drops that actually failed.
+        busy_count += 1
+        if busy_count % _CANDIDATE_DROP_BUSY_WARNING_INTERVAL == 0:
+            logger.warning(
+                "Abandoned candidate %s still blocked by tenant %s after %d consecutive busy checks",
+                schema_id,
+                schema.tenant_id,
+                busy_count,
+            )
+        await _requeue_candidate_drop(
+            schema_id,
+            _CANDIDATE_DROP_DELAY_SECONDS,
+            attempt,
+            last_attempt_at,
+            load_job_id,
+            busy_count=busy_count,
+        )
+    except _CANDIDATE_DROP_RETRYABLE as exc:
+        # A query bug (ProgrammingError and friends) is deliberately absent: it
+        # must surface, not be retried as contention.
+        if attempt + 1 >= _CANDIDATE_DROP_MAX_ATTEMPTS:
+            logger.exception(
+                "Giving up dropping abandoned candidate %s after attempt %d; the next "
+                "sweep queues it again",
+                schema_id,
+                attempt + 1,
+            )
+            return
+        logger.warning(
+            "Dropping abandoned candidate %s failed (attempt %d): %s", schema_id, attempt + 1, exc
+        )
+        delay = min(
+            _CANDIDATE_DROP_RETRY_BASE_SECONDS * (2**attempt), _CANDIDATE_DROP_RETRY_MAX_SECONDS
+        )
+        await _requeue_candidate_drop(schema_id, delay, attempt + 1, last_attempt_at, load_job_id)
+
+
+async def _requeue_candidate_drop(
+    schema_id, delay, attempt, last_attempt_at, load_job_id, *, busy_count=0
+):
+    # The running job holds no queueing lock once doing, so the re-queue can take
+    # it; a drop the sweep queued meanwhile already covers this one.
+    try:
+        await drop_abandoned_candidate.configure(
+            schedule_in={"seconds": delay}, queueing_lock=_drop_lock(schema_id)
+        ).defer_async(
+            schema_id=str(schema_id),
+            attempt=attempt,
+            last_attempt_at=last_attempt_at,
+            load_job_id=load_job_id,
+            busy_count=busy_count,
+        )
+    except AlreadyEnqueued:
+        return
+
+
+# How long a failed candidate of the still-pending generation waits for a retry
+# to resume it before the sweep treats it as abandoned.
+_UNRESUMED_CANDIDATE_TTL = timedelta(hours=24)
+
+
+@app.periodic(cron="7,22,37,52 * * * *")
+@task
+async def sweep_workspace_load_candidates(timestamp: int = 0) -> dict:
+    """Reclaim workspace-load candidates whose writer died or no load will resume.
+
+    A load settles orphans only when the same tenant loads again, so a tenant
+    that is never reloaded would otherwise keep a dead candidate's schema
+    forever. A tenant whose T is held has a live writer and is skipped.
+    """
+    tenant_ids = [
+        tenant_id
+        async for tenant_id in TenantSchema.objects.filter(
+            load_workspace_id__isnull=False,
+            state__in=[SchemaState.PROVISIONING, SchemaState.FAILED],
+        )
+        .values_list("tenant_id", flat=True)
+        .distinct()
+    ]
+    counts = {"settled": 0, "drops_queued": 0, "skipped_busy": 0}
+    for tenant_id in tenant_ids:
+        try:
+            async with tenant_data_lock_if_free(tenant_id) as locked:
+                if not locked:
+                    counts["skipped_busy"] += 1
+                    continue
+                orphans = await _to_thread_fresh_db(settle_orphaned_workspace_candidates, tenant_id)
+                for orphan in orphans:
+                    logger.error(
+                        "Settled orphaned load candidate %s (%s) for tenant %s: its writer died",
+                        orphan.id,
+                        orphan.schema_name,
+                        tenant_id,
+                    )
+                counts["settled"] += len(orphans)
+                abandoned = await _to_thread_fresh_db(
+                    unresumable_workspace_candidates,
+                    tenant_id,
+                    stale_before=timezone.now() - _UNRESUMED_CANDIDATE_TTL,
+                )
+        except Exception:
+            logger.exception("sweep_workspace_load_candidates: tenant %s failed", tenant_id)
+            continue
+        for schema in abandoned:
+            try:
+                await _queue_candidate_drop(schema)
+            except AlreadyEnqueued:
+                continue
+            except Exception:
+                logger.exception("Failed to queue cleanup of candidate '%s'", schema.schema_name)
+                continue
+            counts["drops_queued"] += 1
+    return counts
 
 
 def _refresh_denial_result(reason: str) -> dict:
@@ -1226,7 +1798,9 @@ async def _drop_claimed_refresh_schema_and_fail(schema, job_id: int) -> None:
 async def _drop_failed_refresh_schema(schema_id) -> None:
     # FAILED is terminal for a refresh candidate: it is never served and nothing
     # moves it back, so its physical schema can be dropped without a claim.
-    schema = await TenantSchema.objects.filter(id=schema_id, state=SchemaState.FAILED).afirst()
+    schema = await TenantSchema.objects.filter(
+        id=schema_id, state=SchemaState.FAILED, load_workspace_id__isnull=True
+    ).afirst()
     if schema is None:
         return
     await asyncio.to_thread(SchemaManager().teardown, schema)
@@ -1292,23 +1866,6 @@ async def reconcile_refresh_candidates(timestamp: int = 0) -> dict:
         settled += len(result.settled_schema_ids)
         recovery_needed += result.recovery_needed
     return {"settled": settled, "recovery_needed": recovery_needed}
-
-
-async def _drain_cancelled_refresh_cleanup(schema, job_id: int) -> None:
-    """Finish exact-claim cleanup before propagating worker cancellation."""
-    cleanup = asyncio.create_task(_drop_claimed_refresh_schema_and_fail(schema, job_id))
-    while True:
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            if cleanup.cancelled():
-                return
-            continue
-        except Exception:
-            logger.exception(
-                "Refresh cancellation cleanup failed for schema %s, job %s", schema.id, job_id
-            )
-        return
 
 
 @app.periodic(cron="*/30 * * * *")
@@ -1625,6 +2182,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                     str(recovery.workspace_id),
                     str(recovery.requested_by_id),
                     context.job.id,
+                    intent_kind=await _recovery_intent(recovery.workspace),
                 )
             elif action == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD:
                 result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))
@@ -1870,7 +2428,15 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
     manager = SchemaManager()
     async with contextlib.AsyncExitStack() as stack:
         try:
-            await stack.enter_async_context(tenant_data_lock([schema.tenant_id]))
+            acquired = await stack.enter_async_context(tenant_data_lock_if_free(schema.tenant_id))
+            if not acquired:
+                await _retry_retirement(
+                    schema,
+                    [],
+                    attempt,
+                    "tenant lock T is held by an active writer",
+                )
+                return False
             await schema.arefresh_from_db()
         except TenantSchema.DoesNotExist:
             return False  # deleted (e.g. with its tenant) while we waited for T
@@ -2191,6 +2757,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
                 "Materialization completed but the follow-up response was "
                 "interrupted (likely a server restart). Please retry."
@@ -2218,6 +2785,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
             error_summary=summary,
         )
         if not updated:
@@ -2249,6 +2817,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
                 "Background queue unavailable; the materialization could "
                 "not be resumed. Please retry."
@@ -2421,6 +2990,7 @@ async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) 
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.MATERIALIZATION,
             error_summary=summary,
         )
         if updated:
@@ -2693,6 +3263,23 @@ async def _uncovered_tenant_summaries(
     return summaries
 
 
+def _reused_run_ids(recorded: list[dict] | None) -> list[uuid.UUID]:
+    ids = []
+    for entry in recorded or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            ids.append(uuid.UUID(str(entry.get("reused_run_id"))))
+        except ValueError:
+            continue
+    return ids
+
+
+_UNPUBLISHED_SCHEMA_STATES = frozenset(
+    {SchemaState.PROVISIONING, SchemaState.FAILED, SchemaState.EXPIRED}
+)
+
+
 async def _aggregate_materialization_state(
     procrastinate_job_id: int,
     workspace,
@@ -2728,8 +3315,14 @@ async def _aggregate_materialization_state(
     runs = [
         r
         async for r in MaterializationRun.objects.filter(
-            procrastinate_job_id=procrastinate_job_id,
-        ).select_related("tenant_schema__tenant")
+            Q(procrastinate_job_id=procrastinate_job_id)
+            | Q(
+                id__in=_reused_run_ids(preflight_failures),
+                tenant_schema__tenant__workspace_tenants__workspace=workspace,
+            )
+        )
+        .select_related("tenant_schema__tenant")
+        .distinct()
     ]
     uncovered = await _uncovered_tenant_summaries(
         workspace,
@@ -2746,6 +3339,12 @@ async def _aggregate_materialization_state(
     all_completed = True
     for r in runs:
         tenant_id = r.tenant_schema.tenant.external_id
+        # A load writes a candidate; its rows serve only once promoted. A failed
+        # candidate keeps them for a resume, but nothing can query them.
+        unpublished = (
+            r.tenant_schema.load_workspace_id is not None
+            and r.tenant_schema.state in _UNPUBLISHED_SCHEMA_STATES
+        )
         materialized_row_counts: dict = {}
         sources_detail: dict = {}
         transform_error: str | None = None
@@ -2762,6 +3361,8 @@ async def _aggregate_materialization_state(
                 if not isinstance(info, dict):
                     continue
                 src_state = info.get("state")
+                if unpublished and src_state == "completed":
+                    src_state = "not_published"
                 if src_state == "completed" and "rows" in info:
                     materialized_row_counts[source] = info["rows"]
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
@@ -2804,6 +3405,9 @@ async def _aggregate_materialization_state(
             tenant_summary["error"] = run_error
         if run_error_code:
             tenant_summary["error_code"] = run_error_code
+        if unpublished:
+            tenant_summary["published"] = False
+            all_completed = False
         summary.append(tenant_summary)
         if r.state == MaterializationRun.RunState.CANCELLED:
             any_cancelled = True
@@ -2918,7 +3522,45 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         semantic_state, semantic_error = await _semantic_layer_state(workspace)
     semantic_unavailable = semantic_state == "unavailable"
 
-    if view_schema_failed:
+    # A completed run is historical evidence, not proof its data still exists.
+    # Use current schema state before declaring that another load cannot help.
+    missing_active_tenants = []
+    if status == "completed" and (view_schema_failed or semantic_unavailable):
+        active_ids = {
+            tenant_id
+            async for tenant_id in TenantSchema.objects.filter(
+                tenant__workspace_tenants__workspace=workspace, state=SchemaState.ACTIVE
+            ).values_list("tenant_id", flat=True)
+        }
+        missing_active_tenants = [
+            tenant.canonical_name or tenant.external_id
+            async for tenant in workspace.tenants.all()
+            if tenant.id not in active_ids
+        ]
+    missing_data_guidance = ""
+    if missing_active_tenants:
+        missing_data_guidance = (
+            f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
+        )
+        if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+            missing_data_guidance += (
+                "The data and dependent views expired or were torn down. "
+                "Re-running materialization rebuilds them."
+            )
+        else:
+            missing_data_guidance += (
+                "Verify current access and account credentials before refreshing their data. "
+                "If you cannot access a source, ask someone with access to refresh it."
+            )
+
+    if missing_active_tenants:
+        body = (
+            f"{SYSTEM_RESUME_MARKER} The runs reported completion, but the current data "
+            f"and query surface are unavailable. {missing_data_guidance} "
+            "Then recheck the workspace query layer and semantic model; do not claim recovery until verified. "
+            f"Query layer error: {view_schema_error or semantic_error}. Per-tenant: {summary}"
+        )
+    elif view_schema_failed:
         if credential_guidance or status != "completed":
             body = (
                 f"{SYSTEM_RESUME_MARKER} Materialization left incomplete refresh coverage, "
@@ -3011,7 +3653,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"and freshness of available data before using it, and tell the user which sources were "
             f"not refreshed successfully. Older data may still be queryable. Do NOT "
             f"claim that fresh data is loaded for sources marked "
-            f"failed, skipped, or not_run. A source with state=in_progress or state=failed "
+            f"failed, skipped, not_run, or not_published (loaded but never "
+            f"published, so not queryable). A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
             f"as if it were complete.{credential_guidance} Per-tenant: {summary}"
@@ -3138,6 +3781,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
         )
         return {"status": "agent_timeout"}
     except Exception:
@@ -3156,6 +3800,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=("The agent failed to respond after materialization. Please retry."),
         )
         return {"status": "agent_failed"}
@@ -3203,7 +3848,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     error_summary = ""
     if terminal == ThreadJob.State.FAILED:
-        if view_schema_failed and (credential_guidance or status != "completed"):
+        if missing_active_tenants:
+            error_summary = missing_data_guidance
+        elif view_schema_failed and (credential_guidance or status != "completed"):
             error_summary = (
                 "Some tenant data did not refresh successfully, and the workspace query "
                 "layer (view schema) "
@@ -3271,6 +3918,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the
     # row CANCELLED, so this matches zero rows rather than clobbering it back to a
     # success terminal; we then re-read the actual persisted state below.
+    failure_phase = ""
+    if terminal == ThreadJob.State.FAILED:
+        query_build_failed = (
+            status == "completed"
+            and not missing_active_tenants
+            and view_schema_failed
+            and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in view_schema_error
+        )
+        failure_phase = (
+            ThreadJob.FailurePhase.QUERY_BUILD
+            if query_build_failed
+            else ThreadJob.FailurePhase.MATERIALIZATION
+        )
     updated = await ThreadJob.objects.filter(
         id=tj.id,
         state=ThreadJob.State.RUNNING,
@@ -3278,6 +3938,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         state=terminal,
         completed_at=timezone.now(),
         error_summary=error_summary,
+        failure_phase=failure_phase,
     )
     if not updated:
         actual_state = (

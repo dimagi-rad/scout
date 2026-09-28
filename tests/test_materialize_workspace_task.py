@@ -27,7 +27,13 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
+from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import agrant_tenant_access, grant_tenant_access
+
+
+@pytest.fixture(autouse=True)
+def _no_candidate_ddl(no_candidate_ddl):
+    """Shared stub: see tests.pipeline_doubles.no_candidate_ddl."""
 
 
 @pytest.mark.asyncio
@@ -246,7 +252,7 @@ async def test_materialize_workspace_dispatches_per_tenant(
 
     def fake_pipeline_run(*args, **kwargs):
         captured["calls"] += 1
-        return {"status": "completed", "rows_loaded": 7}
+        return completed_pipeline_run(*args, rows_loaded=7, **kwargs)
 
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
@@ -347,7 +353,7 @@ async def test_materialize_workspace_rebuilds_view_schema_when_multi_tenant_succ
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
             "apps.workspaces.tasks._run_pipeline_with_progress",
-            return_value={"status": "completed"},
+            side_effect=completed_pipeline_run,
         ),
         patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
@@ -377,7 +383,7 @@ async def test_materialize_workspace_skips_view_rebuild_for_single_tenant(
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
             "apps.workspaces.tasks._run_pipeline_with_progress",
-            return_value={"status": "completed"},
+            side_effect=completed_pipeline_run,
         ),
         patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
@@ -443,7 +449,7 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
             "apps.workspaces.tasks._run_pipeline_with_progress",
-            return_value={"status": "completed"},
+            side_effect=completed_pipeline_run,
         ),
         patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
         patch("apps.workspaces.tasks.record_cube_schema_build_failure") as record_failure,
@@ -504,7 +510,7 @@ async def test_materialize_workspace_core_runs_without_deferring_resume(
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
             "apps.workspaces.tasks._run_pipeline_with_progress",
-            return_value={"status": "completed"},
+            side_effect=completed_pipeline_run,
         ),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as defer_mock,
     ):
@@ -903,7 +909,9 @@ async def test_materialize_workspace_chains_resume_task(
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+        ),
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock,
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
@@ -1243,7 +1251,9 @@ async def test_materialize_workspace_defers_rebuild_for_sibling_view_schemas(
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+        ),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
         patch(
             "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
@@ -1277,7 +1287,9 @@ async def test_materialize_workspace_dedupes_sibling_rebuild(
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+        ),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
         patch(
             "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
@@ -1305,7 +1317,9 @@ async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+        ),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
         patch(
             "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
@@ -1343,7 +1357,7 @@ async def _materialize_as(
 ):
     """Run the core as `user`, with the pipeline and both schema builds mocked."""
     if pipeline is None:
-        pipeline = MagicMock(return_value={"status": "completed"}, side_effect=pipeline_side_effect)
+        pipeline = MagicMock(side_effect=pipeline_side_effect or completed_pipeline_run)
     schema_manager = MagicMock()
     schema_manager.build_view_schema.return_value.tenant_coverage = view_schema_coverage or {}
     with (
@@ -1362,15 +1376,45 @@ async def _materialize_as(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
+async def test_partially_covering_requester_is_refused_before_loading(
     workspace, tenant, tenant_membership_obj, user
+):
+    """Under all-of access (#380) a requester missing a tenant never reaches the
+    loader, so #364's partial load cannot start. Every tenant keeps a recorded
+    not-run entry for the resume path; the summary names the missing one."""
+    other = await _add_second_tenant(workspace)
+
+    result, cube = await _materialize_as(
+        user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
+    )
+
+    cube.assert_not_called()
+    assert result["status"] == "denied"
+    assert result["all_succeeded"] is False
+    assert other.canonical_name in result["error"]
+    assert tenant.canonical_name not in result["error"]
+    assert {r["tenant"] for r in result["tenants"]} == {tenant.external_id, other.external_id}
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    # The covered tenant must not inherit the "connect that account" guidance.
+    assert by_tenant[tenant.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_SKIPPED
+    assert by_tenant[tenant.external_id]["error"].startswith("not attempted")
+    assert not any(tenant.external_id in line for line in result["guidance"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
+    settings, workspace, tenant, tenant_membership_obj, user
 ):
     """The production path — user_id is always populated — had zero coverage.
 
     A workspace tenant with no membership for the acting user never entered
     tenant_results, so `all(...)` over a list it was absent from returned True
     and the run reported success while loading a subset of the workspace (#364).
+    Reachable with all-of off, or when access is lost after the gate passed.
     """
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     other = await _add_second_tenant(workspace)
 
     result, _ = await _materialize_as(user, workspace)
@@ -1394,7 +1438,7 @@ async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
-    workspace, tenant, tenant_membership_obj, user, django_user_model
+    settings, workspace, tenant, tenant_membership_obj, user, django_user_model
 ):
     """Never resolve a credential from another member to satisfy this user's run.
 
@@ -1403,6 +1447,8 @@ async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
     teammate's token only ever verifies the teammate's own access. Pins that the
     `user_id` filter stays, rather than being relaxed to any-member resolution.
     """
+    # Pins the loader's own narrowing, reachable only with all-of off.
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     mate = await django_user_model.objects.acreate_user(email="mate@example.com", password="pass")
     other = await _add_second_tenant(workspace, external_id="mates-bot")
     await agrant_tenant_access(mate, other)
@@ -1418,9 +1464,11 @@ async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_archived_membership_does_not_make_a_tenant_reachable(
-    workspace, tenant, tenant_membership_obj, user
+    settings, workspace, tenant, tenant_membership_obj, user
 ):
     """An archived membership is upstream access that was removed — not access."""
+    # Pins the loader's own narrowing, reachable only with all-of off.
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     other = await _add_second_tenant(workspace, external_id="revoked-domain")
     await TenantMembership.objects.acreate(user=user, tenant=other, archived_at=timezone.now())
 
@@ -1510,9 +1558,11 @@ async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("retained_schema", [False, True])
 async def test_unreachable_tenant_cube_build_uses_available_workspace_sources(
-    workspace, tenant, tenant_membership_obj, user, retained_schema
+    settings, workspace, tenant, tenant_membership_obj, user, retained_schema
 ):
     """Missing schemas are disclosed; retained schemas remain in the shared view."""
+    # A partially covering requester only runs with all-of off (see above).
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
     other = await _add_second_tenant(workspace, external_id="unreachable-for-cube")
     await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="refreshed_tenant", state=SchemaState.ACTIVE
@@ -1531,7 +1581,7 @@ async def test_unreachable_tenant_cube_build_uses_available_workspace_sources(
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
             "apps.workspaces.tasks._run_pipeline_with_progress",
-            return_value={"status": "completed"},
+            side_effect=completed_pipeline_run,
         ),
         patch(
             "apps.workspaces.services.schema_manager.get_managed_db_connection", return_value=conn
@@ -1573,10 +1623,10 @@ async def test_cube_build_is_still_skipped_when_an_attempted_tenant_fails(
     promoting a semantic schema over its potentially mixed snapshot is unsafe."""
     failed_tenant = await multi_tenant_workspace.tenants.exclude(id=tenant.id).aget()
 
-    def fail_second(tenant_membership, *_args):
+    def fail_second(tenant_membership, *args):
         if tenant_membership.tenant_id == failed_tenant.id:
             raise RuntimeError("load blew up")
-        return {"status": "completed"}
+        return completed_pipeline_run(tenant_membership, *args)
 
     coverage = {
         "included_tenants": [
@@ -1611,10 +1661,10 @@ async def test_cube_build_runs_when_every_failed_attempted_tenant_is_excluded(
 ):
     failed_tenant = await multi_tenant_workspace.tenants.exclude(id=tenant.id).aget()
 
-    def fail_second(tenant_membership, *_args):
+    def fail_second(tenant_membership, *args):
         if tenant_membership.tenant_id == failed_tenant.id:
             raise RuntimeError("load blew up")
-        return {"status": "completed"}
+        return completed_pipeline_run(tenant_membership, *args)
 
     coverage = {
         "included_tenants": [
@@ -1742,16 +1792,7 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
         return {"type": "api_key", "value": "k"}
 
     def pipeline(membership, *args, **kwargs):
-        schema = TenantSchema.objects.create(
-            tenant=membership.tenant, schema_name="covered_preflight", state=SchemaState.ACTIVE
-        )
-        MaterializationRun.objects.create(
-            tenant_schema=schema,
-            pipeline="commcare_sync",
-            state=MaterializationRun.RunState.COMPLETED,
-            procrastinate_job_id=job_id,
-        )
-        return {"status": "completed"}
+        return completed_pipeline_run(membership, *args, **kwargs)
 
     persisted = []
 

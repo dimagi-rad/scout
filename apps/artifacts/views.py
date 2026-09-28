@@ -16,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.cache import cache
 from django.db import IntegrityError
 from django.db.models import Q
@@ -23,8 +24,11 @@ from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
+from apps.artifacts.services.query_context import resolve_artifact_queries
 from apps.common.utils import creator_display_name
+from apps.semantic.services.date_context import DateContextError, date_context
 from apps.semantic.services.query import run_semantic_query
+from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceDataRecovery, WorkspaceRole
 from apps.workspaces.services.data_recovery import artifact_data_state
@@ -56,14 +60,33 @@ logger = logging.getLogger(__name__)
 # execution. The key includes the artifact version + a hash of the source
 # queries, so an update invalidates it immediately.
 ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
+ARTIFACT_QUERY_CONCURRENCY = 4
 
 
-def _artifact_query_cache_key(artifact: Artifact, data_revision: str = "") -> str:
+def _query_cache_intent(query):
+    if isinstance(query, dict) and isinstance(query.get("query_context"), dict):
+        return {
+            **query,
+            "query_context": {
+                "timezone": query["query_context"].get("timezone", settings.TIME_ZONE)
+            },
+        }
+    return query
+
+
+def _artifact_query_cache_key(
+    artifact: Artifact, data_revision: str = "", resolved_queries=None
+) -> str:
+    # A new clock instant with identical resolved bounds must not defeat the
+    # short-lived cache. Timezone and the compiled date filters remain in it.
+    if resolved_queries is not None:
+        resolved_queries = [_query_cache_intent(query) for query in resolved_queries]
     payload = json.dumps(
         {
             "semantic_queries": artifact.semantic_queries,
             "source_queries": artifact.source_queries,
             "data_revision": data_revision,
+            "resolved_queries": resolved_queries,
         },
         sort_keys=True,
         default=str,
@@ -864,6 +887,7 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             "semantic_queries": artifact.semantic_queries,
             "semantic_query_manifest": artifact.semantic_query_manifest,
             "version": artifact.version,
+            "date_context": date_context(),
         }
 
 
@@ -890,6 +914,9 @@ class ArtifactQueryDataView(View):
     are returned in a format the artifact sandbox can consume directly via
     mergeQueryResults().
     """
+
+    async def post(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
+        return await self.get(request, workspace_id, artifact_id)
 
     async def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
         user = await request.auser()
@@ -943,28 +970,68 @@ class ArtifactQueryDataView(View):
 
         static_data = artifact.data or {}
 
+        try:
+            runtime = (
+                json.loads(request.body) if request.method == "POST" and request.body else None
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JsonResponse({"error": "Request body must be valid UTF-8 JSON."}, status=400)
+        try:
+            doc = static_data.get("story_doc")
+            if isinstance(doc, dict) and doc.get("blocks"):
+                queries, resolved_context = resolve_artifact_queries(doc, runtime)
+                if not queries:
+                    queries, resolved_context = artifact.semantic_queries, None
+            else:
+                queries, resolved_context = artifact.semantic_queries, None
+        except DateContextError as exc:
+            logger.warning("Artifact %s date context rejected: %s", artifact.id, exc)
+            return JsonResponse(
+                {
+                    "error": "Invalid artifact date context. Check the dates, timezone, and date-control bindings."
+                },
+                status=400,
+            )
+
         # Serve repeat opens of the same artifact version from a short-lived
         # cache so we don't re-run every source query on every open (09#9).
-        cache_key = _artifact_query_cache_key(artifact, data_state.get("data_revision", ""))
+        cache_key = _artifact_query_cache_key(
+            artifact, data_state.get("data_revision", ""), queries
+        )
         cached = await cache.aget(cache_key)
         if cached is not None:
             return JsonResponse(
                 {
                     "queries": cached,
+                    "query_context": resolved_context,
                     "static_data": static_data,
                     "semantic_query_manifest": artifact.semantic_query_manifest or {},
                 }
             )
 
+        query_slots = asyncio.Semaphore(ARTIFACT_QUERY_CONCURRENCY)
+        readiness = QueryReadiness(
+            artifact.workspace,
+            [
+                {key: value for key, value in entry.items() if key != "name"}
+                for entry in queries
+                if isinstance(entry, dict)
+            ],
+        )
+
         async def _run_one(i: int, entry: dict) -> dict:
+            if not isinstance(entry, dict):
+                return {"name": f"semantic_query_{i}", "error": "Semantic query must be an object"}
             name = entry.get("name", f"semantic_query_{i}")
             query_spec = {k: v for k, v in entry.items() if k != "name"}
             try:
-                result = await run_semantic_query(
-                    artifact.workspace,
-                    query_spec,
-                    user_id=str(user.id),
-                )
+                async with query_slots:
+                    result = await run_semantic_query(
+                        artifact.workspace,
+                        query_spec,
+                        user_id=str(user.id),
+                        readiness=readiness,
+                    )
             except Exception:
                 logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
                 return {
@@ -983,7 +1050,7 @@ class ArtifactQueryDataView(View):
                 return {"name": name, "semantic_query": query_spec, "error": msg}
             return {
                 "name": name,
-                "semantic_query": result.get("semantic_query", query_spec),
+                "semantic_query": _query_cache_intent(result.get("semantic_query", query_spec)),
                 "columns": result.get("columns", []),
                 "rows": result.get("rows", []),
                 "row_count": result.get("row_count", 0),
@@ -991,9 +1058,7 @@ class ArtifactQueryDataView(View):
             }
 
         results = list(
-            await asyncio.gather(
-                *(_run_one(i, entry) for i, entry in enumerate(artifact.semantic_queries))
-            )
+            await asyncio.gather(*(_run_one(i, entry) for i, entry in enumerate(queries)))
         )
 
         for i, entry in enumerate(artifact.source_queries):
@@ -1014,6 +1079,7 @@ class ArtifactQueryDataView(View):
         return JsonResponse(
             {
                 "queries": results,
+                "query_context": resolved_context,
                 "static_data": static_data,
                 "semantic_query_manifest": artifact.semantic_query_manifest or {},
             }

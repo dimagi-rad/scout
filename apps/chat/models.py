@@ -114,6 +114,11 @@ class ThreadJob(models.Model):
         FAILED = "failed", "Failed"
         CANCELLED = "cancelled", "Cancelled"
 
+    class FailurePhase(models.TextChoices):
+        MATERIALIZATION = "materialization", "Materialization"
+        QUERY_BUILD = "query_build", "Query layer build"
+        RESUME = "resume", "Follow-up response"
+
     TERMINAL_STATES = frozenset({State.COMPLETED, State.FAILED, State.CANCELLED})
     ACTIVE_STATES = frozenset({State.PENDING, State.RUNNING})
 
@@ -134,6 +139,9 @@ class ThreadJob(models.Model):
     # Failure summary for the frontend error card, populated on FAILED/CANCELLED
     # from MaterializationRun.result["sources"] when available, else a generic string.
     error_summary = models.TextField(blank=True, default="")
+    failure_phase = models.CharField(
+        max_length=20, choices=FailurePhase.choices, blank=True, default="", db_default=""
+    )
     # Preflight failures have no MaterializationRun; retain them for resume/recovery.
     materialization_preflight_failures = models.JSONField(default=list, blank=True)
 

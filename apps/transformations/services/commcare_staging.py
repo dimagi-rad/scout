@@ -20,6 +20,7 @@ from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.repeat_identity import GeneratedRepeat, preserve_repeat_names
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.models import Tenant
+from mcp_server.event_time import event_time_sql
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,8 @@ _CASE_CORE_COLUMNS = [
     ("case_type", None),
     ("case_name", None),
     ("owner_id", None),
-    ("date_opened::timestamp", "date_opened"),
-    ("last_modified::timestamp", "last_modified"),
+    (event_time_sql("date_opened"), "date_opened"),
+    (event_time_sql("last_modified"), "last_modified"),
     ("closed", None),
 ]
 
@@ -296,7 +297,7 @@ def _generate_form_asset(
     select_parts: list[str] = [
         "    form_id",
         "    xmlns",
-        '    received_on::timestamp AS "received_on"',
+        f'    {event_time_sql("received_on")} AS "received_on"',
         "    app_id",
         "    form_data",
     ]

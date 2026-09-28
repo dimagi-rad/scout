@@ -14,6 +14,7 @@ from apps.workspaces.services.data_operation import (
     DataLockTimeout,
     LockOrderError,
     tenant_data_lock,
+    tenant_data_lock_if_free,
     tenant_lock_key,
     tenant_lock_keys,
     workspace_data_lock,
@@ -32,6 +33,18 @@ def _held_tenant_locks(conn, keys):
         (_TENANT_LOCK_NAMESPACE & 0xFFFFFFFF, [key & 0xFFFFFFFF for key in keys]),
     ).fetchall()
     return sorted(rows)
+
+
+async def test_try_tenant_lock_returns_without_waiting_for_another_writer():
+    tenant = uuid.uuid4()
+
+    with try_tenant_data_lock(tenant) as held:
+        assert held
+        async with tenant_data_lock_if_free(tenant) as acquired:
+            assert not acquired
+
+    async with tenant_data_lock_if_free(tenant) as acquired:
+        assert acquired
 
 
 @pytest.fixture

@@ -14,7 +14,6 @@ from apps.chat.artifact_links import (
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.helpers import (
     CheckpointerUnavailable,
-    _resolve_workspace_and_membership,
     async_login_required,
 )
 from apps.chat.message_converter import langchain_messages_to_ui
@@ -23,6 +22,7 @@ from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
+
 
 THREAD_TITLE_PREVIEW_CHARS = 200
 
@@ -225,9 +225,9 @@ async def thread_detail_view(request, workspace_id, thread_id):
     """GET/PATCH /api/workspaces/<workspace_id>/threads/<thread_id>/."""
 
     user = request._authenticated_user
-    workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
 
@@ -272,9 +272,9 @@ async def thread_messages_view(request, workspace_id, thread_id):
 
     user = request._authenticated_user
 
-    workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    _workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
@@ -305,9 +305,9 @@ async def thread_artifacts_view(request, workspace_id, thread_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    _workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
@@ -384,9 +384,9 @@ async def thread_viewed_view(request, workspace_id, thread_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
 
     updated = await Thread.objects.filter(
         id=thread_id,
