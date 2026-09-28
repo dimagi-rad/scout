@@ -11,7 +11,13 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
+from apps.chat.models import Thread, ThreadJob
 from apps.users.models import TenantMembership
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantSchema,
+)
 from mcp_server import server
 from mcp_server.context import QueryContext
 
@@ -109,3 +115,62 @@ async def test_get_lineage_rechecks(workspace):
 
     assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
     lineage.assert_not_awaited()
+
+
+async def _status_run(workspace, tenant):
+    tenant_schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_secret_schema", state=SchemaState.ACTIVE
+    )
+    return await MaterializationRun.objects.acreate(
+        tenant_schema=tenant_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=4242,
+    )
+
+
+async def test_materialization_status_reads_for_a_member_with_access(workspace, user, tenant):
+    run = await _status_run(workspace, tenant)
+
+    result = await server.get_materialization_status(
+        str(run.id), workspace_id=str(workspace.id), user_id=str(user.id)
+    )
+
+    assert result["success"] is True
+    assert result["schema"] == "t_secret_schema"
+
+
+async def test_materialization_status_denies_a_member_who_lost_the_source(workspace, user, tenant):
+    run = await _status_run(workspace, tenant)
+    await TenantMembership.objects.filter(user=user, tenant=tenant).aupdate(
+        archived_at=timezone.now()
+    )
+
+    result = await server.get_materialization_status(
+        str(run.id), workspace_id=str(workspace.id), user_id=str(user.id)
+    )
+
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
+    assert tenant.canonical_name in result["error"]["message"]
+    assert "t_secret_schema" not in str(result)
+
+
+async def test_materialization_status_denies_a_thread_job_lookup_too(workspace, user, tenant):
+    run = await _status_run(workspace, tenant)
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    job = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=run.procrastinate_job_id,
+        tool_call_id="tc-status",
+    )
+    await TenantMembership.objects.filter(user=user, tenant=tenant).aupdate(
+        archived_at=timezone.now()
+    )
+
+    result = await server.get_materialization_status(
+        str(job.id), workspace_id=str(workspace.id), user_id=str(user.id)
+    )
+
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
+    assert "t_secret_schema" not in str(result)

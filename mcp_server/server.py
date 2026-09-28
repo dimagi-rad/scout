@@ -1142,6 +1142,8 @@ async def get_materialization_status(
             another workspace cannot be inspected from here.
         user_id: User UUID (injected server-side by the agent graph). Required
             for ThreadJob lookups so one user cannot inspect another user's job.
+            When set, the user's workspace access is rechecked and a denial
+            returns WORKSPACE_ACCESS_DENIED.
         thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
     async with tool_context(
@@ -1151,6 +1153,18 @@ async def get_materialization_status(
         user_id=user_id,
         thread_id=thread_id,
     ) as tc:
+        if workspace_id:
+            try:
+                await _authorize_read(workspace_id, user_id)
+            except _WorkspaceAccessDenied as e:
+                tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
+                return tc["result"]
+            except (ValueError, _ValidationError):
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Materialization run '{run_id}' not found"
+                )
+                return tc["result"]
+
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
