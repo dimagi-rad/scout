@@ -17,7 +17,7 @@ from apps.semantic.canvas import service as canvas_service
 from apps.semantic.models import CubeSchema, SemanticDataset, SemanticModel
 from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services import query as query_service
-from apps.semantic.services.cube import generate_cube_schema, generate_cube_schema_yaml
+from apps.semantic.services.cube import cube_schema_yaml, generate_cube_schema
 from apps.semantic.services.cube_client import CubeClient
 from mcp_server.context import QueryContext
 
@@ -149,7 +149,7 @@ def test_ocs_topic_dataset_can_be_committed_and_bound_to_dashboard(workspace, us
         with connection.cursor() as cursor:
             cursor.execute("DROP TABLE IF EXISTS pg_temp.raw_messages")
 
-    cube_schema.content = generate_cube_schema_yaml(model)
+    cube_schema.content = cube_schema_yaml(generate_cube_schema(model))
     cube_schema.save()
     monkeypatch.setattr(
         query_service,

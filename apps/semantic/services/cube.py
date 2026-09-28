@@ -58,28 +58,29 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         try:
             join_sql = embed_cube_sql(relationship.join_expression, references=join_references)
         except CubeSQLReferenceError as exc:
-            if exc.reference in known_references:
-                logger.warning(
-                    "Skipping relationship %s referencing hidden member %s",
-                    relationship.id,
-                    exc.reference,
-                )
-                continue
-            # A join only adds a path between cubes, so dropping a stale one
-            # changes no metric; failing here would take every cube down with it.
+            # A join only adds a path between cubes, so dropping one changes no
+            # metric; failing here would take every cube in the workspace down.
+            hidden = exc.reference in known_references
+            reference = exc.reference[:200]
             logger.warning(
-                "Skipping relationship %s referencing unknown member %s",
+                "Skipping relationship %s referencing %s member %s",
                 relationship.id,
-                exc.reference,
+                "hidden" if hidden else "unknown",
+                reference,
             )
             diagnostics.append(
                 {
                     "level": "warning",
-                    "code": "relationship_stale_reference",
+                    "code": (
+                        "relationship_hidden_reference"
+                        if hidden
+                        else "relationship_stale_reference"
+                    ),
                     "relationship": relationship.name,
                     "message": (
-                        f"Relationship '{relationship.name}' was skipped: it references "
-                        f"'{exc.reference}', which is not in the semantic catalog."
+                        f"Relationship '{relationship.name}' was not published: it references "
+                        f"'{reference}', which is "
+                        f"{'hidden' if hidden else 'not in the semantic catalog'}."
                     ),
                 }
             )
@@ -143,11 +144,6 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         "cubes": cubes,
         "diagnostics": diagnostics,
     }
-
-
-def generate_cube_schema_yaml(model: SemanticModel) -> str:
-    """Return Cube YAML content for the active semantic model."""
-    return cube_schema_yaml(generate_cube_schema(model))
 
 
 def cube_schema_yaml(schema: dict[str, Any]) -> str:

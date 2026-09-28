@@ -14,6 +14,7 @@ from apps.semantic.models import (
     SemanticRelationship,
 )
 from apps.semantic.services import cube_schema
+from apps.semantic.services.catalog import serialize_catalog
 from apps.semantic.services.cube import generate_cube_schema
 from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
 from apps.semantic.services.cube_sql import embed_cube_sql
@@ -262,9 +263,26 @@ def test_stale_relationship_is_skipped_and_reported_without_failing_the_build(
                 "code": "relationship_stale_reference",
                 "relationship": "cases_to_visits",
                 "message": (
-                    "Relationship 'cases_to_visits' was skipped: it references "
+                    "Relationship 'cases_to_visits' was not published: it references "
                     "'cases.renamed_visit_id', which is not in the semantic catalog."
                 ),
             }
         ]
     )
+    catalog = {dataset["name"]: dataset for dataset in serialize_catalog(model)["datasets"]}
+    published = {r["name"]: r.get("published", True) for r in catalog["visits"]["relationships"]}
+    assert published == {"visits_to_users": True, "cases_to_visits": False}
+
+
+@pytest.mark.django_db
+def test_relationship_through_hidden_member_is_skipped_and_reported(workspace):
+    model = _stale_relationship_catalog(workspace)
+    SemanticField.objects.filter(dataset__name="users", name="id").update(is_visible=False)
+
+    schema = generate_cube_schema(model)
+
+    cubes = {cube["name"]: cube for cube in schema["cubes"]}
+    assert "joins" not in cubes["visits"]
+    assert [(d["code"], d["relationship"]) for d in schema["diagnostics"]] == [
+        ("relationship_hidden_reference", "visits_to_users")
+    ]
