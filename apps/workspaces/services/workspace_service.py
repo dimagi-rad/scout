@@ -6,15 +6,35 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
-from apps.workspaces.tasks import rebuild_workspace_view_schema, teardown_view_schema_task
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
+from apps.workspaces.services.load_generations import (
+    INTENT_RECONCILE_MISSING,
+    capture_load_intent,
+)
+from apps.workspaces.tasks import (
+    materialize_workspace,
+    rebuild_workspace_view_schema,
+    teardown_view_schema_task,
+)
 
 
-def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
-    """Add a tenant to a workspace and mark the view schema for rebuild.
+def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[WorkspaceTenant, bool]:
+    """Add a tenant to a workspace and publish it once it has data.
 
-    Uses get_or_create to atomically handle concurrent requests. Only triggers
-    the schema rebuild when a new WorkspaceTenant is actually created.
+    A tenant that already serves data (loaded for a sibling workspace) only needs
+    this workspace's views rebuilt. One with nothing loaded is loaded as
+    ``actor_id``, and that load republishes the views and Cube with it. Until then
+    the views are rebuilt without it but stay ACTIVE (not provisioning, which
+    would take every source's data tools offline for the whole load): the
+    rebuild records the new source under ``excluded_tenants``, so coverage
+    honestly reports it missing instead of the views silently omitting it. Uses
+    get_or_create to handle concurrent requests; only a newly created link
+    dispatches work.
 
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
@@ -22,10 +42,26 @@ def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
     with transaction.atomic():
         wt, created = WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
         if created:
-            WorkspaceViewSchema.objects.filter(workspace=workspace).update(
-                state=SchemaState.PROVISIONING
-            )
-            rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+            serving = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).exists()
+            if serving or actor_id is None:
+                WorkspaceViewSchema.objects.filter(workspace=workspace).update(
+                    state=SchemaState.PROVISIONING
+                )
+                rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+            else:
+                # Queued first: both take the workspace lock W, and the load holds
+                # it for its whole run, so on a worker with more than one slot a
+                # rebuild dequeued second would wait out the load (or the lock
+                # timeout) before coverage names the missing source.
+                rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+                intent = capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING)
+                materialize_workspace.defer(
+                    workspace_id=str(workspace.id),
+                    user_id=str(actor_id),
+                    load_intent=intent,
+                    only_unserved=True,
+                    notify_thread=False,
+                )
 
     return wt, created
 
@@ -78,8 +114,6 @@ async def touch_workspace_schemas(workspace) -> None:
     so without this they expire and their DROP CASCADE destroys the views inside
     the still-ACTIVE view schema.
     """
-    from apps.workspaces.models import TenantSchema
-
     tenant_count = await workspace.workspace_tenants.acount()
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()
