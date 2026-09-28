@@ -214,7 +214,7 @@ def _is_invalid_client(response) -> bool:
     return _reports_oauth_error(response, "invalid_client")
 
 
-def _is_transient_status(status: int | None) -> bool:
+def is_transient_status(status: int | None) -> bool:
     """A provider hiccup, not a verdict on the grant.
 
     Transient failures never write the refresh-failure marker: the all-of gate reads
@@ -223,6 +223,10 @@ def _is_transient_status(status: int | None) -> bool:
     the freshness gate's call, and it already denies temporarily and retryably.
     """
     return status is not None and (status in (408, 429) or status >= 500)
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    return isinstance(exc, (httpx.RequestError, requests.RequestException))
 
 
 def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
@@ -738,7 +742,7 @@ async def refresh_oauth_token_result(
             )
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        transient = _is_transient_status(e.response.status_code)
+        transient = is_transient_status(e.response.status_code)
         if not transient:
             try:
                 # Deliberately not the caller's deadline: it may already be exhausted, and
@@ -758,7 +762,7 @@ async def refresh_oauth_token_result(
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        transient = isinstance(e, (httpx.RequestError, requests.RequestException))
+        transient = _is_transient_error(e)
         if not transient:
             try:
                 await _arecord_refresh_failure(
@@ -895,7 +899,7 @@ def refresh_oauth_token_result_sync(
             )
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        transient = _is_transient_status(status)
+        transient = is_transient_status(status)
         if not transient:
             try:
                 _record_refresh_failure(
@@ -913,7 +917,7 @@ def refresh_oauth_token_result_sync(
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        transient = isinstance(e, (httpx.RequestError, requests.RequestException))
+        transient = _is_transient_error(e)
         if not transient:
             try:
                 _record_refresh_failure(

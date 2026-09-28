@@ -129,7 +129,7 @@ async def test_inconclusive_refresh_preserves_access(
     await connection.arefresh_from_db()
     assert connection.upstream_denial_code == ""
     # A blip says nothing about the grant, so it must not leave the reconnect marker.
-    assert bool(connection.oauth_refresh_failure_fingerprint) is not transient
+    assert bool(connection.oauth_refresh_failure_fingerprint) == (not transient)
 
 
 @pytest.mark.django_db(transaction=True)

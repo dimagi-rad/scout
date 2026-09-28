@@ -16,6 +16,7 @@ from apps.users.services.access_verification_types import (
     ProviderVerificationResult,
 )
 from apps.users.services.oauth_scope import canonical_provider
+from apps.users.services.token_refresh import is_transient_status
 from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 PROVIDER_BUDGET_SECONDS = 20.0
@@ -93,7 +94,7 @@ def _provider_request(snapshot, settings):
 def _status_result(status_code: int):
     if status_code == 401:
         return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
-    if status_code in (408, 429) or status_code >= 500:
+    if is_transient_status(status_code):
         return ProviderVerificationResult.unavailable(_UNAVAILABLE)
     if status_code < 200 or status_code >= 300:
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)

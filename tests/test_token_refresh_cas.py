@@ -7,7 +7,6 @@ from unittest import mock
 
 import httpx
 import pytest
-import requests
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -228,8 +227,8 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
             return await original(*args, **kwargs)
 
         monkeypatch.setattr(token_refresh, "_apersist_refresh_failure", deny_then_record)
-        httpx_mock.add_response(url=URL, status_code=503)
-        with pytest.raises(TokenRefreshUnavailable):
+        httpx_mock.add_response(url=URL, status_code=400, json={"error": "invalid_grant"})
+        with pytest.raises(TokenRefreshRejected):
             await refresh_oauth_token_result(token, URL)
     else:
         from apps.users.services import token_refresh
@@ -243,8 +242,8 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
             return original(*args, **kwargs)
 
         monkeypatch.setattr(token_refresh, "_persist_refresh_failure", deny_then_record)
-        requests_mock.post(URL, status_code=503)
-        with pytest.raises(TokenRefreshUnavailable):
+        requests_mock.post(URL, status_code=400, json={"error": "invalid_grant"})
+        with pytest.raises(TokenRefreshRejected):
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
 
     await connection.arefresh_from_db()
@@ -254,7 +253,7 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("failure", ["rejected", "transport"])
+@pytest.mark.parametrize("failure", ["rejected", "unclassified"])
 async def test_refresh_failure_marker_error_preserves_provider_classification(
     oauth_identity, mode, failure, httpx_mock, requests_mock, monkeypatch
 ):
@@ -270,10 +269,8 @@ async def test_refresh_failure_marker_error_preserves_provider_classification(
         if failure == "rejected":
             httpx_mock.add_response(url=URL, status_code=400, json={"error": "invalid_grant"})
         else:
-            httpx_mock.add_exception(httpx.ConnectError("offline"), url=URL)
-        with pytest.raises(
-            TokenRefreshRejected if failure == "rejected" else TokenRefreshUnavailable
-        ):
+            httpx_mock.add_response(url=URL, status_code=403, json={})
+        with pytest.raises(TokenRefreshError) as caught:
             await refresh_oauth_token_result(token, URL)
     else:
 
@@ -286,11 +283,13 @@ async def test_refresh_failure_marker_error_preserves_provider_classification(
         if failure == "rejected":
             requests_mock.post(URL, status_code=400, json={"error": "invalid_grant"})
         else:
-            requests_mock.post(URL, exc=requests.ConnectionError("offline"))
-        with pytest.raises(
-            TokenRefreshRejected if failure == "rejected" else TokenRefreshUnavailable
-        ):
+            requests_mock.post(URL, status_code=403, json={})
+        with pytest.raises(TokenRefreshError) as caught:
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+    # Only definitive failures write the marker, so those are the ones to exercise.
+    assert type(caught.value) is (
+        TokenRefreshRejected if failure == "rejected" else TokenRefreshError
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -402,16 +401,16 @@ async def test_refresh_failure_marker_cannot_persist_after_database_deadline(
     # that, or the lock frees before it can expire and the marker gets written.
     clock = ManualClock()
     if mode == "async":
-        httpx_mock.add_response(url=URL, status_code=503)
+        httpx_mock.add_response(url=URL, status_code=400, json={"error": "invalid_grant"})
         operation = refresh_oauth_token_result(token, URL, db_timeout=1.0, clock=clock)
     else:
-        requests_mock.post(URL, status_code=503)
+        requests_mock.post(URL, status_code=400, json={"error": "invalid_grant"})
         operation = sync_to_async(refresh_oauth_token_result_sync)(
             token, URL, db_timeout=1.0, clock=clock
         )
 
     with _user_row_locked(connection.user_id) as release:
-        with pytest.raises(TokenRefreshUnavailable):
+        with pytest.raises(TokenRefreshRejected):
             await operation
         held_at_return = not release.is_set()
 
@@ -799,8 +798,9 @@ async def test_failure_marker_write_error_does_not_erase_the_real_classification
             raise DatabaseError("marker write failed")
 
         monkeypatch.setattr(token_refresh, "_apersist_refresh_failure", unavailable)
-        httpx_mock.add_exception(httpx.ConnectError("offline"), url=URL)
-        with pytest.raises(TokenRefreshUnavailable):
+        # Not a transport error: those are transient and never attempt the marker.
+        httpx_mock.add_exception(RuntimeError("defect"), url=URL)
+        with pytest.raises(TokenRefreshError) as caught:
             await refresh_oauth_token_result(token, URL)
     else:
 
@@ -808,9 +808,10 @@ async def test_failure_marker_write_error_does_not_erase_the_real_classification
             raise DatabaseError("marker write failed")
 
         monkeypatch.setattr(token_refresh, "_persist_refresh_failure", unavailable)
-        requests_mock.post(URL, exc=requests.ConnectionError("offline"))
-        with pytest.raises(TokenRefreshUnavailable):
+        requests_mock.post(URL, exc=RuntimeError("defect"))
+        with pytest.raises(TokenRefreshError) as caught:
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+    assert type(caught.value) is TokenRefreshError
 
 
 @contextlib.contextmanager
