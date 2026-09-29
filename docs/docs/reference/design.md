@@ -181,8 +181,9 @@ A manager adds someone by email and role (`POST …/members/`). The outcome
 depends on the person:
 
 - **No Scout account**: a `pending` invite is created and an email is sent. It
-  is accepted automatically when they first sign in with OAuth using that
-  (verified) email, if they can use the workspace's tenants.
+  is accepted automatically when they sign in with OAuth, if the invite matches
+  one of their verified email addresses or their account email, and they can
+  use the workspace's tenants.
 - **Existing account that can use every tenant**: they become a member
   straight away. Scout re-resolves their tenant memberships with their own
   credentials first.
