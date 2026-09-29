@@ -1098,7 +1098,7 @@ def test_periodic_sweep_settles_dead_refresh_without_a_retry(
     assert candidate.state == SchemaState.FAILED
     drop.assert_called_once_with(schema_id=str(candidate.id))
     status_response = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-    assert status_response.data["state"] == SchemaState.FAILED
+    assert status_response.data["refresh_state"] == SchemaState.FAILED
     assert status_response.data["error"]
 
 
