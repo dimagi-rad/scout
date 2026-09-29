@@ -44,11 +44,13 @@ def _invite_link(invite) -> str:
     return f"{settings.SCOUT_BASE_URL.rstrip('/')}/?invite={invite.token}"
 
 
+def _user_label(user) -> str:
+    # Email is nullable, so a nameless, email-less user must still get the fallback.
+    return (user and (user.get_full_name() or user.email)) or "A Scout workspace manager"
+
+
 def _inviter_label(invite) -> str:
-    inviter = invite.invited_by
-    if not inviter:
-        return "A Scout workspace manager"
-    return inviter.get_full_name() or inviter.email
+    return _user_label(invite.invited_by)
 
 
 def _dispatch(subject, message, recipient_list):
@@ -117,3 +119,18 @@ def notify_invite_accepted(invite, invitee):
             f"{invitee.email} now has access to '{workspace_name}' on Scout.\n",
             [inviter.email],
         )
+
+
+def notify_member_added(membership, added_by):
+    """Tell a user a manager added them straight to a workspace (#382): the direct
+    path creates a membership with no invite, so no other notice ever reaches them."""
+    workspace = membership.workspace
+    link = f"{settings.SCOUT_BASE_URL.rstrip('/')}/workspaces/{workspace.id}/chat"
+    _dispatch(
+        f"You've been added to '{workspace.name}' on Scout",
+        (
+            f"{_user_label(added_by)} added you to the '{workspace.name}' "
+            f"workspace on Scout.\n\nOpen it: {link}\n"
+        ),
+        [membership.user.email],
+    )

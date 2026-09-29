@@ -47,6 +47,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.credential_coverage import CoverageRecovery
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
+    notify_member_added,
     send_pending_invite_email,
 )
 from apps.workspaces.services.member_coverage import (
@@ -792,6 +793,20 @@ class WorkspaceMemberListView(APIView):
                 {"error": "User is already a member."},
                 status=status.HTTP_409_CONFLICT,
             )
+        # An earlier awaiting-access invite is now satisfied; left live, the next
+        # login would "accept" it and send a second, contradictory email.
+        now = timezone.now()
+        WorkspaceInvite.objects.filter(
+            workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
+        ).update(
+            status=WorkspaceInviteStatus.ACCEPTED,
+            resolved_at=now,
+            resolved_membership=new_membership,
+            updated_at=now,
+        )
+        # Defensive: the view runs in autocommit today, but inside an outer atomic
+        # block a rollback must not email about a membership that never landed.
+        transaction.on_commit(lambda: notify_member_added(new_membership, request.user))
         return Response(
             {
                 "result": "member",

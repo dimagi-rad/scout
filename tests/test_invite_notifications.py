@@ -9,9 +9,11 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceInvite,
     WorkspaceInviteStatus,
+    WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services import invite_notifications
 from apps.workspaces.services.invite_notifications import describe_workspace_sources
 from tests.tenant_access import grant_tenant_access
 
@@ -52,7 +54,6 @@ class TestPendingInviteEmail:
     ):
         """An existing account gets no pending email, so the awaiting_access branch
         must tell them directly (else they'd never learn of the invite)."""
-        from apps.workspaces.services import invite_notifications
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
         User.objects.create_user(email="noaccess@example.com", password="pass")
@@ -69,7 +70,6 @@ class TestPendingInviteEmail:
         assert user.email not in recipients
 
     def test_send_pending_invite_email_targets_the_email(self, workspace, user, mocker):
-        from apps.workspaces.services import invite_notifications
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
         invite = WorkspaceInvite.objects.create(
@@ -127,7 +127,6 @@ class TestDescribeWorkspaceSources:
 class TestResolverNotifications:
     @pytest.mark.django_db
     def test_awaiting_access_notifies_invitee_and_manager(self, workspace, user, mocker):
-        from apps.workspaces.services import invite_notifications
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
         invitee = User.objects.create_user(email="invitee@example.com", password="pass")
@@ -146,7 +145,6 @@ class TestResolverNotifications:
 
     @pytest.mark.django_db
     def test_accepted_notifies_invitee_and_manager(self, workspace, user, tenant, mocker):
-        from apps.workspaces.services import invite_notifications
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
         invitee = User.objects.create_user(email="invitee@example.com", password="pass")
@@ -165,7 +163,6 @@ class TestResolverNotifications:
 
     @pytest.mark.django_db
     def test_awaiting_access_is_not_renotified_on_repeat_login(self, workspace, user, mocker):
-        from apps.workspaces.services import invite_notifications
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
         invitee = User.objects.create_user(email="invitee@example.com", password="pass")
@@ -217,3 +214,119 @@ class TestMyInvitesEndpoint:
         resp = client.get("/api/invites/")
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+class TestDirectAddEmail:
+    """#382: a user added straight to a workspace (they already cover its sources)
+    gets a notice; before this, the direct-membership branch sent nothing."""
+
+    def _add(self, client, workspace, email):
+        return client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": email, "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+
+    def test_direct_add_emails_the_new_member(
+        self, client, user, workspace, tenant, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        grant_tenant_access(target, tenant)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._add(client, workspace, "alice@example.com")
+
+        assert resp.status_code == 201
+        assert resp.json()["result"] == "member"
+        emails = _deferred_emails(mock_task)
+        assert [e["recipient_list"] for e in emails] == [["alice@example.com"]]
+        assert workspace.name in emails[0]["subject"]
+        assert f"/workspaces/{workspace.id}/chat" in emails[0]["message"]
+
+    def test_email_waits_for_commit(
+        self, client, user, workspace, tenant, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        grant_tenant_access(target, tenant)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            self._add(client, workspace, "alice@example.com")
+
+        mock_task.defer.assert_not_called()
+        assert len(callbacks) == 1
+
+    def test_re_adding_an_existing_member_sends_nothing(
+        self, client, user, workspace, tenant, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        grant_tenant_access(target, tenant)
+        client.force_login(user)
+        with django_capture_on_commit_callbacks(execute=True):
+            self._add(client, workspace, "alice@example.com")
+        mock_task.reset_mock()
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._add(client, workspace, "alice@example.com")
+
+        assert resp.status_code == 409
+        mock_task.defer.assert_not_called()
+
+    def test_enqueue_failure_does_not_fail_the_add(
+        self, client, user, workspace, tenant, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        mock_task.defer.side_effect = RuntimeError("queue down")
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        grant_tenant_access(target, tenant)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._add(client, workspace, "alice@example.com")
+
+        assert resp.status_code == 201
+
+    def test_direct_add_resolves_a_waiting_invite(
+        self, client, user, workspace, tenant, mocker, django_capture_on_commit_callbacks
+    ):
+        """Left live, the invite would be 'accepted' at next login and send a second,
+        contradictory email to the member and the manager."""
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        invite = WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="alice@example.com",
+            role=WorkspaceRole.READ,
+            invited_by=user,
+            status=WorkspaceInviteStatus.AWAITING_ACCESS,
+        )
+        grant_tenant_access(target, tenant)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            assert self._add(client, workspace, "alice@example.com").status_code == 201
+
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+        assert invite.resolved_at is not None
+        assert invite.resolved_membership == WorkspaceMembership.objects.get(
+            workspace=workspace, user=target
+        )
+
+        mock_task.reset_mock()
+        resolve_pending_invites_on_login(target)
+        mock_task.defer.assert_not_called()
+
+    def test_member_added_email_falls_back_for_a_nameless_adder(self, workspace, user, mocker):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        nameless = User.objects.create_user(email=None, password="pass")
+        membership = WorkspaceMembership.objects.get(workspace=workspace, user=user)
+
+        invite_notifications.notify_member_added(membership, nameless)
+
+        message = _deferred_emails(mock_task)[0]["message"]
+        assert message.startswith("A Scout workspace manager added you")
