@@ -83,15 +83,13 @@ class TestPipelineListTablesOutputShape:
         mock_run.result = {"sources": {"users": {"state": "completed", "rows": 100}}}
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value={"raw_users"}),
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)

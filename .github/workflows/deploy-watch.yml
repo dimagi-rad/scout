@@ -1,0 +1,36 @@
+name: Watch Production Deploy
+
+# A deploy run that skips for a newer queued run never learns whether that run
+# deployed (G10). If it was cancelled or failed early, every run is green while
+# production stays behind main. Check on a timer and file the deploy-failure issue.
+on:
+  schedule:
+    # Off the hour: GitHub delays or drops scheduled runs at :00 under load.
+    - cron: '7,27,47 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-watch
+  cancel-in-progress: true
+
+jobs:
+  behind-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Report production running behind main
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { checkDeployLag } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/deploy-behind.cjs`);
+            await checkDeployLag({ github, context, core, env: process.env, workflowId: 'deploy.yml', jobName: 'deploy' });

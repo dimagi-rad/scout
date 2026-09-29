@@ -373,3 +373,22 @@ def test_superseded_deploy_check_fails_open():
     # silently disable it.
     assert "name" not in jobs["deploy"]
     assert "jobName: 'deploy'" in jobs["supersede"]["steps"][-1]["with"]["script"]
+
+
+def test_production_running_behind_main_is_reported_on_a_timer():
+    # A run that skips for a newer queued run never learns whether that run
+    # deployed (G10); only this separate workflow notices when none did.
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "deploy-watch.yml").read_text())
+    assert workflow["permissions"] == {}
+    # An alert must not queue behind the deploy it is watching for.
+    assert workflow["concurrency"]["group"] != "scout-deploy-host"
+    triggers = workflow[True]  # PyYAML reads the bare `on:` key as True.
+    assert triggers["schedule"]
+    assert "workflow_dispatch" in triggers
+    (job,) = workflow["jobs"].values()
+    assert job["permissions"] == {"actions": "read", "contents": "read", "issues": "write"}
+    script = job["steps"][-1]["with"]["script"]
+    assert "deploy-behind.cjs" in script
+    # Must name deploy.yml and its deploy job, or the live commit is never found.
+    assert "workflowId: 'deploy.yml'" in script
+    assert "jobName: 'deploy'" in script

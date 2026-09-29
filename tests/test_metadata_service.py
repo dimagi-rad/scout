@@ -44,10 +44,8 @@ class TestPipelineListTables:
         mock_ts = MagicMock()
         pipeline_config = _make_pipeline_config(sources=[("cases", "CommCare cases")])
 
-        with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+        with patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs:
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=None)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)
@@ -75,15 +73,13 @@ class TestPipelineListTables:
         }
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value={"raw_cases", "raw_forms"}),
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)
@@ -114,15 +110,13 @@ class TestPipelineListTables:
         mock_run.result = {"sources": {"cases": {"state": "completed", "rows": 100}}}
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value={"raw_cases", "stg_cases", "stg_forms"}),
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)
@@ -164,15 +158,13 @@ class TestPipelineListTables:
         }
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value={"raw_users", "raw_visits"}),
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)
@@ -199,15 +191,13 @@ class TestPipelineListTables:
         mock_run.result = {"sources": {"cases": {"state": "completed", "rows": 100}}}
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value=set()),  # schema was torn down
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)
@@ -239,23 +229,18 @@ class TestPipelineListTables:
         mock_run.state = "partial"
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value={"raw_users"}),
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)
 
-        # The filter passed state__in [COMPLETED, PARTIAL]
-        filter_call = mock_run_cls.objects.filter.call_args.kwargs
-        assert "state__in" in filter_call
-        assert "partial" in filter_call["state__in"]
+        mock_synced_runs.return_value.filter.assert_called_once_with(tenant_schema=mock_ts)
         # Result has only the completed source.
         names = {t["name"] for t in result}
         assert names == {"raw_users"}
@@ -297,15 +282,13 @@ class TestPipelineListTables:
         mock_run.state = "partial"
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value={"raw_users", "raw_completed_works"}),
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_list_tables(mock_ts, pipeline_config)
@@ -512,10 +495,8 @@ class TestPipelineGetMetadata:
         mock_ts = MagicMock()
         pipeline_config = _make_pipeline_config()
 
-        with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+        with patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs:
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=None)
 
             result = await pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
@@ -548,7 +529,7 @@ class TestPipelineGetMetadata:
         mock_run.result = {"sources": {"cases": {"state": "completed", "rows": 100}}}
 
         with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.metadata.synced_runs") as mock_synced_runs,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
                 AsyncMock(return_value={"raw_cases"}),
@@ -563,9 +544,7 @@ class TestPipelineGetMetadata:
                 ),
             ),
         ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs = mock_synced_runs.return_value.filter.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
             result = await pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)

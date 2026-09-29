@@ -188,6 +188,17 @@ def test_list_schema_status_matches_detail(client, user, workspace, tenant_schem
     assert list_status == detail["schema_status"] == "available"
 
 
+@pytest.mark.django_db
+def test_detail_counts_sources_not_schema_rows(client, user, workspace, tenant, tenant_schema):
+    """A source with two ACTIVE schema rows is one available source, as the list says."""
+    TenantSchema.objects.create(
+        tenant=tenant, schema_name="second_active", state=SchemaState.ACTIVE
+    )
+    list_status = _list_entry(client, user, workspace)["schema_status"]
+    detail = client.get(f"/api/workspaces/{workspace.id}/").json()
+    assert list_status == detail["schema_status"] == "available"
+
+
 # ── PARTIAL runs are data-bearing ────────────────────────────────────────────
 
 

@@ -26,6 +26,8 @@ export interface DomainSlice {
   workspaceGeneration: number
   domainsStatus: DomainsStatus
   domainsError: string | null
+  /** Workspaces a background refresh found that weren't listed before: someone added you. */
+  addedDomainIds: string[]
   domainActions: {
     fetchDomains: () => Promise<void>
     /**
@@ -36,6 +38,7 @@ export interface DomainSlice {
     setActiveDomain: (id: string) => void
     setActiveDomainByTenantId: (provider: string, tenantId: string) => void
     ensureTenant: (provider: string, tenantId: string) => Promise<void>
+    dismissAddedDomain: (id: string) => void
   }
 }
 
@@ -60,6 +63,11 @@ function nextActiveDomainId(
   return removed ? defaultDomainId(next) : activeId
 }
 
+// Same array when absent, so subscribers selecting the list don't re-render.
+function withoutId(ids: string[], id: string): string[] {
+  return ids.includes(id) ? ids.filter((other) => other !== id) : ids
+}
+
 export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => {
   // Bumped by every list request, so a background result never overwrites a newer foreground one.
   let listRequestSeq = 0
@@ -71,6 +79,7 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
     workspaceGeneration: 0,
     domainsStatus: "idle",
     domainsError: null,
+    addedDomainIds: [],
     domainActions: {
       fetchDomains: async () => {
         listRequestSeq += 1
@@ -110,9 +119,28 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
             if (JSON.stringify(domains) === JSON.stringify(current.domains)) return "fetched"
+            const activeDomainId = nextActiveDomainId(
+              current.domains,
+              domains,
+              current.activeDomainId,
+            )
+            const known = new Set(current.domains.map((d) => d.id))
+            // The active one is already open, e.g. a deep link waiting on this very refresh,
+            // and one without upstream access would only open the lost-access gate.
+            const added = domains
+              .filter((d) => !known.has(d.id) && d.id !== activeDomainId && workspaceHasAccess(d))
+              .map((d) => d.id)
+            const accessible = new Set(domains.filter(workspaceHasAccess).map((d) => d.id))
+            const kept = current.addedDomainIds.filter(
+              (id) => accessible.has(id) && !added.includes(id),
+            )
             set({
               domains,
-              activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
+              activeDomainId,
+              addedDomainIds:
+                added.length === 0 && kept.length === current.addedDomainIds.length
+                  ? current.addedDomainIds
+                  : [...kept, ...added],
             })
             return "fetched"
           })
@@ -124,10 +152,14 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         return revalidation
       },
 
+      dismissAddedDomain: (id: string) => {
+        set({ addedDomainIds: withoutId(get().addedDomainIds, id) })
+      },
+
       setActiveDomain: (id: string) => {
         if (!get().accountSession.isCurrent()) return
         recordWorkspaceUse(id)
-        set({ activeDomainId: id })
+        set({ activeDomainId: id, addedDomainIds: withoutId(get().addedDomainIds, id) })
       },
 
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
