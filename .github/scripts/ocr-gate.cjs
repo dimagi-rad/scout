@@ -23,7 +23,11 @@ function evaluateReview(result, expectedHead, expectedBase, postingFailed) {
   const manifest = result.manifest;
   if (!isObject(manifest) || manifest.schema_version !== 'ocr.run-manifest/v1'
       || manifest.operation !== 'review') return block('Missing or unsupported OCR review manifest.');
-  if (result.status !== 'complete' || manifest.terminal_state !== 'complete' || manifest.run_failure != null) {
+  // OCR filters docs and other non-code paths before selection; with nothing left
+  // it reports a skipped run, which is not a failure (PR #626 was stuck on it).
+  const skipped = result.status === 'skipped' && manifest.terminal_state === 'skipped';
+  if ((!skipped && (result.status !== 'complete' || manifest.terminal_state !== 'complete'))
+      || manifest.run_failure != null) {
     return block('OCR did not complete successfully.');
   }
   if (result.summary?.budget_exceeded) return block('OCR exceeded its token budget.');
@@ -35,6 +39,12 @@ function evaluateReview(result, expectedHead, expectedBase, postingFailed) {
   const sets = ['selected', 'completed', 'reused', 'failed', 'waived'];
   if (!isObject(coverage) || sets.some((key) => !Array.isArray(coverage[key]))) {
     return block('Missing or malformed OCR coverage.');
+  }
+  if (skipped) {
+    if (result.comments.length > 0 || sets.some((key) => coverage[key].length > 0)) {
+      return block('OCR reported a skipped review with findings or coverage.');
+    }
+    return { passed: true, skipped: true, reason: 'OCR selected no reviewable code files in this range.', significant };
   }
   if (coverage.selected.length === 0 || coverage.failed.length > 0 || coverage.waived.length > 0) {
     return block('OCR has unreviewed selected files.');

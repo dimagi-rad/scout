@@ -179,6 +179,51 @@ test('Claude uses a delta only when it previously completed the accepted checkpo
   }
 });
 
+function skipped(h) {
+  h.result.status = 'skipped';
+  h.result.manifest.terminal_state = 'skipped';
+  h.result.manifest.coverage = { selected: [], completed: [], reused: [], failed: [], waived: [] };
+  return h;
+}
+
+test('zero OCR-reviewable files pass the gate and Claude reviews its usual range', async () => {
+  for (const [make, from, mode] of [
+    [() => skipped(harness()), MERGE, 'full'],
+    [() => skipped(incremental(harness({ CLAUDE_HEAD: '' }))), MERGE, 'full'],
+    [() => skipped(incremental(harness({ CLAUDE_HEAD: PRIOR }))), PRIOR, 'incremental'],
+  ]) {
+    const h = make();
+    await finishReview(h);
+    assert.equal(h.outputs.passed, 'true');
+    assert.deepEqual(h.failures, []);
+    assert.equal(h.outputs.claude_mode, mode);
+    assert.equal(h.outputs.claude_from, from);
+    const ocrFrom = h.env.RANGE_MODE === 'checkpoint' ? PRIOR : MERGE;
+    assert.ok(h.outputs.claude_scope.includes(`range ${ocrFrom}..${HEAD}, so no OCR review covers those changes`));
+    assert.match(h.summary, /OCR gate: passed[\s\S]*no reviewable code files[\s\S]*cover every changed file/);
+    assert.equal(readState(h.comments).passed, true);
+  }
+  const h = harness();
+  await finishReview(h);
+  assert.equal(h.outputs.claude_scope, '');
+});
+
+test('zero OCR-reviewable files block fork PRs, which get no Claude review', async () => {
+  const h = skipped(harness({ SAME_REPO: 'false' }));
+  await finishReview(h);
+  assert.equal(h.outputs.passed, 'false');
+  assert.equal(h.failures.length, 1);
+  assert.equal(h.outputs.claude_scope, '');
+  assert.match(h.summary, /OCR gate: blocked[\s\S]*disabled for fork PRs[\s\S]*maintainer review/);
+  assert.equal(readState(h.comments).passed, false);
+});
+
+test('the Claude prompt carries the gate scope note', () => {
+  const workflow = require('node:fs').readFileSync(path.join(__dirname, '../workflows/ocr.yml'), 'utf8');
+  const claude = workflow.split(/      - name: /).find(step => step.startsWith('Run Claude review'));
+  assert.match(claude, /\$\{\{ steps\.gate\.outputs\.claude_scope \}\}/);
+});
+
 test('prepare snapshots every trusted script and fingerprints changes to each policy file', async () => {
   const original = harness(); await prepareReview(original);
   assert.match(original.outputs.policy, /^[a-f0-9]{64}$/);

@@ -7,6 +7,7 @@ OCR posts actionable inline findings, routes low-severity findings to its sticky
 - **High or critical findings:** block Claude; address the findings and push again.
 - **Low or medium findings only:** allow Claude to run.
 - **Failed, partial, budget-limited, waived-file, malformed or unclassified results:** block Claude until a complete review can establish the outcome.
+- **No OCR-reviewable files** (OCR filters out Markdown and other non-code paths, so a docs-only PR selects nothing): OCR reports a skipped run with empty coverage. The gate passes it, and Claude reviews its usual range (the whole PR unless it completed the accepted checkpoint), told that no OCR review covers the skipped range. A skipped run with any finding, coverage entry, failure or mismatched range still blocks. On fork PRs, which get no Claude follow-up, it blocks instead of reporting a review that never happened.
 - **Fork PRs:** receive OCR feedback; automatic Claude follow-up is disabled.
 
 The first review covers the full PR. After a complete review passes the gate, the next push can review only changes since that accepted head. The gate validates both ends of that range, the originating workflow run and Git ancestry. Duplicate-comment suppression is separate from incremental review: it reduces noise, not the amount of code reviewed.

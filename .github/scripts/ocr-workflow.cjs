@@ -190,6 +190,12 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
     from = '';
     decision = { passed: false, reason: 'OCR output could not be validated. See the run logs and review artifacts.' };
   }
+  // With no OCR-reviewable files in the range, only Claude reviews it. Fork PRs get
+  // no Claude follow-up, so passing there would report a review nobody performed.
+  const claudeOnly = decision.passed && decision.skipped === true;
+  if (claudeOnly && env.SAME_REPO !== 'true') {
+    decision = { passed: false, reason: 'OCR selected no reviewable code files, and the Claude review that would cover them is disabled for fork PRs.' };
+  }
   await currentPR(github, context, env);
   const comments = await commentsFor(github, context, env.PR_NUMBER);
   const previousComments = comments.filter(trustedComment);
@@ -202,9 +208,19 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
     && env.CLAUDE_HEAD === from;
   core.setOutput('claude_from', claudeIncremental ? from : mergeBase);
   core.setOutput('claude_mode', claudeIncremental ? 'incremental' : 'full');
-  const followup = decision.passed
-    ? (env.SAME_REPO === 'true' ? 'Claude review will run next.' : 'Claude follow-up is disabled for fork PRs.')
-    : 'Claude review was skipped. Fix significant findings or resolve the review error, then push an update or comment `@ocr`.';
+  core.setOutput('claude_scope', claudeOnly && decision.passed
+    ? `OCR selected no reviewable code files in its range ${from}..${env.REVIEW_HEAD}, so no OCR review covers those changes. Review every changed file in your range, including documentation accuracy against the code it describes.`
+    : '');
+  let followup;
+  if (decision.passed) {
+    followup = env.SAME_REPO === 'true'
+      ? (claudeOnly ? 'OCR reviewed no files in this range; Claude review will run next and cover every changed file in its range.' : 'Claude review will run next.')
+      : 'Claude follow-up is disabled for fork PRs.';
+  } else if (claudeOnly) {
+    followup = 'This PR needs a maintainer review instead.';
+  } else {
+    followup = 'Claude review was skipped. Fix significant findings or resolve the review error, then push an update or comment `@ocr`.';
+  }
   let grouping = '';
   try {
     if (fs.readFileSync('/tmp/ocr-stderr.log', 'utf8').includes('falling back to per-file dispatch')) {
