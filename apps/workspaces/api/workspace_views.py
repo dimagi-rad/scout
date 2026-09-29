@@ -83,7 +83,10 @@ from apps.workspaces.services.status import (
     classify_tenant_schemas,
     workspace_schema_status,
 )
-from apps.workspaces.services.workspace_service import remove_workspace_tenant
+from apps.workspaces.services.workspace_service import (
+    load_new_workspace,
+    remove_workspace_tenant,
+)
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -626,6 +629,7 @@ class WorkspaceListView(APIView):
                 user=request.user,
                 role=WorkspaceRole.MANAGE,
             )
+            load_new_workspace(workspace, actor_id=request.user.id)
         tenants = [
             {
                 "id": str(tenant.id),
