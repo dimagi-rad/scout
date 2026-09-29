@@ -127,7 +127,7 @@ jobs:
         timeout-minutes: 10
         run: |
           total=1 failed=0 kamal_failed=0 kamal_total=0
-          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o StrictHostKeyChecking=accept-new \
             "scout@$SCOUT_EC2_IP" bash -s -- prune-workers < scripts/host-disk-guard.sh \
             || { failed=$((failed + 1)); echo "::warning title=Prune failed::Worker container prune failed."; }
           # Same service-wide prune `kamal deploy` runs after a successful deploy.
@@ -154,7 +154,7 @@ jobs:
       - name: Check host disk space
         timeout-minutes: 2
         run: |
-          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o StrictHostKeyChecking=accept-new \
             "scout@$SCOUT_EC2_IP" bash -s -- check "$HOST_MIN_FREE_GB" < scripts/host-disk-guard.sh
 
       # Role-specific Kamal builds retain the correct service labels without
@@ -175,7 +175,7 @@ jobs:
         id: drain_workers
         timeout-minutes: 12
         run: |
-          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o StrictHostKeyChecking=accept-new \
             "scout@$SCOUT_EC2_IP" bash -s -- staging 600 < scripts/drain-workers.sh
 
       - name: Deploy API

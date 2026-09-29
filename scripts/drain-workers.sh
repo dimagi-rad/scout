@@ -191,6 +191,8 @@ while IFS= read -r candidate; do
 done <<< "$snapshot"
 
 deadline=$((SECONDS + drain_timeout))
+# Idle SSH sessions and proxies drop connections that stay silent for minutes.
+next_progress=$((SECONDS + 30))
 for index in "${!targets[@]}"; do
   inspect_worker "${targets[$index]}"
   validate_process "${starts[$index]}"
@@ -269,6 +271,10 @@ while :; do
   fi
   if (( SECONDS >= deadline )); then
     fail "Graceful worker drain timed out; inspect pending receipts in $receipt_directory. In-flight jobs may still finish; queued jobs wait."
+  fi
+  if (( SECONDS >= next_progress )); then
+    echo "still draining: $remaining workers running ($((deadline - SECONDS))s left)"
+    next_progress=$((SECONDS + 30))
   fi
   sleep 1
 done
