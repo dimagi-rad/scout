@@ -62,6 +62,8 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             # metric; failing here would take every cube in the workspace down.
             hidden = exc.reference in known_references
             reference = exc.reference[:200]
+            # Catalog refresh hides dropped source columns rather than deleting them.
+            state = "hidden or no longer in the source" if hidden else "not in the semantic catalog"
             logger.warning(
                 "Skipping relationship %s referencing %s member %s",
                 relationship.id,
@@ -79,8 +81,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
                     "relationship": relationship.name,
                     "message": (
                         f"Relationship '{relationship.name}' was not published: it references "
-                        f"'{reference}', which is "
-                        f"{'hidden' if hidden else 'not in the semantic catalog'}."
+                        f"'{reference}', which is {state}."
                     ),
                 }
             )
