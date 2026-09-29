@@ -1387,6 +1387,109 @@ def test_manifest_less_story_with_non_string_granularity_is_an_invalid_query(
     assert "query_granularity" in [item["kind"] for item in entry["unresolved_references"]]
 
 
+def _set_block_type(doc, value):
+    doc["blocks"][2]["type"] = value
+
+
+def _set_date_default(doc, value):
+    doc["blocks"][0]["config"]["default"] = value
+
+
+def _set_default_comparison(doc, value):
+    doc["blocks"].insert(
+        0, {"id": "period", "type": "period_selector", "config": {"default_comparison": value}}
+    )
+
+
+def _set_chart_type(doc, value):
+    doc["blocks"][2]["config"]["chart_type"] = value
+
+
+def _set_series_color(doc, value):
+    doc["blocks"][2]["config"]["series"] = [{"key": "visits_count", "color": value}]
+
+
+def _set_style_value(doc, value):
+    doc["blocks"][2]["config"]["style"] = {"legend": value}
+
+
+def _set_recharts_type(doc, value):
+    config = doc["blocks"][2]["config"]
+    for key in ("chart_type", "x_key", "series"):
+        config.pop(key)
+    config["recharts"] = {"type": value, "props": {"stroke": "var(--chart-1)"}}
+
+
+def _set_granularity(doc, value):
+    doc["blocks"][1]["config"]["queries"]["visits_by_day"]["granularity"] = value
+
+
+WRONG_TYPED_FIELDS = {
+    "block_type": (_set_block_type, "unknown_block_type"),
+    "date_default": (_set_date_default, "date_preset"),
+    "default_comparison": (_set_default_comparison, "date_comparison"),
+    "chart_type": (_set_chart_type, "graph_chart_type"),
+    "series_color": (_set_series_color, "recharts_color"),
+    "style_value": (_set_style_value, "config_value"),
+    "recharts_type": (_set_recharts_type, "recharts_type"),
+    "granularity": (_set_granularity, "query_granularity"),
+}
+# query-data resolves date bindings first and rejects these with its handled 400, as it
+# would an unsupported preset string.
+UNRESOLVABLE_DATE_BINDING_FIELDS = {"block_type", "date_default"}
+WRONG_TYPED_VALUES = pytest.mark.parametrize(
+    "value", [["line"], {"kind": "line"}], ids=["list", "object"]
+)
+
+
+@WRONG_TYPED_VALUES
+@pytest.mark.parametrize("field", WRONG_TYPED_FIELDS)
+def test_validate_doc_reports_a_wrong_typed_enum_value(field, value):
+    doc = graph_doc()
+    mutate, code = WRONG_TYPED_FIELDS[field]
+    mutate(doc, value)
+
+    assert code in [item["code"] for item in validate_doc(doc)]
+
+
+@pytest.mark.django_db(transaction=True)
+@WRONG_TYPED_VALUES
+@pytest.mark.parametrize("field", WRONG_TYPED_FIELDS)
+@pytest.mark.parametrize("endpoint", ["data", "query-data"])
+def test_stored_story_with_a_wrong_typed_enum_value_still_reads(
+    workspace, member_user, endpoint, field, value
+):
+    doc = graph_doc()
+    WRONG_TYPED_FIELDS[field][0](doc, value)
+    artifact = Artifact.objects.create(
+        workspace=workspace,
+        created_by=member_user,
+        title="Legacy",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    client = Client()
+    client.force_login(member_user)
+
+    async def execute(_workspace, query, **kwargs):
+        return {"columns": ["visits_count"], "rows": [[3]], "row_count": 1, "semantic_query": query}
+
+    with (
+        patch("apps.artifacts.views.run_semantic_query", side_effect=execute),
+        patch(
+            "apps.artifacts.views._current_artifact_data_state",
+            new=AsyncMock(return_value={"queryable": True, "status": "ready"}),
+        ),
+    ):
+        response = client.get(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/{endpoint}/")
+
+    if endpoint == "query-data" and field in UNRESOLVABLE_DATE_BINDING_FIELDS:
+        assert response.status_code == 400, response.content
+        assert response.json()["error"].startswith("Invalid artifact date context")
+    else:
+        assert response.status_code == 200, response.content
+
+
 @pytest.mark.django_db(transaction=True)
 def test_recovery_post_persists_the_missing_manifest(workspace, member_user):
     artifact = _manifest_less_story(workspace, member_user)
