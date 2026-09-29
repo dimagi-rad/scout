@@ -429,9 +429,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         case 'svg':
                             this.renderSVG(artifact);
                             break;
-                        case 'story':
-                            this.renderStory(artifact);
-                            break;
                         default:
                             this.showError('Unknown artifact type', `Type "${artifact.type}" is not supported.`);
                     }
@@ -673,66 +670,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 } catch (error) {
                     this.showError('SVG Render Error', error.message, error.stack, error.name);
                 }
-            },
-
-            renderStory(artifact) {
-                const storyDoc = artifact.data && artifact.data.story_doc;
-                if (!storyDoc || !Array.isArray(storyDoc.blocks)) {
-                    this.showError('Story Not Found', 'This story artifact has no story_doc.blocks payload.');
-                    return;
-                }
-
-                const visibleBlocks = storyDoc.blocks.filter(block => !block.hidden);
-                this.container.innerHTML = `
-                    <article class="story-root" style="font-family: system-ui, -apple-system, sans-serif; color: #111827; max-width: 960px; margin: 0 auto;">
-                        ${visibleBlocks.map(block => this.renderStoryBlock(block, artifact.data || {})).join('')}
-                    </article>
-                `;
-            },
-
-            renderStoryBlock(block, data) {
-                const config = block.config || {};
-                if (block.type === 'markdown') {
-                    const body = config.body || '';
-                    return `<section style="margin-bottom: 20px;" data-block-id="${this.escapeHtml(block.id || '')}">${marked.parse(body)}</section>`;
-                }
-                if (block.type === 'stat') {
-                    const queryName = config.query;
-                    const rows = Array.isArray(data[queryName]) ? data[queryName] : [];
-                    const field = config.field;
-                    const value = rows[0] && field ? rows[0][field] : config.value;
-                    return `
-                        <section style="margin-bottom: 16px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;" data-block-id="${this.escapeHtml(block.id || '')}">
-                            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: .04em;">${this.escapeHtml(config.label || block.id || 'Metric')}</div>
-                            <div style="font-size: 32px; font-weight: 700; margin-top: 4px;">${this.escapeHtml(value == null ? '—' : String(value))}</div>
-                        </section>
-                    `;
-                }
-                if (block.type === 'table') {
-                    const queryName = config.query;
-                    const rows = Array.isArray(data[queryName]) ? data[queryName] : [];
-                    const columns = config.columns || (rows[0] ? Object.keys(rows[0]) : []);
-                    return `
-                        <section style="margin-bottom: 20px;" data-block-id="${this.escapeHtml(block.id || '')}">
-                            ${config.title ? `<h2 style="font-size: 18px; margin: 0 0 8px;">${this.escapeHtml(config.title)}</h2>` : ''}
-                            <div style="overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px;">
-                                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                                    <thead style="background: #f9fafb;">
-                                        <tr>${columns.map(col => `<th style="text-align: left; padding: 8px; border-bottom: 1px solid #e5e7eb;">${this.escapeHtml(String(col))}</th>`).join('')}</tr>
-                                    </thead>
-                                    <tbody>
-                                        ${rows.map(row => `<tr>${columns.map(col => `<td style="padding: 8px; border-bottom: 1px solid #f3f4f6;">${this.escapeHtml(row[col] == null ? '' : String(row[col]))}</td>`).join('')}</tr>`).join('')}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </section>
-                    `;
-                }
-                return `
-                    <section style="margin-bottom: 16px; color: #6b7280;" data-block-id="${this.escapeHtml(block.id || '')}">
-                        Unsupported story block: ${this.escapeHtml(block.type || 'unknown')}
-                    </section>
-                `;
             },
 
             hideLoading() {
