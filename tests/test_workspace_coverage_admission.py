@@ -231,8 +231,10 @@ class TestSourceAdd:
         httpx_mock.add_response(url=COMMCARE_DOMAIN_API, json=_domains(t2))
         client.force_login(user)
 
-        self._post(client, ws, t2)
+        resp = self._post(client, ws, t2)
 
+        assert resp.status_code == 202
+        assert WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
         assert TenantMembership.objects.filter(user=bob, tenant=t1).exists()
         assert TenantMembership.objects.filter(user=bob, tenant=t2).exists()
 
