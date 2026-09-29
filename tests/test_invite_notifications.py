@@ -491,6 +491,14 @@ class TestMemberRemovedEmail:
         assert resp.status_code == 204
         assert not WorkspaceMembership.objects.filter(pk=target.pk).exists()
 
+    def test_email_less_member_is_skipped(self, workspace, user, mocker):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        nameless = User.objects.create_user(email=None, password="pass")
+
+        invite_notifications.notify_member_removed(workspace, nameless, user)
+
+        mock_task.defer.assert_not_called()
+
 
 class TestInviteRevokedEmail:
     """#382: an invitee whose invite is revoked is told, since the invite or
