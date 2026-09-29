@@ -118,26 +118,31 @@ async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
     return [
         (token.account, token.token)
         for token in await aiter_social_tokens(user, provider)
-        if token.token and not (token.expires_at and token.expires_at <= now)
+        if _usable_as_is(token, now)
     ]
+
+
+def _usable_as_is(token, now) -> bool:
+    return bool(token.token) and not (token.expires_at and token.expires_at <= now)
 
 
 async def _arenewed_access_tokens(user, provider) -> tuple[list[tuple], bool]:
     """``(pairs, failed)``: *user*'s tokens, renewing any that need it.
 
-    Only for the user a request names (G2): a refresh failure there follows from
-    their own add. A transient one records nothing (#596) and sets ``failed``; a
-    rejected grant has marked the credential for reconnect, so it is just dropped.
+    Only for the user a request names (G2). They did not start the request, so a
+    failed renewal records nothing on their credential (G1). A token that isn't
+    renewed is used as it stands while unexpired; ``failed`` is set only when a
+    transient failure leaves nothing to use.
     """
     token_url = get_token_url(provider)
+    now = timezone.now()
     pairs, failed = [], False
     for token in await aiter_social_tokens(user, provider):
+        stored = (token.account, token.token) if _usable_as_is(token, now) else None
         can_refresh = bool(token_url and token.token_secret and token.app)
-        if not token_needs_refresh(token.expires_at, can_refresh=can_refresh):
-            if token.token:
-                pairs.append((token.account, token.token))
-            continue
-        if not can_refresh:
+        if not can_refresh or not token_needs_refresh(token.expires_at):
+            if stored:
+                pairs.append(stored)
             continue
         try:
             # Bounded by its own timeouts, never cancelled: cancelling between the
@@ -147,11 +152,13 @@ async def _arenewed_access_tokens(user, provider) -> tuple[list[tuple], bool]:
                 token_url,
                 request_timeout=SHARE_REFRESH_TIMEOUT,
                 db_timeout=INTERACTIVE_DB_DEADLINE,
+                record_failure=False,
             )
-        except TokenRefreshUnavailable:
-            failed = True
-            continue
-        except TokenRefreshError:
+        except TokenRefreshError as error:
+            if stored:
+                pairs.append(stored)
+            elif isinstance(error, TokenRefreshUnavailable):
+                failed = True
             continue
         pairs.append((token.account, access_token))
     return pairs, failed
