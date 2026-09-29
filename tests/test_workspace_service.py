@@ -2,6 +2,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from django.db import transaction
 from django.utils import timezone
 
 from apps.users.models import Tenant, TenantMembership
@@ -11,6 +12,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.schema_manager import fail_view_schema_if_unbuildable
 from apps.workspaces.services.tenant_coverage import coverage_complete, coverage_warning
 from apps.workspaces.services.workspace_service import (
     LastWorkspaceTenant,
@@ -405,6 +407,15 @@ def test_removing_a_source_when_nothing_is_served_creates_the_failed_row(
         "included_tenants": [],
         "excluded_tenants": [_entry(tenant), _entry(tenant2)],
     }
+
+
+@pytest.mark.django_db
+def test_a_single_source_workspace_gets_no_view_row(workspace):
+    """One source is served from its own schema; a view row would be an orphan."""
+    with transaction.atomic():
+        assert fail_view_schema_if_unbuildable(workspace) is True
+
+    assert not WorkspaceViewSchema.objects.filter(workspace=workspace).exists()
 
 
 @pytest.mark.parametrize("retired", [SchemaState.TEARDOWN, SchemaState.EXPIRED])

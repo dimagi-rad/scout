@@ -229,6 +229,9 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
                 vs.state = SchemaState.TEARDOWN
                 vs.save(update_fields=["state"])
                 teardown_view_schema_task.defer(view_schema_id=str(vs.id))
+        # When nothing is served, views over the removed source stay physically
+        # until a load rebuilds them or that source's retirement retry drops them;
+        # a FAILED row is never served, so they are unreadable meanwhile.
         elif not fail_view_schema_if_unbuildable(workspace):
             WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                 state=SchemaState.PROVISIONING

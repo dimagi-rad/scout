@@ -124,22 +124,12 @@ def _served_sources(tenant_ids):
     return TenantSchema.objects.filter(tenant_id__in=tenant_ids, state=SchemaState.ACTIVE)
 
 
-def view_schema_buildable(workspace_id) -> bool:
+async def aview_schema_buildable(workspace_id) -> bool:
     """Whether a view rebuild for this workspace can publish anything.
 
     A single source is served from its own schema, and with no source served at
     all the build can only fail with NoActiveTenantSchema, so queueing it is noise.
     """
-    tenant_ids = list(
-        WorkspaceTenant.objects.filter(workspace_id=workspace_id).values_list(
-            "tenant_id", flat=True
-        )
-    )
-    return len(tenant_ids) > 1 and _served_sources(tenant_ids).exists()
-
-
-async def aview_schema_buildable(workspace_id) -> bool:
-    """Async twin of :func:`view_schema_buildable`."""
     tenant_ids = [
         tenant_id
         async for tenant_id in WorkspaceTenant.objects.filter(
@@ -150,23 +140,27 @@ async def aview_schema_buildable(workspace_id) -> bool:
 
 
 def fail_view_schema_if_unbuildable(workspace) -> bool:
-    """Record what a rebuild with no served source would; True when it did.
+    """True when no view rebuild should be queued, having recorded why.
 
-    For callers deciding whether to queue a rebuild, inside their transaction.
-    The row is locked before the check, as a build publishing ACTIVE holds that
-    lock, so a build that just succeeded is never overwritten with FAILED. Writes
-    the build's own FAILED state, ``last_error`` and coverage, creating the row
-    as the build would: the dependent-rebuild fan-out only reaches workspaces
-    with a row, and it is what rebuilds these views once any source loads.
-    A retired row keeps its lifecycle state (see SchemaManager._save_build_failure).
+    For callers deciding whether to queue a rebuild, inside their transaction. A
+    workspace with fewer than two sources has no views to build and nothing is
+    written. With no served source this writes the build's own FAILED state,
+    ``last_error`` and coverage, creating the row as the build would: the
+    dependent-rebuild fan-out only reaches workspaces with a row, and it is what
+    rebuilds these views once any source loads. The row is locked before the
+    check, as a build publishing ACTIVE holds that lock, so a build that just
+    succeeded is never overwritten with FAILED. A retired row keeps its lifecycle
+    state (see SchemaManager._save_build_failure).
     """
     existing = WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace).first()
-    if view_schema_buildable(workspace.id):
-        return False
     tenants = sorted(
         workspace.tenants.all(),
         key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
     )
+    if len(tenants) < 2:
+        return True
+    if _served_sources([t.id for t in tenants]).exists():
+        return False
     failure = {
         "state": SchemaState.FAILED,
         "last_error": str(NoActiveTenantSchema(workspace.id))[:500],

@@ -98,10 +98,12 @@ async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace, t
         state=SchemaState.EXPIRED
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"):
         result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
 
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    task_records = [r for r in caplog.records if r.name == "apps.workspaces.tasks"]
+    assert any("Cannot build view schema" in r.getMessage() for r in task_records)
+    assert not [r for r in task_records if r.levelno >= logging.ERROR]
     vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
     assert vs.state == SchemaState.FAILED
     assert "has no active schema for any tenant" in vs.last_error
