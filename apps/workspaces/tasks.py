@@ -2434,6 +2434,12 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                 result = await rebuild_workspace_view_schema.func(
                     str(recovery.workspace_id), revive_retired=True
                 )
+            elif (
+                recovery.recovery_type == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD
+                and surface.get("semantic_status") == "stale"
+            ):
+                # The catalog still serves but its latest build failed; chat asks for this (#714).
+                result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))
             elif surface["status"] == "ready":
                 result = {"status": "already_recovered"}
             else:
