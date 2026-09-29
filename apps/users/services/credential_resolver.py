@@ -12,6 +12,7 @@ from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import (
     is_active_identity,
     oauth_membership_scope_mismatch,
+    ocs_scope_unusable,
     provider_accounts,
 )
 from apps.users.services.token_refresh import (
@@ -186,9 +187,13 @@ async def aconnection_status(conn) -> str:
 
     Renewable credentials need no user action unless their last renewal failed.
     Failure fingerprints prevent an old credential's error poisoning a reconnect.
+    ``needs_team`` marks a team-less OCS connection that can reach no data however
+    healthy its token is (#379): the fix is removing it and connecting a team.
     """
     if conn.credential_type != TenantConnection.OAUTH:
         return "unknown"
+    if ocs_scope_unusable(conn.provider, conn.scope_key):
+        return "needs_team"
     token_obj = await aget_connection_token(conn)
     if token_obj is None:
         return "expired"

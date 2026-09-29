@@ -970,6 +970,63 @@ async def test_provider_and_connection_health_agree_after_refresh(user, httpx_mo
     assert (await client.get("/api/auth/connections/")).json()[0]["status"] == "connected"
 
 
+@pytest.mark.parametrize(("all_of", "status"), [(True, "needs_team"), (False, "connected")])
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teamless_identity_needs_reconnect_under_all_of(user, settings, all_of, status):
+    """Under all-of a team-less identity discovers nothing (#379), so both health
+    surfaces must say it needs a team rather than show a healthy connection or claim
+    a valid token expired."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = all_of
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    site, _ = await Site.objects.aget_or_create(
+        id=1, defaults={"domain": "testserver", "name": "test"}
+    )
+    await app.sites.aadd(site)
+    account = await SocialAccount.objects.acreate(user=user, provider="ocs", uid="42")
+    await SocialToken.objects.acreate(
+        account=account, app=app, token="t", expires_at=timezone.now() + timedelta(hours=5)
+    )
+    await TenantConnection.objects.acreate(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH, social_account=account
+    )
+
+    client = await _login(user)
+    providers = (await client.get("/api/auth/providers/")).json()["providers"]
+    assert providers[0]["status"] == status
+    assert (await client.get("/api/auth/connections/")).json()[0]["status"] == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_legacy_teamless_identity_beside_a_team_keeps_the_provider_connected(user):
+    """What the #379 cleanup leaves: only the legacy connection is flagged, so the
+    provider keeps "Connect another team" and "Disconnect all"."""
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    site, _ = await Site.objects.aget_or_create(
+        id=1, defaults={"domain": "testserver", "name": "test"}
+    )
+    await app.sites.aadd(site)
+    await _aocs_identity(user, team="acme", token="team-tok", app=app)
+    legacy = await SocialAccount.objects.acreate(user=user, provider="ocs", uid="42")
+    await SocialToken.objects.acreate(
+        account=legacy, app=app, token="t", expires_at=timezone.now() + timedelta(hours=5)
+    )
+    await TenantConnection.objects.acreate(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH, social_account=legacy
+    )
+
+    client = await _login(user)
+    providers = (await client.get("/api/auth/providers/")).json()["providers"]
+    connections = (await client.get("/api/auth/connections/")).json()
+
+    assert providers[0]["status"] == "connected"
+    assert {c["scope_key"]: c["status"] for c in connections} == {
+        "acme": "connected",
+        "": "needs_team",
+    }
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_failed_refresh_is_expired_on_both_health_surfaces(user, httpx_mock):

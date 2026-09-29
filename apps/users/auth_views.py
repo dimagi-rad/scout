@@ -23,8 +23,10 @@ from apps.users.models import (
 from apps.users.rate_limiting import check_rate_limit, record_attempt
 from apps.users.services.credential_resolver import aiter_fresh_access_tokens
 from apps.users.services.oauth_scope import (
+    account_scope,
     canonical_provider,
     is_active_identity,
+    ocs_scope_unusable,
     provider_accounts,
 )
 from apps.users.services.tenant_resolution import (
@@ -265,7 +267,7 @@ def providers_view(request):
     apps = SocialApp.objects.filter(sites=current_site).order_by("provider")
 
     connected_providers = set()
-    token_status = {}  # provider -> "connected" | "expired"
+    token_status = {}  # provider -> "connected" | "expired" | "needs_team"
     if request.user.is_authenticated:
         connected_providers = set(
             SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
@@ -289,6 +291,10 @@ def providers_view(request):
             if not is_active_identity(social_token.account, bindings):
                 continue
             provider = social_token.account.provider
+            # Not a healthy connection: it can reach no data sources (#379).
+            if ocs_scope_unusable(provider, account_scope(social_token.account)):
+                _record_status(seen_statuses, provider, "needs_team")
+                continue
             token_url = get_token_url(provider)
             can_refresh = bool(token_url and social_token.token_secret and social_token.app)
             refresh_failed = False
@@ -312,7 +318,9 @@ def providers_view(request):
                 token_health(social_token, provider, refresh_failed=refresh_failed),
             )
         token_status = {
-            provider: ("connected" if "connected" in statuses else "expired")
+            provider: next(
+                (s for s in ("connected", "expired", "needs_team") if s in statuses), "expired"
+            )
             for provider, statuses in seen_statuses.items()
         }
 

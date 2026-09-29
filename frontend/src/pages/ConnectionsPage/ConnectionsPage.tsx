@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { api } from "@/api/client"
-import { BASE_PATH } from "@/config"
 import { CONNECTIONS_PATH } from "@/lib/routes"
+import { oauthConnectUrl, type OAuthProvider, type OAuthProviderStatus } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -14,16 +14,6 @@ import {
   ApiConnectionDialog,
   type ApiKeyConnection,
 } from "@/components/ApiConnectionDialog"
-
-interface OAuthProvider {
-  id: string
-  name: string
-  login_url: string
-  connected: boolean
-  status?: "connected" | "expired" | "disconnected" | null
-  /** True when one token covers one scope (an OCS team), so several can coexist. */
-  supports_multiple_scopes?: boolean
-}
 
 const providerBadgeStyles: Record<string, string> = {
   commcare: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
@@ -53,8 +43,29 @@ function teamLabelFor(conn: ApiKeyConnection): string {
   return named?.team_name || conn.provider
 }
 
+const WARNING_BADGE =
+  "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
+
+/** Status line and connect-button label per provider status. */
+const PROVIDER_STATUS_COPY: Partial<
+  Record<OAuthProviderStatus, { label: string; action: string; warn: boolean }>
+> = {
+  connected: { label: "Connected", action: "Connect", warn: false },
+  expired: { label: "Connection expired", action: "Reconnect", warn: true },
+  needs_team: { label: "No team selected", action: "Connect a team", warn: true },
+}
+const NOT_CONNECTED = { label: "Not connected", action: "Connect", warn: false }
+
+/** Badges for connections that need the user to act, keyed by status. */
+const CONNECTION_STATUS_BADGE: Partial<
+  Record<NonNullable<ApiKeyConnection["status"]>, { label: string; testId: string }>
+> = {
+  expired: { label: "Reconnect needed", testId: "connection-expired" },
+  needs_team: { label: "No team: remove it and connect a team", testId: "connection-needs-team" },
+}
+
 function connectUrlFor(provider: OAuthProvider): string {
-  return `${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}${CONNECTIONS_PATH}`
+  return oauthConnectUrl(provider, CONNECTIONS_PATH)
 }
 
 type DialogState =
@@ -210,63 +221,58 @@ export function ConnectionsPage() {
         ) : providers.length === 0 ? (
           <p className="text-sm text-muted-foreground">No OAuth providers configured.</p>
         ) : (
-          providers.map((provider) => (
-            <Card key={provider.id}>
-              <CardContent className="flex items-center justify-between p-4">
-                <div>
-                  <p className="font-medium">{provider.name}</p>
-                  <p
-                    className={`text-sm ${
-                      provider.status === "expired"
-                        ? "text-amber-600"
-                        : "text-muted-foreground"
-                    }`}
-                  >
-                    {provider.status === "connected"
-                      ? "Connected"
-                      : provider.status === "expired"
-                        ? "Connection expired"
-                        : "Not connected"}
-                  </p>
-                </div>
-                <div className="flex shrink-0 gap-2">
-                  {provider.status === "connected" &&
-                    provider.supports_multiple_scopes && (
+          providers.map((provider) => {
+            const copy = (provider.status && PROVIDER_STATUS_COPY[provider.status]) || NOT_CONNECTED
+            // A team-less sign-in's token is live, so it must stay disconnectable (#379).
+            const canDisconnect =
+              provider.status === "connected" || provider.status === "needs_team"
+            return (
+              <Card key={provider.id}>
+                <CardContent className="flex items-center justify-between p-4">
+                  <div>
+                    <p className="font-medium">{provider.name}</p>
+                    <p className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}>
+                      {copy.label}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    {provider.status === "connected" &&
+                      provider.supports_multiple_scopes && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          asChild
+                          data-testid={`connect-another-${provider.id}`}
+                        >
+                          <a href={connectUrlFor(provider)}>Connect another team</a>
+                        </Button>
+                      )}
+                    {provider.status !== "connected" && (
                       <Button
                         variant="outline"
                         size="sm"
                         asChild
-                        data-testid={`connect-another-${provider.id}`}
+                        data-testid={`connect-${provider.id}`}
                       >
-                        <a href={connectUrlFor(provider)}>Connect another team</a>
+                        <a href={connectUrlFor(provider)}>{copy.action}</a>
                       </Button>
                     )}
-                  {provider.status === "connected" ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleDisconnect(provider.id)}
-                      disabled={disconnecting === provider.id}
-                      data-testid={`disconnect-${provider.id}`}
-                    >
-                      {disconnecting === provider.id ? "Disconnecting..." : "Disconnect all"}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      asChild
-                      data-testid={`connect-${provider.id}`}
-                    >
-                      <a href={connectUrlFor(provider)}>
-                        {provider.status === "expired" ? "Reconnect" : "Connect"}
-                      </a>
-                    </Button>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          ))
+                    {canDisconnect && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDisconnect(provider.id)}
+                        disabled={disconnecting === provider.id}
+                        data-testid={`disconnect-${provider.id}`}
+                      >
+                        {disconnecting === provider.id ? "Disconnecting..." : "Disconnect all"}
+                      </Button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })
         )}
       </section>
 
@@ -314,6 +320,7 @@ export function ConnectionsPage() {
                   const isApiKey = conn.credential_type === "api_key"
                   const isConfirming = confirmRemoveId === conn.connection_id
                   const teamLabel = teamLabelFor(conn)
+                  const statusBadge = conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined
 
                   return (
                     <Card
@@ -336,13 +343,13 @@ export function ConnectionsPage() {
                               <Badge variant="secondary">
                                 {isApiKey ? "API Key" : "OAuth"}
                               </Badge>
-                              {conn.status === "expired" && (
+                              {statusBadge && (
                                 <Badge
                                   variant="secondary"
-                                  className="bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
-                                  data-testid={`connection-expired-${conn.connection_id}`}
+                                  className={WARNING_BADGE}
+                                  data-testid={`${statusBadge.testId}-${conn.connection_id}`}
                                 >
-                                  Reconnect needed
+                                  {statusBadge.label}
                                 </Badge>
                               )}
                             </div>

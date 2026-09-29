@@ -7,12 +7,7 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useEmbedParams } from "@/hooks/useEmbedParams"
 import { BASE_PATH } from "@/config"
-
-interface OAuthProvider {
-  id: string
-  name: string
-  login_url: string
-}
+import type { OAuthProvider } from "@/lib/oauth"
 
 export function LoginForm() {
   const [email, setEmail] = useState("")

@@ -730,7 +730,7 @@ class TestProvidersEndpoint:
         a data loader; GitHub has no token endpoint and is never used that way.
         Reporting it "expired" would be unclearable — reconnecting re-stores
         ``expires_at=None`` — and would hide the Disconnect button, which the
-        Connections page only renders for "connected".
+        Connections page renders only for "connected" and "needs_team".
         """
         account = SocialAccount.objects.create(user=user, provider="github", uid="gh-1")
         SocialToken.objects.create(
@@ -745,7 +745,7 @@ class TestProvidersEndpoint:
         """The inverse: a provider Scout DOES load data with must fail closed."""
         ocs_app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
         ocs_app.sites.add(site)
-        account = SocialAccount.objects.create(user=user, provider="ocs", uid="ocs-1")
+        account = SocialAccount.objects.create(user=user, provider="ocs", uid="ocs-1#acme")
         SocialToken.objects.create(
             app=ocs_app, account=account, token="tok", token_secret="", expires_at=None
         )
