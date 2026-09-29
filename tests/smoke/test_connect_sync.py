@@ -150,6 +150,9 @@ class TestConnectSync:
         tm = _get_or_create_membership(user, opp_id)
         return tm
 
+    # Waits on a human OAuth flow and a live sync sized by the opportunity, so the
+    # suite-wide 300s per-test cap in pyproject.toml would kill it mid-pipeline.
+    @pytest.mark.timeout(0)
     def test_full_pipeline(self, connect_opportunity_id, scout_base_url):
         """Run the full Connect sync pipeline for one opportunity."""
         from mcp_server.pipeline_registry import get_registry
