@@ -140,7 +140,7 @@ def _table_knowledge_references(row: TableKnowledge, catalog: _Catalog) -> list[
     relations = [r for r in row.related_tables or [] if isinstance(r, dict | str)]
     related = [r.get("table") if isinstance(r, dict) else r for r in relations]
     references += [catalog.table(name) for name in _names(related)]
-    # Every text field KnowledgeRetriever renders; use_cases never reaches the prompt.
+    # Prose KnowledgeRetriever renders that can name catalog objects; use_cases is not rendered.
     prose = [
         row.description,
         *_names(row.data_quality_notes),
@@ -197,7 +197,9 @@ def audit_knowledge_drift(
     """Report, per workspace holding knowledge, rows whose references the catalog no longer serves.
 
     Explicitly requested workspaces are always reported, even with nothing to check,
-    so a requested id is never silently dropped. A workspace without an active semantic model is reported as ``unavailable`` and
+    so a requested id is never silently dropped.
+
+    A workspace without an active semantic model is reported as ``unavailable`` and
     not audited: with no catalog to compare against, every reference would look drifted.
     Issues about six queries per audited workspace; this is an operator command, so
     that is preferred over batching every workspace's catalog into memory at once.
