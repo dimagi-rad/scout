@@ -391,4 +391,30 @@ async def test_a_run_denied_mid_way_is_explained_even_when_no_source_failed(
 
     assert result["status"] == "partial"
     assert "others did not" not in result["message"]
+    # Also true when a source was freshly loaded before the denial.
+    assert "unchanged" not in result["message"]
     assert "The requesting user can't use these data sources: t1" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_mid_run_denial_with_a_failed_view_build_still_forbids_querying(
+    workspace, user, monkeypatch
+):
+    async def _fake_core(workspace_id, user_id="", job_id=None):
+        return {
+            "all_succeeded": False,
+            "tenants": [{"tenant": "t1", "success": True}, {"tenant": "t2", "success": True}],
+            "view_schema": {"ok": False, "error": "build failed", "tenant_coverage": {}},
+            "denied_mid_run": {
+                "error": "Access could not be verified",
+                "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+            },
+            "guidance": [],
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+
+    assert "Do not query this workspace until it is rebuilt" in result["message"]
