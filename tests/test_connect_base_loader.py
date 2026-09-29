@@ -2,10 +2,13 @@ import io
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 import requests_mock as rm
 from urllib3.connectionpool import HTTPSConnectionPool
 from urllib3.response import HTTPResponse
 
+from apps.common.error_codes import ErrorCode, code_of
+from apps.common.errors import ConnectUnavailableError, ExpectedUpstreamError
 from mcp_server.loaders.connect_base import (
     EXPORT_ACCEPT_HEADER,
     RETRY_TOTAL,
@@ -274,6 +277,7 @@ def fast_retry_loader(loader):
     """
     adapter = loader._session.get_adapter("https://connect.example.com/")
     adapter.max_retries.backoff_factor = 0
+    adapter.max_retries.backoff_jitter = 0
     return loader
 
 
@@ -341,3 +345,89 @@ class TestConnectRetryBehaviour:
             list(fast_retry_loader._paginate_export_pages("user_visits/"))
 
         assert len(calls) == 1
+
+
+def _reset_connection(self, conn, method, url, **kwargs):
+    raise ConnectionResetError("reset")
+
+
+class TestConnectGetTransientFailures:
+    URL = "https://connect.example.com/export/opportunity/1/"
+
+    def test_502_then_200_succeeds(self, fast_retry_loader):
+        ctx, calls = _drive_with_statuses(
+            fast_retry_loader,
+            scripted=[(502, b"", {}), (200, b'{"ok": true}', {"Content-Type": "application/json"})],
+        )
+        with ctx:
+            resp = fast_retry_loader._get(self.URL)
+
+        assert resp.json() == {"ok": True}
+        assert len(calls) == 2
+
+    def test_repeated_502_raises_expected_upstream_error(self, fast_retry_loader):
+        ctx, calls = _drive_with_statuses(fast_retry_loader, scripted=[(502, b"", {})])
+        with ctx, pytest.raises(ConnectUnavailableError) as exc:
+            fast_retry_loader._get(self.URL)
+
+        assert isinstance(exc.value, ExpectedUpstreamError)
+        assert not isinstance(exc.value, requests.HTTPError)
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
+        assert len(calls) == RETRY_TOTAL + 1
+
+    def test_repeated_502_on_export_page_is_expected_and_keeps_context(self, fast_retry_loader):
+        ctx, _ = _drive_with_statuses(fast_retry_loader, scripted=[(502, b"", {})])
+        with ctx, pytest.raises(ConnectExportError) as exc:
+            list(fast_retry_loader._paginate_export_pages("user_visits/"))
+
+        assert isinstance(exc.value, ExpectedUpstreamError)
+        assert exc.value.status == 502
+        assert exc.value.attempts == RETRY_TOTAL + 1
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
+
+    def test_persistent_connection_error_raises_expected_upstream_error(self, fast_retry_loader):
+        with (
+            patch.multiple(
+                HTTPSConnectionPool,
+                _make_request=_reset_connection,
+                _get_conn=lambda self, timeout=None: MagicMock(),
+                _put_conn=lambda self, conn: None,
+            ),
+            pytest.raises(ConnectUnavailableError),
+        ):
+            fast_retry_loader._get(self.URL)
+
+    def test_404_is_not_retried_or_reclassified(self, fast_retry_loader):
+        ctx, calls = _drive_with_statuses(fast_retry_loader, scripted=[(404, b"", {})])
+        with ctx, pytest.raises(requests.HTTPError):
+            fast_retry_loader._get(self.URL)
+
+        assert len(calls) == 1
+
+    def test_connection_error_on_export_page_keeps_structured_context(self, fast_retry_loader):
+        with (
+            patch.multiple(
+                HTTPSConnectionPool,
+                _make_request=_reset_connection,
+                _get_conn=lambda self, timeout=None: MagicMock(),
+                _put_conn=lambda self, conn: None,
+            ),
+            pytest.raises(ConnectExportError) as exc,
+        ):
+            list(fast_retry_loader._paginate_export_pages("user_visits/", start_last_id=7))
+
+        assert isinstance(exc.value, ExpectedUpstreamError)
+        assert exc.value.attempts == RETRY_TOTAL + 1
+        assert exc.value.last_id == 7
+
+    @pytest.mark.parametrize(
+        "error", [requests.exceptions.SSLError, requests.exceptions.ProxyError]
+    )
+    def test_tls_and_proxy_failures_stay_reportable(self, fast_retry_loader, error):
+        with (
+            patch.object(fast_retry_loader._session, "get", side_effect=error("broken")),
+            pytest.raises(error) as exc,
+        ):
+            fast_retry_loader._get(self.URL)
+
+        assert not isinstance(exc.value, ExpectedUpstreamError)

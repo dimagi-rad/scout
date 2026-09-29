@@ -60,6 +60,7 @@ def _drive_with_statuses(scripted):
 def _no_backoff(loader):
     adapter = loader._session.get_adapter("https://www.commcarehq.org/")
     adapter.max_retries.backoff_factor = 0
+    adapter.max_retries.backoff_jitter = 0
     return loader
 
 

@@ -18,6 +18,7 @@ from apps.common.errors import (
     ConnectAccessDeniedError,
     ConnectAuthError,  # noqa: F401  — re-exported; callers catch the provider base
     ConnectTokenExpiredError,
+    ConnectUnavailableError,
 )
 from mcp_server.loaders._http import (
     RETRY_STATUS_FORCELIST,
@@ -88,6 +89,14 @@ class ConnectExportError(Exception):
         self.last_id = last_id
 
 
+class ConnectExportUnavailableError(ConnectExportError, ConnectUnavailableError):
+    """Connect stayed unavailable through the retry policy on an export page.
+
+    Keeps ``ConnectExportError``'s structured fields for the materializer's
+    log line while classifying as an expected upstream state.
+    """
+
+
 class ConnectBaseLoader:
     """Base class for Connect API loaders.
 
@@ -143,17 +152,44 @@ class ConnectBaseLoader:
                 f"{self.opportunity_id} (HTTP 401): it has expired or been revoked."
             )
 
+    def _send(self, url: str, **kwargs) -> requests.Response:
+        """GET through the retrying session; a transport failure that survived it is expected.
+
+        Timeouts and connection errors are retried by the session adapter, so one
+        reaching here means the retries ran out.
+        """
+        try:
+            return get_with_auth_refresh(
+                self._session,
+                url,
+                trusted_origin=self.base_url,
+                refresh=self._refresh,
+                timeout=HTTP_TIMEOUT,
+                **kwargs,
+            )
+        except (requests.exceptions.SSLError, requests.exceptions.ProxyError):
+            # A broken TLS chain or proxy is a Scout-side config fault that retrying
+            # cannot clear, so it must stay reportable.
+            raise
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise ConnectUnavailableError(
+                f"CommCare Connect could not be reached for opportunity "
+                f"{self.opportunity_id}: {type(e).__name__}"
+            ) from e
+
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
-        """GET a URL, raising on 401/403 via ``_raise_for_auth``."""
-        resp = get_with_auth_refresh(
-            self._session,
-            url,
-            trusted_origin=self.base_url,
-            refresh=self._refresh,
-            params=params,
-            timeout=HTTP_TIMEOUT,
-        )
+        """GET a URL, raising on 401/403 via ``_raise_for_auth``.
+
+        Transient statuses are retried by the session adapter; one that survives
+        it raises ``ConnectUnavailableError`` rather than a bare ``HTTPError``.
+        """
+        resp = self._send(url, params=params)
         self._raise_for_auth(resp.status_code)
+        if resp.status_code in RETRY_STATUS_FORCELIST:
+            raise ConnectUnavailableError(
+                f"CommCare Connect was unavailable for opportunity "
+                f"{self.opportunity_id}: HTTP {resp.status_code} after {RETRY_TOTAL + 1} attempts"
+            )
         if not resp.ok:
             raise requests.HTTPError(
                 f"Connect request failed: HTTP {resp.status_code}", response=resp
@@ -208,22 +244,23 @@ class ConnectBaseLoader:
         first_page = True
 
         while url is not None:
-            resp = get_with_auth_refresh(
-                self._session,
-                url,
-                trusted_origin=self.base_url,
-                refresh=self._refresh,
-                params=request_params,
-                headers=headers,
-                timeout=HTTP_TIMEOUT,
-            )
+            try:
+                resp = self._send(url, params=request_params, headers=headers)
+            except ConnectUnavailableError as e:
+                raise ConnectExportUnavailableError(
+                    str(e),
+                    attempts=RETRY_TOTAL + 1,
+                    last_id=_extract_last_id(url, request_params),
+                ) from e
             self._raise_for_auth(resp.status_code)
             if not resp.ok:
                 # A status in the forcelist means the urllib3 Retry policy
                 # ran to exhaustion (RETRY_TOTAL retries on top of the initial
                 # attempt). Anything else short-circuited on the first try.
-                attempts = RETRY_TOTAL + 1 if resp.status_code in RETRY_STATUS_FORCELIST else 1
-                raise ConnectExportError(
+                transient = resp.status_code in RETRY_STATUS_FORCELIST
+                attempts = RETRY_TOTAL + 1 if transient else 1
+                error_cls = ConnectExportUnavailableError if transient else ConnectExportError
+                raise error_cls(
                     f"Connect export request failed for opportunity "
                     f"{self.opportunity_id}: HTTP {resp.status_code}",
                     status=resp.status_code,

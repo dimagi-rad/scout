@@ -13,6 +13,7 @@ from apps.common.errors import (
     ExpectedUpstreamError,
     TokenRefreshError,
     UpstreamAccessDenied,
+    UpstreamUnavailable,
 )
 from mcp_server.loaders.commcare_metadata import _extract_case_types, _extract_form_definitions
 from mcp_server.loaders.connect_base import ConnectBaseLoader
@@ -37,6 +38,12 @@ class ConnectMetadataLoader(ConnectBaseLoader):
             ]
             form_definitions = _extract_form_definitions(apps)
             case_types = _extract_case_types(apps)
+        except UpstreamUnavailable as e:
+            logger.warning(
+                "app_structure unavailable for opportunity %s; continuing without form_definitions: %s",
+                self.opportunity_id,
+                e,
+            )
         except (ExpectedUpstreamError, TokenRefreshError):
             raise
         except Exception:
