@@ -101,6 +101,24 @@ describe("domainSlice.fetchDomains — default pick skips lost-access workspaces
     expect(useAppStore.getState().activeDomainId).toBe("live")
   })
 
+  it("moves off an active workspace that was deleted (D2)", async () => {
+    useAppStore.setState({ activeDomainId: "gone", domains: [ws("gone", true), ws("live", true)] as never })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("live", true)] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("live")
+  })
+
+  it("keeps an active id the previous list never had, such as a deep link", async () => {
+    useAppStore.setState({ activeDomainId: "linked", domains: [ws("live", true)] as never })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("live", true)] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("linked")
+  })
+
   it("falls back to the first workspace when none are accessible", async () => {
     const { workspaceApi } = await import("@/api/workspaces")
     vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("skelly", false)] as never)

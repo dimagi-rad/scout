@@ -38,6 +38,19 @@ function defaultDomainId(domains: TenantMembership[]): string | null {
   return (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
 }
 
+// Dropped from the list (deleted, or you were removed): every lookup of it would
+// now miss, and a missing role reads as writable, so move to the default. An id
+// that was never listed, such as a deep link still being checked, is kept.
+export function nextActiveDomainId(
+  prev: TenantMembership[],
+  next: TenantMembership[],
+  activeId: string | null,
+): string | null {
+  if (activeId === null) return defaultDomainId(next)
+  const removed = prev.some((d) => d.id === activeId) && !next.some((d) => d.id === activeId)
+  return removed ? defaultDomainId(next) : activeId
+}
+
 export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => {
   // Bumped by every list request, so a background result never overwrites a newer foreground one.
   let listRequestSeq = 0
@@ -55,12 +68,12 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         set({ domainsStatus: "loading", domainsError: null })
         try {
           const domains = await workspaceApi.list()
-          const activeDomainId = get().activeDomainId
+          const current = get()
           set({
             domains,
             domainsStatus: "loaded",
             domainsError: null,
-            activeDomainId: activeDomainId ?? defaultDomainId(domains),
+            activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
           })
         } catch (error) {
           set({
@@ -83,16 +96,9 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
             if (JSON.stringify(domains) === JSON.stringify(current.domains)) return
-            const activeId = current.activeDomainId
-            // Removed from the active workspace: every lookup of it would now miss,
-            // and a missing role reads as writable, so move to the default.
-            const removed =
-              activeId !== null &&
-              current.domains.some((d) => d.id === activeId) &&
-              !domains.some((d) => d.id === activeId)
             set({
               domains,
-              activeDomainId: activeId === null || removed ? defaultDomainId(domains) : activeId,
+              activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
             })
           })
           .catch(() => {
