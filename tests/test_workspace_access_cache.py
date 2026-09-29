@@ -394,29 +394,40 @@ def test_removing_the_missing_source_evaluates_readiness_once(
 
 
 @pytest.mark.django_db
-def test_changing_a_workspaces_sources_drops_its_cached_coverage(scope, user, uncovered_manager):
+def test_changing_a_workspaces_sources_drops_its_cached_coverage(
+    scope, user, uncovered_manager, django_capture_on_commit_callbacks
+):
     ws, missing = uncovered_manager
     assert [t.tenant_name for t in missing_tenants_for_member(user, ws)] == ["Two"]
 
-    remove_workspace_tenant(ws, WorkspaceTenant.objects.get(workspace=ws, tenant=missing))
+    with django_capture_on_commit_callbacks(execute=True):
+        remove_workspace_tenant(ws, WorkspaceTenant.objects.get(workspace=ws, tenant=missing))
 
     assert missing_tenants_for_member(user, ws) == ()
 
 
 @pytest.mark.django_db
-def test_adding_a_source_drops_the_workspaces_cached_coverage(scope, user, workspace):
+def test_adding_a_source_drops_the_workspaces_cached_coverage(
+    scope, user, workspace, django_capture_on_commit_callbacks
+):
     """Adding a source widens what members must cover, so a stale entry fails open."""
     assert missing_tenants_for_member(user, workspace) == ()
     extra = Tenant.objects.create(provider="commcare", external_id="x9", canonical_name="Extra")
 
-    add_workspace_tenant(workspace, extra)
+    with django_capture_on_commit_callbacks() as callbacks:
+        add_workspace_tenant(workspace, extra)
+        # Not before commit, or another connection could re-cache the old tenant set.
+        assert missing_tenants_for_member(user, workspace) == ()
+    for callback in callbacks:
+        callback()
 
     assert [t.tenant_name for t in missing_tenants_for_member(user, workspace)] == ["Extra"]
 
 
 @pytest.mark.django_db
 def test_invalidate_matches_a_stringified_user_id(scope, user):
-    access_cache.store(user, "ws", access_cache.COVERAGE, (), since=access_cache.generation())
+    since = access_cache.generation()
+    access_cache.store(user, "ws", access_cache.COVERAGE, (), since=since)
 
     access_cache.invalidate(user_id=str(user.pk))
 
@@ -467,3 +478,28 @@ async def test_membership_rediscovery_drops_the_users_cached_decisions(user, wor
         access_cache.detach_scope(token)
 
     assert after.denied_reason == TENANT_ACCESS_LOST
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_async_resolution_that_races_an_invalidation_is_not_cached(
+    user, workspace, monkeypatch
+):
+    """The motivating shape: parallel tool calls, one of which records a denial."""
+    real = access_module.amember_coverage_gaps
+
+    async def gaps_then_denial_elsewhere(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        access_cache.invalidate(user_id=user.pk)
+        return result
+
+    monkeypatch.setattr(access_module, "amember_coverage_gaps", gaps_then_denial_elsewhere)
+    opened, token = access_cache.open_scope()
+    try:
+        assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+        cached = access_cache.lookup(user, workspace.id, READ_KEY)
+    finally:
+        access_cache.close_scope(opened)
+        access_cache.detach_scope(token)
+
+    assert cached is None

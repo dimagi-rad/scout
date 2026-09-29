@@ -24,6 +24,7 @@ callers take ``generation()`` before reading and pass it to ``store``.
 
 from __future__ import annotations
 
+import itertools
 import time
 from contextvars import ContextVar
 
@@ -42,6 +43,11 @@ class Scope(dict):
 
     closed = False
     generation = 0
+
+    def __init__(self):
+        super().__init__()
+        # next() on a count is atomic, unlike += on an attribute shared with threads.
+        self._bumps = itertools.count(1)
 
 
 _scope: ContextVar[Scope | None] = ContextVar("workspace_access_cache", default=None)
@@ -101,10 +107,11 @@ def store(user, workspace_id, options, result, *, since: int | None) -> None:
     key = _key(user, workspace_id, options)
     if scope is None or key is None or since != scope.generation:
         return
-    scope[key] = (time.monotonic(), result)
+    entry = (time.monotonic(), result)
+    scope[key] = entry
     # Re-checked after the write: invalidate bumps before it drops, so an
     # invalidation racing this store either is seen here or removes the entry.
-    if since != scope.generation:
+    if since != scope.generation and scope.get(key) is entry:
         scope.pop(key, None)
 
 
@@ -113,7 +120,7 @@ def invalidate(*, user_id=None, workspace_id=None) -> None:
     scope = _active()
     if scope is None:
         return
-    scope.generation += 1
+    scope.generation = next(scope._bumps)
     workspace_id = None if workspace_id is None else str(workspace_id)
     user_id = None if user_id is None else str(user_id)
     for key in list(scope):
