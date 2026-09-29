@@ -133,24 +133,27 @@ def _usable_as_is(token, now) -> bool:
     return bool(token.token) and not (token.expires_at and token.expires_at <= now)
 
 
-async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple], bool]:
-    """``(pairs, failed)``: *user*'s tokens, renewing any that need it.
+async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple], Rediscovery]:
+    """``(pairs, outcome)``: *user*'s tokens, renewing any that need it.
 
     Only for the user a request names (G2). They did not start the request, so a
     failed renewal records nothing on their credential (G1). A token that isn't
-    renewed is used as it stands while unexpired; ``failed`` is set only when a
-    transient failure, or the ``deadline`` (event-loop time) passing before a
-    renewal starts, leaves nothing to use.
+    renewed is used as it stands while unexpired. When one leaves nothing to use,
+    ``outcome`` says why: ``failed`` for a transient failure or the ``deadline``
+    (event-loop time) passing before a renewal starts, ``needs_sign_in`` when the
+    token is expired and cannot be renewed, or the provider refused to renew it.
     """
     token_url = get_token_url(provider)
     now = timezone.now()
-    pairs, failed = [], False
+    pairs, failed, needs_sign_in = [], False, False
     for token in await aiter_social_tokens(user, provider):
         stored = (token.account, token.token) if _usable_as_is(token, now) else None
         can_refresh = bool(token_url and token.token_secret and token.app)
         if not can_refresh or not token_needs_refresh(token.expires_at):
             if stored:
                 pairs.append(stored)
+            else:
+                needs_sign_in = True
             continue
         if asyncio.get_running_loop().time() >= deadline:
             if stored:
@@ -175,9 +178,13 @@ async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple]
                 pairs.append(stored)
             elif isinstance(error, TokenRefreshUnavailable):
                 failed = True
+            else:
+                # Any non-transient refusal is what a user's own refresh records as
+                # "reconnect required"; here it is only reported, never recorded (G1).
+                needs_sign_in = True
             continue
         pairs.append((token.account, access_token))
-    return pairs, failed
+    return pairs, Rediscovery(failed=failed, needs_sign_in=needs_sign_in)
 
 
 async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> Rediscovery:
@@ -207,8 +214,9 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
         if resolve is None:
             continue
         if renew:
-            pairs, renewal_failed = await _arenewed_access_tokens(target, provider, deadline)
-            failed = failed or renewal_failed
+            pairs, renewal = await _arenewed_access_tokens(target, provider, deadline)
+            failed = failed or renewal.failed
+            needs_sign_in = needs_sign_in or renewal.needs_sign_in
         else:
             pairs = await _aunexpired_access_tokens(target, provider)
         for account, token in pairs:

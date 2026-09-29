@@ -450,7 +450,32 @@ class TestDirectAdd:
 
         resp = self._add(client, ws, target.email)
 
-        assert resp.json()["result"] == "invite_awaiting_access"
+        body = resp.json()
+        assert body["result"] == "invite_awaiting_access"
+        assert body["recheck_complete"] is True
+        assert body["needs_sign_in"] is True
+        conn.refresh_from_db()
+        assert conn.oauth_refresh_failure_fingerprint == ""
+        assert conn.upstream_denied_at is None
+
+    def test_an_expired_target_token_that_cannot_be_renewed_asks_them_to_sign_in(
+        self, client, user, t1
+    ):
+        """With no refresh grant, nothing unlocks until the target signs in again; the
+        manager must not be told access arrives on its own."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        conn = _oauth_identity(
+            target, token="tok-old", refresh="", expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        body = resp.json()
+        assert body["result"] == "invite_awaiting_access"
+        assert body["recheck_complete"] is True
+        assert body["needs_sign_in"] is True
         conn.refresh_from_db()
         assert conn.oauth_refresh_failure_fingerprint == ""
         assert conn.upstream_denied_at is None
