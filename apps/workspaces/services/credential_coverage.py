@@ -247,6 +247,8 @@ def _oauth_gap(membership, connection, tokens, bindings):
         return _gap(CredentialGapCode.OAUTH_SCOPE_MISMATCH, membership.tenant, membership)
     if not token.token:
         return _gap(CredentialGapCode.OAUTH_CREDENTIAL_EMPTY, membership.tenant, membership)
+    # Written only for a refresh the provider refused, never for a transient failure,
+    # so this gap means the credential needs replacing rather than a retry.
     refresh_failed = bool(
         connection.oauth_refresh_failure_fingerprint
         and connection.oauth_refresh_failure_fingerprint == credential_fingerprint(token)
