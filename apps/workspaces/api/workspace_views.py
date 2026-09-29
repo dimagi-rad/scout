@@ -47,6 +47,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.credential_coverage import CoverageRecovery
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
+    notify_member_added,
     send_pending_invite_email,
 )
 from apps.workspaces.services.member_coverage import (
@@ -792,6 +793,9 @@ class WorkspaceMemberListView(APIView):
                 {"error": "User is already a member."},
                 status=status.HTTP_409_CONFLICT,
             )
+        # on_commit so a caller's rolled-back transaction never emails about a
+        # membership that doesn't exist.
+        transaction.on_commit(lambda: notify_member_added(new_membership, request.user))
         return Response(
             {
                 "result": "member",

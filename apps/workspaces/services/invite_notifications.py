@@ -117,3 +117,19 @@ def notify_invite_accepted(invite, invitee):
             f"{invitee.email} now has access to '{workspace_name}' on Scout.\n",
             [inviter.email],
         )
+
+
+def notify_member_added(membership, added_by):
+    """Tell a user a manager added them straight to a workspace (#382): the direct
+    path creates a membership with no invite, so no other notice ever reaches them."""
+    workspace = membership.workspace
+    adder = (added_by.get_full_name() or added_by.email) if added_by else None
+    link = f"{settings.SCOUT_BASE_URL.rstrip('/')}/workspaces/{workspace.id}/chat"
+    _dispatch(
+        f"You've been added to '{workspace.name}' on Scout",
+        (
+            f"{adder or 'A Scout workspace manager'} added you to the '{workspace.name}' "
+            f"workspace on Scout.\n\nOpen it: {link}\n"
+        ),
+        [membership.user.email],
+    )
