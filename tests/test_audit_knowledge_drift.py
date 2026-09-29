@@ -43,6 +43,10 @@ def catalog(workspace):
         table_name="raw_forms",
         is_visible=False,
     )
+    # Shares a name with prose like `docs.md`, which must not read as a member.
+    SemanticDataset.objects.create(
+        semantic_model=model, workspace=workspace, name="docs", table_name="raw_docs"
+    )
     return model
 
 
@@ -65,8 +69,8 @@ def knowledge(workspace, catalog):
         ),
         "drifted_learning": AgentLearning.objects.create(
             workspace=workspace,
-            description="Visits need a date filter",
-            applies_to_tables=["visits"],
+            description="Filter `visits` and `raw_forms` by date",
+            applies_to_tables=["visits", "raw_forms", ""],
         ),
     }
 
@@ -93,6 +97,7 @@ def test_json_reports_only_drifted_rows(workspace, knowledge):
         ],
         str(knowledge["drifted_learning"].id): [
             {"kind": "table", "name": "visits", "reason": "missing"},
+            {"kind": "table", "name": "raw_forms", "reason": "hidden"},
         ],
     }
 
@@ -102,9 +107,11 @@ def test_table_knowledge_columns_and_related_tables(workspace, catalog):
     table = TableKnowledge.objects.create(
         workspace=workspace,
         table_name="raw_cases",
-        description="Cases",
+        description="Cases; prefer `cases.old_status`.",
+        data_quality_notes=["Join `raw_forms` late", 3],
+        use_cases=["`forms` is hidden but never rendered"],
         column_notes={"status": "ok", "old_status": "gone", "never": "typo"},
-        related_tables=[{"table": "raw_forms"}, "raw_cases"],
+        related_tables=[{"table": "raw_forms"}, "raw_cases", "raw_forms"],
     )
 
     [report] = json.loads(_audit("--json"))
@@ -118,6 +125,7 @@ def test_table_knowledge_columns_and_related_tables(workspace, catalog):
                 {"kind": "column", "name": "raw_cases.never", "reason": "missing"},
                 {"kind": "column", "name": "raw_cases.old_status", "reason": "hidden"},
                 {"kind": "table", "name": "raw_forms", "reason": "hidden"},
+                {"kind": "member", "name": "cases.old_status", "reason": "hidden"},
             ],
         }
     ]

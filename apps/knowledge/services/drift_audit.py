@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
+from uuid import UUID
 
 from django.db.models import Exists, OuterRef
 
@@ -18,7 +20,6 @@ from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_activ
 from apps.workspaces.models import Workspace
 
 _BACKTICKED_RE = re.compile(r"`([^`\s]+)`")
-_MEMBER_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$")
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,6 @@ class _Catalog:
         self.known_columns: dict[str, set[str]] = defaultdict(set)
         self.live_members: set[str] = set()
         self.known_members: set[str] = set()
-        self.known_datasets: set[str] = set()
         for dataset in SemanticDataset.objects.filter(semantic_model=model).prefetch_related(
             "fields"
         ):
@@ -69,7 +69,6 @@ class _Catalog:
                 "",
             }
             self.known_tables |= names
-            self.known_datasets.add(dataset.name)
             if dataset.is_visible:
                 self.live_tables |= names
             for semantic_field in dataset.fields.all():
@@ -79,7 +78,9 @@ class _Catalog:
                 self.known_members.add(member)
                 if live:
                     self.live_members.add(member)
-                for name in names if column else ():
+                if not column:
+                    continue
+                for name in names:
                     self.known_columns[name].add(column)
                     if live:
                         self.live_columns[name].add(column)
@@ -100,47 +101,48 @@ class _Catalog:
             return None
         return DriftedReference("member", name, _reason(name in self.known_members))
 
-    def text_references(self, text: str) -> list[DriftedReference]:
+    def text_references(self, *texts: str) -> list[DriftedReference | None]:
         """Backticked names the catalog knows of but no longer serves.
 
-        Free text is only matched against names this catalog has held, so a code
-        span that was never a dataset member or table is not reported.
+        Free text is only matched against exact names this catalog has held, so a
+        code span that was never a member or table (`docs.md`) is not reported. A
+        member whose field row was deleted outright is therefore not detected either.
         """
-        drifted: dict[str, DriftedReference] = {}
-        for token in _BACKTICKED_RE.findall(text):
-            member = _MEMBER_RE.match(token)
-            if member and member.group(1) in self.known_datasets:
-                reference = self.member(token)
-            elif token in self.known_tables:
-                reference = self.table(token)
-            else:
-                reference = None
-            if reference is not None:
-                drifted[token] = reference
-        return list(drifted.values())
+        references = []
+        for text in texts:
+            for token in _BACKTICKED_RE.findall(text):
+                if token in self.known_members:
+                    references.append(self.member(token))
+                elif token in self.known_tables:
+                    references.append(self.table(token))
+        return references
 
 
 def _reason(known: bool) -> str:
     return "hidden" if known else "missing"
 
 
+def _unique(references: list[DriftedReference | None]) -> list[DriftedReference]:
+    return [reference for reference in dict.fromkeys(references) if reference is not None]
+
+
+def _names(values) -> list[str]:
+    return [value for value in values or [] if isinstance(value, str) and value]
+
+
 def _table_knowledge_references(row: TableKnowledge, catalog: _Catalog) -> list[DriftedReference]:
-    missing_table = catalog.table(row.table_name)
-    if missing_table is not None:
-        references = [missing_table]
-    else:
-        references = [
-            reference
-            for column in sorted(row.column_notes or {})
-            if (reference := catalog.column(row.table_name, column)) is not None
-        ]
-    for relation in row.related_tables or []:
-        related = relation.get("table") if isinstance(relation, dict) else relation
-        if isinstance(related, str) and related:
-            reference = catalog.table(related)
-            if reference is not None:
-                references.append(reference)
-    return references
+    references = [catalog.table(row.table_name)]
+    if references[0] is None:
+        references += [catalog.column(row.table_name, c) for c in sorted(row.column_notes or {})]
+    related = [
+        relation.get("table") if isinstance(relation, dict) else relation
+        for relation in row.related_tables or []
+    ]
+    references += [catalog.table(name) for name in _names(related)]
+    # Mirrors the prose KnowledgeRetriever renders; use_cases never reaches the prompt.
+    notes = _names(row.data_quality_notes)
+    references += catalog.text_references(row.description, *notes)
+    return _unique(references)
 
 
 def _audit_workspace(workspace: Workspace) -> WorkspaceDriftReport:
@@ -159,28 +161,19 @@ def _audit_workspace(workspace: Workspace) -> WorkspaceDriftReport:
 
     rows: list[tuple[str, str, str, list[DriftedReference]]] = []
     for entry in KnowledgeEntry.objects.filter(workspace=workspace).order_by("title"):
-        rows.append(
-            ("knowledge_entry", str(entry.id), entry.title, catalog.text_references(entry.content))
-        )
+        references = _unique(catalog.text_references(entry.content))
+        rows.append(("knowledge_entry", str(entry.id), entry.title, references))
     for table in TableKnowledge.objects.filter(workspace=workspace).order_by("table_name"):
-        rows.append(
-            (
-                "table_knowledge",
-                str(table.id),
-                table.table_name,
-                _table_knowledge_references(table, catalog),
-            )
-        )
+        references = _table_knowledge_references(table, catalog)
+        rows.append(("table_knowledge", str(table.id), table.table_name, references))
     # Inactive learnings never reach the prompt, so their drift is not actionable.
     for learning in AgentLearning.objects.filter(workspace=workspace, is_active=True).order_by(
         "created_at"
     ):
-        references = [
-            reference
-            for name in learning.applies_to_tables or []
-            if isinstance(name, str) and (reference := catalog.table(name)) is not None
-        ]
-        references += catalog.text_references(learning.description)
+        references = _unique(
+            [catalog.table(name) for name in _names(learning.applies_to_tables)]
+            + catalog.text_references(learning.description)
+        )
         rows.append(("agent_learning", str(learning.id), learning.description[:80], references))
 
     report.checked = len(rows)
@@ -192,11 +185,15 @@ def _audit_workspace(workspace: Workspace) -> WorkspaceDriftReport:
     return report
 
 
-def audit_knowledge_drift(workspace_ids=None) -> list[WorkspaceDriftReport]:
+def audit_knowledge_drift(
+    *, workspace_ids: Iterable[UUID | str] | None = None
+) -> list[WorkspaceDriftReport]:
     """Report, per workspace holding knowledge, rows whose references the catalog no longer serves.
 
     A workspace without an active semantic model is reported as ``unavailable`` and
     not audited: with no catalog to compare against, every reference would look drifted.
+    Issues about six queries per audited workspace; this is an operator command, so
+    that is preferred over batching every workspace's catalog into memory at once.
     """
     workspaces = Workspace.objects.filter(
         Exists(KnowledgeEntry.objects.filter(workspace=OuterRef("pk")))
@@ -204,5 +201,5 @@ def audit_knowledge_drift(workspace_ids=None) -> list[WorkspaceDriftReport]:
         | Exists(AgentLearning.objects.filter(workspace=OuterRef("pk"), is_active=True))
     ).order_by("name", "id")
     if workspace_ids:
-        workspaces = workspaces.filter(id__in=workspace_ids)
+        workspaces = workspaces.filter(id__in=list(workspace_ids))
     return [_audit_workspace(workspace) for workspace in workspaces]
