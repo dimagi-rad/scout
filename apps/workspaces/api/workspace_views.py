@@ -490,12 +490,11 @@ class WorkspaceDetailView(APIView):
             except WorkspaceViewSchema.DoesNotExist:
                 view_schema_state = None
 
+        active, provisioning = classify_tenant_schemas(
+            TenantSchema.objects.filter(tenant__in=tenants).values_list("tenant_id", "state")
+        )
         schema_status = workspace_schema_status(
-            [tenant.id for tenant in tenants],
-            *classify_tenant_schemas(
-                TenantSchema.objects.filter(tenant__in=tenants).values_list("tenant_id", "state")
-            ),
-            view_schema_state,
+            [tenant.id for tenant in tenants], active, provisioning, view_schema_state
         )
 
         last_run_at = (

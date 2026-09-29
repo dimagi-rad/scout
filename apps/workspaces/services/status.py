@@ -28,6 +28,8 @@ def derive_schema_status(
     """The workspace ``schema_status`` the list and detail APIs report.
 
     Returns "available" | "provisioning" | "unavailable" | "failed".
+    ``active_count`` counts sources, not schema rows; callers holding rows should
+    go through ``workspace_schema_status``, which does that counting.
 
     - Single-tenant: available iff every tenant is ACTIVE; provisioning if any is
       mid-provisioning; else unavailable.
