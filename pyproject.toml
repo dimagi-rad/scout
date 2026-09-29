@@ -105,6 +105,11 @@ python_files = ["test_*.py"]
 # --ds, not just the ini key above: pytest-django lets an exported
 # DJANGO_SETTINGS_MODULE beat the ini, and sourcing .env exports development.
 addopts = "-v --tb=short -m 'not smoke' --ds=config.settings.test"
+# A hung test should fail with every thread's stack, not sit silent until the CI
+# job timeout. The slowest test takes under 10s on CI. "thread" works even when
+# the hang is inside an event loop or a C call that a signal cannot interrupt.
+timeout = 300
+timeout_method = "thread"
 markers = [
     "smoke: end-to-end smoke tests requiring live credentials (run with: pytest -m smoke)",
 ]
@@ -125,4 +130,5 @@ dev = [
     "prek>=0.3.3",
     "invoke>=2.2",
     "freezegun>=1.5.5",
+    "pytest-timeout>=2.4.0",
 ]

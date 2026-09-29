@@ -14,6 +14,12 @@ The default `addopts` (`pyproject.toml`) include `-m 'not smoke'`, so smoke test
 are excluded from the normal run. CI runs `uv run pytest` via
 `.github/workflows/test.yml`.
 
+Every test has a 300s limit (`timeout` in `pyproject.toml`, from pytest-timeout).
+A test that exceeds it dumps every thread's stack and ends the whole run, because
+the `thread` method exits the process. `--override-ini="addopts="` does not lift
+the limit; use `--timeout=0` or `@pytest.mark.timeout(0)` for a test that is
+legitimately slow.
+
 ## Frontend unit tests (Vitest + Testing Library)
 
 ```bash
