@@ -127,7 +127,13 @@ module.exports = {
   driverFactory: ({ securityContext }) => {
     const context = workspaceContext(securityContext);
     if (!context) {
-      return { type: 'postgres', ...managedConfig };
+      // Cube's standalone /readyz runs testConnection() through this driver, so
+      // it must connect; there is no tenant role to downgrade to (#421).
+      return {
+        type: 'postgres',
+        ...managedConfig,
+        options: `-c statement_timeout=${CATALOG_QUERY_TIMEOUT_MS} -c default_transaction_read_only=on -c search_path=pg_catalog`,
+      };
     }
 
     const [, , schemaName, readonlyRole] = context;
