@@ -8,10 +8,13 @@ remains a separate decision in ``apps.workspaces.access``.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from uuid import UUID
 
 from allauth.socialaccount.models import SocialToken
 
@@ -33,6 +36,14 @@ from apps.users.services.token_refresh import (
 from apps.workspaces.models import WorkspaceMembership, WorkspaceTenant
 
 LOCAL_CREDENTIAL_READINESS = "local_credential_readiness"
+_LOGGED_CONNECTION_ID_LIMIT = 20
+# The access gate evaluates readiness several times per request for every member,
+# so each (provider, error class) combination is reported at most this often per
+# process: a rotated DB_CREDENTIAL_KEY yields one event per window, not per member.
+_DECRYPT_FAILURE_REPORT_INTERVAL_SECONDS = 300
+_decrypt_failure_last_reported: dict[tuple[str, str], float] = {}
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialGapCode(StrEnum):
@@ -187,18 +198,70 @@ def _gap(code: CredentialGapCode, tenant, membership=None) -> CredentialCoverage
     )
 
 
-def _api_key_gap(membership, connection, connection_teams):
+class _ApiKeyDecryptCache:
+    """Decrypts each API-key connection at most once per readiness evaluation.
+
+    Scoped to one call, never cached across requests, so a fixed key or a
+    replaced credential is picked up on the next evaluation.
+    """
+
+    def __init__(self):
+        self._usable: dict[UUID, bool] = {}
+        self._failures: dict[UUID, tuple[str, str]] = {}
+
+    def usable(self, connection) -> bool | None:
+        """True if the key decrypts to a value, False if empty, None on decrypt failure."""
+        if connection.pk in self._failures:
+            return None
+        if connection.pk not in self._usable:
+            try:
+                value = decrypt_credential(connection.encrypted_credential)
+            except Exception as exc:
+                self._failures[connection.pk] = (connection.provider, type(exc).__name__)
+                return None
+            self._usable[connection.pk] = bool(value)
+        return self._usable[connection.pk]
+
+    def report_failures(self) -> None:
+        # One aggregated event: a rotated DB_CREDENTIAL_KEY fails every API-key
+        # connection at once. No exc_info, so no traceback frames reach Sentry.
+        if not self._failures:
+            return
+        now = time.monotonic()
+        kinds = set(self._failures.values())
+        if all(
+            now - _decrypt_failure_last_reported.get(kind, float("-inf"))
+            < _DECRYPT_FAILURE_REPORT_INTERVAL_SECONDS
+            for kind in kinds
+        ):
+            return
+        for kind in kinds:
+            _decrypt_failure_last_reported[kind] = now
+        connection_ids = [str(pk) for pk in sorted(self._failures)]
+        shown = connection_ids[:_LOGGED_CONNECTION_ID_LIMIT]
+        if len(connection_ids) > len(shown):
+            shown.append("...")
+        logger.error(
+            "API-key credential decrypt failed for %d connection(s); check "
+            "DB_CREDENTIAL_KEY. connection_ids=%s providers=%s errors=%s",
+            len(connection_ids),
+            shown,
+            sorted({provider for provider, _error in self._failures.values()}),
+            sorted({error for _provider, error in self._failures.values()}),
+        )
+
+
+def _api_key_gap(membership, connection, connection_teams, decrypt_cache):
     if canonical_provider(connection.provider) == "ocs" and connection_teams.get(
         connection.pk, set()
     ) != {_normalized_team_slug(membership)}:
         return _gap(CredentialGapCode.OCS_API_KEY_TEAM_AMBIGUOUS, membership.tenant, membership)
     if not connection.encrypted_credential:
         return _gap(CredentialGapCode.API_KEY_MISSING, membership.tenant, membership)
-    try:
-        value = decrypt_credential(connection.encrypted_credential)
-    except Exception:
+    usable = decrypt_cache.usable(connection)
+    if usable is None:
         return _gap(CredentialGapCode.API_KEY_DECRYPT_FAILED, membership.tenant, membership)
-    if not value:
+    if not usable:
         return _gap(CredentialGapCode.API_KEY_MISSING, membership.tenant, membership)
     return None
 
@@ -264,7 +327,7 @@ def _oauth_gap(membership, connection, tokens, bindings):
     return None
 
 
-def _membership_gap(membership, tokens, bindings, connection_teams):
+def _membership_gap(membership, tokens, bindings, connection_teams, decrypt_cache):
     tenant = membership.tenant
     connection = membership.connection
     if connection is None:
@@ -278,7 +341,7 @@ def _membership_gap(membership, tokens, bindings, connection_teams):
         # OCS can discover and persist a key's experiments even when its
         # sessions endpoint has no team slug. The membership-to-connection link
         # is the local proof in that supported case; do not invent a team.
-        return _api_key_gap(membership, connection, connection_teams)
+        return _api_key_gap(membership, connection, connection_teams, decrypt_cache)
     if connection.credential_type == TenantConnection.OAUTH:
         if canonical_provider(tenant.provider) == "ocs" and not membership.team_slug:
             return _gap(CredentialGapCode.OCS_TEAM_MISSING, tenant, membership)
@@ -323,22 +386,28 @@ def _evaluate_tenant_readiness(
     for membership in connection_memberships:
         connection_teams[membership.connection_id].add(_normalized_team_slug(membership))
 
+    decrypt_cache = _ApiKeyDecryptCache()
     readiness = []
-    for user_id, tenant in pairs:
-        membership = memberships_by_user_tenant.get((user_id, tenant.pk))
-        gap = (
-            _gap(CredentialGapCode.MISSING_LIVE_MEMBERSHIP, tenant)
-            if membership is None
-            else _membership_gap(membership, tokens_by_account, bindings, connection_teams)
-        )
-        readiness.append(
-            TenantCredentialReadiness(
-                user_id=user_id,
-                tenant_id=str(tenant.pk),
-                usable=gap is None,
-                gap=gap,
+    try:
+        for user_id, tenant in pairs:
+            membership = memberships_by_user_tenant.get((user_id, tenant.pk))
+            gap = (
+                _gap(CredentialGapCode.MISSING_LIVE_MEMBERSHIP, tenant)
+                if membership is None
+                else _membership_gap(
+                    membership, tokens_by_account, bindings, connection_teams, decrypt_cache
+                )
             )
-        )
+            readiness.append(
+                TenantCredentialReadiness(
+                    user_id=user_id,
+                    tenant_id=str(tenant.pk),
+                    usable=gap is None,
+                    gap=gap,
+                )
+            )
+    finally:
+        decrypt_cache.report_failures()
     return tuple(readiness)
 
 
