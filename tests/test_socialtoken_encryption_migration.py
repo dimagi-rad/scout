@@ -6,6 +6,7 @@ the live model's encrypting field cannot mask a migration that did nothing.
 """
 
 import importlib
+import math
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
@@ -95,7 +96,9 @@ def test_forward_is_idempotent(historical_apps, mixed_rows):
         migration.encrypt_tokens(historical_apps, None)
 
     assert {pk: _raw(pk) for pk in mixed_rows.values()} == first
-    assert len(queries) == 1
+    statements = [q["sql"].lstrip().split()[0].upper() for q in queries]
+    assert statements.count("SELECT") == 1
+    assert "UPDATE" not in statements
 
 
 @pytest.mark.django_db
@@ -109,7 +112,9 @@ def test_forward_batches_by_primary_key(historical_apps, user, monkeypatch):
     _assert_all_encrypted(rows)
     selects = [q for q in queries if q["sql"].lstrip().upper().startswith("SELECT")]
     updates = [q for q in queries if q["sql"].lstrip().upper().startswith("UPDATE")]
-    assert (len(selects), len(updates)) == (4, 3)
+    assert len(updates) == math.ceil(len(rows) / migration.BATCH_SIZE)
+    assert len(selects) == len(updates) + 1
+    assert all("FOR UPDATE" in q["sql"] for q in selects)
 
 
 @pytest.mark.django_db
@@ -125,8 +130,11 @@ def test_reverse_restores_plaintext(historical_apps, mixed_rows):
 
 
 @pytest.mark.django_db
-def test_reverse_refuses_to_blank_undecryptable_rows(historical_apps, mixed_rows):
+def test_reverse_raises_before_writing_a_batch_it_cannot_decrypt(
+    historical_apps, mixed_rows, monkeypatch
+):
     migration.encrypt_tokens(historical_apps, None)
+    monkeypatch.setattr(migration, "BATCH_SIZE", 2)
     before = {pk: _raw(pk) for pk in mixed_rows.values()}
 
     with (
