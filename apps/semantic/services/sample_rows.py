@@ -91,12 +91,14 @@ def _selected_fields(dataset: SemanticDataset, field_refs: list[str] | None) -> 
         ]
         if not selected:
             selected = [
-                field for field in visible if field.field_type == SemanticField.FieldType.MEASURE
+                field
+                for field in visible
+                if is_listed(field) and field.field_type == SemanticField.FieldType.MEASURE
             ][:1]
     selected = selected[:MAX_SAMPLE_FIELDS]
     if not selected:
         raise SemanticCatalogUnavailable(
-            f"Dataset '{dataset.name}' has no visible fields to sample."
+            f"Dataset '{dataset.name}' has no listed fields to sample."
         )
     return selected
 

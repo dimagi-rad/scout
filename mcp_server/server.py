@@ -722,7 +722,8 @@ async def list_datasets(
         limit: Maximum datasets to return, clamped to 100.
         offset: Number of matching datasets to skip.
         search: Optional case-insensitive search over dataset/workspace text.
-        include_fields: Include visible semantic fields for each returned dataset.
+        include_fields: Include each returned dataset's listed semantic fields. Tenant-constant
+            ids and raw JSON columns are left out but stay queryable by name.
         workspace_id: Active workspace UUID (injected server-side by the agent graph).
         user_id: Acting user UUID (injected server-side; used for access control).
         thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
@@ -931,8 +932,9 @@ def _serialized_semantic_dataset(workspace: Workspace, dataset_name: str) -> dic
 async def semantic_catalog(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """List the workspace semantic model: datasets, dimensions, measures, and relationships.
 
-    Use this instead of raw table discovery. Returned member names are the only
-    fields that can be used with semantic_query.
+    Use this instead of raw table discovery. Use the returned member names with
+    semantic_query. Tenant-constant ids and raw JSON columns are left out of the
+    listing but stay queryable by name.
     """
     async with tool_context(
         "semantic_catalog", workspace_id, user_id=user_id, thread_id=thread_id
@@ -964,7 +966,10 @@ async def semantic_catalog(workspace_id: str = "", user_id: str = "", thread_id:
 async def describe_dataset(
     dataset_name: str, workspace_id: str = "", user_id: str = "", thread_id: str = ""
 ) -> dict:
-    """Describe one semantic dataset and its queryable members.
+    """Describe one semantic dataset and its listed members.
+
+    Tenant-constant ids and raw JSON columns are left out of the listing but stay
+    queryable by name (for example ``raw_visits.opportunity_id``).
 
     Args:
         dataset_name: Dataset name from semantic_catalog, for example "visits".
