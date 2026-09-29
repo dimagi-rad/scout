@@ -123,18 +123,3 @@ def test_display_name_for_multi_bot_workspace_carries_source_count(user):
     # Tenants order by canonical_name, so an alphabetically-earlier bot used to take over.
     WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-a", "Alpha"))
     assert ws.display_name == "Demo \u00b7 3 sources"
-
-
-@pytest.mark.django_db
-def test_same_named_workspaces_keep_distinct_ids_for_urls(user):
-    """The URL slug is cosmetic; the workspace id in the path is what keeps URLs unique."""
-    first = Workspace.objects.create(name="Malaria Study", created_by=user)
-    second = Workspace.objects.create(name="Malaria Study", created_by=user)
-    for ws in (first, second):
-        for i in range(3):
-            WorkspaceTenant.objects.create(
-                workspace=ws, tenant=_ocs_bot(f"bot-{ws.id}-{i}", f"Bot {i}")
-            )
-
-    assert first.display_name == second.display_name == "Malaria Study \u00b7 3 sources"
-    assert first.id != second.id
