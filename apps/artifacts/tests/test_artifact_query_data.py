@@ -652,7 +652,7 @@ NON_OBJECT = {"array": b"[1]", "string": b'"x"', "number": b"5", "null": b"null"
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("story_doc", [True, False], ids=["story", "stored_queries"])
+@pytest.mark.parametrize("artifact_state", ["story", "stored_queries", "no_queries", "not_ready"])
 @pytest.mark.parametrize(
     "body,error",
     [
@@ -662,12 +662,18 @@ NON_OBJECT = {"array": b"[1]", "string": b'"x"', "number": b"5", "null": b"null"
     ids=[*INVALID_JSON, *NON_OBJECT],
 )
 async def test_inspector_rejects_a_body_that_is_not_a_json_object(
-    live_artifact, member_client, workspace, story_doc, body, error
+    live_artifact, member_client, workspace, artifact_state, body, error
 ):
-    if story_doc:
+    if artifact_state == "story":
         live_artifact.data = {"story_doc": story()}
-        await live_artifact.asave(update_fields=["data"])
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as run:
+    elif artifact_state == "no_queries":
+        live_artifact.semantic_queries = []
+    await live_artifact.asave(update_fields=["data", "semantic_queries"])
+    data_state = {"status": "stale", "queryable": artifact_state != "not_ready", "message": "x"}
+    with (
+        patch("apps.artifacts.views.artifact_data_state", new=AsyncMock(return_value=data_state)),
+        patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as run,
+    ):
         response = await member_client.post(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
             body,

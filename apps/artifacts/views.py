@@ -797,6 +797,12 @@ class ArtifactQueryDataView(View):
         if err:
             return err
 
+        runtime = None
+        if request.method == "POST":
+            runtime, err = parse_json_object(request, allow_empty=True)
+            if err:
+                return err
+
         try:
             artifact = await Artifact.objects.select_related("workspace").aget(
                 pk=artifact_id, workspace=workspace
@@ -832,11 +838,6 @@ class ArtifactQueryDataView(View):
 
         static_data = artifact.data or {}
 
-        runtime = None
-        if request.method == "POST":
-            runtime, err = parse_json_object(request, allow_empty=True)
-            if err:
-                return err
         try:
             doc = static_data.get("story_doc")
             if isinstance(doc, dict) and doc.get("blocks"):
