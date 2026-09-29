@@ -1,11 +1,13 @@
 import threading
 from copy import deepcopy
+from io import StringIO
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
+from django.core.management import call_command
 from django.db import connection
 from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
@@ -1402,6 +1404,45 @@ def test_recovery_post_survives_a_delete_racing_the_backfill(workspace, member_u
 
     assert response.status_code == 200, response.content
     assert not ArtifactSemanticQuery.objects.filter(artifact=artifact).exists()
+
+
+@pytest.mark.django_db
+def test_backfill_command_dry_run_writes_nothing(workspace, member_user):
+    artifact = _manifest_less_story(workspace, member_user)
+    out = StringIO()
+
+    call_command("backfill_story_manifests", stdout=out)
+
+    assert f"Would backfill story {artifact.pk}" in out.getvalue()
+    artifact.refresh_from_db()
+    assert artifact.semantic_queries == []
+    assert artifact.semantic_query_manifest == {}
+    assert not ArtifactSemanticQuery.objects.filter(artifact=artifact).exists()
+
+
+@pytest.mark.django_db
+def test_backfill_command_apply_persists_legacy_manifests_once(workspace, member_user):
+    legacy = _manifest_less_story(workspace, member_user)
+    deleted = _manifest_less_story(workspace, member_user)
+    deleted.soft_delete(member_user)
+    react = Artifact.objects.create(
+        workspace=workspace, created_by=member_user, title="Chart", artifact_type=ArtifactType.REACT
+    )
+
+    call_command("backfill_story_manifests", "--apply", stdout=StringIO())
+
+    legacy.refresh_from_db()
+    assert [q["name"] for q in legacy.semantic_queries] == ["q.visits_by_day"]
+    assert list(
+        ArtifactSemanticQuery.objects.filter(artifact=legacy).values_list("query_key", flat=True)
+    ) == ["q.visits_by_day"]
+    for untouched in (deleted, react):
+        stored = Artifact.all_objects.get(pk=untouched.pk)
+        assert (stored.semantic_queries, stored.semantic_query_manifest) == ([], {})
+
+    rerun = StringIO()
+    call_command("backfill_story_manifests", "--apply", stdout=rerun)
+    assert "Backfilled 0 stories, 0 failed." in rerun.getvalue()
 
 
 @pytest.mark.django_db(transaction=True)
