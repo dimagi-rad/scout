@@ -989,11 +989,11 @@ def _write_ocs_experiments(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        page = _with_natural_key(page, "experiment_id", "raw_experiments")
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "experiment_id", "raw_experiments")
+        if not page:
+            continue
         rows = [
             (
                 r.get("experiment_id", ""),
@@ -1042,11 +1042,11 @@ def _write_ocs_sessions(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        page = _with_natural_key(page, "session_id", "raw_sessions")
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "session_id", "raw_sessions")
+        if not page:
+            continue
         rows = [
             (
                 r.get("session_id", ""),
@@ -1163,11 +1163,11 @@ def _write_ocs_participants(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        page = _with_natural_key(page, "participant_id", "raw_participants")
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "participant_id", "raw_participants")
+        if not page:
+            continue
         rows = [
             (
                 r.get("participant_id", ""),
@@ -1379,11 +1379,11 @@ def _write_cases(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        page = _with_natural_key(page, "case_id", "raw_cases")
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "case_id", "raw_cases")
+        if not page:
+            continue
         rows = [
             (
                 c.get("case_id"),
@@ -1448,11 +1448,11 @@ def _write_forms(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        page = _with_natural_key(page, "form_id", "raw_forms")
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "form_id", "raw_forms")
+        if not page:
+            continue
         rows = [
             (
                 f.get("form_id", ""),
@@ -1517,7 +1517,7 @@ def _max_id(page: list[dict], field: str) -> int | None:
     return max(valid) if valid else None
 
 
-def _with_natural_key(page: list[dict], key: str, table: str) -> list[dict]:
+def _drop_keyless_rows(page: list[dict], key: str, table: str) -> list[dict]:
     """Drop, and log, provider rows that arrive without their natural key.
 
     Unfiltered, an id-less row fails the whole page on a BIGINT key, or collapses
@@ -1746,11 +1746,11 @@ def _write_connect_visits(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        page = _with_natural_key(page, "visit_id", "raw_visits")
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "visit_id", "raw_visits")
+        if not page:
+            continue
         rows = [
             (
                 r.get("visit_id"),
@@ -1834,11 +1834,11 @@ def _write_connect_users(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        page = _with_natural_key(page, "username", "raw_users")
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "username", "raw_users")
+        if not page:
+            continue
         rows = [
             (
                 r.get("username", ""),
