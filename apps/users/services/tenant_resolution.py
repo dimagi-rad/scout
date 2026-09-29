@@ -20,6 +20,10 @@ archival on an unsuccessful fetch:
   * CommCare pagination that can't be followed → raise (no silent truncation).
 Callers (the login signal and ``tenant_list_view``) treat any raise as "skip
 refresh," so access is never revoked on an inconclusive fetch (fail-open).
+
+A discovery the user did not start (``may_revoke=False``: a manager's add replaying
+members' stored tokens) records no denial and archives nothing. Only the user's own
+sign-in may take their access away (#561 G1).
 """
 
 from __future__ import annotations
@@ -169,6 +173,7 @@ def _sync_memberships(
     archive_team_slug: str | None = None,
     observed_connection=None,
     access_token=None,
+    archive=True,
 ) -> list[TenantMembership]:
     """Upsert memberships for ``fresh_tenants`` and archive this connection's stale ones.
 
@@ -184,6 +189,7 @@ def _sync_memberships(
     team-scoped (a successful fetch only covers the current team; other teams' access
     must be left intact). If a team-scoped provider has no resolvable team slug,
     archival is skipped entirely (additive only) since it can't be scoped safely.
+    ``archive=False`` is additive only too, for a discovery the user did not start.
     """
     with transaction.atomic():
         # A reconnect/disconnect must not interleave between this check and archival.
@@ -229,6 +235,8 @@ def _sync_memberships(
         user_id = user.pk
         transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
 
+        if not archive:
+            return memberships
         archive_qs = TenantMembership.all_objects.filter(
             user=user, connection=connection, archived_at__isnull=True
         ).exclude(tenant_id__in=fresh_ids)
@@ -241,7 +249,7 @@ def _sync_memberships(
 
 
 async def resolve_commcare_domains(
-    user, access_token: str, *, social_account=None, allow_replace=True
+    user, access_token: str, *, social_account=None, allow_replace=True, may_revoke=True
 ) -> list[TenantMembership]:
     """Fetch the user's CommCare domains and full-sync TenantMembership records.
 
@@ -252,7 +260,10 @@ async def resolve_commcare_domains(
     try:
         domains = await _fetch_all_domains(access_token)
     except CommCareAuthError as error:
-        await _record_discovery_denial(observed, access_token, error.status_code, social_account)
+        if may_revoke:
+            await _record_discovery_denial(
+                observed, access_token, error.status_code, social_account
+            )
         raise
     conn = await _aoauth_connection(
         user,
@@ -277,14 +288,19 @@ async def resolve_commcare_domains(
         fresh.append(tenant)
 
     memberships = await _sync_memberships(
-        user, conn, fresh, observed_connection=observed, access_token=access_token
+        user,
+        conn,
+        fresh,
+        observed_connection=observed,
+        access_token=access_token,
+        archive=may_revoke,
     )
     logger.info("Resolved %d CommCare domains for user %s", len(memberships), user.email)
     return memberships
 
 
 async def resolve_connect_opportunities(
-    user, access_token: str, *, social_account=None, allow_replace=True
+    user, access_token: str, *, social_account=None, allow_replace=True, may_revoke=True
 ) -> list[TenantMembership]:
     """Fetch the user's Connect opportunities and full-sync TenantMembership records.
 
@@ -298,7 +314,7 @@ async def resolve_connect_opportunities(
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
     if resp.status_code in (401, 403):
         # Export-list permission can be denied while opportunity membership remains valid.
-        if resp.status_code == 401:
+        if resp.status_code == 401 and may_revoke:
             await _record_discovery_denial(observed, access_token, resp.status_code, social_account)
         raise ConnectAuthError(
             f"Connect returned {resp.status_code} while listing opportunities — the "
@@ -334,14 +350,19 @@ async def resolve_connect_opportunities(
         fresh.append(tenant)
 
     memberships = await _sync_memberships(
-        user, conn, fresh, observed_connection=observed, access_token=access_token
+        user,
+        conn,
+        fresh,
+        observed_connection=observed,
+        access_token=access_token,
+        archive=may_revoke,
     )
     logger.info("Resolved %d Connect opportunities for user %s", len(memberships), user.email)
     return memberships
 
 
 async def resolve_ocs_chatbots(
-    user, access_token: str, *, social_account=None, allow_replace=True
+    user, access_token: str, *, social_account=None, allow_replace=True, may_revoke=True
 ) -> list[TenantMembership]:
     """Fetch the user's OCS chatbots (experiments) and full-sync TenantMembership records.
 
@@ -363,7 +384,10 @@ async def resolve_ocs_chatbots(
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
-                await _record_discovery_denial(observed, access_token, resp.status_code, account)
+                if may_revoke:
+                    await _record_discovery_denial(
+                        observed, access_token, resp.status_code, account
+                    )
                 raise OCSAuthError(
                     f"OCS returned {resp.status_code} while listing experiments — the "
                     f"access token is expired, revoked, or not authorized for this team"
@@ -407,6 +431,7 @@ async def resolve_ocs_chatbots(
         archive_team_slug=team_slug,
         observed_connection=observed,
         access_token=access_token,
+        archive=may_revoke,
     )
     logger.info(
         "Resolved %d OCS chatbots for user %s (team %s)", len(memberships), user.email, team_slug

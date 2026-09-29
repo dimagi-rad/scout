@@ -13,13 +13,15 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.tenant_resolution import COMMCARE_DOMAIN_API
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.api import workspace_views
 from apps.workspaces.models import (
@@ -70,7 +72,34 @@ def _member(ws, email, *tenants, role=WorkspaceRole.READ):
 
 
 async def _no_refresh(*_args, **_kwargs):
-    return False
+    return workspace_views.Rediscovery()
+
+
+def _commcare_oauth(user, *, token="tok-stored", expires_at=None) -> TenantConnection:
+    """A CommCare HQ OAuth identity as sign-in leaves it: account, token, connection."""
+    app, _ = SocialApp.objects.get_or_create(
+        provider="commcare", name="CommCare", defaults={"client_id": "cid", "secret": "sec"}
+    )
+    account = SocialAccount.objects.create(user=user, provider="commcare", uid=f"cc-{user.pk}")
+    SocialToken.objects.create(
+        account=account, app=app, token=token, token_secret="refresh", expires_at=expires_at
+    )
+    return TenantConnection.objects.create(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="",
+        social_account=account,
+    )
+
+
+def _domains(*tenants):
+    return {
+        "objects": [
+            {"domain_name": t.external_id, "project_name": t.canonical_name} for t in tenants
+        ],
+        "meta": {"next": None},
+    }
 
 
 @pytest.fixture
@@ -156,6 +185,66 @@ class TestSourceAdd:
         assert resp.json()["recheck_complete"] is False
         assert "retrying may help" in resp.json()["error"]
 
+    def test_a_bystanders_rejected_sign_in_leaves_their_access_alone(
+        self, client, user, httpx_mock, t1, t2
+    ):
+        """G1: rediscovery replays other members' stored tokens. A stale one drawing a
+        401 is not this request's to act on: only the member's own sign-in may
+        archive their access, so they are asked to sign in and nothing is revoked."""
+        ws = _workspace(user, t1)
+        grant_tenant_access(user, t2)
+        bob = _member(ws, "bob@example.com")
+        conn = _commcare_oauth(bob)
+        TenantMembership.objects.create(user=bob, tenant=t1, connection=conn)
+        httpx_mock.add_response(url=COMMCARE_DOMAIN_API, status_code=401)
+        client.force_login(user)
+
+        resp = self._post(client, ws, t2)
+
+        assert TenantMembership.objects.filter(user=bob, tenant=t1).exists()
+        conn.refresh_from_db()
+        assert conn.upstream_denied_at is None
+        assert resp.status_code == 409
+        body = resp.json()
+        assert [(m["email"], m["needs_sign_in"]) for m in body["members"]] == [
+            ("bob@example.com", True)
+        ]
+        assert "sign in to Scout again" in body["error"]
+        assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
+
+    def test_a_bystanders_rediscovery_only_ever_adds_access(self, client, user, httpx_mock, t1, t2):
+        """G1: a listing that omits a tenant is the member's own sign-in's to act on."""
+        ws = _workspace(user, t1)
+        grant_tenant_access(user, t2)
+        bob = _member(ws, "bob@example.com")
+        conn = _commcare_oauth(bob)
+        TenantMembership.objects.create(user=bob, tenant=t1, connection=conn)
+        httpx_mock.add_response(url=COMMCARE_DOMAIN_API, json=_domains(t2))
+        client.force_login(user)
+
+        self._post(client, ws, t2)
+
+        assert TenantMembership.objects.filter(user=bob, tenant=t1).exists()
+        assert TenantMembership.objects.filter(user=bob, tenant=t2).exists()
+
+    def test_a_provider_error_during_rediscovery_is_reported_as_retryable(
+        self, client, user, httpx_mock, t1, t2
+    ):
+        """G3: resolve errors were swallowed, so a 502 read as a complete recheck."""
+        ws = _workspace(user, t1)
+        grant_tenant_access(user, t2)
+        bob = _member(ws, "bob@example.com", t1)
+        _commcare_oauth(bob, expires_at=timezone.now() + timedelta(hours=1))
+        httpx_mock.add_response(url=COMMCARE_DOMAIN_API, status_code=502)
+        client.force_login(user)
+
+        resp = self._post(client, ws, t2)
+
+        assert resp.status_code == 409
+        assert resp.json()["recheck_complete"] is False
+        assert "retrying may help" in resp.json()["error"]
+        assert resp.json()["members"][0]["needs_sign_in"] is False
+
     def test_refused_when_another_member_cannot_use_it(self, client, user, t1, t2):
         ws = _workspace(user, t1)
         _member(ws, "brian@example.com", t1)
@@ -186,7 +275,7 @@ class TestSourceAdd:
 
         async def _grant(target, _providers, **_kwargs):
             await sync_to_async(grant_tenant_access)(target, t2)
-            return True
+            return workspace_views.Rediscovery()
 
         with patch(REFRESH, side_effect=_grant):
             resp = self._post(client, ws, t2)
