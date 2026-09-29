@@ -344,3 +344,22 @@ async def test_a_reloading_recovery_is_not_described_as_a_rebuild():
 
     assert graph_base._INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE in context
     assert "reloads nothing" not in context
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_stale_catalog_over_a_failed_load_is_left_for_a_refresh(agent_layer, queued_jobs):
+    """Rebuilding from an unsafe snapshot fails again and only holds the recovery slot."""
+    ws, tenant, schema = await _loaded_workspace("stale-unsafe")
+    await _stale_catalog(ws)
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.FAILED,
+        completed_at=timezone.now(),
+    )
+    _user, client = await _member(ws, tenant, "stale-unsafe@b.c")
+
+    await _chat(client, ws)
+
+    assert await _rebuilds(ws) == []
