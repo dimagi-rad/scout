@@ -55,10 +55,9 @@ class TestParseJsonObject:
 
 @pytest.mark.django_db
 class TestEndpointsRejectNonObjectBodies:
-    @pytest.mark.parametrize("path", ["/api/auth/login/", "/api/auth/signup/"])
     @pytest.mark.parametrize("body", BAD_BODIES.values(), ids=BAD_BODIES.keys())
-    def test_anonymous_endpoints(self, path, body):
-        resp = Client().post(path, data=body, content_type="application/json")
+    def test_login(self, body):
+        resp = Client().post("/api/auth/login/", data=body, content_type="application/json")
 
         assert resp.status_code == 400
 

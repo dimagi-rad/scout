@@ -154,9 +154,9 @@ def test_merge_failure_does_not_break_login(caplog):
 
 @pytest.mark.django_db
 def test_collision_refuses_merge_when_canonical_email_not_verified(caplog):
-    """If the canonical row's email is not verified (e.g. created via /signup
-    without verification), refuse the merge — otherwise an attacker who
-    /signup'd with a victim's email could absorb the victim's OAuth account."""
+    """If the canonical row's email is not verified (e.g. a password account
+    created without verification), refuse the merge — otherwise a password
+    account holding a victim's email could absorb the victim's OAuth account."""
     # Canonical exists but has NO verified EmailAddress for new_email
     canonical = User.objects.create(email="brian@y.com", username="canon")
     duplicate = User.objects.create(email=None, username="connect-user")
@@ -270,16 +270,16 @@ def test_collision_refuses_merge_for_untrusted_social_account(caplog):
 @pytest.mark.django_db
 def test_collision_refuses_merge_for_password_only_canonical(caplog):
     """01#8 / security seam: a canonical that owns the email ONLY via a password
-    /signup (no verified EmailAddress, no trusted SocialAccount) is still
-    refused — auto-merging an incoming OAuth identity into it would let an
-    attacker who /signup'd with a victim's email absorb the victim's OAuth
+    account (no verified EmailAddress, no trusted SocialAccount) is still
+    refused — auto-merging an incoming OAuth identity into it would let a
+    password account holding a victim's email absorb the victim's OAuth
     account. Resolving the password->OAuth path safely needs the #258 allauth
     email-verification work and a product decision; see PR body."""
     canonical = User.objects.create(email="brian@y.com", username="canon")
     canonical.set_password("attacker-chosen")
     canonical.save()
-    # No EmailAddress row, no SocialAccount — exactly the /signup-bypasses-allauth
-    # state.
+    # No EmailAddress row, no SocialAccount — the state of a password account
+    # created outside allauth.
     duplicate = User.objects.create(email=None, username="connect-user")
     dup_account = SocialAccount.objects.create(
         user=duplicate,

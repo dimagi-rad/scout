@@ -42,13 +42,12 @@ class TestStringField:
 
 @pytest.mark.django_db
 class TestAuthFieldTypes:
-    @pytest.mark.parametrize("path", ["/api/auth/login/", "/api/auth/signup/"])
     @pytest.mark.parametrize("field", ["email", "password"])
     @pytest.mark.parametrize("value", WRONG_TYPES.values(), ids=WRONG_TYPES.keys())
-    def test_email_and_password_must_be_strings(self, path, field, value):
+    def test_email_and_password_must_be_strings(self, field, value):
         body = {"email": "new@example.com", "password": "a-long-passphrase", field: value}
 
-        resp = _post(Client(), path, body)
+        resp = _post(Client(), "/api/auth/login/", body)
 
         assert resp.status_code == 400
         assert resp.json()["error"] == f"{field} must be a string."
