@@ -118,3 +118,37 @@ test('file-level high findings block and count as significant', () => {
   assert.equal(evaluate(result).passed, false);
   assert.equal(evaluate(result).significant, 1);
 });
+
+function skippedReport() {
+  const result = report();
+  result.status = 'skipped';
+  result.manifest.terminal_state = 'skipped';
+  result.manifest.coverage = { selected: [], completed: [], reused: [], failed: [], waived: [] };
+  return result;
+}
+test('a run with zero OCR-reviewable files passes as skipped for Claude to review', () => {
+  const decision = evaluate(skippedReport());
+  assert.equal(decision.passed, true);
+  assert.equal(decision.skipped, true);
+  assert.equal(decision.significant, 0);
+  assert.equal(evaluate(report()).skipped, undefined);
+});
+test('a skipped run still fails closed on findings, coverage, failure, range or publication', () => {
+  const mutations = [
+    (r) => { r.comments = [{ severity: 'low', content: 'Finding' }]; },
+    (r) => { r.manifest.coverage.selected = [item('a')]; },
+    (r) => { r.manifest.coverage.completed = [item('a')]; },
+    (r) => { r.manifest.coverage.waived = [item('a')]; },
+    (r) => { r.manifest.coverage.failed = [item('a')]; },
+    (r) => { delete r.manifest.coverage.reused; },
+    (r) => { r.manifest.run_failure = { classification: 'input' }; },
+    (r) => { r.manifest.input.resolved_head = 'c'.repeat(40); },
+    (r) => { r.manifest.input.resolved_base = 'c'.repeat(40); },
+    (r) => { r.summary = { budget_exceeded: true }; },
+    (r) => { r.manifest.terminal_state = 'complete'; },
+    (r) => { r.status = 'complete'; },
+    (r) => { r.manifest.operation = 'scan'; },
+  ];
+  for (const mutate of mutations) { const result = skippedReport(); mutate(result); blocked(result); }
+  blocked(skippedReport(), '1');
+});

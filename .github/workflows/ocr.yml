@@ -200,6 +200,7 @@ jobs:
           prompt: |
             Review PR https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.number }}.
             OCR's completeness and severity gate passed for head ${{ needs.prepare.outputs.head }}.
+            ${{ steps.gate.outputs.claude_scope }}
             This is a ${{ steps.gate.outputs.claude_mode }} Claude review.
             Review changes from ${{ steps.gate.outputs.claude_from }} to ${{ needs.prepare.outputs.head }}.
             Use git diff for that exact range, not gh pr diff (which includes the whole PR).
