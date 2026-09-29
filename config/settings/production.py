@@ -33,8 +33,8 @@ SECURE_HSTS_PRELOAD = True
 
 # Without this secret the MCP server is unauthenticated or unreachable (#51):
 # refuse to start rather than discover it at the first agent tool call.
-MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="")
-if not MCP_SHARED_SECRET.strip():
+MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="").strip()
+if not MCP_SHARED_SECRET:
     raise ImproperlyConfigured("MCP_SHARED_SECRET must be set in production.")
 
 # Amazon SES. region_name is required: the container has no AWS_REGION, so boto3
