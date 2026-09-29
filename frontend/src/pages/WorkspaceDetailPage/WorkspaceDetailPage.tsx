@@ -59,7 +59,7 @@ function InviteStatusChip({ status }: { status: WorkspaceInviteStatus }) {
   )
 }
 
-function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
+export function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
   const [members, setMembers] = useState<WorkspaceMember[]>([])
   const [invites, setInvites] = useState<WorkspaceInvite[]>([])
   const [loading, setLoading] = useState(true)
@@ -121,6 +121,14 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }
 
+  // A 409 means the invite was accepted or revoked elsewhere; the list is stale.
+  function reloadIfInviteGone(err: unknown) {
+    if (err instanceof ApiError && err.status === 409) {
+      setConfirmRemoveId(null)
+      void load()
+    }
+  }
+
   async function handleInviteRoleChange(inviteId: string, newRole: WorkspaceMember["role"]) {
     setUpdatingId(inviteId)
     try {
@@ -130,6 +138,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       )
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to update invite role")
+      reloadIfInviteGone(err)
     } finally {
       setUpdatingId(null)
     }
@@ -143,6 +152,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       setConfirmRemoveId(null)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to revoke invite")
+      reloadIfInviteGone(err)
     } finally {
       setRemovingId(null)
     }
