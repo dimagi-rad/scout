@@ -10,6 +10,7 @@ workspace creation validates every requested source.
 import asyncio
 import contextlib
 import threading
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -581,6 +582,29 @@ class TestRediscoveryOutcome:
         )
 
         assert outcome == workspace_views.Rediscovery(failed=False, needs_sign_in=needs_sign_in)
+
+    def test_a_slow_upstream_cannot_hold_a_direct_add_past_its_budget(
+        self, monkeypatch, httpx_mock
+    ):
+        """The renew pass runs on the sync request thread, so it shares one budget
+        rather than spending a full timeout per provider and identity."""
+        monkeypatch.setattr(workspace_views, "TARGET_REFRESH_BUDGET", 0.3)
+        target = User.objects.create_user(email="bob@example.com", password="pass")
+        _oauth_identity(target, expires_at=timezone.now() + timedelta(hours=1))
+
+        async def slow_listing(_request):
+            await asyncio.sleep(1)
+            return httpx.Response(200, json=_domains())
+
+        httpx_mock.add_callback(slow_listing, url=COMMCARE_DOMAIN_API)
+        started = time.monotonic()
+
+        outcome = async_to_sync(workspace_views._arefresh_target_for_workspace)(
+            target, ["commcare"], renew=True
+        )
+
+        assert time.monotonic() - started < 1
+        assert outcome == workspace_views.Rediscovery(failed=True)
 
 
 @pytest.mark.django_db
