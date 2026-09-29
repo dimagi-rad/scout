@@ -1393,3 +1393,21 @@ async def test_schema_status_shows_a_zero_row_counter(user):
     in_flight = await _schema_status(workspace)
 
     assert "(0 of 400 rows)" in in_flight["message"]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_schema_status_counts_a_failed_source_as_failed_not_finished(user):
+    """G6: a source whose run failed landed nothing; it is not "finished"."""
+    workspace = await Workspace.objects.acreate(name="Partly failed", created_by=user)
+    failed, loading, _waiting = [
+        await _tenant_in(workspace, name) for name in ("alpha", "bravo", "charlie")
+    ]
+    await _run(failed, MaterializationRun.RunState.FAILED, 80)
+    await _run(loading, MaterializationRun.RunState.LOADING, 80)
+
+    in_flight = await _schema_status(workspace)
+
+    assert in_flight["sources_finished"] == 0
+    assert in_flight["sources_failed"] == 1
+    assert "source 2 of 3" in in_flight["message"]
+    assert "1 failed" in in_flight["message"]

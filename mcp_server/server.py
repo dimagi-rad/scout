@@ -1670,6 +1670,11 @@ async def run_materialization(
         return tc["result"]
 
 
+_FINISHED_RUN_STATES = frozenset(
+    {MaterializationRun.RunState.COMPLETED, MaterializationRun.RunState.PARTIAL}
+)
+
+
 def _load_source_entry(tenant, run: MaterializationRun | None) -> dict:
     entry = {
         "tenant_id": str(tenant.id),
@@ -1692,18 +1697,25 @@ def _load_source_entry(tenant, run: MaterializationRun | None) -> dict:
     return entry
 
 
-def _load_progress_message(sources: list[dict], finished: int, single_job: bool) -> str:
+def _load_progress_message(
+    sources: list[dict], finished: int, failed: int, single_job: bool
+) -> str:
     loading = [s for s in sources if s["state"] in MaterializationRun.ACTIVE_STATES]
     if not (single_job and len(loading) == 1):
         # Separate jobs (e.g. per-source refreshes) have no shared order to count through.
-        return f"{len(loading)} of {len(sources)} sources loading, {finished} finished."
+        failed_note = f", {failed} failed" if failed else ""
+        return (
+            f"{len(loading)} of {len(sources)} sources loading, {finished} finished{failed_note}."
+        )
     current = loading[0]
-    message = f"Loading source {finished + 1} of {len(sources)} ({current['name']})"
+    message = f"Loading source {finished + failed + 1} of {len(sources)} ({current['name']})"
     if current["detail"]:
         message += f": {current['detail']}"
     if current["rows_loaded"] is not None and current["rows_total"]:
         rows = f"{current['rows_loaded']:,} of {current['rows_total']:,} {current['unit']}"
         message += f" ({rows})"
+    if failed:
+        message += f"; {failed} failed so far"
     return message
 
 
@@ -1747,13 +1759,14 @@ async def _load_in_progress(workspace: Workspace) -> dict | None:
         return (int(run.state in MaterializationRun.ACTIVE_STATES), run.started_at)
 
     sources = [_load_source_entry(t, latest.get(t.id)) for t in sorted(tenants, key=order)]
-    finished = sum(
-        1 for s in sources if s["state"] not in {"waiting", *MaterializationRun.ACTIVE_STATES}
-    )
+    unfinished = {"waiting", *MaterializationRun.ACTIVE_STATES}
+    finished = sum(1 for s in sources if s["state"] in _FINISHED_RUN_STATES)
+    failed = sum(1 for s in sources if s["state"] not in unfinished | _FINISHED_RUN_STATES)
     return {
         "sources_total": len(sources),
         "sources_finished": finished,
-        "message": _load_progress_message(sources, finished, single_job=len(job_ids) <= 1),
+        "sources_failed": failed,
+        "message": _load_progress_message(sources, finished, failed, single_job=len(job_ids) <= 1),
         "sources": sources,
     }
 
@@ -1765,8 +1778,9 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
     Returns schema existence, state, last materialization timestamp, and table
     list; exists=False if no schema has been provisioned yet. Safe to call
     before any data has been loaded. While a load is running,
-    ``load_in_progress`` reports which source it is on (e.g. "source 2 of 3")
-    and that source's step and row progress; it is null when nothing is loading. Fails with WORKSPACE_ACCESS_DENIED when
+    ``load_in_progress`` reports which source it is on (e.g. "source 2 of 3"),
+    how many sources finished or failed, and that source's step and row progress;
+    it is null when nothing is loading. Fails with WORKSPACE_ACCESS_DENIED when
     the acting user can no longer read the workspace.
 
     Args:
