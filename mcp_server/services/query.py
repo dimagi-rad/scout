@@ -3,7 +3,10 @@ Query execution service for the MCP server.
 
 Validates and executes read-only SQL against a tenant's database schema.
 Agent-authored SQL goes through ``execute_query``, which enforces the
-SQLValidator rules and row limits and runs under the tenant's read-only role.
+SQLValidator rules and row limits; backend-authored parameterized SQL (the
+catalog reads in ``metadata.py``) calls ``_execute_async_parameterized``
+directly and gets raw exceptions. Both share that pooled executor, so both run
+under the tenant's read-only role.
 """
 
 from __future__ import annotations
