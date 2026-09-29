@@ -215,9 +215,11 @@ def _is_invalid_client(response) -> bool:
 
 
 def is_transient_status(status: int | None) -> bool:
-    """A provider hiccup, not a verdict on the grant.
+    """A provider hiccup, not a verdict on the credential; retrying may succeed.
 
-    Transient failures never write the refresh-failure marker: the all-of gate reads
+    Shared with upstream access verification so both paths agree on what is
+    retryable. On the refresh path, transient failures never write the
+    refresh-failure marker: the all-of gate reads
     that marker as "reconnect", which cannot fix a blip and would lock the member out
     of every workspace sharing the source (#551 review M1). Upstream reachability is
     the freshness gate's call, and it already denies temporarily and retryably.

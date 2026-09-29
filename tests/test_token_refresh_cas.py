@@ -215,12 +215,14 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
     oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
 ):
     token, connection = oauth_identity
+    attempted = []
     if mode == "async":
         from apps.users.services import token_refresh
 
         original = token_refresh._apersist_refresh_failure
 
         async def deny_then_record(*args, **kwargs):
+            attempted.append(True)
             await TenantConnection.objects.filter(pk=connection.pk).aupdate(
                 upstream_denied_at=timezone.now()
             )
@@ -236,6 +238,7 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
         original = token_refresh._persist_refresh_failure
 
         def deny_then_record(*args, **kwargs):
+            attempted.append(True)
             TenantConnection.objects.filter(pk=connection.pk).update(
                 upstream_denied_at=timezone.now()
             )
@@ -246,6 +249,7 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
         with pytest.raises(TokenRefreshRejected):
             await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
 
+    assert attempted, "the marker write must run for the fence to reject it"
     await connection.arefresh_from_db()
     assert connection.oauth_refresh_failure_fingerprint == ""
 
