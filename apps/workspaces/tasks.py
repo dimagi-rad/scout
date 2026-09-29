@@ -2442,6 +2442,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                 )
             elif (
                 recovery.recovery_type == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD
+                and surface["status"] == "ready"
                 and surface.get("semantic_status") == "stale"
             ):
                 # The catalog still serves but its latest build failed; chat asks for this (#714).
