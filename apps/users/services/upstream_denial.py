@@ -115,7 +115,8 @@ def record_validated_upstream_denial(connection, *, code, tenant_id=None, now=No
     connection.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
     archived = memberships.update(archived_at=now)
     # The turn that saw the denial must not keep running on a grant cached before it.
-    # After commit, or a sibling tool call could re-cache from the unarchived rows.
+    # After commit, so a sibling tool call can't re-read the unarchived rows; one
+    # that read them before is refused its store by the scope's generation.
     user_id = connection.user_id
     transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
     return archived

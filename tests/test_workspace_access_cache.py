@@ -16,6 +16,7 @@ from django.test.utils import CaptureQueriesContext
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
+from apps.users.services.tenant_resolution import _sync_memberships
 from apps.users.services.upstream_denial import record_validated_upstream_denial
 from apps.workspaces import access as access_module
 from apps.workspaces import access_cache
@@ -413,9 +414,56 @@ def test_adding_a_source_drops_the_workspaces_cached_coverage(scope, user, works
     assert [t.tenant_name for t in missing_tenants_for_member(user, workspace)] == ["Extra"]
 
 
+@pytest.mark.django_db
 def test_invalidate_matches_a_stringified_user_id(scope, user):
-    access_cache.store(user, "ws", access_cache.COVERAGE, ())
+    access_cache.store(user, "ws", access_cache.COVERAGE, (), since=access_cache.generation())
 
     access_cache.invalidate(user_id=str(user.pk))
 
     assert access_cache.lookup(user, "ws", access_cache.COVERAGE) is None
+
+
+@pytest.mark.django_db
+def test_a_result_read_before_an_invalidation_is_not_stored(scope, user):
+    """A sibling that read the pre-denial rows must not re-cache after the drop."""
+    since = access_cache.generation()
+    access_cache.invalidate(user_id=user.pk)
+
+    access_cache.store(user, "ws", access_cache.COVERAGE, (), since=since)
+
+    assert access_cache.lookup(user, "ws", access_cache.COVERAGE) is None
+
+
+@pytest.mark.django_db
+def test_a_resolution_that_races_an_invalidation_is_not_cached(scope, user, workspace, monkeypatch):
+    real = access_module.member_coverage_gaps
+
+    def gaps_then_denial_elsewhere(*args, **kwargs):
+        result = real(*args, **kwargs)
+        access_cache.invalidate(user_id=user.pk)
+        return result
+
+    monkeypatch.setattr(access_module, "member_coverage_gaps", gaps_then_denial_elsewhere)
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+
+    assert access_cache.lookup(user, workspace.id, READ_KEY) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_membership_rediscovery_drops_the_users_cached_decisions(user, workspace, tenant):
+    """Member refreshes run rediscovery inside a gated request (source/member add)."""
+    membership = await TenantMembership.objects.select_related("connection").aget(
+        user=user, tenant=tenant
+    )
+    opened, token = access_cache.open_scope()
+    try:
+        assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+        # A fetch that no longer lists the tenant archives it.
+        await _sync_memberships(user, membership.connection, [])
+        after = await aresolve_workspace_access_ex(user, workspace.id)
+    finally:
+        access_cache.close_scope(opened)
+        access_cache.detach_scope(token)
+
+    assert after.denied_reason == TENANT_ACCESS_LOST
