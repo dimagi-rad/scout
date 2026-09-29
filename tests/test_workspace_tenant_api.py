@@ -1,15 +1,19 @@
+from unittest.mock import patch
+
 import pytest
 from django.db.models import ProtectedError
 from rest_framework.test import APIClient
 
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.api import workspace_views
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.workspace_service import LastWorkspaceTenant
 from tests.tenant_access import grant_tenant_access
 
 
@@ -135,6 +139,31 @@ def test_removing_last_source_with_confirmation_deletes_the_workspace(
     assert not Workspace.objects.filter(id=workspace.id).exists()
     assert not Thread.objects.filter(workspace_id=workspace.id).exists()
     assert WorkspaceTenant.objects.filter(workspace=sibling_workspace, tenant=tenant).exists()
+
+
+def test_source_added_before_the_confirmed_delete_keeps_the_workspace(
+    api_client, user, workspace, tenant, tenant2, sibling_workspace
+):
+    """A source that lands between the last-source check and the delete wins."""
+    url = _last_source_url(workspace, tenant, confirm=True)
+    WorkspaceTenant.objects.create(workspace=sibling_workspace, tenant=tenant2)
+    real_remove = workspace_views.remove_workspace_tenant
+    calls = []
+
+    def last_then_real(ws, wt):
+        calls.append(wt.id)
+        if len(calls) == 1:
+            WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+            raise LastWorkspaceTenant("Cannot remove the last tenant from a workspace.")
+        return real_remove(ws, wt)
+
+    api_client.force_login(user)
+    with patch.object(workspace_views, "remove_workspace_tenant", side_effect=last_then_real):
+        resp = api_client.delete(url)
+
+    assert resp.status_code == 204
+    assert Workspace.objects.filter(id=workspace.id).exists()
+    assert list(workspace.workspace_tenants.values_list("tenant_id", flat=True)) == [tenant2.id]
 
 
 def test_non_manager_cannot_remove_last_source_even_confirmed(

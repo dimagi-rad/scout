@@ -1342,14 +1342,14 @@ class WorkspaceTenantView(APIView):
         try:
             remove_workspace_tenant(workspace, wt)
         except LastWorkspaceTenant:
-            return _delete_for_last_source(request, workspace)
+            return _delete_for_last_source(request, workspace, wt)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 LAST_SOURCE_PREFIX = "Removing the last data source deletes the workspace. "
 
 
-def _delete_for_last_source(request, workspace) -> Response:
+def _delete_for_last_source(request, workspace, wt) -> Response:
     """Delete ``workspace`` because its last source is being removed (#381).
 
     A workspace never exists without a source, so this is a workspace delete and
@@ -1371,5 +1371,13 @@ def _delete_for_last_source(request, workspace) -> Response:
             },
             status=status.HTTP_409_CONFLICT,
         )
-    workspace.delete()
+    with transaction.atomic():
+        # The last-source check's row locks ended with its transaction. Adding a
+        # source takes this lock (add_tenant_covered_by_members), so re-checking
+        # under it means no source can land between the check and the delete.
+        Workspace.objects.select_for_update().only("pk").get(pk=workspace.pk)
+        if workspace.workspace_tenants.exclude(id=wt.id).exists():
+            remove_workspace_tenant(workspace, wt)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        workspace.delete()
     return Response({"workspace_deleted": True}, status=status.HTTP_200_OK)
