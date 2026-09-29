@@ -712,6 +712,16 @@ async def _workspace_tenant_ids(workspace_id) -> list:
     ]
 
 
+async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
+    """A load refused before it started still left its sources unrefreshed (#715).
+
+    A role denial says nothing about the sources, so it leaves their records alone.
+    """
+    if denial.get("error_code") != ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
+        await arecord_load_outcomes(workspace_id, denial.get("tenants") or [], user_id)
+    return denial
+
+
 def serialized_workspace_materialization(function):
     """Capture load intent, then take W and the sorted tenant locks T*.
 
@@ -732,7 +742,7 @@ def serialized_workspace_materialization(function):
     ):
         denial = await _materialization_write_denial(workspace_id, user_id)
         if denial is not None:
-            return denial
+            return await _recorded_denial(workspace_id, user_id, denial)
         intent = parse_load_intent(load_intent)
         if intent is None:
             tenant_ids = await _workspace_tenant_ids(workspace_id)
@@ -740,12 +750,12 @@ def serialized_workspace_materialization(function):
         async with workspace_data_lock(workspace_id):
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
-                return denial
+                return await _recorded_denial(workspace_id, user_id, denial)
             tenant_ids = await _workspace_tenant_ids(workspace_id)
             async with tenant_data_lock(tenant_ids):
                 denial = await _materialization_write_denial(workspace_id, user_id)
                 if denial is not None:
-                    return denial
+                    return await _recorded_denial(workspace_id, user_id, denial)
                 return await function(
                     workspace_id,
                     user_id,
@@ -892,6 +902,7 @@ async def materialize_workspace_core(
 
     if not memberships:
         logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
+        await arecord_load_outcomes(workspace.id, unreachable_results, user_id)
         return _no_reachable_tenants_result(unreachable_results)
 
     registry = get_registry()
@@ -1257,7 +1268,7 @@ async def materialize_workspace_core(
         "cube_schema": cube_schema_outcome,
         "guidance": _credential_guidance(_summary_failures(guidance_sources)),
         "denied_mid_run": denied_mid_run,
-        "source_freshness": await arecord_load_outcomes(workspace.id, all_results),
+        "source_freshness": await arecord_load_outcomes(workspace.id, all_results, user_id),
     }
 
 

@@ -67,6 +67,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_load_pending
 from apps.workspaces.services.query_state import serving_writer_in_flight
 from apps.workspaces.services.source_freshness import (
+    CREDENTIAL_CODES,
     REFRESHED,
     REUSED,
     aworkspace_source_freshness,
@@ -1186,7 +1187,8 @@ async def _build_system_prompt(
             if warning:
                 volatile += warning + "\n"
         freshness = _source_freshness_block(
-            await aworkspace_source_freshness(workspace.id), write_capable=write_capable
+            await aworkspace_source_freshness(workspace.id, getattr(user, "id", "")),
+            write_capable=write_capable,
         )
         if freshness:
             volatile += f"\n{freshness}\n"
@@ -1206,38 +1208,50 @@ def _source_freshness_block(sources: list[dict], *, write_capable: bool) -> str:
     ``last_materialized_at`` is the newest source's time, so one fresh source hid a
     month-old one and the agent blamed the loader instead of the expired sign-in.
     """
-    if not any(s["last_fetched_at"] or s["not_refreshed"] for s in sources):
+    if not any(s["serving"] or s["not_refreshed"] for s in sources):
         return ""
     lines = ["### Source Freshness", ""]
     for source in sources:
         fetched = parse_datetime(source["last_fetched_at"] or "")
-        age = (
-            f"data last fetched {fetched:%Y-%m-%d %H:%M} UTC ({_fetch_age(fetched)})"
-            if fetched
-            else "no data fetched yet"
-        )
+        if fetched:
+            age = f"data last fetched {fetched:%Y-%m-%d %H:%M} UTC ({_fetch_age(fetched)})"
+        elif source["serving"]:
+            age = "data loaded, fetch time unknown"
+        else:
+            age = "no data fetched yet"
         line = f"- {source['name']} ({provider_label(source['provider'])}): {age}"
         if source["not_refreshed"]:
-            code = source.get("error_code") or "unknown error"
-            line += f". NOT refreshed by the latest load ({code}). Fix: {source['remedy']}."
+            why = (
+                "the load stopped before this source"
+                if source.get("stopped")
+                else source.get("error_code") or "unknown error"
+            )
+            line += f". NOT refreshed by the latest load ({why})"
+            if not source["serving"]:
+                line += "; its data is not in what this workspace can query"
+            line += f". Fix: {source['remedy']}."
         elif source["last_load"] == REUSED:
             line += "; the latest load reused this data without fetching it again."
         elif source["last_load"] == REFRESHED:
             line += "; refreshed by the latest load."
         lines.append(line)
-    if any(s["not_refreshed"] for s in sources):
+    stale = [s for s in sources if s["not_refreshed"]]
+    if stale:
         lines += [
             "",
-            "A source marked NOT refreshed still serves its last fetched data. When an "
-            "answer uses it, tell the user its data is only current to that fetch date, "
-            "name the source, and give its fix. Do not tell the user that a refresh "
-            "cannot help or that the loader is at fault for these sources: the fix "
-            "listed is what brings their data up to date.",
+            "When an answer depends on a source marked NOT refreshed, tell the user its "
+            "data is only current to its fetch date, name the source, and give its fix.",
         ]
+        if any(s.get("error_code") in CREDENTIAL_CODES for s in stale):
+            lines.append(
+                "For a sign-in problem, do not tell the user that a refresh cannot help or "
+                "that the loader is at fault: the fix listed is what brings that source "
+                "up to date."
+            )
         if not write_capable:
             lines.append(
                 "This user's workspace role is read-only, so a workspace member with "
-                "write access has to apply the fix."
+                "write access has to refresh the data."
             )
     return "\n".join(lines)
 

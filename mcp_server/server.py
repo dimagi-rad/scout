@@ -1817,8 +1817,8 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
     data was fetched) and ``last_load`` (``refreshed``, ``reused`` or ``skipped``
     by this workspace's latest load). ``last_materialized_at`` is only the newest
     of those times, so read ``sources`` for any one source's age. A source with
-    ``not_refreshed: true`` still serves older data; its ``remedy`` says what
-    gets it fetched again.
+    ``not_refreshed: true`` was not fetched by the latest load; ``serving`` says
+    whether its older data is still queryable and ``remedy`` what gets it fetched.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -1869,7 +1869,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         if tenant_count == 0:
             tc["result"] = not_provisioned
             return tc["result"]
-        sources = await aworkspace_source_freshness(workspace.id)
+        sources = await aworkspace_source_freshness(workspace.id, user_id)
         not_provisioned["data"]["sources"] = sources
 
         synced_at = (
