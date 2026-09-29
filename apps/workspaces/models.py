@@ -314,8 +314,11 @@ class WorkspaceTenant(models.Model):
     workspace = models.ForeignKey(
         Workspace, on_delete=models.CASCADE, related_name="workspace_tenants"
     )
+    # PROTECT, not CASCADE: dropping the link behind the workspace's back could
+    # leave it with no sources, which must never exist (#381). Remove the source
+    # through remove_workspace_tenant first, which deletes a workspace it empties.
     tenant = models.ForeignKey(
-        "users.Tenant", on_delete=models.CASCADE, related_name="workspace_tenants"
+        "users.Tenant", on_delete=models.PROTECT, related_name="workspace_tenants"
     )
 
     class Meta:

@@ -1,4 +1,5 @@
 import pytest
+from django.db.models import ProtectedError
 from rest_framework.test import APIClient
 
 from apps.chat.models import Thread
@@ -190,6 +191,24 @@ def test_removing_a_missing_last_source_of_an_unshared_workspace_deletes_it(
 
     assert resp.status_code == 200, resp.data
     assert not Workspace.objects.filter(id=workspace.id).exists()
+
+
+@pytest.mark.parametrize("via_queryset", [False, True])
+def test_deleting_a_tenant_a_workspace_uses_is_blocked(workspace, tenant, via_queryset):
+    """A tenant delete would otherwise cascade to the link and empty the workspace."""
+    with pytest.raises(ProtectedError):
+        if via_queryset:
+            Tenant.objects.filter(id=tenant.id).delete()
+        else:
+            tenant.delete()
+
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+
+
+def test_deleting_a_tenant_no_workspace_uses_still_works(tenant2):
+    tenant2.delete()
+
+    assert not Tenant.objects.filter(id=tenant2.id).exists()
 
 
 def test_add_tenant_refused_when_member_lacks_a_workspace_tenant(
