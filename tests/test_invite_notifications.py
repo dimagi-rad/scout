@@ -288,3 +288,30 @@ class TestDirectAddEmail:
             resp = self._add(client, workspace, "alice@example.com")
 
         assert resp.status_code == 201
+
+    def test_direct_add_resolves_a_waiting_invite(
+        self, client, user, workspace, tenant, mocker, django_capture_on_commit_callbacks
+    ):
+        """Left live, the invite would be 'accepted' at next login and send a second,
+        contradictory email to the member and the manager."""
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        invite = WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="alice@example.com",
+            role=WorkspaceRole.READ,
+            invited_by=user,
+            status=WorkspaceInviteStatus.AWAITING_ACCESS,
+        )
+        grant_tenant_access(target, tenant)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            assert self._add(client, workspace, "alice@example.com").status_code == 201
+        mock_task.reset_mock()
+        resolve_pending_invites_on_login(target)
+
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+        assert invite.resolved_at is not None
+        mock_task.defer.assert_not_called()

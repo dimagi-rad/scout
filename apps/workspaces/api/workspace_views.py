@@ -793,8 +793,14 @@ class WorkspaceMemberListView(APIView):
                 {"error": "User is already a member."},
                 status=status.HTTP_409_CONFLICT,
             )
-        # on_commit so a caller's rolled-back transaction never emails about a
-        # membership that doesn't exist.
+        # An earlier awaiting-access invite is now satisfied; left live, the next
+        # login would "accept" it and send a second, contradictory email.
+        now = timezone.now()
+        WorkspaceInvite.objects.filter(
+            workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
+        ).update(status=WorkspaceInviteStatus.ACCEPTED, resolved_at=now, updated_at=now)
+        # Defensive: the view runs in autocommit today, but inside an outer atomic
+        # block a rollback must not email about a membership that never landed.
         transaction.on_commit(lambda: notify_member_added(new_membership, request.user))
         return Response(
             {
