@@ -7,7 +7,8 @@ ciphertext prefix are skipped, which makes both directions idempotent.
 Each batch is locked, rewritten and committed on its own (``atomic = False``),
 so a token refreshed concurrently is never overwritten with its stale value and
 no lock is held for the whole table rewrite. An interrupted run leaves a mixed
-table, which readers handle and a re-run finishes.
+table, which readers handle and a re-run finishes. A concurrent disconnect's
+bulk DELETE can still abort a batch as a deadlock victim; re-running is safe.
 
 Deploy only once every role (API, MCP, worker) runs code that reads ciphertext
 (#691): migrate runs from the API container while older roles still serve.

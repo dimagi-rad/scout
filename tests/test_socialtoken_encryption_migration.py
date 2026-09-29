@@ -18,7 +18,7 @@ from django.test.utils import CaptureQueriesContext
 
 from apps.users.token_encryption import (
     CIPHERTEXT_PREFIX,
-    decrypt_token_value,
+    decrypt_token_value_strict,
     encrypt_token_value,
 )
 
@@ -146,7 +146,7 @@ def test_reverse_commits_readable_batches_and_stops_at_an_unreadable_one(
     first_batch = sorted(mixed_rows.values())[:2]
     later_rows = sorted(mixed_rows.values())[2:]
     other_key = Fernet.generate_key().decode()
-    plaintext = {pk: tuple(decrypt_token_value(v) for v in _raw(pk)) for pk in first_batch}
+    plaintext = {pk: tuple(decrypt_token_value_strict(v) for v in _raw(pk)) for pk in first_batch}
     with override_settings(DB_CREDENTIAL_KEY=other_key):
         for pk in first_batch:
             _store(pk, *(encrypt_token_value(v) for v in plaintext[pk]))
