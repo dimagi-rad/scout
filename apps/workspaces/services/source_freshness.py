@@ -106,12 +106,15 @@ async def _last_fetched(tenant_ids: Iterable) -> dict[str, datetime]:
     return {str(row["tenant_schema__tenant_id"]): row["fetched"] async for row in rows}
 
 
-async def arecord_load_outcomes(workspace_id, tenant_results: list[dict], user_id="") -> list:
+async def arecord_load_outcomes(
+    workspace_id, tenant_results: list[dict], user_id="", *, only_listed: bool = False
+) -> list:
     """Persist what this load did with each source and return it for the run result.
 
     A source that was only published as already loaded keeps its earlier record:
     nothing checked its credential, so "reused" would clear a standing skip. A
-    source the load never reached (it was cancelled first) is recorded as skipped.
+    source the load never reached (it was cancelled first) is recorded as skipped,
+    unless ``only_listed`` says the results cover only some sources on purpose.
     Never raises: the load already happened, and its summary must still return.
     """
     try:
@@ -128,6 +131,8 @@ async def arecord_load_outcomes(workspace_id, tenant_results: list[dict], user_i
         for wt in workspace_tenants:
             tenant_id = str(wt.tenant_id)
             entry = entries.get(tenant_id)
+            if entry is None and only_listed:
+                continue
             if entry is None:
                 outcome = {"refresh": SKIPPED, "error_code": "", "not_reached": True}
             else:

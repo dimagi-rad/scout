@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from django.conf import settings
@@ -1196,7 +1196,8 @@ async def _build_system_prompt(
 
 
 def _fetch_age(fetched: datetime) -> str:
-    days = (timezone.now() - fetched).days
+    # Calendar days in UTC, matching the date printed beside it.
+    days = (timezone.now().astimezone(UTC).date() - fetched.astimezone(UTC).date()).days
     if days <= 0:
         return "today"
     return "1 day ago" if days == 1 else f"{days} days ago"
@@ -1214,7 +1215,7 @@ def _source_freshness_block(sources: list[dict], *, write_capable: bool) -> str:
     for source in sources:
         fetched = parse_datetime(source["last_fetched_at"] or "")
         if fetched:
-            age = f"data last fetched {fetched:%Y-%m-%d %H:%M} UTC ({_fetch_age(fetched)})"
+            age = f"data last fetched {fetched.astimezone(UTC):%Y-%m-%d %H:%M} UTC ({_fetch_age(fetched)})"
         elif source["serving"]:
             age = "data loaded, fetch time unknown"
         else:

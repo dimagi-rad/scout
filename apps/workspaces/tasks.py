@@ -713,13 +713,30 @@ async def _workspace_tenant_ids(workspace_id) -> list:
 
 
 async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
-    """A load refused before it started still left its sources unrefreshed (#715).
+    """A load refused before it started still left some sources unrefreshed (#715).
 
-    A role denial says nothing about the sources, so it leaves their records alone.
+    Only a source the requester's own sign-in failed for is recorded. A role
+    denial, a source skipped for another one, or an inconclusive check says
+    nothing about the source, so its record from the last real load stands.
     """
-    if denial.get("error_code") != ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
-        await arecord_load_outcomes(workspace_id, denial.get("tenants") or [], user_id)
+    failed = [
+        entry
+        for entry in denial.get("tenants") or []
+        if entry.get("error_code") in _DENIAL_CODES_ABOUT_THE_SOURCE
+    ]
+    if failed:
+        await arecord_load_outcomes(workspace_id, failed, user_id, only_listed=True)
     return denial
+
+
+_DENIAL_CODES_ABOUT_THE_SOURCE = frozenset(
+    {
+        ErrorCode.AUTH_TOKEN_EXPIRED,
+        ErrorCode.AUTH_CREDENTIAL_MISSING,
+        ErrorCode.AUTH_ACCESS_DENIED,
+        ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+    }
+)
 
 
 def serialized_workspace_materialization(function):

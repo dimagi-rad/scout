@@ -175,7 +175,7 @@ async def test_prompt_names_the_stale_source_and_says_reconnect(
     assert "refreshed by the latest load" in connect_line
     assert "NOT refreshed" not in connect_line
     assert "do not tell the user that a refresh cannot help" in volatile
-    assert ("read-only" in volatile) is not write_capable
+    assert ("read-only" in volatile) != write_capable
 
 
 @pytest.mark.asyncio
@@ -368,3 +368,32 @@ async def test_prompt_says_when_a_stale_source_is_left_out_of_the_queryable_data
     assert "report the error" in hq_line
     # Not a sign-in problem, so the agent may say the load itself failed.
     assert "loader is at fault" not in volatile
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "code", [ErrorCode.WORKSPACE_TENANT_SKIPPED, ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE]
+)
+async def test_a_denial_about_the_requester_keeps_the_last_real_load(workspace, tenant, user, code):
+    """Another member losing a different source says nothing about this one."""
+    await WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).aupdate(
+        last_load={"refresh": REFRESHED, "at": timezone.now().isoformat()}
+    )
+    entry = {
+        "tenant": tenant.external_id,
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "success": False,
+        "error": "not attempted",
+        "error_code": code,
+    }
+    denial = {"status": "denied", "error_code": code, "tenants": [entry]}
+    with patch(
+        "apps.workspaces.tasks._materialization_write_denial", AsyncMock(return_value=denial)
+    ):
+        await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+
+    (source,) = await aworkspace_source_freshness(workspace.id)
+    assert source["last_load"] == REFRESHED
+    assert source["not_refreshed"] is False
