@@ -695,9 +695,9 @@ export function TenantsTab({
       setTenants((prev) => prev.filter((t) => t.id !== wt.id))
       setConfirmRemoveId(null)
     } catch (err) {
-      setConfirmRemoveId(null)
       // Another manager removed the other sources since this list loaded.
       if (requiresWorkspaceDelete(err)) {
+        setConfirmRemoveId(null)
         openLastSourceDialog(wt)
       } else {
         setMutationError(err instanceof ApiError ? err.message : "Failed to remove data source")
@@ -720,7 +720,10 @@ export function TenantsTab({
       const result = await workspaceApi.removeTenant(workspaceId, lastSource.id, {
         confirmDeleteWorkspace: true,
       })
-      if (!isCurrentAccount()) return
+      if (!isCurrentAccount()) {
+        setLastSource(null)
+        return
+      }
       if (result?.workspace_deleted) {
         onWorkspaceDeleted()
         return
@@ -730,6 +733,10 @@ export function TenantsTab({
       setLastSource(null)
       void loadConnected()
     } catch (err) {
+      if (!isCurrentAccount()) {
+        setLastSource(null)
+        return
+      }
       setDeleteWorkspaceError(err instanceof ApiError ? err.message : "Failed to delete workspace")
     } finally {
       setDeletingWorkspace(false)
@@ -1294,7 +1301,7 @@ export function WorkspaceDetailPage() {
 
   function handleDelete() {
     fetchDomains()
-    navigate("/workspaces")
+    navigate(`${location.pathname.startsWith("/embed") ? "/embed" : ""}/workspaces`)
   }
 
   useEffect(() => {
