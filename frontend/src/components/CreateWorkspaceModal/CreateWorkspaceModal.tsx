@@ -89,11 +89,14 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       const fresh = await refreshUserTenants(userId)
       if (!isCurrentAccount()) return
       setSources(fresh)
+      setSourcesError(null)
       // A refresh can revoke sources; a selection or filter that no longer exists
-      // would be unfixable because its row and chip are gone.
+      // would be unfixable because its row and chip are gone. Pruning changes the
+      // selected set, which invalidates a prior "create anyway" (see toggleSource).
       const freshIds = new Set(fresh.map((t) => t.tenant_uuid))
       setSelected((prev) => new Set([...prev].filter((id) => freshIds.has(id))))
-      if (!fresh.some((t) => t.provider === providerFilter)) setProviderFilter(null)
+      setDuplicateAcknowledged(false)
+      setProviderFilter((prev) => (fresh.some((t) => t.provider === prev) ? prev : null))
     } catch (err) {
       if (!isCurrentAccount()) return
       setRefreshError(err instanceof ApiError ? err.message : "Failed to refresh data sources")

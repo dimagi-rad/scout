@@ -149,3 +149,18 @@ it("drops a selection the refreshed list no longer offers", async () => {
   await waitFor(() => expect(screen.queryByTestId("create-source-tenant-a")).toBeNull())
   expect(screen.getByTestId("create-workspace-submit")).toBeDisabled()
 })
+
+it("shows the refreshed sources after the initial load failed", async () => {
+  vi.mocked(getUserTenantsCached).mockRejectedValue(new Error("offline"))
+  vi.mocked(refreshUserTenants).mockResolvedValue([
+    { id: "membership-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null },
+  ])
+  const user = userEvent.setup()
+  render(<MemoryRouter><CreateWorkspaceModal onClose={vi.fn()} /></MemoryRouter>)
+  await screen.findByTestId("create-sources-error")
+
+  await user.click(screen.getByTestId("create-sources-refresh"))
+
+  expect(await screen.findByTestId("create-source-tenant-a")).toBeInTheDocument()
+  expect(screen.queryByTestId("create-sources-error")).toBeNull()
+})
