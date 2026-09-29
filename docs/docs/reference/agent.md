@@ -387,6 +387,12 @@ the run mode and the member's role.
 Workspaces with more than one tenant also get a warning when sources are
 excluded from the active view, or when its coverage is unknown.
 
+### 8. Current date context
+
+Every run ends with a `## Current date context` section, also outside the
+cache: the reporting timezone and today's date, with an instruction to use
+date presets and never infer today from model memory or data timestamps.
+
 ## Response processing
 
 ### Stream translation
