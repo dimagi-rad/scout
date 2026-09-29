@@ -244,6 +244,30 @@ READ_ONLY_ESCALATION_MESSAGE = (
 # an ended-on-escalation turn from a real answer without matching its prose.
 ESCALATION_METADATA_KEY = "scout_escalation"
 
+# A refusal, a max_tokens cut-off, or a turn with only thinking would otherwise
+# end the chat with a blank reply and a clean finish.
+MODEL_STOPPED_MESSAGES = {
+    "refusal": "The model declined to answer this request. Try rephrasing it.",
+    "max_tokens": "The model stopped before finishing its answer; try again.",
+    "empty": "The model stopped before answering; try again.",
+}
+
+# Graph nodes that end a turn with a fixed AIMessage instead of an LLM call, so
+# the chat stream must emit their text itself.
+FIXED_MESSAGE_NODES = frozenset({"escalate", "model_stopped"})
+
+
+def _unfinished_turn_reason(message: Any) -> str | None:
+    """Why a final (tool-call-free) model turn left the user without an answer."""
+    if not isinstance(message, AIMessage) or message.tool_calls:
+        return None
+    stop_reason = message.response_metadata.get("stop_reason")
+    if stop_reason in ("refusal", "max_tokens"):
+        return stop_reason
+    if not message.text.strip():
+        return "empty"
+    return None
+
 
 def _should_escalate(messages: list) -> bool:
     """Detect a panic loop: last N trailing tool messages all returned an
@@ -894,8 +918,8 @@ async def build_agent_graph(
         response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
         return {"messages": [response]}
 
-    def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
-        """Route to tools if the last message has tool calls, else end."""
+    def should_continue(state: AgentState) -> Literal["tools", "model_stopped", "__end__"]:
+        """Route to tools on tool calls, to model_stopped on an unanswered turn, else end."""
         messages = state.get("messages", [])
         if not messages:
             return END
@@ -903,8 +927,27 @@ async def build_agent_graph(
         last_message = messages[-1]
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
+        if _unfinished_turn_reason(last_message) is not None:
+            return "model_stopped"
 
         return END
+
+    def model_stopped_node(state: AgentState) -> dict[str, Any]:
+        """Terminal node: tell the user the model stopped instead of leaving a blank reply."""
+        reason = _unfinished_turn_reason(state["messages"][-1]) or "empty"
+        logger.warning(
+            "agent graph: model turn ended without an answer (reason=%s, workspace=%s)",
+            reason,
+            workspace.id,
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=MODEL_STOPPED_MESSAGES[reason],
+                    response_metadata={ESCALATION_METADATA_KEY: f"model_{reason}"},
+                )
+            ]
+        }
 
     def post_tools_router(state: AgentState) -> Literal["agent", "escalate"]:
         """Route post-tools: escalate if the agent is in a panic loop, else agent.
@@ -947,6 +990,7 @@ async def build_agent_graph(
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
     graph.add_node("escalate", escalation_node)
+    graph.add_node("model_stopped", model_stopped_node)
 
     graph.set_entry_point("agent")
 
@@ -955,6 +999,7 @@ async def build_agent_graph(
         should_continue,
         {
             "tools": "tools",
+            "model_stopped": "model_stopped",
             END: END,
         },
     )
@@ -969,6 +1014,7 @@ async def build_agent_graph(
         },
     )
     graph.add_edge("escalate", END)
+    graph.add_edge("model_stopped", END)
 
     compiled = graph.compile(checkpointer=checkpointer)
 
@@ -1218,6 +1264,7 @@ __all__ = [
     "ESCALATION_MESSAGE",
     "ESCALATION_METADATA_KEY",
     "ESCALATION_TRIGGER_COUNT",
+    "FIXED_MESSAGE_NODES",
     "HEADLESS_ESCALATION_MESSAGE",
     "READ_ONLY_ESCALATION_MESSAGE",
     "_should_escalate",

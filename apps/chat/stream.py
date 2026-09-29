@@ -37,7 +37,7 @@ from typing import Any
 from anthropic import APIStatusError, InternalServerError, RateLimitError
 from langchain_core.messages import AIMessage, ToolMessage
 
-from apps.agents.graph.base import INJECTED_TOOL_PARAMS
+from apps.agents.graph.base import FIXED_MESSAGE_NODES, INJECTED_TOOL_PARAMS
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
@@ -492,9 +492,10 @@ async def langgraph_to_ui_stream(
                     }
                 )
 
-            elif event_type == "on_chain_end" and event.get("name") == "escalate":
-                # The terminal ``escalate`` node returns a hardcoded AIMessage
-                # rather than calling the LLM, so it emits no on_chat_model_stream
+            elif event_type == "on_chain_end" and event.get("name") in FIXED_MESSAGE_NODES:
+                # A terminal fixed-message node (``escalate``, ``model_stopped``)
+                # returns a hardcoded AIMessage rather than calling the LLM, so it
+                # emits no on_chat_model_stream
                 # event and its message was never turned into a live text-delta —
                 # the panic-loop recovery affordance only appeared after reload
                 # (06#1). Translate the node's output into a streamed text part so
