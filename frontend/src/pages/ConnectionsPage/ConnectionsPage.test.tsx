@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
@@ -57,5 +57,80 @@ describe("ConnectionsPage", () => {
     expect(screen.queryByText("Connection expired")).toBeNull()
     expect(screen.getByTestId("remove-connection-c1")).toBeTruthy()
     expect(screen.getByTestId("disconnect-ocs")).toBeTruthy()
+  })
+
+  describe("filtering", () => {
+    const chatbot = (id: string, name: string) => ({
+      membership_id: id,
+      tenant_id: `ext-${id}`,
+      tenant_name: name,
+      team_slug: "",
+      team_name: "",
+    })
+    const conn = (id: string, provider: string, scope_label: string, chatbots: unknown[]) => ({
+      connection_id: id,
+      provider,
+      credential_type: "oauth",
+      scope_key: "",
+      scope_label,
+      status: "connected",
+      chatbots,
+    })
+
+    async function renderWithConnections() {
+      vi.mocked(api.get).mockImplementation((path) =>
+        Promise.resolve(
+          path === "/api/auth/providers/"
+            ? { providers: [] }
+            : [
+                conn("c1", "ocs", "Acme Health Team", [chatbot("m1", "Triage Bot")]),
+                conn("c2", "commcare", "Other Org", [chatbot("m2", "Survey")]),
+                conn("c3", "ocs", "Empty Team", []),
+              ],
+        ),
+      )
+      render(<ConnectionsPage />)
+      await screen.findByTestId("connection-card-c1")
+    }
+
+    it("searches by the team name shown on the card", async () => {
+      await renderWithConnections()
+      fireEvent.change(screen.getByTestId("search-filter-input"), {
+        target: { value: "acme" },
+      })
+      expect(screen.getByTestId("connection-card-c1")).toBeTruthy()
+      expect(screen.queryByTestId("connection-card-c2")).toBeNull()
+      expect(screen.queryByTestId("connection-card-c3")).toBeNull()
+    })
+
+    it("finds a connection that has no chatbots", async () => {
+      await renderWithConnections()
+      fireEvent.change(screen.getByTestId("search-filter-input"), {
+        target: { value: "empty team" },
+      })
+      expect(screen.getByTestId("connection-card-c3")).toBeTruthy()
+      expect(screen.queryByTestId("connection-card-c1")).toBeNull()
+    })
+
+    it("still searches by chatbot name", async () => {
+      await renderWithConnections()
+      fireEvent.change(screen.getByTestId("search-filter-input"), {
+        target: { value: "survey" },
+      })
+      expect(screen.getByTestId("connection-card-c2")).toBeTruthy()
+      expect(screen.queryByTestId("connection-card-c1")).toBeNull()
+    })
+
+    it("filters by provider and combines with search", async () => {
+      await renderWithConnections()
+      fireEvent.click(screen.getByTestId("filter-provider-ocs"))
+      expect(screen.queryByTestId("connection-card-c2")).toBeNull()
+      expect(screen.getByTestId("connection-card-c1")).toBeTruthy()
+      fireEvent.change(screen.getByTestId("search-filter-input"), {
+        target: { value: "empty" },
+      })
+      expect(screen.queryByTestId("connection-card-c1")).toBeNull()
+      expect(screen.getByTestId("connection-card-c3")).toBeTruthy()
+    })
   })
 })

@@ -135,16 +135,18 @@ export function ConnectionsPage() {
   }, [connections])
 
   const filteredConnections = useMemo(() => {
-    const lowerSearch = search.toLowerCase()
+    const lowerSearch = search.trim().replace(/^#/, "").toLowerCase()
     return connections.filter((c) => {
       if (activeFilters.provider && c.provider !== activeFilters.provider) return false
       if (lowerSearch) {
-        const matches = c.chatbots.some(
-          (cb) =>
-            cb.tenant_name.toLowerCase().includes(lowerSearch) ||
-            cb.tenant_id.toLowerCase().includes(lowerSearch),
-        )
-        if (!matches) return false
+        // Search what the card shows: its team heading and provider, not just chatbots,
+        // so connections with no chatbots stay findable.
+        const haystacks = [
+          teamLabelFor(c),
+          c.provider,
+          ...c.chatbots.flatMap((cb) => [cb.tenant_name, cb.tenant_id]),
+        ]
+        if (!haystacks.some((h) => h.toLowerCase().includes(lowerSearch))) return false
       }
       return true
     })
