@@ -1,41 +1,36 @@
 # Understanding results
 
-When you ask a question, the agent responds with a combination of text, data, and sometimes artifacts. This page explains what to expect.
+When you ask a question, the agent answers in text and shows the tool calls it made along the way. Some answers also produce an artifact.
 
 ## Text responses
 
-The agent provides natural language explanations alongside query results. These typically include:
+The agent's written answer summarizes what it found and notes caveats about the data. If it used SQL instead of a semantic query, it should say so and why.
 
-- A summary of what the query found.
-- The SQL that was executed, so you can verify the logic.
-- Caveats or notes about the data.
+## Tool calls and query results
 
-## Data tables
+Each tool call appears in the conversation as a collapsible row. Expand it to see the details:
 
-Query results are formatted as tables in the chat. Tables include column headers and rows of data. Large result sets are truncated to the project's configured row limit (default: 500 rows).
+- **Semantic queries** show the rows returned, the row count and timing, the semantic query that ran (datasets, measures, dimensions, filters), and the members it used.
+- **SQL queries** show the rows returned, the row count, timing, and tables accessed, with a **SQL** tab showing the exact SQL that ran.
+
+A **truncated** badge means the result hit the row limit (semantic queries return 100 rows by default and at most 500; SQL queries at most 500). Ask for a narrower filter or an aggregate if you need the full picture.
 
 ## Artifacts
 
-When the agent creates a visualization or interactive component, it appears as an artifact. Artifacts render in a separate panel and can be:
+When the agent builds a chart or dashboard, it appears as an artifact button in the chat. Click it to open the artifact. See [Artifacts](artifacts.md).
 
-- **Charts and analytical stories** (Recharts) -- bar, line, area, pie, and composed views.
-- **Dashboards** (React with Recharts) -- interactive components with multiple views.
-- **Documents** (Markdown or HTML) -- formatted reports.
-- **Graphics** (SVG) -- static diagrams and illustrations.
+## Errors
 
-See [Artifacts](artifacts.md) for details on working with artifacts.
+A failed tool call shows its error message and code. Common ones:
 
-## Error messages
+- **Validation errors** -- the query referenced an unknown dataset or member, used an unsupported filter, or the SQL failed safety checks.
+- **Timeouts** -- the query ran longer than 30 seconds. Add filters or aggregate to reduce the data scanned.
+- **Access errors** -- your account's access to a data source has expired or been removed. Reconnect it on the **Connected Accounts** page.
 
-If something goes wrong, the agent will explain the error:
+The agent usually reads the error, adjusts its query, and tries again. It is told to limit retries, and to stop and explain what it needs when it can't find the right fields rather than guessing.
 
-- **Semantic query validation errors** -- the request referenced an unknown dataset/member or unsupported filter.
-- **Execution errors** -- the semantic query ran but failed. The agent will typically retry with corrections automatically.
-- **Timeout errors** -- the query exceeded the configured timeout. Try simplifying the query or adding filters to reduce the data scanned.
-- **Rate limit errors** -- you've exceeded the per-user or per-project query quota. Wait a moment and try again.
+If the AI service is briefly overloaded, Scout automatically retries your message once and shows a message only if the retry also fails. If you send messages too quickly (more than 20 a minute), Scout asks you to wait before sending another.
 
-## Self-correction
+## Learnings
 
-When a query fails due to a correctable error (like a wrong column name or table reference), the agent automatically retries with corrections, up to three times. You'll see the agent explain what went wrong and what it changed.
-
-Over time, the agent saves these corrections as learnings and applies them to future queries, so the same mistakes don't happen again.
+When the agent discovers a correction worth keeping, such as a filter a metric always needs, it can save it as a learning. Learnings are included in later conversations in the same workspace. See [Knowledge](../admin/knowledge.md#agent-learnings).
