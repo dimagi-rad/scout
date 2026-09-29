@@ -17,13 +17,15 @@ from django.db import transaction
 from apps.common.identifiers import dbt_column_alias
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
+    StagedColumn,
     _leaf_slug,
     _NameFallbacks,
     _question_path,
     _question_path_to_json_path,
     _repeat_model_names,
-    _sql_escape,
-    _typed_expression,
+    fold_to_column_budget,
+    repeat_child_columns,
+    warn_folded,
 )
 from apps.transformations.services.repeat_identity import GeneratedRepeat, preserve_repeat_names
 from apps.users.models import Tenant
@@ -45,18 +47,9 @@ _VISIT_BASE_COLUMNS = [
 ]
 
 
-def visit_column_map(
+def _visit_columns(
     form_definitions: dict, fallbacks: _NameFallbacks | None = None
-) -> list[tuple[dict, str]]:
-    """Return an ordered list of (question, final_column_name) for stg_visits.
-
-    Applies the same base-column seeding and :func:`~apps.common.identifiers.dbt_column_alias` deduplication
-    that :func:`_generate_stg_visits` uses, guaranteeing that the column names
-    returned here are byte-for-byte identical to those emitted in the staging SQL.
-
-    Only non-repeat questions with a non-empty ``value`` path are included —
-    repeat-group children are staged in separate tables and excluded here.
-    """
+) -> list[StagedColumn]:
     questions: list[dict] = []
     for _deliver_unit, form_def in form_definitions.items():
         for q in form_def.get("questions", []):
@@ -70,16 +63,33 @@ def visit_column_map(
     }
     reserved_aliases = set(seen_aliases) | set(question_slugs.values())
     return [
-        (
+        StagedColumn(
             q,
-            dbt_column_alias(
-                question_slugs[q["value"]],
-                seen_aliases,
-                reserved=reserved_aliases,
-            ),
+            dbt_column_alias(question_slugs[q["value"]], seen_aliases, reserved=reserved_aliases),
+            f"form_json #>> {_question_path_to_json_path(q['value'])}",
         )
         for q in questions
     ]
+
+
+def visit_column_map(
+    form_definitions: dict, fallbacks: _NameFallbacks | None = None
+) -> list[tuple[dict, str]]:
+    """Return an ordered list of (question, final_column_name) for stg_visits.
+
+    Applies the same base-column seeding, :func:`~apps.common.identifiers.dbt_column_alias`
+    deduplication and column-budget folding that :func:`_generate_stg_visits`
+    uses, guaranteeing that the column names returned here are byte-for-byte
+    identical to those emitted in the staging SQL.
+
+    Only non-repeat questions with a non-empty ``value`` path are included —
+    repeat-group children are staged in separate tables and excluded here, as
+    are fields folded into ``form_json`` to fit PostgreSQL's column limit.
+    """
+    columns = fold_to_column_budget(
+        _visit_columns(form_definitions, fallbacks), fixed_count=len(_VISIT_BASE_COLUMNS)
+    )
+    return [(column.question, column.alias) for column in columns]
 
 
 def _generate_stg_visits(
@@ -89,20 +99,14 @@ def _generate_stg_visits(
 
     Non-repeat questions from every form definition contribute a typed, aliased
     column extracted from ``form_json``.  Repeat questions are skipped here and
-    handled by :func:`_generate_repeat_group_asset`.
+    handled by :func:`_generate_connect_repeat_group_asset`.
     """
-    lines = ["SELECT"]
-    select_parts: list[str] = [f"    {col}" for col in _VISIT_BASE_COLUMNS]
-
-    for q, col_name in visit_column_map(form_definitions, fallbacks):
-        value_path = q.get("value", "")
-        json_path = _question_path_to_json_path(value_path)
-        raw_expr = f"form_json #>> {json_path}"
-        q_type = q.get("type")
-        select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
-
-    lines.append(",\n".join(select_parts))
-    lines.append("FROM raw_visits")
+    columns = _visit_columns(form_definitions, fallbacks)
+    kept = fold_to_column_budget(columns, fixed_count=len(_VISIT_BASE_COLUMNS))
+    warn_folded(tenant, "stg_visits", total=len(columns), kept=len(kept), raw_column="form_json")
+    select_parts = [f"    {col}" for col in _VISIT_BASE_COLUMNS]
+    select_parts.extend(column.select_sql() for column in kept)
+    lines = ["SELECT", ",\n".join(select_parts), "FROM raw_visits"]
 
     return TransformationAsset(
         name="stg_visits",
@@ -137,22 +141,9 @@ def _generate_connect_repeat_group_asset(
         '    row_number() OVER (PARTITION BY f.visit_id ORDER BY elem.ordinality) AS "repeat_index"',
     ]
     seen_aliases: dict[str, int] = {"visit_id": 1, "repeat_index": 1}
-    staged_questions = [q for q in child_questions if _question_path(q)]
-    question_slugs = {
-        q["value"]: _leaf_slug(q["value"], kind="question", fallbacks=fallbacks)
-        for q in staged_questions
-    }
-    reserved_aliases = set(seen_aliases) | set(question_slugs.values())
-
-    for q in staged_questions:
-        value_path = q["value"]
-        leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = dbt_column_alias(
-            question_slugs[value_path], seen_aliases, reserved=reserved_aliases
-        )
-        raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
-        q_type = q.get("type")
-        select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
+    select_parts.extend(
+        repeat_child_columns(tenant, model_name, child_questions, seen_aliases, fallbacks)
+    )
 
     lines.append(",\n".join(select_parts))
     lines.append(f"FROM {{{{ ref('{parent_model}') }}}} f,")

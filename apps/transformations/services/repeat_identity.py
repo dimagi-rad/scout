@@ -21,6 +21,10 @@ from mcp_server.event_time import event_time_sql
 
 _REF = re.compile(r"\{\{\s*ref\('([a-z][a-z0-9_]*)'\)\s*\}\}")
 _NAME = re.compile(r"[a-z][a-z0-9_]*")
+# Raw JSON columns a staging model selects only when it folds fields to fit
+# PostgreSQL's column limit (#712); a folded model is still canonical.
+CASE_PROPERTIES_COLUMN = "properties"
+REPEAT_ELEMENT_COLUMN = "repeat_data"
 _CAST_TYPES = tuple(
     exp.DataType.build(name, dialect="postgres")
     for name in ("integer", "numeric", "date", "timestamp")
@@ -179,7 +183,14 @@ def repeat_source(sql: str, *, provider: str) -> RepeatSource | None:
         f"WHERE f.{json_column} #> {_json_path(path)} IS NOT NULL",
         read="postgres",
     )
-    return RepeatSource(parent, path) if _canonical_query(tree, expected, core_count=2) else None
+    folded = expected.copy()
+    folded.select(
+        sqlglot.parse_one(f'elem.value AS "{REPEAT_ELEMENT_COLUMN}"', read="postgres"), copy=False
+    )
+    canonical = _canonical_query(tree, expected, core_count=2) or _canonical_query(
+        tree, folded, core_count=3
+    )
+    return RepeatSource(parent, path) if canonical else None
 
 
 def _parent_source(sql: str, *, provider: str) -> str | None:
@@ -251,9 +262,20 @@ def _canonical_case(sql: str) -> bool:
         next(p for p in typed_times.expressions if p.alias_or_name == column).set(
             "this", sqlglot.parse_one(event_time_sql(column), read="postgres")
         )
+    templates = [expected, typed_times]
+    for template in list(templates):
+        folded = template.copy()
+        folded.select(exp.column(CASE_PROPERTIES_COLUMN), copy=False)
+        templates.append(folded)
     return any(
-        _canonical_query(tree, template, core_count=7, scalar_column="properties", allow_cast=False)
-        for template in [expected, typed_times]
+        _canonical_query(
+            tree,
+            template,
+            core_count=len(template.expressions),
+            scalar_column="properties",
+            allow_cast=False,
+        )
+        for template in templates
     )
 
 
