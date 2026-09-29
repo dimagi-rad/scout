@@ -16,6 +16,7 @@ Covers findings:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from django.conf import settings
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -220,7 +221,7 @@ def test_anthropic_request_payload_carries_cache_breakpoints():
     payload ``ChatAnthropic`` would send (its ``_get_request_payload``) — the
     deterministic, offline equivalent of verifying cache hits (arch #254, 02#3).
     """
-    llm = ChatAnthropic(model="claude-opus-4-8", max_tokens=64, api_key="test-key")
+    llm = ChatAnthropic(model=settings.DEFAULT_LLM_MODEL, max_tokens=64, api_key="test-key")
 
     system_msg = _build_cached_system_message("STABLE PREFIX " * 50, "VOLATILE SUFFIX")
     messages = [system_msg, HumanMessage(content="hello")]

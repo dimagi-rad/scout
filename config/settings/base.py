@@ -301,7 +301,7 @@ WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = env.bool(
 
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
-DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-4-8")
+DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-5-5")
 
 # Hard ceiling on the materialization-resume agent.ainvoke. The agent's
 # recursion_limit is 50; 120s is generous for any sane follow-up response.

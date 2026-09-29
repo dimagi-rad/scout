@@ -11,7 +11,7 @@ import pytest
 from django.conf import settings
 from django.test import override_settings
 
-from apps.agents.graph.base import build_agent_graph
+from apps.agents.graph.base import DEFAULT_MAX_TOKENS, build_agent_graph
 
 
 @pytest.mark.asyncio
@@ -37,6 +37,31 @@ async def test_llm_model_comes_from_settings():
     assert MockChat.call_args.kwargs["model"] == "sentinel-model-id"
 
 
-def test_default_llm_model_is_opus_4_8():
-    """With DEFAULT_LLM_MODEL unset, the default resolves to claude-opus-4-8."""
-    assert settings.DEFAULT_LLM_MODEL == "claude-opus-4-8"
+def test_default_llm_model_is_opus_5_5():
+    """With DEFAULT_LLM_MODEL unset, the default resolves to claude-opus-5-5."""
+    assert settings.DEFAULT_LLM_MODEL == "claude-opus-5-5"
+
+
+@pytest.mark.asyncio
+async def test_llm_sends_no_thinking_or_forced_tool_choice():
+    """Opus 5.5 rejects thinking={"type": "disabled"} and forced tool_choice with a 400,
+    so the agent must send neither and leave room in max_tokens for thinking."""
+    workspace = MagicMock()
+    workspace.id = "ws-1"
+    user = MagicMock(is_authenticated=False)
+
+    with (
+        patch("apps.agents.graph.base.ChatAnthropic") as MockChat,
+        patch("apps.agents.graph.base._build_tools", return_value=[]),
+        patch(
+            "apps.agents.graph.base._build_system_prompt",
+            new=AsyncMock(return_value=("prompt", "")),
+        ),
+    ):
+        await build_agent_graph(workspace, user)
+
+    kwargs = MockChat.call_args.kwargs
+    assert "thinking" not in kwargs
+    assert kwargs["max_tokens"] == DEFAULT_MAX_TOKENS
+    bind_kwargs = MockChat.return_value.bind_tools.call_args.kwargs
+    assert bind_kwargs.get("tool_choice") in (None, "auto")

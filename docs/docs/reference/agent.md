@@ -458,9 +458,14 @@ result = graph.invoke(state, config=config)
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `DEFAULT_LLM_MODEL` (env) | `claude-opus-4-8` | Model for the agent and its subagents |
+| `DEFAULT_LLM_MODEL` (env) | `claude-opus-5-5` | Model for the agent and its subagents |
+| `DEFAULT_MAX_TOKENS` (code) | `16000` | Per-call output cap, covering thinking plus the reply. The canvas and artifact subagents use the same value (`NESTED_MAX_TOKENS`) |
 | Workspace `system_prompt` | empty | Workspace instructions in the system prompt |
 | Workspace member role | — | Tools and prompt variants (see [Roles and run modes](#roles-and-run-modes)) |
+
+Thinking is always on with Opus 5.5 and can't be disabled. The agent sends no
+`thinking` or `effort` parameters, so it runs adaptive thinking at the API's default
+effort (`medium`). Thinking tokens count toward `max_tokens` and are billed as output.
 
 Row limits and query timeouts aren't configurable per workspace. They're fixed
 in code (see [Dataset discovery and query configuration](#5-dataset-discovery-and-query-configuration)).
