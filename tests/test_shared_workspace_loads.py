@@ -520,7 +520,7 @@ async def _deny_after_first_tenant(workspace, **kwargs):
     return AsyncMock(return_value=_denial(tenants, **kwargs))
 
 
-async def _run_new_source_load_denied_after_first_tenant(workspace, user):
+async def _run_new_source_load_denied_after_first_tenant(workspace, user, *, only_unserved=True):
     """Run a new-source load whose authority recheck fails from the second tenant on.
 
     Calls the core without its locking wrapper (the locks are taken here), so
@@ -535,7 +535,7 @@ async def _run_new_source_load_denied_after_first_tenant(workspace, user):
             None,
             load_intent={},
             locked_tenant_ids=frozenset(str(t) for t in tenant_ids),
-            only_unserved=True,
+            only_unserved=only_unserved,
         )
 
 
@@ -1063,3 +1063,36 @@ async def test_losing_an_already_handled_source_mid_run_is_never_reported_as_suc
     assert result["all_succeeded"] is False
     assert result["denied_mid_run"]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
     assert result["guidance"]
+
+
+async def test_mid_run_denial_guidance_names_each_source_once(workspace, tenant, user):
+    """The pending sources are reported with the denial's own entries; adding the
+    denial's list again for guidance must not name them twice."""
+    await _add_sources(workspace, user, serving=[], unserved=["second", "third"])
+    tenants = [t async for t in workspace.tenants.all()]
+    denial = _denial(tenants, ErrorCode.AUTH_TOKEN_EXPIRED)
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(return_value=denial),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(
+                workspace, user, only_unserved=False
+            )
+
+    [line] = result["guidance"]
+    for source in tenants:
+        assert line.count(source.external_id) == 1, line
+    assert result["denied_mid_run"]["error_code"] == ErrorCode.AUTH_TOKEN_EXPIRED
+
+
+async def test_an_undenied_run_reports_no_mid_run_denial(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        result = await _run(workspace, user)
+    assert result["denied_mid_run"] is None

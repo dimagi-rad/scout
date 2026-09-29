@@ -1145,16 +1145,20 @@ async def materialize_workspace_core(
     all_results = tenant_results + unreachable_results
     _set_tenant_display_names(all_results)
     guidance_sources = all_results
-    denied = {}
+    denied_mid_run = None
     if determinate_denial is not None:
-        # The lost source may have been handled before the recheck, so its
-        # guidance comes from the denial, not from any entry above.
-        guidance_sources = all_results + determinate_denial["tenants"]
-        denied = {
-            "denied_mid_run": {
-                "error": determinate_denial["error"],
-                "error_code": determinate_denial["error_code"],
-            }
+        # The lost source may have been handled before the recheck, so it shows
+        # as a success above; its guidance comes from the denial. Sources already
+        # reported as failed carry that same entry, so they are not added twice.
+        reported_failed = {e.get("tenant_id") for e in all_results if not e.get("success")}
+        guidance_sources = all_results + [
+            entry
+            for entry in determinate_denial["tenants"]
+            if entry.get("tenant_id") not in reported_failed
+        ]
+        denied_mid_run = {
+            "error": determinate_denial["error"],
+            "error_code": determinate_denial["error_code"],
         }
     return {
         "tenants": all_results,
@@ -1162,7 +1166,7 @@ async def materialize_workspace_core(
         "view_schema": view_schema_outcome,
         "cube_schema": cube_schema_outcome,
         "guidance": _credential_guidance(_summary_failures(guidance_sources)),
-        **denied,
+        "denied_mid_run": denied_mid_run,
     }
 
 
