@@ -1,7 +1,7 @@
 """The DRF views answer a non-object body or a wrong-typed field with a 400, not a 500."""
 
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.test import Client
@@ -159,14 +159,25 @@ class TestFieldTypes:
         active_schema.refresh_from_db()
         assert active_schema.last_accessed_at is None
 
-    def test_trigger_malformed_workspace_id_is_forbidden_like_an_unknown_one(
-        self, client, tenant, tenant_membership, active_schema
+    @pytest.mark.parametrize("with_workspace", [False, True], ids=["no_workspace", "workspace"])
+    def test_accepted_trigger_resets_the_schema_ttl(
+        self, client, tenant, workspace, active_schema, with_workspace
     ):
-        body = {"tenant_id": str(tenant.id), "workspace_id": "nope"}
+        body = {"tenant_id": str(tenant.id)}
+        if with_workspace:
+            body["workspace_id"] = str(workspace.id)
 
-        resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
+        with (
+            patch("apps.transformations.views.run_transformation_pipeline") as run,
+            patch("apps.transformations.views.TransformationRunSerializer") as serializer,
+        ):
+            serializer.return_value.data = {}
+            resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
 
-        assert resp.status_code == 403
+        assert resp.status_code == 201
+        assert run.call_args.kwargs["workspace"] == (workspace if with_workspace else None)
+        active_schema.refresh_from_db()
+        assert active_schema.last_accessed_at is not None
 
 
 # transaction=True: the query service calls close_old_connections(), which closes a connection
