@@ -31,7 +31,7 @@ multi-process production deployments, configure a shared Redis cache through
 > protection accepts (see [Manual deployment](manual.md#mcp-server)). The MCP server
 > rejects those requests, so agent tool calls fail in this stack. One way around it
 > is to give the MCP service an accepted name by merging this into
-> `docker-compose.override.yml`:
+> `docker-compose.override.yml` (keep its existing `ports` block):
 >
 > ```yaml
 > services:
