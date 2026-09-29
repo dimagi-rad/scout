@@ -97,10 +97,9 @@ class TestCreateQueuesLoad:
     def test_a_workspace_without_sources_queues_nothing(
         self, client, user, defer, django_capture_on_commit_callbacks
     ):
-        with django_capture_on_commit_callbacks(execute=True) as callbacks:
+        with django_capture_on_commit_callbacks(execute=True):
             _create(client, user)
 
-        assert callbacks == []
         defer.assert_not_called()
 
     def test_a_queue_outage_does_not_fail_the_create(

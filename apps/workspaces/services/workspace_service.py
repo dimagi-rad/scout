@@ -72,14 +72,7 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 # rebuild dequeued second would wait out the load (or the lock
                 # timeout) before coverage names the missing source.
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
-                intent = capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING)
-                materialize_workspace.defer(
-                    workspace_id=str(workspace.id),
-                    user_id=str(actor_id),
-                    load_intent=intent,
-                    only_unserved=True,
-                    notify_thread=False,
-                )
+                _defer_unserved_load(workspace.id, [tenant.id], actor_id)
 
     return wt, created
 
@@ -97,21 +90,24 @@ def load_new_workspace(workspace, *, actor_id) -> None:
     tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
     if not tenant_ids:
         return
-    workspace_id = str(workspace.id)
-
-    def dispatch():
-        intent = capture_load_intent(tenant_ids, INTENT_RECONCILE_MISSING)
-        materialize_workspace.defer(
-            workspace_id=workspace_id,
-            user_id=str(actor_id),
-            load_intent=intent,
-            only_unserved=True,
-            notify_thread=False,
-        )
-
+    workspace_id = workspace.id
     # robust: the workspace exists either way, so a queue outage must not turn a
     # committed create into a 500; the first chat starts the load instead.
-    transaction.on_commit(dispatch, robust=True)
+    transaction.on_commit(
+        lambda: _defer_unserved_load(workspace_id, tenant_ids, actor_id), robust=True
+    )
+
+
+def _defer_unserved_load(workspace_id, tenant_ids, actor_id) -> None:
+    """Load, as ``actor_id``, whichever of the workspace's sources serve nothing."""
+    intent = capture_load_intent(tenant_ids, INTENT_RECONCILE_MISSING)
+    materialize_workspace.defer(
+        workspace_id=str(workspace_id),
+        user_id=str(actor_id),
+        load_intent=intent,
+        only_unserved=True,
+        notify_thread=False,
+    )
 
 
 def _record_pending_source(workspace, tenant) -> None:
