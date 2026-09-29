@@ -43,7 +43,7 @@ from django.core.cache import cache
 from apps.common.error_codes import ErrorCode
 from apps.users.models import PROVIDER_CHOICES, TenantMembership
 from apps.workspaces import access_cache
-from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_EXPIRED,
     CREDENTIAL_MISSING,
@@ -322,12 +322,39 @@ def missing_tenants_by_workspace(user, workspaces) -> dict:
                 user=user, tenant_id__in=all_tenants.keys()
             ).values_list("tenant_id", flat=True)
         )
+    granted, unresolved = _split_any_of_granted(tenants_by_ws, live)
+    gaps = member_coverage_gaps(user.pk, unresolved.values()) if unresolved else {}
+    return _missing_by_workspace(tenants_by_ws, granted, gaps)
+
+
+async def amissing_tenants_by_workspace(user, tenants_by_ws: dict) -> dict:
+    """Async :func:`missing_tenants_by_workspace` over ``{workspace_id: [tenant, ...]}``."""
+    all_tenants = {t.pk: t for tenants in tenants_by_ws.values() for t in tenants}
+    if not all_tenants:
+        return dict.fromkeys(tenants_by_ws, ())
+    live = set()
+    if not all_of_access_enforced():
+        live = {
+            tenant_id
+            async for tenant_id in TenantMembership.objects.filter(
+                user=user, tenant_id__in=all_tenants.keys()
+            ).values_list("tenant_id", flat=True)
+        }
+    granted, unresolved = _split_any_of_granted(tenants_by_ws, live)
+    gaps = await amember_coverage_gaps(user.pk, unresolved.values()) if unresolved else {}
+    return _missing_by_workspace(tenants_by_ws, granted, gaps)
+
+
+def _split_any_of_granted(tenants_by_ws: dict, live: set) -> tuple[set, dict]:
     # Any-of already grants these, so readiness is only worth computing for the rest.
     granted = {ws_id for ws_id, tenants in tenants_by_ws.items() if live & {t.pk for t in tenants}}
     unresolved = {
         t.pk: t for ws_id, tenants in tenants_by_ws.items() if ws_id not in granted for t in tenants
     }
-    gaps = member_coverage_gaps(user.pk, unresolved.values()) if unresolved else {}
+    return granted, unresolved
+
+
+def _missing_by_workspace(tenants_by_ws: dict, granted: set, gaps: dict) -> dict:
     return {
         ws_id: ()
         if ws_id in granted
@@ -478,6 +505,37 @@ async def aresolve_workspace_access_ex(
         if not cached.retryable:
             access_cache.store(user, workspace_id, options, cached)
     return cached
+
+
+async def aresolve_local_access_many(
+    user, memberships, *, minimum_role: str = WorkspaceRole.READ
+) -> dict:
+    """Local access for many of ``user``'s loaded memberships, keyed by workspace id.
+
+    The rules of ``aresolve_workspace_access_ex(..., verification=None)``, with
+    readiness evaluated once over the union of tenants so a user's workspace
+    listing costs a fixed number of queries rather than several per membership.
+    Performs no upstream recheck and bypasses ``access_cache``.
+    """
+    own = [m for m in memberships if m.user_id == user.pk]
+    tenants_by_ws = {m.workspace_id: [] for m in own}
+    async for wt in WorkspaceTenant.objects.filter(
+        workspace_id__in=list(tenants_by_ws)
+    ).select_related("tenant"):
+        tenants_by_ws[wt.workspace_id].append(wt.tenant)
+    missing_by_ws = await amissing_tenants_by_workspace(user, tenants_by_ws)
+    results = {m.workspace_id: WorkspaceAccess(denied_reason=NOT_MEMBER) for m in memberships}
+    for m in own:
+        missing = missing_by_ws[m.workspace_id]
+        if missing:
+            results[m.workspace_id] = WorkspaceAccess(
+                denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing
+            )
+        elif not role_satisfies(m.role, minimum_role):
+            results[m.workspace_id] = WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
+        else:
+            results[m.workspace_id] = WorkspaceAccess(workspace=m.workspace, membership=m)
+    return results
 
 
 async def _aresolve_workspace_access_ex(
