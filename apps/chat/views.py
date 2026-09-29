@@ -49,9 +49,7 @@ class ForeignThreadError(Exception):
         self.thread = thread
 
 
-async def _upsert_thread(
-    thread_id, user, history_title: str = "", *, workspace, existing: Thread | None = None
-) -> Thread:
+async def _upsert_thread(thread_id, user, history_title: str = "", *, workspace) -> Thread:
     """Create the Thread row if absent and bump updated_at on every turn.
 
     Raises ``ForeignThreadError``, without touching the row, when it belongs to
@@ -63,18 +61,14 @@ async def _upsert_thread(
     "newer than last_viewed" indicator and ``-updated_at`` ordering freeze at
     the creation timestamp.
     """
-    thread, created = (
-        (existing, False)
-        if existing is not None
-        else await Thread.objects.aget_or_create(
-            id=thread_id,
-            defaults={
-                "user": user,
-                "workspace": workspace,
-                "title": _short_thread_title(history_title),
-                "title_is_custom": False,
-            },
-        )
+    thread, created = await Thread.objects.aget_or_create(
+        id=thread_id,
+        defaults={
+            "user": user,
+            "workspace": workspace,
+            "title": _short_thread_title(history_title),
+            "title_is_custom": False,
+        },
     )
     if _is_foreign_thread(thread, user, workspace):
         raise ForeignThreadError(thread)
@@ -232,9 +226,7 @@ async def chat_view(request):
     # The Thread row is the only authorization for this checkpointer key, so a
     # failed upsert must propagate rather than fall through to the agent.
     try:
-        await _upsert_thread(
-            thread_id, user, user_content, workspace=workspace, existing=existing_thread
-        )
+        await _upsert_thread(thread_id, user, user_content, workspace=workspace)
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
 

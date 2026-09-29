@@ -45,7 +45,7 @@ def _stub_agent(checkpointer):
     return graph.compile(checkpointer=checkpointer)
 
 
-async def _member(email, ws, tenant):
+async def _member(email, ws, tenant, *, raise_request_exception=True):
     user = await User.objects.acreate_user(email=email, password="x")
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
@@ -53,8 +53,7 @@ async def _member(email, ws, tenant):
     await TenantMembership.objects.acreate(
         user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
     )
-    # Propagated view errors become a 500 response, as in production.
-    client = AsyncClient(raise_request_exception=False)
+    client = AsyncClient(raise_request_exception=raise_request_exception)
     await client.alogin(email=email, password="x")
     return user, client
 
@@ -218,7 +217,8 @@ async def test_canonical_thread_id_is_the_checkpointer_key(checkpointer):
 @pytest.mark.django_db(transaction=True)
 async def test_failed_thread_upsert_never_reaches_the_agent(checkpointer):
     ws, tenant = await _shared_workspace("upsert-fail")
-    _, client = await _member("upsert-fail@b.c", ws, tenant)
+    # A propagated view error becomes a 500 response, as in production.
+    _, client = await _member("upsert-fail@b.c", ws, tenant, raise_request_exception=False)
 
     with (
         patch(
