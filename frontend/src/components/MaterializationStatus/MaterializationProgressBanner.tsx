@@ -1,8 +1,10 @@
 import { Loader2, X } from "lucide-react"
-import { useState } from "react"
 import { api } from "@/api/client"
 import type { ActiveJob } from "@/api/jobs"
+import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+
+const CANCEL_FAILED = "Cancel failed — try again"
 
 interface Props {
   job: ActiveJob
@@ -20,22 +22,16 @@ interface Props {
  * live row count instead of a fake fill.
  */
 export function MaterializationProgressBanner({ job, workspaceId }: Props) {
-  const [cancelState, setCancelState] = useState<"idle" | "pending" | "error">("idle")
   const { canWrite } = useWorkspaceRole(workspaceId)
+  const cancel = useRetryableAction(CANCEL_FAILED, canWrite)
 
   const handleCancel = async (e: React.MouseEvent) => {
     e.preventDefault()
-    if (cancelState === "pending") return
-    setCancelState("pending")
-    try {
-      await api.post(
-        `/api/workspaces/${workspaceId}/jobs/${job.thread_job_id}/cancel/`,
-        {},
-      )
-    } catch {
-      setCancelState("error")
-      setTimeout(() => setCancelState("idle"), 3000)
-    }
+    if (cancel.blocked) return
+    // On success stay "Stopping…" until the poll drops this banner.
+    await cancel.run(() =>
+      api.post(`/api/workspaces/${workspaceId}/jobs/${job.thread_job_id}/cancel/`, {}),
+    )
   }
 
   const progress = job.progress
@@ -66,7 +62,13 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
 
   const stepText = step != null && totalSteps != null ? `Step ${step} of ${totalSteps}` : null
   const stopLabel =
-    cancelState === "pending" ? "Stopping…" : cancelState === "error" ? "Try again" : "Stop"
+    cancel.state === "pending"
+      ? "Stopping…"
+      : cancel.failure
+        ? cancel.failure.retryable
+          ? "Try again"
+          : "Can't stop"
+        : "Stop"
 
   return (
     <div className="px-4 pt-1 pb-2">
@@ -127,25 +129,32 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
               />
             )}
           </div>
+          {/* No role="alert": the card's aria-live region already announces it. */}
+          {cancel.failure && (
+            <div
+              className="text-xs text-red-600 dark:text-red-400 mt-1 break-words"
+              data-testid="materialization-banner-cancel-error"
+            >
+              {cancel.failure.message}
+            </div>
+          )}
         </div>
 
         {canWrite && (
           <button
             type="button"
             onClick={handleCancel}
-            disabled={cancelState === "pending"}
+            disabled={cancel.blocked}
             className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors shrink-0 ${
-              cancelState === "pending"
+              cancel.blocked
                 ? "border-blue-600/20 text-blue-400 cursor-not-allowed dark:border-blue-400/20 dark:text-blue-500"
                 : "border-blue-600/30 text-blue-700 hover:border-red-400 hover:bg-red-50 hover:text-red-600 dark:border-blue-400/30 dark:text-blue-300 dark:hover:border-red-400/50 dark:hover:bg-red-950/40 dark:hover:text-red-400"
             }`}
             data-testid="materialization-banner-stop-btn"
-            title={
-              cancelState === "error" ? "Cancel failed — try again" : "Stop data loading"
-            }
+            title={cancel.failure?.message ?? "Stop data loading"}
           >
             <X
-              className={`h-3.5 w-3.5 ${cancelState === "pending" ? "animate-pulse" : ""}`}
+              className={`h-3.5 w-3.5 ${cancel.state === "pending" ? "animate-pulse" : ""}`}
               aria-hidden="true"
             />
             <span>{stopLabel}</span>

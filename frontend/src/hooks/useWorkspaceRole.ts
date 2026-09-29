@@ -51,3 +51,30 @@ export function writeErrorMessage(
   // the caller's "try again" is the right advice there.
   return serverMessage ? error.message : fallback
 }
+
+export interface ActionFailure {
+  message: string
+  /** False when the server says repeating the same request cannot succeed. */
+  retryable: boolean
+}
+
+/**
+ * Like writeErrorMessage, but also says whether offering the action again
+ * makes sense. A structured 403 is final unless access_denied_body marks it
+ * `retryable` (an upstream verification outage); anything else — a 5xx, a
+ * dropped connection, a non-JSON 403 like a CSRF failure — may clear on its own.
+ * Only access_denied_body's freshness branch sets `retryable`, so a new denial
+ * reason elsewhere reads as final. Not uiSlice's RECHECKABLE_REASONS: that asks
+ * whether an explicit access recheck can help, not whether resending can.
+ */
+export function actionFailure(
+  error: unknown,
+  fallback: string,
+  canWrite: boolean,
+): ActionFailure {
+  const denial = error instanceof ApiError && error.status === 403 ? asRecord(error.body) : undefined
+  return {
+    message: writeErrorMessage(error, fallback, canWrite),
+    retryable: !denial || denial.retryable === true,
+  }
+}

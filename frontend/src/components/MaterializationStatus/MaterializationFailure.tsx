@@ -1,7 +1,9 @@
-import { useState } from "react"
 import { AlertTriangle, RotateCw, XCircle } from "lucide-react"
 import { jobsApi, type RecentTermination } from "@/api/jobs"
+import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+
+const RETRY_FAILED = "Retry failed — try again"
 
 interface Props {
   termination: RecentTermination
@@ -15,9 +17,10 @@ interface Props {
  * spinner clears and the ThreadJob ended in FAILED or CANCELLED. Surfaces the
  * server-composed error_summary and a Retry button.
  *
- * Retry is guarded by local state (idle | pending) so a rapid double-click
- * cannot fire two dispatches. After the POST returns, the polling hook will
- * surface the new active job and the parent re-renders the progress card.
+ * Retry is guarded by useRetryableAction so a rapid double-click cannot fire
+ * two dispatches, and a final denial disables it with the server's reason.
+ * After the POST returns, the polling hook will surface the new active job and
+ * the parent re-renders the progress card.
  */
 export function MaterializationFailure({
   termination,
@@ -25,32 +28,32 @@ export function MaterializationFailure({
   threadId,
   onRetryDispatched,
 }: Props) {
-  const [retryState, setRetryState] = useState<"idle" | "pending" | "error">("idle")
   const isCancelled = termination.state === "cancelled"
   const { canWrite } = useWorkspaceRole(workspaceId)
+  const retry = useRetryableAction(RETRY_FAILED, canWrite)
 
   const handleRetry = async () => {
-    if (retryState === "pending") return
-    setRetryState("pending")
-    try {
-      await jobsApi.retryMaterialization(workspaceId, {
+    if (retry.blocked) return
+    const ok = await retry.run(() =>
+      jobsApi.retryMaterialization(workspaceId, {
         thread_id: threadId,
         tool_call_id: termination.tool_call_id,
-      })
-      onRetryDispatched?.()
-      // Leave button disabled briefly; the next poll cycle will swap this
-      // card out for the progress card.
-      setTimeout(() => setRetryState("idle"), 1500)
-    } catch {
-      setRetryState("error")
-      setTimeout(() => setRetryState("idle"), 3000)
-    }
+      }),
+    )
+    if (!ok) return
+    onRetryDispatched?.()
+    // Leave button disabled briefly; the next poll cycle will swap this
+    // card out for the progress card.
+    retry.settle(1500)
   }
 
   const Icon = isCancelled ? XCircle : AlertTriangle
   const headerText = isCancelled
     ? "Materialization cancelled"
     : "Materialization failed"
+  let retryLabel = "Retry"
+  if (retry.state === "pending") retryLabel = "Retrying..."
+  else if (retry.failure) retryLabel = retry.failure.retryable ? "Retry failed" : "Can't retry"
 
   return (
     <div
@@ -74,36 +77,35 @@ export function MaterializationFailure({
               {termination.error_summary}
             </div>
           )}
+          {retry.failure && (
+            <div
+              className="text-red-600 dark:text-red-400 mt-1 whitespace-pre-wrap break-words"
+              role="alert"
+              data-testid="materialization-retry-error"
+            >
+              {retry.failure.message}
+            </div>
+          )}
         </div>
         {termination.retry_available && canWrite && (
           <button
             type="button"
             onClick={handleRetry}
-            disabled={retryState === "pending"}
+            disabled={retry.blocked}
             className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors shrink-0 ${
-              retryState === "error"
-                ? "text-red-500 border border-red-500/40"
-                : retryState === "pending"
-                  ? "text-muted-foreground border border-border"
+              retry.blocked
+                ? "text-muted-foreground border border-border cursor-not-allowed"
+                : retry.failure
+                  ? "text-red-500 border border-red-500/40"
                   : "text-red-600 hover:bg-red-500/10 border border-red-500/30"
             }`}
             data-testid="materialization-retry-btn"
-            title={
-              retryState === "error"
-                ? "Retry failed — try again"
-                : "Retry materialization"
-            }
+            title={retry.failure?.message ?? "Retry materialization"}
           >
             <RotateCw
-              className={`w-3 h-3 ${retryState === "pending" ? "animate-spin" : ""}`}
+              className={`w-3 h-3 ${retry.state === "pending" ? "animate-spin" : ""}`}
             />
-            <span>
-              {retryState === "pending"
-                ? "Retrying..."
-                : retryState === "error"
-                  ? "Retry failed"
-                  : "Retry"}
-            </span>
+            <span>{retryLabel}</span>
           </button>
         )}
       </div>

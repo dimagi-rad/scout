@@ -46,7 +46,8 @@ User = get_user_model()
         (ErrorCode.AUTH_CREDENTIAL_MISSING, True),
         (ErrorCode.WORKSPACE_TENANT_UNREACHABLE, True),
         (ErrorCode.PIPELINE_UNRESOLVED, False),
-        (ErrorCode.WORKSPACE_ROLE_INSUFFICIENT, False),
+        # The viewer here can write, so the actor's role denial no longer holds.
+        (ErrorCode.WORKSPACE_ROLE_INSUFFICIENT, True),
         (ErrorCode.AUTH_REFRESH_FAILED, True),
         (ErrorCode.CONNECTION_ERROR, True),
         (ErrorCode.INTERNAL_ERROR, True),
@@ -72,7 +73,9 @@ def test_retry_policy_uses_codes_at_every_failure_surface(code, retry, surface):
         started_at=None,
         materialization_preflight_failures=results if surface == "preflight" else [],
     )
-    response = _termination_to_dict(job, [] if surface == "preflight" else results)
+    response = _termination_to_dict(
+        job, [] if surface == "preflight" else results, viewer_can_write=True
+    )
     assert response["retry_available"] is retry
 
 
@@ -114,7 +117,10 @@ def test_retry_keeps_partial_recovery_and_failed_followups_available(
             {"tenant": "blocked", "error_code": ErrorCode.AUTH_ACCESS_DENIED}
         ],
     )
-    assert _termination_to_dict(job, [{"sources": sources}])["retry_available"] is retry
+    assert (
+        _termination_to_dict(job, [{"sources": sources}], viewer_can_write=True)["retry_available"]
+        is retry
+    )
 
 
 @pytest.mark.parametrize("phase,retry", [("query_build", False), ("resume", True), ("", True)])
@@ -131,7 +137,7 @@ def test_completed_source_runs_do_not_offer_reload_for_a_query_build_failure(pha
         materialization_preflight_failures=[],
     )
     results = [{"sources": {"sessions": {"state": "completed"}}}]
-    assert _termination_to_dict(job, results)["retry_available"] is retry
+    assert _termination_to_dict(job, results, viewer_can_write=True)["retry_available"] is retry
 
 
 def test_cancelled_job_can_retry_even_with_recorded_remediation_failure():
@@ -146,7 +152,43 @@ def test_cancelled_job_can_retry_even_with_recorded_remediation_failure():
         started_at=None,
         materialization_preflight_failures=[{"error_code": ErrorCode.AUTH_ACCESS_DENIED}],
     )
-    assert _termination_to_dict(job, [])["retry_available"] is True
+    assert _termination_to_dict(job, [], viewer_can_write=True)["retry_available"] is True
+
+
+@pytest.mark.parametrize(
+    "state,phase,results",
+    [
+        pytest.param(ThreadJob.State.CANCELLED, "", [], id="cancelled"),
+        pytest.param(
+            ThreadJob.State.FAILED,
+            ThreadJob.FailurePhase.MATERIALIZATION,
+            [{"sources": {"sessions": {"state": "completed"}}}],
+            id="partial-recovery",
+        ),
+        pytest.param(
+            ThreadJob.State.FAILED,
+            ThreadJob.FailurePhase.MATERIALIZATION,
+            [{"error_code": ErrorCode.CONNECTION_ERROR}],
+            id="transient-failure",
+        ),
+        pytest.param(ThreadJob.State.FAILED, ThreadJob.FailurePhase.RESUME, [], id="resume"),
+    ],
+)
+def test_viewer_without_write_role_never_gets_retry(state, phase, results):
+    # The retry endpoint needs READ_WRITE whatever failed (D12, #589).
+    job = SimpleNamespace(
+        id="job",
+        thread_id="thread",
+        tool_call_id="tool",
+        state=state,
+        completed_at=None,
+        error_summary="Try again",
+        failure_phase=phase,
+        started_at=timezone.now(),
+        materialization_preflight_failures=[],
+    )
+    assert _termination_to_dict(job, results, viewer_can_write=True)["retry_available"] is True
+    assert _termination_to_dict(job, results, viewer_can_write=False)["retry_available"] is False
 
 
 @pytest.mark.asyncio
