@@ -1,8 +1,11 @@
 """Tests for WorkspaceInvite notifications (pending email + bidirectional awaiting/accepted)."""
 
+from datetime import timedelta
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.models import (
@@ -472,4 +475,78 @@ class TestMemberRemovedEmail:
             resp = self._delete(client, workspace, target)
 
         assert resp.status_code == 403
+        mock_task.defer.assert_not_called()
+
+
+class TestInviteRevokedEmail:
+    """#382: an invitee whose invite is revoked is told, since the invite or
+    awaiting-access email may have sent them off to act on it."""
+
+    @pytest.fixture
+    def invite(self, workspace, user):
+        return WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="invitee@example.com",
+            role=WorkspaceRole.READ,
+            invited_by=user,
+            status=WorkspaceInviteStatus.AWAITING_ACCESS,
+        )
+
+    def _revoke(self, client, workspace, invite):
+        return client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+
+    def test_revoke_emails_the_invitee(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._revoke(client, workspace, invite)
+
+        assert resp.status_code == 204
+        emails = _deferred_emails(mock_task)
+        assert [e["recipient_list"] for e in emails] == [["invitee@example.com"]]
+        assert workspace.name in emails[0]["subject"]
+
+    def test_email_waits_for_commit(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            self._revoke(client, workspace, invite)
+
+        mock_task.defer.assert_not_called()
+        assert len(callbacks) == 1
+
+    def test_revoking_again_sends_nothing(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        client.force_login(user)
+        with django_capture_on_commit_callbacks(execute=True):
+            self._revoke(client, workspace, invite)
+        mock_task.reset_mock()
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._revoke(client, workspace, invite)
+
+        assert resp.status_code == 204
+        mock_task.defer.assert_not_called()
+
+    def test_revoking_an_expired_invite_sends_nothing(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        WorkspaceInvite.objects.filter(pk=invite.pk).update(
+            expires_at=timezone.now() - timedelta(days=1)
+        )
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._revoke(client, workspace, invite)
+
+        assert resp.status_code == 204
         mock_task.defer.assert_not_called()

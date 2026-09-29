@@ -178,3 +178,17 @@ def notify_member_removed(workspace, user, removed_by):
         ),
         [user.email],
     )
+
+
+def notify_invite_revoked(invite, revoked_by):
+    """Tell an invitee their invite was withdrawn (#382): the invite and awaiting-access
+    emails may have sent them off to sign in or get upstream access."""
+    workspace_name = invite.workspace.name
+    _dispatch(
+        f"Your invite to '{workspace_name}' on Scout was withdrawn",
+        (
+            f"{_user_label(revoked_by)} withdrew your invite to the '{workspace_name}' "
+            f"workspace on Scout. You don't need to do anything.\n"
+        ),
+        [invite.email],
+    )

@@ -64,6 +64,7 @@ from apps.workspaces.services.credential_coverage import (
 )
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
+    notify_invite_revoked,
     notify_member_added,
     notify_member_removed,
     notify_role_changed,
@@ -1122,6 +1123,9 @@ class WorkspaceInviteDetailView(APIView):
             ).exists()
         ):
             return _invite_no_longer_live()
+        # A retry of an already-revoked invite, or one that had lapsed, is no news.
+        if revoked and not invite.is_expired:
+            transaction.on_commit(lambda: notify_invite_revoked(invite, request.user))
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
