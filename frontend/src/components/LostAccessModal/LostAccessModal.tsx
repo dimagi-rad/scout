@@ -57,6 +57,8 @@ export function LostAccessModal() {
 
   const source = providerLabels(active.tenants ?? [])
   const missing = active.missing_tenants ?? []
+  // Nothing to reconnect or re-verify: deleting it is the only way out (#381).
+  const noSources = active.tenants !== undefined && active.tenants.length === 0
 
   function goTo(ws: (typeof domains)[number]) {
     setActiveDomain(ws.id)
@@ -78,13 +80,20 @@ export function LostAccessModal() {
             <AlertTriangle className="h-5 w-5" aria-hidden />
           </span>
           <h2 id="lost-access-title" className="text-lg font-semibold">
-            {missing.length > 0
-              ? `You can’t open “${active.display_name}” yet`
-              : `You’ve lost access to “${active.display_name}”`}
+            {noSources
+              ? `“${active.display_name}” has no data sources`
+              : missing.length > 0
+                ? `You can’t open “${active.display_name}” yet`
+                : `You’ve lost access to “${active.display_name}”`}
           </h2>
         </div>
 
-        {missing.length > 0 ? (
+        {noSources ? (
+          <p className="text-sm text-muted-foreground" data-testid="lost-access-no-sources">
+            There is nothing to load or query in this workspace. A manager can delete it from
+            the workspace’s settings.
+          </p>
+        ) : missing.length > 0 ? (
           <div className="text-sm text-muted-foreground">
             <p>This workspace needs access to every one of its data sources. Still needed:</p>
             <ul className="mt-2 space-y-1" data-testid="lost-access-missing">
@@ -112,21 +121,21 @@ export function LostAccessModal() {
           </p>
         )}
 
-        {retryOutcome && (
+        {retryOutcome && !noSources && (
           <p className="mt-3 text-sm text-muted-foreground" data-testid="lost-access-retry-outcome">
             {retryOutcome}
           </p>
         )}
 
         <div className="mt-3 flex flex-wrap gap-2">
-          <button
+          {!noSources && <button
             data-testid="lost-access-connections"
             onClick={() => navigate(CONNECTIONS_PATH)}
             className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           >
             Open Connected Accounts
-          </button>
-          <button
+          </button>}
+          {!noSources && <button
             type="button"
             disabled={verifyingId === active.id}
             onClick={() => {
@@ -140,17 +149,17 @@ export function LostAccessModal() {
             data-testid="lost-access-retry-verification"
           >
             {verifyingId === active.id ? "Verifying…" : "Retry verification"}
-          </button>
+          </button>}
           <button
             data-testid="lost-access-workspace-settings"
             onClick={() => navigate(workspacePath(active))}
             className="rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
           >
-            Leave or edit this workspace
+            {noSources ? "Leave or delete this workspace" : "Leave or edit this workspace"}
           </button>
         </div>
 
-        {missing.length === 0 && <p className="mt-3 text-sm text-muted-foreground">
+        {missing.length === 0 && !noSources && <p className="mt-3 text-sm text-muted-foreground">
           If you disconnected your account, reconnect it in Connected Accounts. If your provider
           removed or restricted your access, ask a provider admin to restore it;
           reconnecting alone won’t restore those permissions.

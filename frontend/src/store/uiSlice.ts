@@ -24,6 +24,8 @@ const ACCESS_DENIAL_REASONS = new Set([
   "upstream_access_lost",
   "verification_unavailable",
   "verification_in_progress",
+  // A workspace with no sources (#381): only a delete resolves it, so never recheckable.
+  "no_sources",
 ])
 
 // A lost-access denial is also rechecked on request: once an admin restores access
