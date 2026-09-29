@@ -80,7 +80,7 @@ async def test_reconciler_fails_stalled_run_and_threadjob():
     ):
         result = await reconcile_stale_materialization_runs()
 
-    assert result["failed"] == 1
+    assert result == {"failed": 1, "view_schemas_settled": 0}
     await run.arefresh_from_db()
     assert run.state == MaterializationRun.RunState.FAILED
     assert run.completed_at is not None
@@ -109,7 +109,7 @@ async def test_reconciler_leaves_live_run_untouched():
     ):
         result = await reconcile_stale_materialization_runs()
 
-    assert result["failed"] == 0
+    assert result == {"failed": 0, "view_schemas_settled": 0}
     await run.arefresh_from_db()
     assert run.state == MaterializationRun.RunState.LOADING
 
@@ -137,7 +137,7 @@ async def test_reconciler_fails_run_with_terminal_job():
     ):
         result = await reconcile_stale_materialization_runs()
 
-    assert result["failed"] == 1
+    assert result == {"failed": 1, "view_schemas_settled": 0}
     await run.arefresh_from_db()
     assert run.state == MaterializationRun.RunState.FAILED
 
@@ -160,7 +160,7 @@ async def test_reconciler_skips_when_status_unknown():
     ):
         result = await reconcile_stale_materialization_runs()
 
-    assert result["failed"] == 0
+    assert result == {"failed": 0, "view_schemas_settled": 0}
     await run.arefresh_from_db()
     assert run.state == MaterializationRun.RunState.LOADING
 

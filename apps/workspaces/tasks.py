@@ -3126,8 +3126,8 @@ ORPHANED_VIEW_BUILD_ERROR = (
 )
 
 
-def _view_build_task_names() -> tuple[str, ...]:
-    return (rebuild_workspace_view_schema.name, materialize_workspace.name)
+_VIEW_BUILD_TASK_NAMES = (rebuild_workspace_view_schema.name, materialize_workspace.name)
+_STARTED_JOB_STATUSES = ("doing", "aborting")
 
 
 def _settle_orphaned_view_build(view_schema_id, stalled_before) -> WorkspaceViewSchema | None:
@@ -3135,9 +3135,11 @@ def _settle_orphaned_view_build(view_schema_id, stalled_before) -> WorkspaceView
 
     A row is PROVISIONING only while a W holder builds it or while the rebuild
     deferred in the same transaction as the flip is still queued. The caller
-    holds W, so only queue evidence is left: a todo job, or a started one whose
-    worker still heartbeats (Procrastinate's stalled-job rule), will build it.
-    The row lock orders this against add/remove_workspace_tenant's flip.
+    holds W, so only queue evidence is left. A job is dead only when it ended or
+    its worker stopped heartbeating (Procrastinate's stalled-job rule); any other
+    status, including one this code does not know, keeps the row. An active data
+    recovery rebuilds the view too, so it also keeps the row. The row lock orders
+    this against add/remove_workspace_tenant's flip.
     """
     with transaction.atomic():
         vs = (
@@ -3147,19 +3149,23 @@ def _settle_orphaned_view_build(view_schema_id, stalled_before) -> WorkspaceView
         )
         if vs is None:
             return None
+        # Unlike find_legacy_refresh_jobs, this args scan may run under W: it
+        # happens only for a stranded row and reads only unfinished jobs.
         live_owner = (
             ProcrastinateJob.objects.filter(
-                task_name__in=_view_build_task_names(),
+                task_name__in=_VIEW_BUILD_TASK_NAMES,
                 args__workspace_id=str(vs.workspace_id),
             )
+            .exclude(status__in=_MATERIALIZATION_TERMINAL_STATUSES)
             .filter(
-                Q(status="todo")
-                | Q(
-                    status__in=["doing", "aborting"],
-                    worker__last_heartbeat__gte=stalled_before,
-                )
+                ~Q(status__in=_STARTED_JOB_STATUSES) | Q(worker__last_heartbeat__gte=stalled_before)
             )
             .exists()
+        ) or (
+            WorkspaceDataRecovery.objects.filter(
+                workspace_id=vs.workspace_id,
+                state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+            ).exists()
         )
         if live_owner:
             return None

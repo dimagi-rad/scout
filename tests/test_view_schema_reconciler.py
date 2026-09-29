@@ -14,8 +14,13 @@ from asgiref.sync import async_to_sync
 from django.db import connection
 from django.utils import timezone
 
-from apps.workspaces.models import SchemaState, WorkspaceViewSchema
-from apps.workspaces.services.data_operation import sync_workspace_data_lock
+from apps.workspaces.models import SchemaState, WorkspaceDataRecovery, WorkspaceViewSchema
+from apps.workspaces.services.data_operation import (
+    LockOrderError,
+    sync_workspace_data_lock,
+    tenant_data_lock,
+    workspace_data_lock_if_free,
+)
 from apps.workspaces.tasks import (
     MATERIALIZATION_STALLED_HEARTBEAT_SECONDS,
     ORPHANED_VIEW_BUILD_ERROR,
@@ -157,3 +162,40 @@ def test_view_schemas_outside_provisioning_are_untouched(workspace, state):
     vs.refresh_from_db()
     assert vs.state == state
     assert vs.last_error == ""
+
+
+def test_an_active_data_recovery_keeps_the_view_schema(workspace, user):
+    vs = _view_schema(workspace)
+    # A queued repair is keyed by recovery_id, so no job arg names the workspace.
+    WorkspaceDataRecovery.objects.create(
+        workspace=workspace, requested_by=user, recovery_type="view_rebuild"
+    )
+
+    result = _sweep()
+
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.PROVISIONING
+    assert result["view_schemas_settled"] == 0
+
+
+def test_the_non_waiting_workspace_lock_skips_a_held_lock_and_reuses_its_own():
+    workspace_id = uuid.uuid4()
+
+    async def check():
+        async with workspace_data_lock_if_free(workspace_id) as outer:
+            async with workspace_data_lock_if_free(workspace_id) as inner:
+                return outer, inner
+
+    with sync_workspace_data_lock(workspace_id):
+        assert async_to_sync(check)() == (False, False)
+    assert async_to_sync(check)() == (True, True)
+
+
+def test_the_non_waiting_workspace_lock_refuses_while_tenant_locks_are_held():
+    async def check():
+        async with tenant_data_lock([uuid.uuid4()]):
+            async with workspace_data_lock_if_free(uuid.uuid4()):
+                pass
+
+    with pytest.raises(LockOrderError):
+        async_to_sync(check)()
