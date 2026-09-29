@@ -13,9 +13,12 @@ import hashlib
 import json
 import logging
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from django.conf import settings
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -63,6 +66,12 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_load_pending
 from apps.workspaces.services.query_state import serving_writer_in_flight
+from apps.workspaces.services.source_freshness import (
+    REFRESHED,
+    REUSED,
+    aworkspace_source_freshness,
+    provider_label,
+)
 from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
 from mcp_server.pipeline_registry import get_registry
 
@@ -1176,7 +1185,61 @@ async def _build_system_prompt(
             warning = coverage_warning(coverage)
             if warning:
                 volatile += warning + "\n"
+        freshness = _source_freshness_block(
+            await aworkspace_source_freshness(workspace.id), write_capable=write_capable
+        )
+        if freshness:
+            volatile += f"\n{freshness}\n"
     return stable, volatile
+
+
+def _fetch_age(fetched: datetime) -> str:
+    days = (timezone.now() - fetched).days
+    if days <= 0:
+        return "today"
+    return "1 day ago" if days == 1 else f"{days} days ago"
+
+
+def _source_freshness_block(sources: list[dict], *, write_capable: bool) -> str:
+    """Each source's data age and whether the latest load refreshed it (#715).
+
+    ``last_materialized_at`` is the newest source's time, so one fresh source hid a
+    month-old one and the agent blamed the loader instead of the expired sign-in.
+    """
+    if not any(s["last_fetched_at"] or s["not_refreshed"] for s in sources):
+        return ""
+    lines = ["### Source Freshness", ""]
+    for source in sources:
+        fetched = parse_datetime(source["last_fetched_at"] or "")
+        age = (
+            f"data last fetched {fetched:%Y-%m-%d %H:%M} UTC ({_fetch_age(fetched)})"
+            if fetched
+            else "no data fetched yet"
+        )
+        line = f"- {source['name']} ({provider_label(source['provider'])}): {age}"
+        if source["not_refreshed"]:
+            code = source.get("error_code") or "unknown error"
+            line += f". NOT refreshed by the latest load ({code}). Fix: {source['remedy']}."
+        elif source["last_load"] == REUSED:
+            line += "; the latest load reused this data without fetching it again."
+        elif source["last_load"] == REFRESHED:
+            line += "; refreshed by the latest load."
+        lines.append(line)
+    if any(s["not_refreshed"] for s in sources):
+        lines += [
+            "",
+            "A source marked NOT refreshed still serves its last fetched data. When an "
+            "answer uses it, tell the user its data is only current to that fetch date, "
+            "name the source, and give its fix. Do not tell the user that a refresh "
+            "cannot help or that the loader is at fault for these sources: the fix "
+            "listed is what brings their data up to date.",
+        ]
+        if not write_capable:
+            lines.append(
+                "This user's workspace role is read-only, so a workspace member with "
+                "write access has to apply the fix."
+            )
+    return "\n".join(lines)
 
 
 async def _build_stable_system_prompt(

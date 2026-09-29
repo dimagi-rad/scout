@@ -257,6 +257,7 @@ async def test_build_system_prompt_no_schema_status_call():
             "apps.agents.graph.base._fetch_semantic_model_context",
             new=AsyncMock(return_value="Data is loaded. Use `list_datasets`."),
         ),
+        patch("apps.agents.graph.base.aworkspace_source_freshness", AsyncMock(return_value=[])),
     ):
         MockKR.return_value.retrieve = AsyncMock(return_value="")
 

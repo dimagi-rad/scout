@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from django.utils import timezone
 
+from apps.agents.graph import base as graph_base
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant
 from apps.users.services.credential_resolver import CredentialResolutionError
@@ -146,6 +147,34 @@ async def test_schema_status_names_the_stale_source_and_its_fix(workspace, tenan
     assert fresh["last_load"] == REFRESHED
     # The workspace-wide time is the fresh source's, which is why it misled.
     assert response["data"]["last_materialized_at"] == fresh["last_fetched_at"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("write_capable", [True, False])
+async def test_prompt_names_the_stale_source_and_says_reconnect(
+    workspace, tenant, user, month_ago, write_capable
+):
+    await _expired_hq_load(workspace, tenant, user, month_ago)
+    with patch(
+        "apps.agents.graph.base._fetch_semantic_model_context",
+        AsyncMock(return_value="Data is loaded and ready."),
+    ):
+        _stable, volatile = await graph_base._build_system_prompt(
+            workspace, user, write_capable=write_capable
+        )
+
+    hq_line = next(line for line in volatile.splitlines() if "Test Domain (CommCare HQ)" in line)
+    assert "30 days ago" in hq_line
+    assert "NOT refreshed" in hq_line
+    assert ErrorCode.AUTH_TOKEN_EXPIRED in hq_line
+    assert RECONNECT_HQ in hq_line
+    connect_line = next(line for line in volatile.splitlines() if "Reading Opp" in line)
+    assert "today" in connect_line
+    assert "refreshed by the latest load" in connect_line
+    assert "NOT refreshed" not in connect_line
+    assert "Do not tell the user that a refresh cannot help" in volatile
+    assert ("read-only" in volatile) is not write_capable
 
 
 @pytest.mark.asyncio
