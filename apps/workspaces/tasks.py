@@ -2060,7 +2060,7 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
 
     The data-bearing MaterializationRun rows are NOT touched here. A schema in
     TEARDOWN is already unreachable via the catalog (load_tenant_context only
-    resolves ACTIVE/MATERIALIZING schemas), so flipping runs to STALE before the
+    resolves ACTIVE schemas), so flipping runs to STALE before the
     physical DROP succeeds buys nothing — and if teardown_schema later fails the
     DROP and reverts the schema to ACTIVE, prematurely-staled runs would strand
     the (still-present) data as invisible. teardown_schema marks the runs STALE

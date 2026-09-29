@@ -20,7 +20,6 @@ from apps.users.models import Tenant
 class SchemaState(models.TextChoices):
     PROVISIONING = "provisioning"
     ACTIVE = "active"
-    MATERIALIZING = "materializing"
     EXPIRED = "expired"
     TEARDOWN = "teardown"
     FAILED = "failed"

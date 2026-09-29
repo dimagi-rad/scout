@@ -580,7 +580,7 @@ class TestBuildViewSchemaTenantCoverage:
     def test_a_transient_source_state_keeps_the_views(self, workspace, tenant):
         """A load in progress is not a retirement: the views may serve again."""
         TenantSchema.objects.create(
-            tenant=tenant, schema_name="t_loading", state=SchemaState.MATERIALIZING
+            tenant=tenant, schema_name="t_loading", state=SchemaState.PROVISIONING
         )
         with (
             patch(

@@ -1215,7 +1215,7 @@ class TestExecuteAsyncIntegration:
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("view_state", [SchemaState.ACTIVE, SchemaState.MATERIALIZING])
+@pytest.mark.parametrize("view_state", [SchemaState.ACTIVE])
 @pytest.mark.parametrize("malformed", [False, True])
 async def test_schema_status_discloses_missing_sources(user, view_state, malformed):
     workspace = await Workspace.objects.acreate(name="Degraded workspace", created_by=user)

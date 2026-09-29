@@ -151,19 +151,6 @@ def test_refresh_status_returns_schema_state(manage_client, workspace, tenant):
 
 
 @pytest.mark.django_db
-def test_refresh_status_returns_materializing_state(manage_client, workspace, tenant):
-    TenantSchema.objects.create(
-        tenant=tenant,
-        schema_name="status_materializing_schema",
-        state=SchemaState.MATERIALIZING,
-    )
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-    assert resp.status_code == 200
-    assert resp.data["state"] == "provisioning"
-    assert resp.data["refresh_state"] == SchemaState.MATERIALIZING
-
-
-@pytest.mark.django_db
 def test_refresh_status_no_schema_returns_unavailable(manage_client, workspace):
     resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
     assert resp.status_code == 200

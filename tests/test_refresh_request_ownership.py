@@ -180,7 +180,7 @@ def _age_past_retention(candidate):
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("state", [SchemaState.ACTIVE, SchemaState.MATERIALIZING])
+@pytest.mark.parametrize("state", [SchemaState.ACTIVE])
 def test_duplicate_delivery_is_ignored_for_serving_candidate(
     workspace, tenant, tenant_membership, refresh_job, state
 ):
@@ -644,7 +644,7 @@ def _post_refresh(client, workspace, *, job_id=987650):
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("state", [SchemaState.ACTIVE, SchemaState.MATERIALIZING])
+@pytest.mark.parametrize("state", [SchemaState.ACTIVE])
 def test_duplicate_delivery_never_runs_physical_work(
     workspace, tenant, tenant_membership, refresh_job, state
 ):
@@ -1199,22 +1199,6 @@ def test_claim_without_schema_is_not_reported_as_a_role_failure(
     assert result["error_code"] != ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
     assert "role" not in result["error"].lower()
     assert any(r.levelno == logging.ERROR for r in caplog.records)
-
-
-@pytest.mark.django_db(transaction=True)
-def test_legacy_materializing_row_does_not_block_refresh(
-    manage_client, workspace, tenant, tenant_membership
-):
-    # Nothing persists MATERIALIZING and no reconciler clears it, so a leftover row
-    # in that state must not answer "in progress" forever.
-    TenantSchema.objects.create(
-        tenant=tenant, schema_name="legacy_materializing", state=SchemaState.MATERIALIZING
-    )
-
-    response, defer = _post_refresh(manage_client, workspace)
-
-    assert response.status_code == 202
-    defer.assert_called_once()
 
 
 @pytest.mark.django_db(transaction=True)

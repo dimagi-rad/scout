@@ -404,7 +404,7 @@ async def test_excluded_source_loading_does_not_block_serving_view(
         tenant=tenant, schema_name="coverage_ready", state=SchemaState.ACTIVE
     )
     loading = await TenantSchema.objects.acreate(
-        tenant=other, schema_name="coverage_loading", state=SchemaState.MATERIALIZING
+        tenant=other, schema_name="coverage_loading", state=SchemaState.PROVISIONING
     )
     await MaterializationRun.objects.acreate(
         tenant_schema=loading, pipeline="sync", state="loading"
@@ -439,8 +439,7 @@ async def test_excluded_source_loading_does_not_block_serving_view(
 async def _unresolvable_workspace(workspace, tenant, *, multi, state, partial=False):
     """Make ``workspace``'s providers unresolvable: all of them, or one of two if ``partial``.
 
-    ``state`` is the serving schema's state, or None for nothing loaded. No run is active,
-    so a MATERIALIZING schema here is a stuck load (G12).
+    ``state`` is the serving schema's state, or None for nothing loaded.
     """
     if not partial:
         await Tenant.objects.filter(id=tenant.id).aupdate(provider="retired_provider")
@@ -458,7 +457,7 @@ async def _unresolvable_workspace(workspace, tenant, *, multi, state, partial=Fa
         await TenantSchema.objects.acreate(tenant=tenant, schema_name="loaded", state=state)
 
 
-_SERVING_STATES = [None, SchemaState.ACTIVE, SchemaState.MATERIALIZING]
+_SERVING_STATES = [None, SchemaState.ACTIVE]
 
 
 @pytest.mark.asyncio
@@ -471,8 +470,7 @@ async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
     workspace, tenant, interactive, write_capable, multi, state
 ):
     """F2: a re-run fails PIPELINE_UNRESOLVED for a provider with no pipeline, so
-    telling the agent to (re-)run materialization only wastes a job every turn.
-    G12: a stuck MATERIALIZING load can't finish either, so waiting is no better."""
+    telling the agent to (re-)run materialization only wastes a job every turn."""
     await _unresolvable_workspace(workspace, tenant, multi=multi, state=state)
 
     context = await _fetch_semantic_model_context(
@@ -495,12 +493,6 @@ async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
 
 
 def _expected_load_guidance(state, *, interactive, write_capable):
-    if state == SchemaState.MATERIALIZING:
-        if not write_capable:
-            return graph_base._READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        if interactive:
-            return graph_base._INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return graph_base._HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
     if state == SchemaState.ACTIVE:
         if write_capable:
             return graph_base._LOADED_REBUILD_GUIDANCE

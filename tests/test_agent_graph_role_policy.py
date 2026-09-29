@@ -23,7 +23,13 @@ from apps.agents.prompts.base_system import (
     READ_ONLY_BASE_SYSTEM_PROMPT,
 )
 from apps.users.models import Tenant
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant, WorkspaceViewSchema
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 
 
 def _by_name(tools):
@@ -287,7 +293,14 @@ def test_every_base_prompt_variant_keeps_the_shared_guardrails(prompt):
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("loading", [False, True])
 async def test_read_unloaded_guidance_points_to_write_member(workspace, tenant, multi, loading):
-    state = SchemaState.MATERIALIZING if loading else SchemaState.FAILED
+    state = SchemaState.PROVISIONING if loading else SchemaState.FAILED
+    if loading:
+        target = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="loading", state=SchemaState.PROVISIONING
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=target, pipeline="commcare_sync", state="loading"
+        )
     if multi:
         other = await Tenant.objects.acreate(
             provider="commcare", external_id="other", canonical_name="Other"
@@ -296,7 +309,7 @@ async def test_read_unloaded_guidance_points_to_write_member(workspace, tenant, 
         await WorkspaceViewSchema.objects.acreate(
             workspace=workspace, schema_name="view", state=state
         )
-    else:
+    elif not loading:
         await TenantSchema.objects.acreate(tenant=tenant, schema_name="data", state=state)
 
     context = await _fetch_semantic_model_context(workspace, interactive=True, write_capable=False)

@@ -192,7 +192,7 @@ class SchemaManager:
 
         Resolution order, all scoped to this tenant:
 
-        1. Current live schema (ACTIVE/MATERIALIZING), most-recently-accessed. A
+        1. Current live (ACTIVE) schema, most-recently-accessed. A
            blue-green refresh's not-yet-promoted ``_r`` schema is PROVISIONING, so
            it is skipped until promoted (then sorts first).
         2. Else resurrect the most-recent EXPIRED record in place, reusing its name.
@@ -203,7 +203,7 @@ class SchemaManager:
         live = (
             TenantSchema.objects.filter(
                 tenant=tenant,
-                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+                state=SchemaState.ACTIVE,
             )
             .order_by("-last_accessed_at")
             .first()
@@ -238,7 +238,7 @@ class SchemaManager:
                 # named) record between lookup and create — re-fetch and return it.
                 created = False
                 ts = TenantSchema.objects.get(schema_name=schema_name)
-                if ts.state in (SchemaState.ACTIVE, SchemaState.MATERIALIZING):
+                if ts.state == SchemaState.ACTIVE:
                     return ts
                 # Not active yet: fall through to CREATE SCHEMA (IF NOT EXISTS is safe).
 

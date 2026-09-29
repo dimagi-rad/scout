@@ -5,6 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from apps.agents.graph.base import _fetch_semantic_model_context
+from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
+
 
 class TestMcpToolNames:
     """Verify MCP_TOOL_NAMES contains all tools that need workspace_id injection."""
@@ -181,11 +184,11 @@ class TestHeadlessMode:
         """When a materialization is already in progress, the headless prompt
         must NOT tell the agent "no data loaded → call run_materialization" (that
         starts a 2nd parallel run). It gets distinct in-progress guidance."""
-        from apps.agents.graph.base import _fetch_semantic_model_context
-        from apps.workspaces.models import SchemaState, TenantSchema
-
-        await TenantSchema.objects.acreate(
-            tenant=tenant, schema_name="t_inprog", state=SchemaState.MATERIALIZING
+        schema = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="t_inprog", state=SchemaState.PROVISIONING
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema, pipeline="commcare_sync", state="loading"
         )
         msg = await _fetch_semantic_model_context(workspace, interactive=False, write_capable=True)
 
