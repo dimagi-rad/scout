@@ -9,13 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
 from django.test import AsyncClient
 from django.utils import timezone
 from langchain_core.messages import AIMessage
 
 from apps.recipes import tasks as recipe_tasks
-from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
+from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner, VariableValidationError
 
 User = get_user_model()
@@ -55,30 +54,6 @@ def recipe(db, user, workspace):
             },
         ],
         created_by=user,
-    )
-
-
-@pytest.fixture
-def recipe_step_1(db, recipe):
-    """Create first step of a recipe."""
-    return RecipeStep.objects.create(
-        recipe=recipe,
-        order=1,
-        prompt_template="Show me the top {{limit}} customers in {{region}} region",
-        expected_tool="semantic_query",
-        description="Get top customers by region",
-    )
-
-
-@pytest.fixture
-def recipe_step_2(db, recipe):
-    """Create second step of a recipe."""
-    return RecipeStep.objects.create(
-        recipe=recipe,
-        order=2,
-        prompt_template="What were the total sales for {{region}} starting from {{start_date}}?",
-        expected_tool="semantic_query",
-        description="Calculate total sales for region",
     )
 
 
@@ -295,156 +270,6 @@ class TestRecipeVariableValidation:
 
 
 # ============================================================================
-# 3. TestRecipeStepModel
-# ============================================================================
-
-
-@pytest.mark.django_db
-class TestRecipeStepModel:
-    """Tests for the RecipeStep model."""
-
-    def test_create_recipe_step(self, recipe):
-        """Test creating a recipe step."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="Show sales for {{region}}",
-            expected_tool="semantic_query",
-            description="Get sales data",
-        )
-
-        assert step.id is not None
-        assert step.recipe == recipe
-        assert step.order == 1
-        assert step.prompt_template == "Show sales for {{region}}"
-        assert step.expected_tool == "semantic_query"
-        assert str(step) == f"Step 1: {recipe.name}"
-
-    def test_recipe_step_ordering(self, recipe):
-        """Test that recipe steps are ordered by recipe and order."""
-        RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Step 1")
-        RecipeStep.objects.create(recipe=recipe, order=2, prompt_template="Step 2")
-        RecipeStep.objects.create(recipe=recipe, order=3, prompt_template="Step 3")
-
-        steps = list(recipe.steps.all())
-        assert len(steps) == 3
-        assert steps[0].order == 1
-        assert steps[1].order == 2
-        assert steps[2].order == 3
-
-    def test_recipe_step_unique_order_per_recipe(self, recipe):
-        """Test that order must be unique within a recipe."""
-        RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Step 1")
-
-        # Creating another step with same order should fail
-        with pytest.raises(IntegrityError):
-            RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Duplicate")
-
-    def test_recipe_cascade_delete_steps(self, recipe):
-        """Test that deleting a recipe deletes its steps."""
-        RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Step 1")
-        RecipeStep.objects.create(recipe=recipe, order=2, prompt_template="Step 2")
-
-        recipe_id = recipe.id
-        recipe.delete()
-
-        # Steps should be deleted
-        assert not RecipeStep.objects.filter(recipe_id=recipe_id).exists()
-
-
-# ============================================================================
-# 4. TestRecipeStepVariableSubstitution
-# ============================================================================
-
-
-@pytest.mark.django_db
-class TestRecipeStepVariableSubstitution:
-    """Tests for variable substitution in prompt templates."""
-
-    def test_render_prompt_single_variable(self, recipe):
-        """Test rendering prompt with single variable."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="Show data for {{region}}",
-        )
-
-        rendered = step.render_prompt({"region": "North"})
-        assert rendered == "Show data for North"
-
-    def test_render_prompt_multiple_variables(self, recipe):
-        """Test rendering prompt with multiple variables."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="Show top {{limit}} customers in {{region}}",
-        )
-
-        rendered = step.render_prompt({"region": "South", "limit": 25})
-        assert rendered == "Show top 25 customers in South"
-
-    def test_render_prompt_repeated_variable(self, recipe):
-        """Test rendering prompt with same variable used multiple times."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="{{region}} sales: compare {{region}} to other regions",
-        )
-
-        rendered = step.render_prompt({"region": "West"})
-        assert rendered == "West sales: compare West to other regions"
-
-    def test_render_prompt_no_variables(self, recipe):
-        """Test rendering prompt without any variables."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="Show all sales data",
-        )
-
-        rendered = step.render_prompt({})
-        assert rendered == "Show all sales data"
-
-    def test_render_prompt_extra_variables_ignored(self, recipe):
-        """Test that extra variables in values dict are ignored."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="Show {{region}} data",
-        )
-
-        rendered = step.render_prompt(
-            {
-                "region": "East",
-                "unused_var": "value",
-            }
-        )
-        assert rendered == "Show East data"
-
-    def test_render_prompt_number_variable(self, recipe):
-        """Test rendering with number variable."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="Show top {{limit}} results",
-        )
-
-        rendered = step.render_prompt({"limit": 100})
-        assert rendered == "Show top 100 results"
-
-    def test_render_prompt_date_variable(self, recipe):
-        """Test rendering with date variable."""
-        step = RecipeStep.objects.create(
-            recipe=recipe,
-            order=1,
-            prompt_template="Sales since {{start_date}}",
-        )
-
-        rendered = step.render_prompt({"start_date": "2024-01-01"})
-        assert rendered == "Sales since 2024-01-01"
-
-
-# ============================================================================
 # 5. TestRecipeRunModel
 # ============================================================================
 
@@ -595,7 +420,7 @@ class TestRecipeRunner:
             RecipeRunner.validate_and_default(recipe, {"region": "North", "limit": 10})
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_validates_variables(self, recipe, user, recipe_step_1):
+    async def test_recipe_runner_validates_variables(self, recipe, user):
         """RecipeRunner.execute_async raises VariableValidationError on missing vars."""
         invalid_values = {"region": "North", "limit": 10}  # start_date missing
         run = await RecipeRun.objects.acreate(
@@ -613,9 +438,7 @@ class TestRecipeRunner:
     @pytest.mark.asyncio
     @patch("apps.recipes.services.runner.build_agent_graph", new_callable=AsyncMock)
     @patch("apps.recipes.services.runner.get_mcp_tools", new_callable=AsyncMock)
-    async def test_recipe_runner_builds_headless_graph(
-        self, mock_mcp, mock_build, recipe, user, recipe_step_1
-    ):
+    async def test_recipe_runner_builds_headless_graph(self, mock_mcp, mock_build, recipe, user):
         """The runner must build the agent graph in HEADLESS mode (interactive=
         False), with no checkpointer, passing its job_id — so the agent gets the
         blocking materialize tool instead of the chat fire-and-ack one that would
@@ -641,7 +464,7 @@ class TestRecipeRunner:
         assert kwargs["checkpointer"] is None
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_creates_run_record(self, recipe, user, recipe_step_1):
+    async def test_recipe_runner_creates_run_record(self, recipe, user):
         """RecipeRunner creates a RecipeRun record."""
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
         mock_graph = Mock()
@@ -665,7 +488,7 @@ class TestRecipeRunner:
         assert run.run_by == user
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_executes_prompt(self, recipe, user, recipe_step_1):
+    async def test_recipe_runner_executes_prompt(self, recipe, user):
         """RecipeRunner records a single executed step on success."""
         values = {"region": "West", "limit": 15, "start_date": "2024-06-01"}
         mock_graph = Mock()
@@ -687,9 +510,7 @@ class TestRecipeRunner:
         assert run.step_results[0]["success"] is True
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_substitutes_variables_in_prompts(
-        self, recipe, user, recipe_step_1
-    ):
+    async def test_recipe_runner_substitutes_variables_in_prompts(self, recipe, user):
         """RecipeRunner renders variable values into the prompt."""
         values = {"region": "East", "limit": 25, "start_date": "2024-03-01"}
         mock_graph = Mock()
@@ -711,9 +532,7 @@ class TestRecipeRunner:
         assert "25" in step_result["prompt"]
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_response_is_text_of_block_list_answer(
-        self, recipe, user, recipe_step_1
-    ):
+    async def test_recipe_runner_response_is_text_of_block_list_answer(self, recipe, user):
         """A thinking+text block-list answer is recorded as its text only."""
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
         tool_turn = AIMessage(
@@ -744,9 +563,7 @@ class TestRecipeRunner:
         assert run.step_results[0]["response"] == "Top customers: A, B."
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_response_skips_tool_call_preamble(
-        self, recipe, user, recipe_step_1
-    ):
+    async def test_recipe_runner_response_skips_tool_call_preamble(self, recipe, user):
         """An empty final answer is not replaced by an earlier tool-call preamble."""
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
         preamble = AIMessage(
@@ -772,7 +589,7 @@ class TestRecipeRunner:
         assert run.step_results[0]["response"] == ""
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_handles_execution_failure(self, recipe, user, recipe_step_1):
+    async def test_recipe_runner_handles_execution_failure(self, recipe, user):
         """RecipeRunner records a failed run when the graph raises."""
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
         mock_graph = Mock()
@@ -793,7 +610,7 @@ class TestRecipeRunner:
         assert "error" in run.step_results[0]
 
     @pytest.mark.asyncio
-    async def test_recipe_runner_updates_run_status(self, recipe, user, recipe_step_1):
+    async def test_recipe_runner_updates_run_status(self, recipe, user):
         """RecipeRunner marks the run completed with a completion timestamp."""
         values = {"region": "South", "limit": 5, "start_date": "2024-02-01"}
         mock_graph = Mock()
@@ -931,7 +748,7 @@ class TestRecipeRunView:
     """Tests for the async recipe run endpoint."""
 
     @pytest.mark.asyncio
-    async def test_run_endpoint_returns_202_and_defers_task(self, recipe, user, recipe_step_1):
+    async def test_run_endpoint_returns_202_and_defers_task(self, recipe, user):
         """POST run/ creates a PENDING RecipeRun, defers the background task, and
         returns 202 — execution is async because a recipe may block on a
         materialization that must not hold the HTTP connection open."""
@@ -953,9 +770,7 @@ class TestRecipeRunView:
         mock_task.defer_async.assert_awaited_once_with(recipe_run_id=str(run.id))
 
     @pytest.mark.asyncio
-    async def test_run_endpoint_rejects_invalid_variables_before_dispatch(
-        self, recipe, user, recipe_step_1
-    ):
+    async def test_run_endpoint_rejects_invalid_variables_before_dispatch(self, recipe, user):
         """Variable validation happens in the request (400) — we must not create
         a run or defer a task for an invalid request."""
         client = AsyncClient()
@@ -972,9 +787,7 @@ class TestRecipeRunView:
         mock_task.defer_async.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_run_recipe_task_executes_and_finalizes(
-        self, recipe, user, recipe_step_1, monkeypatch
-    ):
+    async def test_run_recipe_task_executes_and_finalizes(self, recipe, user, monkeypatch):
         """The run_recipe task runs the (mocked) runner against the pre-created
         run and the run reaches a terminal status."""
         run = await RecipeRun.objects.acreate(
@@ -1001,7 +814,7 @@ class TestRecipeRunView:
         assert result["status"] == RecipeRunStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_run_endpoint_forbids_non_member(self, recipe, other_user, recipe_step_1):
+    async def test_run_endpoint_forbids_non_member(self, recipe, other_user):
         """A user with no workspace membership gets 403."""
         client = AsyncClient()
         await sync_to_async(client.login)(email="other@example.com", password="otherpass123")

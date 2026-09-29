@@ -1,10 +1,7 @@
 """
 Admin configuration for Recipe models.
 
-The runner executes a single ``Recipe.prompt`` (recipes/services/runner.py),
-not the vestigial ``RecipeStep`` rows. The admin now surfaces ``prompt`` and
-drops the RecipeStep inline / ModelAdmin so operators stop creating step rows
-nothing reads (arch #260, 11#5).
+The runner executes a single ``Recipe.prompt`` (recipes/services/runner.py).
 """
 
 from django.contrib import admin
