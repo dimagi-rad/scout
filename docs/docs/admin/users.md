@@ -1,62 +1,76 @@
 # Users
 
-Scout uses Django's authentication system with a custom user model that uses email as the primary identifier.
+Scout uses Django's authentication with a custom user model that identifies users by email. Accounts created through CommCare Connect may have no email, because Connect does not always provide one.
 
-## Authentication methods
+What a user can do is set per workspace by their workspace role. See [Workspaces](workspaces.md#roles).
+
+## Logging in
 
 ### Email and password
 
-Users can log in with email and password via the SPA login form. The login endpoint (`POST /api/auth/login/`) validates credentials and creates a session cookie.
+The login page accepts an email and password (`POST /api/auth/login/`), which creates a session cookie.
 
-Login is rate-limited: after 5 failed attempts for a given email address, the account is locked out for 5 minutes.
+After 5 failed attempts for an email address, further attempts for that address are refused for 5 minutes.
 
 ### OAuth providers
 
-Scout supports OAuth login via django-allauth. Built-in providers include:
+Scout supports OAuth login through django-allauth with these providers:
 
-- **Google** -- sign in with Google accounts.
-- **GitHub** -- sign in with GitHub accounts.
-- **CommCare** -- sign in with CommCare HQ accounts.
-- **CommCare Connect** -- sign in with CommCare Connect accounts.
+| Provider | ID | Notes |
+|----------|----|-------|
+| CommCare HQ | `commcare` | Logging in also discovers your project spaces as data sources. Restricted to `dimagi.com` emails by default. |
+| CommCare Connect | `commcare_connect` | Logging in also discovers your opportunities as data sources. |
+| Open Chat Studio | `ocs` | Logging in also discovers your chatbots as data sources. You can connect more than one team. |
+| Google | `google` | Login only; no data sources. |
+| GitHub | `github` | Login only; no data sources. |
 
-OAuth credentials (client ID and secret) are configured via the Django admin at `/admin/socialaccount/socialapp/`. OAuth tokens are encrypted at rest and can be refreshed proactively before expiry.
+The login page shows a button for each provider that has an OAuth app configured. To configure them, set `<PREFIX>_OAUTH_CLIENT_ID` and `<PREFIX>_OAUTH_CLIENT_SECRET` (prefixes `COMMCARE`, `CONNECT`, `OCS`, `GOOGLE`, `GITHUB`) and run:
 
-When a user logs in via OAuth for the first time, a Django user is automatically created. If a user with the same email already exists, the social account is linked to the existing user.
+```bash
+uv run manage.py setup_oauth_apps --domain scout.example.com
+```
 
-## Session management
+The command is idempotent, so re-run it after rotating credentials. You can also edit the apps in the Django admin at `/admin/socialaccount/socialapp/`.
 
-Scout uses session-cookie authentication (not JWT). Sessions are managed by Django's session framework. The SPA reads the CSRF token from a cookie and includes it in API requests.
+To change which email domains may log in with a provider, set `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS` to a JSON object mapping provider IDs to domain lists, e.g. `{"commcare": ["dimagi.com"]}`. A provider with no entry accepts any email.
 
-Key endpoints:
+The first OAuth login creates a Scout user. If a user with the same email already exists and has proven ownership of it (a verified email, or a trusted provider account that asserted it), the new login is linked to that user.
+
+### Connected Accounts
+
+The **Connected Accounts** page (in the sidebar) lists your OAuth connections and lets you connect or disconnect them. **Add API Connection** connects CommCare HQ or Open Chat Studio with an API key instead of OAuth. Scout uses these credentials to load data from your data sources.
+
+## Sessions and endpoints
+
+Scout uses session cookies, not JWTs. The frontend gets a CSRF token from `/api/auth/csrf/` and sends it with API requests.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/auth/csrf/` | GET | Set CSRF cookie |
-| `/api/auth/me/` | GET | Get current user info |
+| `/api/auth/csrf/` | GET | Set the CSRF cookie |
+| `/api/auth/me/` | GET | Current user info |
 | `/api/auth/login/` | POST | Email/password login |
-| `/api/auth/logout/` | POST | End session |
-
-## Roles
-
-Users are assigned roles per-project through the ProjectMembership model:
-
-| Role | Permissions |
-|------|-------------|
-| **Viewer** | Chat with the agent and view results |
-| **Analyst** | Chat, export data, create saved queries |
-| **Admin** | Full project configuration access |
-
-A user can have different roles in different projects.
+| `/api/auth/logout/` | POST | End the session |
+| `/api/auth/providers/` | GET | OAuth providers and your connection status |
 
 ## Creating users
 
-Users can be created through:
+Users are created by:
 
-1. **Django admin** -- `/admin/users/user/add/`
-2. **`createsuperuser` command** -- `uv run manage.py createsuperuser`
-3. **OAuth sign-up** -- first login via Google/GitHub auto-creates the user.
-4. **Django allauth sign-up** -- if enabled, users can self-register.
+1. **OAuth login.** The first login with any configured provider creates the user.
+2. **`createsuperuser`.** Run `uv run manage.py createsuperuser`.
+3. **The Django admin** at `/admin/users/user/add/`.
+
+There is no self-service sign-up form in the UI. To give someone access to a workspace, a workspace manager adds them by email (see [Workspaces](workspaces.md#members)). If they don't have an account yet, the invite resolves when they first log in.
 
 ## Superusers
 
-Django superusers have full access to the admin interface and can manage all projects, users, and settings. Create the initial superuser during installation with `uv run manage.py createsuperuser`.
+Django superusers can use the Django admin at `/admin/` to manage users, workspaces, and other records. Create the first one with `uv run manage.py createsuperuser`.
+
+## Duplicate accounts
+
+If duplicate users with the same email exist, merge them with:
+
+```bash
+uv run manage.py merge_duplicate_users --dry-run   # preview
+uv run manage.py merge_duplicate_users
+```
