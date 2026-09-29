@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 SUBAGENT_NAME = "canvas_manager"
 NESTED_MCP_TOOL_NAMES = frozenset({"list_datasets", "describe_dataset", "semantic_query"})
 NESTED_RECURSION_LIMIT = 18
-NESTED_MAX_TOKENS = 4096
+# Sized for adaptive thinking plus the reply; see DEFAULT_MAX_TOKENS.
+NESTED_MAX_TOKENS = 16_000
 
 
 class CanvasManagerInput(BaseModel):
