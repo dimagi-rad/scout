@@ -105,7 +105,8 @@ _UPSTREAM_AUTH_ERRORS = (CommCareAuthError, ConnectAuthError, OCSAuthError)
 class Rediscovery:
     """What rediscovering one user's access with their stored sign-ins found."""
 
-    # A provider error or timeout: retrying may give a different answer.
+    # The check couldn't settle coverage: a provider error, a timeout, or a refusal
+    # that proves nothing (Connect's export-list 403). Retrying may help.
     failed: bool = False
     # Upstream refused a stored sign-in (401); only the user signing in again settles it.
     needs_sign_in: bool = False
@@ -249,7 +250,7 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
                 # still holds the opportunity (see tenant_resolution), so it proves
                 # nothing and reads as a check that couldn't finish.
                 needs_sign_in = needs_sign_in or refused.status_code == 401
-                if provider == "commcare_connect" and refused.status_code == 403:
+                if isinstance(refused, ConnectAuthError) and refused.status_code == 403:
                     failed = True
                 logger.info(
                     "Share-time refresh refused upstream (HTTP %s) for target=%s "
