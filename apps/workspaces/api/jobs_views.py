@@ -202,7 +202,8 @@ async def active_jobs_view(request, workspace_id):
         procrastinate_job_id__in=[
             job.procrastinate_job_id
             for job in terminated_jobs
-            if _needs_materialization_retry_check(job)
+            # Retry is hidden from non-writers anyway; skip the scan on their polls.
+            if viewer_can_write and _needs_materialization_retry_check(job)
         ],
     ).only("procrastinate_job_id", "result"):
         if isinstance(run.result, dict):
