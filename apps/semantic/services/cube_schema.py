@@ -37,6 +37,7 @@ VALIDATOR_SLOT_WAIT_SECONDS = 300.0
 # A canvas commit builds on its request thread: this wait, VALIDATE_BUDGET_SECONDS
 # (70s) and the 30s warm-up must stay under the API proxy's 120s read timeout
 # (frontend/nginx.prod-kamal.conf), or the user gets a 504 for a commit that landed.
+# The 110s total is not headroom: commit_canvas's diagnostics and writes come first.
 INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 10.0
 VALIDATOR_SLOT_POLL_SECONDS = 1.0
 
@@ -262,7 +263,7 @@ def _build_validate_and_promote(
         raise CubeSchemaBuildError(f"Could not generate Cube schema: {exc}") from exc
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
-    with nullcontext(slot) if slot else _validator_slot(slot_wait_seconds) as held:
+    with nullcontext(slot) if slot is not None else _validator_slot(slot_wait_seconds) as held:
         try:
             validation = async_to_sync(CubeClient().validate_schema)(content)
         except CubeServiceUnavailable as exc:
