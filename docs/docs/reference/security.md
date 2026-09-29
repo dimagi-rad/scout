@@ -87,9 +87,14 @@ at most 4 pools of up to 10 connections each (`mcp_server/services/pool.py`).
 
 ## Encrypted credentials
 
-OAuth access and refresh tokens, and API-key connection credentials, are
+API-key connection credentials (`TenantConnection.encrypted_credential`) are
 encrypted at rest with Fernet. The key is the `DB_CREDENTIAL_KEY` environment
 variable and is never stored in the database.
+
+OAuth access and refresh tokens are stored by django-allauth in its
+`SocialToken` table as plaintext; token refresh and data loading read them
+directly. `EncryptingSocialAccountAdapter` encrypts them only in the copy
+allauth serializes into the session during login.
 
 ## Rate limiting
 

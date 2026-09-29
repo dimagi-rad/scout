@@ -466,6 +466,6 @@ Queries run against the workspace's tenant or view schema, not a configured sche
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API authentication |
-| `DB_CREDENTIAL_KEY` | Fernet key for encrypting stored OAuth tokens and API-key credentials |
+| `DB_CREDENTIAL_KEY` | Fernet key for encrypting API-key connection credentials (see [Security](security.md#encrypted-credentials)) |
 | `MCP_SERVER_URL` | MCP server endpoint (default: `http://localhost:8100/mcp`) |
 | `MCP_SHARED_SECRET` | Shared secret the agent sends to the MCP server; required in production |
