@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes, useLocation } from "react-router-dom"
 import { api } from "@/api/client"
 import { workspaceApi } from "@/api/workspaces"
@@ -346,6 +346,121 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
       `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
     ))
     expect(useAppStore.getState().activeDomainId).toBe(WS_A)
+  })
+
+  it("rechecks with a new request, not one that started before the link opened (D1)", async () => {
+    const WS_NEW = "33333333-3333-3333-3333-333333333333"
+    let finishOlder!: (domains: TenantMembership[]) => void
+    const list = vi.spyOn(workspaceApi, "list")
+      .mockReturnValueOnce(new Promise((resolve) => { finishOlder = resolve }))
+      .mockResolvedValueOnce([domain(WS_NEW, "Just Added"), domain(WS_A, "Workspace A")])
+    // A focus refresh already in flight when the link is opened, from before the grant.
+    const older = useAppStore.getState().domainActions.revalidateDomains()
+    renderPrettyChat(`/workspaces/${WS_NEW}/chat`)
+
+    await act(async () => {
+      finishOlder([domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B")])
+      await older
+    })
+
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      expect(useAppStore.getState().activeDomainId).toBe(WS_NEW)
+      expect(screen.getByTestId("path").textContent).toMatch(`/workspaces/just-added/${WS_NEW}/chat/`)
+    })
+  })
+
+  it("clears the recheck timer when the page goes away mid-recheck (D3)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let release!: (domains: TenantMembership[]) => void
+    try {
+      vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
+      const clear = vi.spyOn(globalThis, "clearTimeout")
+      const router = renderPrettyChat(`/workspaces/${"66666666-6666-6666-6666-666666666666"}/chat`)
+      await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())
+      const pending = vi.getTimerCount()
+
+      act(() => router.dispose())
+      cleanup()
+
+      expect(clear).toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBeLessThan(pending)
+    } finally {
+      vi.useRealTimers()
+      await act(async () => release(useAppStore.getState().domains))
+    }
+  })
+
+  it("returns to the link when the recheck answers after the 5s fallback (D4)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let release!: (domains: TenantMembership[]) => void
+    const WS_SLOW = "55555555-5555-5555-5555-555555555555"
+    try {
+      vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
+      renderPrettyChat(`/workspaces/${WS_SLOW}/chat/${THREAD_STALE}`)
+      await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000)
+      })
+      await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+      ))
+    } finally {
+      vi.useRealTimers()
+    }
+
+    await act(async () => release([
+      domain(WS_SLOW, "Slow Grant"), domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B"),
+    ]))
+
+    await waitFor(() => {
+      expect(useAppStore.getState().activeDomainId).toBe(WS_SLOW)
+      expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/slow-grant/${WS_SLOW}/chat/${THREAD_STALE}`,
+      )
+    })
+  })
+
+  it("rechecks a link again on a later visit, A → B → A", async () => {
+    const WS_NEW = "77777777-7777-7777-7777-777777777777"
+    const list = vi.spyOn(workspaceApi, "list")
+      .mockResolvedValueOnce([domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B")])
+      .mockResolvedValueOnce([
+        domain(WS_NEW, "Granted Later"), domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B"),
+      ])
+    const router = renderPrettyChat(`/workspaces/${WS_NEW}/chat`)
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    ))
+
+    await act(() => router.navigate(`/workspaces/workspace-b/${WS_B}/chat`))
+    await act(() => router.navigate(`/workspaces/${WS_NEW}/chat`))
+
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      expect(useAppStore.getState().activeDomainId).toBe(WS_NEW)
+      expect(screen.getByTestId("path").textContent).toMatch(`/workspaces/granted-later/${WS_NEW}/chat/`)
+    })
+  })
+
+  it("keeps a workspace picked mid-recheck instead of bouncing back to the link", async () => {
+    const WS_NEW = "88888888-8888-8888-8888-888888888888"
+    let finishRecheck!: (domains: TenantMembership[]) => void
+    vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { finishRecheck = resolve }))
+    renderPrettyChat(`/workspaces/${WS_NEW}/chat`)
+    await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())
+
+    act(() => useAppStore.getState().domainActions.setActiveDomain(WS_B))
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toMatch(
+      `/workspaces/workspace-b/${WS_B}/chat/`,
+    ))
+
+    await act(async () => {
+      finishRecheck([domain(WS_NEW, "Late"), domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B")])
+    })
+
+    expect(useAppStore.getState().activeDomainId).toBe(WS_B)
+    expect(screen.getByTestId("path").textContent).toMatch(`/workspaces/workspace-b/${WS_B}/chat/`)
   })
 
   it("restores the current thread when navigation removes only the URL thread", async () => {

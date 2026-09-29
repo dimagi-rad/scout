@@ -37,8 +37,8 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
 
   // Canonical pretty chat URL; degrades to the bare `/workspaces/<uuid>/chat`
   // form when the workspace isn't loaded yet (no slug derivable).
-  const chatUrl = (workspaceId: string, thread: string | null) => {
-    const ws = domains.find((d) => d.id === workspaceId)
+  const chatUrl = (workspaceId: string, thread: string | null, list = domains) => {
+    const ws = list.find((d) => d.id === workspaceId)
     const base = `${pathPrefix}${workspacePath(ws ?? { id: workspaceId })}/chat`
     return thread ? `${base}/${thread}` : base
   }
@@ -53,20 +53,78 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
   // to after the list loaded (#355). Refetch once before giving up on it, and
   // hold store → URL meanwhile so the default workspace doesn't replace the link.
   const [recheckedWorkspaceId, setRecheckedWorkspaceId] = useState<string | null>(null)
-  const recheckRequestedRef = useRef<string | null>(null)
+  // Each visit to a link gets its own recheck, so A → B → A looks again.
+  const [recheckVisit, setRecheckVisit] = useState(urlWorkspaceId)
+  if (recheckVisit !== urlWorkspaceId) {
+    setRecheckVisit(urlWorkspaceId)
+    setRecheckedWorkspaceId(null)
+  }
   const awaitingUrlWorkspace =
     !!urlWorkspaceId &&
     domainsStatus === "loaded" &&
     !domains.some((d) => d.id === urlWorkspaceId) &&
     recheckedWorkspaceId !== urlWorkspaceId
 
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const currentUrlWorkspaceIdRef = useRef(urlWorkspaceId)
+  useEffect(() => {
+    currentUrlWorkspaceIdRef.current = urlWorkspaceId
+  }, [urlWorkspaceId])
+
   useEffect(() => {
     if (!awaitingUrlWorkspace || !urlWorkspaceId) return
-    if (recheckRequestedRef.current === urlWorkspaceId) return
-    recheckRequestedRef.current = urlWorkspaceId
+    const linkThreadId = urlThreadId ?? null
+    const heldActiveDomainId = useAppStore.getState().activeDomainId
+    let settled = false
+    const giveUp = () => {
+      settled = true
+      clearTimeout(timer)
+      unsubscribe()
+      setRecheckedWorkspaceId(urlWorkspaceId)
+    }
+    let fallback: { activeDomainId: string | null; threadId: string } | null = null
     // The API client has no timeout; a stalled request must not freeze store → URL sync.
-    const timeout = new Promise<void>((resolve) => setTimeout(resolve, URL_WORKSPACE_RECHECK_TIMEOUT_MS))
-    void Promise.race([revalidateDomains(), timeout]).then(() => setRecheckedWorkspaceId(urlWorkspaceId))
+    const timer = setTimeout(() => {
+      if (settled) return
+      const { activeDomainId: fallbackDomainId, threadId: fallbackThreadId } = useAppStore.getState()
+      fallback = { activeDomainId: fallbackDomainId, threadId: fallbackThreadId }
+      giveUp()
+    }, URL_WORKSPACE_RECHECK_TIMEOUT_MS)
+    // Picking another workspace mid-recheck is a decision; a late result must not bounce it back.
+    const unsubscribe = useAppStore.subscribe((s) => {
+      if (!settled && s.activeDomainId !== heldActiveDomainId) giveUp()
+    })
+
+    void revalidateDomains({ fresh: true }).then((fetched) => {
+      // Skipped for a full load, which drops the hold and re-runs this effect when it lands.
+      if (!fetched || !mountedRef.current) return
+      if (!settled) {
+        giveUp()
+        return
+      }
+      // The recheck timed out but the late answer has the workspace: return to the
+      // link, unless the user has moved on from the fallback since.
+      if (!fallback) return
+      const s = useAppStore.getState()
+      if (
+        s.domains.some((d) => d.id === urlWorkspaceId) &&
+        s.activeDomainId === fallback.activeDomainId &&
+        s.threadId === fallback.threadId &&
+        currentUrlWorkspaceIdRef.current === fallback.activeDomainId
+      ) {
+        navigate(chatUrl(urlWorkspaceId, linkThreadId, s.domains), { replace: true })
+      }
+    })
+    return () => {
+      settled = true
+      clearTimeout(timer)
+      unsubscribe()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [awaitingUrlWorkspace, urlWorkspaceId, revalidateDomains])
 
   // Direction 1: URL → store
