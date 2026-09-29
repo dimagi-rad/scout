@@ -49,6 +49,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [sourcesError, setSourcesError] = useState<string | null>(null)
   const [sourcesAttempt, setSourcesAttempt] = useState(0)
   const [sourcesRefreshing, setSourcesRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState("")
   const [providerFilter, setProviderFilter] = useState<string | null>(null)
@@ -83,13 +84,21 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   async function handleRefreshSources() {
     if (!userId) return
     setSourcesRefreshing(true)
-    setSourcesError(null)
+    setRefreshError(null)
     try {
-      setSources(await refreshUserTenants(userId))
+      const fresh = await refreshUserTenants(userId)
+      if (!isCurrentAccount()) return
+      setSources(fresh)
+      // A refresh can revoke sources; a selection or filter that no longer exists
+      // would be unfixable because its row and chip are gone.
+      const freshIds = new Set(fresh.map((t) => t.tenant_uuid))
+      setSelected((prev) => new Set([...prev].filter((id) => freshIds.has(id))))
+      if (!fresh.some((t) => t.provider === providerFilter)) setProviderFilter(null)
     } catch (err) {
-      setSourcesError(err instanceof ApiError ? err.message : "Failed to refresh data sources")
+      if (!isCurrentAccount()) return
+      setRefreshError(err instanceof ApiError ? err.message : "Failed to refresh data sources")
     } finally {
-      setSourcesRefreshing(false)
+      if (isCurrentAccount()) setSourcesRefreshing(false)
     }
   }
 
@@ -237,6 +246,15 @@ export function CreateWorkspaceModal({ onClose }: Props) {
               <p className="mb-2 text-xs text-muted-foreground">
                 Choose at least one data source for the workspace.
               </p>
+              {refreshError && (
+                <p
+                  className="mb-2 text-xs text-destructive"
+                  role="alert"
+                  data-testid="create-sources-refresh-error"
+                >
+                  {refreshError}
+                </p>
+              )}
 
               {sourcesLoading ? (
                 <p className="py-4 text-center text-sm text-muted-foreground">

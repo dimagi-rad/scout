@@ -126,3 +126,26 @@ it("refreshes upstream sources on request so a newly granted one appears", async
   expect(await screen.findByTestId("create-source-tenant-c")).toBeInTheDocument()
   expect(refreshUserTenants).toHaveBeenCalledExactlyOnceWith("user")
 })
+
+it("keeps the loaded sources usable when a refresh fails", async () => {
+  vi.mocked(refreshUserTenants).mockRejectedValue(new Error("timeout"))
+  const { user } = await openModal()
+
+  await user.click(screen.getByTestId("create-sources-refresh"))
+
+  expect(await screen.findByTestId("create-sources-refresh-error")).toBeInTheDocument()
+  expect(screen.getByTestId("create-source-tenant-a")).toBeInTheDocument()
+})
+
+it("drops a selection the refreshed list no longer offers", async () => {
+  vi.mocked(refreshUserTenants).mockResolvedValue([
+    { id: "membership-b", tenant_uuid: "tenant-b", provider: "ocs", tenant_id: "b", tenant_name: "Beta", last_selected_at: null },
+  ])
+  const { user } = await openModal()
+  await user.click(screen.getByTestId("create-source-tenant-a"))
+
+  await user.click(screen.getByTestId("create-sources-refresh"))
+
+  await waitFor(() => expect(screen.queryByTestId("create-source-tenant-a")).toBeNull())
+  expect(screen.getByTestId("create-workspace-submit")).toBeDisabled()
+})
