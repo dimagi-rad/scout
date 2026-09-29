@@ -228,7 +228,8 @@ describe("Sidebar workspace revalidation (#355)", () => {
     expect(mocks.revalidateDomains).not.toHaveBeenCalled()
     vi.advanceTimersByTime(1_000)
     expect(mocks.revalidateDomains).toHaveBeenCalledOnce()
-    expect(mocks.revalidateDomains).toHaveBeenCalledWith({ fresh: true })
+    // A tick has no moment to be fresh for, so it may join a request already in flight.
+    expect(mocks.revalidateDomains).toHaveBeenCalledWith({ fresh: false })
 
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" })
     try {

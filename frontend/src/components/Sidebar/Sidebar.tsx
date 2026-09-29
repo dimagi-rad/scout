@@ -153,27 +153,29 @@ export function Sidebar() {
   // fetched again (#355): on coming back to the tab, and on a slow poll while you stay.
   const lastRevalidatedAtRef = useRef(0)
   useEffect(() => {
-    const revalidate = () => {
+    const revalidate = (fresh: boolean) => {
       if (document.visibilityState === "hidden") return
       const now = Date.now()
       if (now - lastRevalidatedAtRef.current < DOMAIN_REVALIDATE_MIN_INTERVAL_MS) return
       const previous = lastRevalidatedAtRef.current
       lastRevalidatedAtRef.current = now
-      // Fresh: a request from before you came back can't show a workspace added meanwhile.
-      void revalidateDomains({ fresh: true }).then((result) => {
+      // Fresh on return: a request from before you came back can't show a workspace added
+      // meanwhile. A poll tick has no such moment, so it joins any request already in flight.
+      void revalidateDomains({ fresh }).then((result) => {
         // A skip left the list to another load, so it mustn't use up the window for a real return.
         if (result === "skipped" && lastRevalidatedAtRef.current === now) {
           lastRevalidatedAtRef.current = previous
         }
       })
     }
-    document.addEventListener("visibilitychange", revalidate)
-    window.addEventListener("focus", revalidate)
-    const pollId = window.setInterval(revalidate, DOMAIN_REVALIDATE_POLL_MS)
+    const revalidateOnReturn = () => revalidate(true)
+    document.addEventListener("visibilitychange", revalidateOnReturn)
+    window.addEventListener("focus", revalidateOnReturn)
+    const pollId = window.setInterval(() => revalidate(false), DOMAIN_REVALIDATE_POLL_MS)
     return () => {
       window.clearInterval(pollId)
-      document.removeEventListener("visibilitychange", revalidate)
-      window.removeEventListener("focus", revalidate)
+      document.removeEventListener("visibilitychange", revalidateOnReturn)
+      window.removeEventListener("focus", revalidateOnReturn)
     }
   }, [revalidateDomains])
 
