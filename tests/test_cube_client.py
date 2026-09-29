@@ -330,7 +330,7 @@ def _schema_operation(operation):
 @pytest.fixture
 def validator_url(settings, monkeypatch):
     settings.CUBE_VALIDATOR_URL = "http://validator.test"
-    monkeypatch.setattr(cube_client_module, "SCHEMA_RETRY_BASE_DELAY_SECONDS", 0, raising=False)
+    monkeypatch.setattr(cube_client_module, "SCHEMA_RETRY_BASE_DELAY_SECONDS", 0)
 
 
 @pytest.mark.asyncio

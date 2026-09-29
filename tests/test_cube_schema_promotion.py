@@ -87,7 +87,7 @@ def cube_http(monkeypatch, settings):
     settings.CUBE_API_URL = "http://cube.test"
     settings.CUBE_VALIDATOR_URL = "http://validator.test"
     settings.CUBEJS_API_SECRET = "s" * 32
-    monkeypatch.setattr(cube_client, "SCHEMA_RETRY_BASE_DELAY_SECONDS", 0, raising=False)
+    monkeypatch.setattr(cube_client, "SCHEMA_RETRY_BASE_DELAY_SECONDS", 0)
     monkeypatch.setattr(
         cube_schema,
         "load_workspace_context",
