@@ -245,21 +245,48 @@ def _owned_history(actor_user_id, current, requested) -> list[tuple]:
     ]
 
 
-def _history_is_fresh(current, request, requested, history, *, now=None) -> bool:
-    if not requested or {tenant_id for tenant_id, _archived_at in history} != requested:
-        return False
-    if not all(archived_at is None for _tenant_id, archived_at in history):
-        return False
+def _fresh_history_tenants(current, request, history, *, now=None) -> frozenset:
+    """Tenants in ``history`` whose every row is live and whose proof is fresh."""
+    archived = {tenant_id for tenant_id, archived_at in history if archived_at is not None}
+    live = {tenant_id for tenant_id, _archived_at in history} - archived
+    if not live:
+        return frozenset()
     proofs = {
         proof.tenant_id: proof
-        for proof in UpstreamAccessProof.objects.filter(connection=current, tenant_id__in=requested)
+        for proof in UpstreamAccessProof.objects.filter(connection=current, tenant_id__in=live)
     }
     fresh_now = now or timezone.now()
-    return all(
-        tenant_id in proofs
+    return frozenset(
+        tenant_id
+        for tenant_id in live
+        if tenant_id in proofs
         and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now)
-        for tenant_id in requested
     )
+
+
+def _history_is_fresh(current, request, requested, history, *, now=None) -> bool:
+    return bool(requested) and _fresh_history_tenants(current, request, history, now=now) == (
+        requested
+    )
+
+
+def fresh_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, now=None) -> frozenset:
+    """The subset of ``tenant_ids`` a claim on this connection would find fresh.
+
+    Freshness is per tenant, so one read answers :func:`proofs_are_fresh` for every
+    subset: a listing checks many workspaces' tenants on one connection at once.
+    Database-only and lock-free, like :func:`proofs_are_fresh`.
+    """
+    requested = frozenset(tenant_ids)
+    if not requested:
+        return frozenset()
+    with transaction.atomic():
+        try:
+            current, request = _current_snapshot(actor_user_id, connection_id, lock=False)
+        except (TenantConnection.DoesNotExist, ValueError):
+            return frozenset()
+        history = _owned_history(actor_user_id, current, requested)
+        return _fresh_history_tenants(current, request, history, now=now)
 
 
 def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> bool:
@@ -270,15 +297,10 @@ def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> b
     through to :func:`claim_verification` when a recheck is actually needed.
     """
     requested = frozenset(tenant_ids)
-    if not requested:
-        return False
-    with transaction.atomic():
-        try:
-            current, request = _current_snapshot(actor_user_id, connection_id, lock=False)
-        except (TenantConnection.DoesNotExist, ValueError):
-            return False
-        history = _owned_history(actor_user_id, current, requested)
-        return _history_is_fresh(current, request, requested, history, now=now)
+    return (
+        bool(requested)
+        and fresh_proof_tenant_ids(actor_user_id, connection_id, requested, now=now) == requested
+    )
 
 
 def _observation_hash(observation: CredentialObservation) -> str:
@@ -890,6 +912,7 @@ def publish_verification(
 
 
 aclaim_verification = sync_to_async(claim_verification)
+afresh_proof_tenant_ids = sync_to_async(fresh_proof_tenant_ids)
 aproofs_are_fresh = sync_to_async(proofs_are_fresh)
 apublish_verification = sync_to_async(publish_verification)
 apublish_verification_receipt = sync_to_async(publish_verification_receipt)
