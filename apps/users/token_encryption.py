@@ -3,13 +3,14 @@
 The two columns belong to allauth's model, so rather than wrapping every reader
 the fields themselves are swapped for :class:`EncryptedTokenField` when the users
 app is ready. That makes the ORM the single encrypt/decrypt boundary: model
-instances, ``values()`` and ``refresh_from_db()`` all see plaintext in Python.
+instances, ``values()``, ``refresh_from_db()`` and ``.update()`` all see
+plaintext in Python and ciphertext in the database.
 
-Stored ciphertext carries :data:`CIPHERTEXT_PREFIX` so plaintext rows and
-encrypted rows can coexist and be told apart. A provider token that itself began
-with the prefix would be mistaken for ciphertext; none of Scout's providers issue
-such tokens. Reads accept both; writes are still plaintext so that every process
-running during the next deploy can already read the ciphertext it starts writing.
+Stored ciphertext carries :data:`CIPHERTEXT_PREFIX` so rows written before
+encryption (plaintext) and after it can coexist and be told apart: reads accept
+both, writes always encrypt, and ``users.0017`` encrypts the legacy rows.
+A provider token that itself began with the prefix would be mistaken for
+ciphertext; none of Scout's providers issue such tokens.
 """
 
 from __future__ import annotations
@@ -53,6 +54,13 @@ def encrypt_token_value(value: str | None) -> str | None:
     return CIPHERTEXT_PREFIX + _current_fernet().encrypt(value.encode()).decode()
 
 
+def decrypt_token_value_strict(value: str | None) -> str | None:
+    """Like :func:`decrypt_token_value` but raises ``InvalidToken`` on a bad ciphertext."""
+    if not is_encrypted(value):
+        return value
+    return _current_fernet().decrypt(value[len(CIPHERTEXT_PREFIX) :].encode()).decode()
+
+
 def decrypt_token_value(value: str | None) -> str | None:
     """Plaintext for a stored value; legacy plaintext rows are returned unchanged.
 
@@ -61,10 +69,8 @@ def decrypt_token_value(value: str | None) -> str | None:
     sending ciphertext upstream as a bearer token. Callers comparing credentials
     must therefore never treat an empty value as a match.
     """
-    if not is_encrypted(value):
-        return value
     try:
-        return _current_fernet().decrypt(value[len(CIPHERTEXT_PREFIX) :].encode()).decode()
+        return decrypt_token_value_strict(value)
     except (InvalidToken, ValueError) as exc:
         logger.error(  # noqa: TRY400 — one traceback per row would flood Sentry
             "Failed to decrypt stored OAuth token (%s) — key rotated/misconfigured or data corrupt",
@@ -76,6 +82,9 @@ def decrypt_token_value(value: str | None) -> str | None:
 class EncryptedTokenField(models.TextField):
     def from_db_value(self, value, expression, connection):
         return decrypt_token_value(value)
+
+    def get_prep_value(self, value):
+        return encrypt_token_value(super().get_prep_value(value))
 
     def get_lookup(self, lookup_name):
         if lookup_name not in _ALLOWED_LOOKUPS:

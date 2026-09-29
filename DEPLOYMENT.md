@@ -122,7 +122,7 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 | `SCOUT_LANGFUSE_SECRET_KEY` | Langfuse observability |
 | `SCOUT_LANGFUSE_PUBLIC_KEY` | Langfuse observability |
 | `SCOUT_DJANGO_SECRET_KEY` | Django secret key |
-| `SCOUT_DB_CREDENTIAL_KEY` | Fernet key for DB credential encryption |
+| `SCOUT_DB_CREDENTIAL_KEY` | Fernet key for DB credential and OAuth token encryption; changing it forces every OAuth user to reconnect |
 | `SCOUT_ANTHROPIC_API_KEY` | Claude API key |
 | `SCOUT_SENTRY_DSN` | Sentry DSN for the backend Django project (API, worker, MCP all share it) |
 | `SCOUT_TASKBADGER_API_KEY` | Task Badger project API key for background-job tracking (API + worker share it) |

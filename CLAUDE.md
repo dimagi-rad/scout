@@ -68,7 +68,7 @@ processes; fix those errors before restarting. Warnings do not stop startup.
 - **MCP Server**: Standalone FastMCP server (`mcp_server/`) for tool-based data access (SQL execution, table metadata)
 - **Task Queue**: Procrastinate with PostgreSQL backend (no Redis required); async tasks in `apps/workspaces/tasks.py`. Run worker via `manage.py procrastinate worker`.
 - **Auth**: Session cookies (no JWT), CSRF token from `GET /api/auth/csrf/`
-- **DB encryption**: Project database credentials encrypted with Fernet (`DB_CREDENTIAL_KEY` env var)
+- **DB encryption**: Project database credentials and OAuth tokens (allauth `SocialToken`, via `apps/users/token_encryption.py`) encrypted with Fernet (`DB_CREDENTIAL_KEY` env var)
 
 ### Django apps (`apps/`)
 
@@ -104,7 +104,7 @@ The codebase is async-first. New views should be `async def` using native Django
 Required (see `.env.example`):
 - `DATABASE_URL` - Platform PostgreSQL connection string
 - `ANTHROPIC_API_KEY` - Claude API key for LangGraph agent
-- `DB_CREDENTIAL_KEY` - Fernet key for encrypting project DB credentials
+- `DB_CREDENTIAL_KEY` - Fernet key for encrypting project DB credentials and stored OAuth tokens
 - `DJANGO_SECRET_KEY` - Django secret key
 - `CUBE_API_URL`, `CUBE_VALIDATOR_URL`, `CUBEJS_API_SECRET` - Semantic runtime and validator (see local setup above)
 
