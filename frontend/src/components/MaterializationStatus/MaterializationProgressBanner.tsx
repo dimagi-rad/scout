@@ -2,7 +2,9 @@ import { Loader2, X } from "lucide-react"
 import { useState } from "react"
 import { api } from "@/api/client"
 import type { ActiveJob } from "@/api/jobs"
-import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { actionFailure, useWorkspaceRole, type ActionFailure } from "@/hooks/useWorkspaceRole"
+
+const CANCEL_FAILED = "Cancel failed — try again"
 
 interface Props {
   job: ActiveJob
@@ -21,18 +23,21 @@ interface Props {
  */
 export function MaterializationProgressBanner({ job, workspaceId }: Props) {
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "error">("idle")
+  const [cancelError, setCancelError] = useState<ActionFailure | null>(null)
   const { canWrite } = useWorkspaceRole(workspaceId)
 
   const handleCancel = async (e: React.MouseEvent) => {
     e.preventDefault()
     if (cancelState === "pending") return
     setCancelState("pending")
+    setCancelError(null)
     try {
       await api.post(
         `/api/workspaces/${workspaceId}/jobs/${job.thread_job_id}/cancel/`,
         {},
       )
-    } catch {
+    } catch (error) {
+      setCancelError(actionFailure(error, CANCEL_FAILED, canWrite))
       setCancelState("error")
       setTimeout(() => setCancelState("idle"), 3000)
     }
@@ -127,9 +132,18 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
               />
             )}
           </div>
+          {cancelError && (
+            <div
+              className="text-xs text-red-600 dark:text-red-400 mt-1 break-words"
+              role="alert"
+              data-testid="materialization-banner-cancel-error"
+            >
+              {cancelError.message}
+            </div>
+          )}
         </div>
 
-        {canWrite && (
+        {canWrite && (cancelError?.retryable ?? true) && (
           <button
             type="button"
             onClick={handleCancel}
@@ -141,7 +155,7 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
             }`}
             data-testid="materialization-banner-stop-btn"
             title={
-              cancelState === "error" ? "Cancel failed — try again" : "Stop data loading"
+              cancelState === "error" ? CANCEL_FAILED : "Stop data loading"
             }
           >
             <X

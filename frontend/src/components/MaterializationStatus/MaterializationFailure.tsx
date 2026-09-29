@@ -1,7 +1,9 @@
 import { useState } from "react"
 import { AlertTriangle, RotateCw, XCircle } from "lucide-react"
 import { jobsApi, type RecentTermination } from "@/api/jobs"
-import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { actionFailure, useWorkspaceRole, type ActionFailure } from "@/hooks/useWorkspaceRole"
+
+const RETRY_FAILED = "Retry failed — try again"
 
 interface Props {
   termination: RecentTermination
@@ -26,12 +28,14 @@ export function MaterializationFailure({
   onRetryDispatched,
 }: Props) {
   const [retryState, setRetryState] = useState<"idle" | "pending" | "error">("idle")
+  const [retryError, setRetryError] = useState<ActionFailure | null>(null)
   const isCancelled = termination.state === "cancelled"
   const { canWrite } = useWorkspaceRole(workspaceId)
 
   const handleRetry = async () => {
     if (retryState === "pending") return
     setRetryState("pending")
+    setRetryError(null)
     try {
       await jobsApi.retryMaterialization(workspaceId, {
         thread_id: threadId,
@@ -41,7 +45,8 @@ export function MaterializationFailure({
       // Leave button disabled briefly; the next poll cycle will swap this
       // card out for the progress card.
       setTimeout(() => setRetryState("idle"), 1500)
-    } catch {
+    } catch (error) {
+      setRetryError(actionFailure(error, RETRY_FAILED, canWrite))
       setRetryState("error")
       setTimeout(() => setRetryState("idle"), 3000)
     }
@@ -74,8 +79,17 @@ export function MaterializationFailure({
               {termination.error_summary}
             </div>
           )}
+          {retryError && (
+            <div
+              className="text-red-600 dark:text-red-400 mt-1 whitespace-pre-wrap break-words"
+              role="alert"
+              data-testid="materialization-retry-error"
+            >
+              {retryError.message}
+            </div>
+          )}
         </div>
-        {termination.retry_available && canWrite && (
+        {termination.retry_available && canWrite && (retryError?.retryable ?? true) && (
           <button
             type="button"
             onClick={handleRetry}
@@ -90,7 +104,7 @@ export function MaterializationFailure({
             data-testid="materialization-retry-btn"
             title={
               retryState === "error"
-                ? "Retry failed — try again"
+                ? RETRY_FAILED
                 : "Retry materialization"
             }
           >
