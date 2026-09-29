@@ -20,7 +20,7 @@ const done = (id, run_number, head_sha, updated_at, extra = {}) => run(
 
 // `compare` maps a head sha to the compare status of OURS...head (default diverged).
 // `deployed` maps a run id to its deploy job's conclusion (default success).
-function fakeGithub({ runs = [], compare = {}, deployed = {}, listError = null } = {}) {
+function fakeGithub({ runs = [], compare = {}, deployed = {}, listError = null, deployJob = 'deploy' } = {}) {
   const calls = [];
   return {
     calls,
@@ -34,7 +34,7 @@ function fakeGithub({ runs = [], compare = {}, deployed = {}, listError = null }
         listJobsForWorkflowRun: async (args) => {
           calls.push(['jobs', args]);
           const conclusion = deployed[args.run_id] || 'success';
-          return { data: { jobs: [{ name: 'test / test', conclusion: 'success' }, { name: 'deploy', conclusion }] } };
+          return { data: { jobs: [{ name: 'test / test', conclusion: 'success' }, { name: deployJob, conclusion }] } };
         },
       },
       repos: {
@@ -202,4 +202,13 @@ test('the rollback guard warns when no recent run deployed', async () => {
   });
   assert.equal(await skip(github, context, core), null);
   assert.match(core.out.warnings[0], /rollback guard is inactive/);
+});
+
+test('the live run is matched by the configured deploy job name', async () => {
+  const runs = [done(20, 120, sha('c'), '2026-09-29T02:00:00Z', { conclusion: 'timed_out' })];
+  const compare = { [sha('c')]: 'ahead' };
+  const renamed = { github: fakeGithub({ runs, compare, deployJob: 'ship' }), context, core: fakeCore(), workflowId };
+  assert.equal((await findReasonToSkip({ ...renamed, jobName: 'ship' })).why, 'already deployed');
+  const mismatched = { ...renamed, github: fakeGithub({ runs, compare, deployJob: 'ship' }) };
+  assert.equal(await findReasonToSkip({ ...mismatched, jobName: 'deploy' }), null);
 });

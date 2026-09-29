@@ -6,8 +6,6 @@ const WAITING = new Set(['queued', 'pending', 'waiting', 'requested']);
 // Superseded runs (deploy job skipped) are among the candidates, so this must
 // reach past a burst of them; each lookup is one API call.
 const MAX_JOB_LOOKUPS = 50;
-// A run can deploy and still end failed or cancelled in `report`.
-const FINISHED = new Set(['success', 'failure', 'cancelled']);
 
 async function contains({ github, context, sha }) {
   if (sha === context.sha) return true;
@@ -35,7 +33,8 @@ async function findSupersedingRun({ github, context, runs }) {
 // and the concurrency group already makes deploys land in run-number order.
 async function findLiveRun({ github, context, core, runs, jobName }) {
   const finished = runs
-    .filter((run) => run.id !== context.runId && FINISHED.has(run.conclusion))
+    // Any conclusion: a run can deploy and still end failed, cancelled or timed out.
+    .filter((run) => run.id !== context.runId && run.status === 'completed')
     .sort((a, b) => b.run_number - a.run_number);
   for (const run of finished.slice(0, MAX_JOB_LOOKUPS)) {
     const { data } = await github.rest.actions.listJobsForWorkflowRun({
