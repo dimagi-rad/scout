@@ -116,7 +116,7 @@ one. Each user gets their own auto-created workspace; they are not shared.
   characters).
 - Only managers can delete a workspace. Deletion is refused if it is the
   requester's last workspace covering one of its tenants. It removes the
-  workspace's threads (which invalidates their share links), artifacts,
+  workspace's threads, artifacts,
   recipes, knowledge and pending invites.
 
 ### Workspace access
@@ -202,13 +202,8 @@ revoke it. Accepting an invite never changes the role of an existing member.
 
 A thread is a chat session between a user and the agent, owned by that user
 and tied to one workspace. Threads are private: other members can't list or
-read them.
+read them, and there is no way to share one.
 
-- The owner can share a thread if they have the read-write role. Sharing
-  creates a random `share_token`; the thread's messages and its linked
-  artifacts are then readable by anyone with the link, without signing in.
-- Shared threads are read-only.
-- Unsharing clears the token, so the link stops working immediately.
 - Threads are deleted when their owner is removed from the workspace, when the
   workspace is deleted, or when the user is deleted.
 
@@ -229,8 +224,7 @@ Artifacts are saved outputs, usually story dashboards created by the agent
   lists. With `--confirm`, the `purge_deleted_artifacts` management command
   permanently deletes artifacts soft-deleted more than 30 days ago (without it,
   it only reports them). It is not scheduled.
-- Artifacts have no share links of their own, but a shared thread exposes its
-  linked artifacts.
+- Artifacts have no share links.
 - If an artifact's data isn't available (for example, the schema expired), the
   query endpoint returns 409 with the recovery state, and a read-write member
   can start a repair.
@@ -244,16 +238,14 @@ Artifacts are saved outputs, usually story dashboards created by the agent
 A recipe is a saved prompt template with typed variables, created by the agent's
 `save_as_recipe` tool.
 
-- All members can view recipes and their runs. The `is_shared` flag on a
-  recipe is stored but not used to filter.
+- All members can view recipes and their runs. There is no per-recipe or
+  per-run sharing setting.
 - Read-write members can edit and soft-delete recipes.
 - Any member can run a recipe. The run is queued and executed by the
   background worker; the API returns 202 with the pending run.
 - A run executes as the member who started it, headless, with that member's
   role. If data needs loading, the run loads it and continues. A run that ends
   on an escalation or error is marked failed.
-- Read-write members can make a run public, which gives it a share link that
-  works without signing in.
 
 ---
 

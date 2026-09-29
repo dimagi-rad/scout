@@ -20,13 +20,12 @@ const dataset = (label: string): SemanticDataset => ({
 const model = { id: "model", name: "model", version: 1, status: "ready", diagnostics: [], updated_at: "" }
 const catalog = (label: string) => ({ model, datasets: [dataset(label)] })
 const recipe = (name: string): Recipe => ({
-  id: "same-id", name, description: "", prompt: "", variables: [], is_shared: false,
+  id: "same-id", name, description: "", prompt: "", variables: [],
   created_at: "", updated_at: "",
 })
 const run = (label: string): RecipeRun => ({
   id: "same-id", status: "completed", variable_values: { label }, step_results: [],
-  is_shared: false, is_public: false, share_token: null, started_at: null,
-  completed_at: null, created_at: "",
+  started_at: null, completed_at: null, created_at: "",
 })
 const entry = (title: string): KnowledgeEntryItem => ({
   id: "same-id", type: "entry", title, content: "", tags: [], created_at: "", updated_at: "",
@@ -108,7 +107,6 @@ const mutations: Mutation[] = [
   { name: "recipe update", method: "put", start: s => s.recipeActions.updateRecipe("same-id", { name: "a" }), response: recipe("a") },
   { name: "recipe delete", method: "delete", start: s => s.recipeActions.deleteRecipe("same-id"), response: undefined },
   { name: "recipe execution", method: "post", start: s => s.recipeActions.runRecipe("same-id", {}), response: run("a") },
-  { name: "run sharing", method: "patch", start: s => s.recipeActions.updateRecipeRun("same-id", "same-id", { is_shared: true }), response: { ...run("a"), is_shared: true } },
   { name: "knowledge creation", method: "post", start: s => s.knowledgeActions.createKnowledge({ type: "entry", title: "a" }), response: entry("a") },
   { name: "knowledge update", method: "put", start: s => s.knowledgeActions.updateKnowledge("same-id", { title: "a" }), response: entry("a") },
   { name: "knowledge delete", method: "delete", start: s => s.knowledgeActions.deleteKnowledge("same-id"), response: undefined },

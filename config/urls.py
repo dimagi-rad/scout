@@ -6,10 +6,8 @@ from django.contrib import admin
 from django.http import HttpResponse
 from django.urls import include, path
 
-from apps.chat.thread_views import public_thread_view
 from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
-from apps.recipes.api.views import PublicRecipeRunView
 from apps.workspaces.api.access_views import workspace_access_verify_view
 from apps.workspaces.api.workspace_views import (
     MyInvitesView,
@@ -109,15 +107,4 @@ urlpatterns = [
     # workspace_id comes from the request body, not the URL
     path("api/chat/", chat_view, name="chat"),
     path("api/auth/", include("apps.users.auth_urls")),
-    # Public share links, no auth required
-    path(
-        "api/recipes/runs/shared/<str:share_token>/",
-        PublicRecipeRunView.as_view(),
-        name="public-recipe-run",
-    ),
-    path(
-        "api/chat/threads/shared/<str:share_token>/",
-        public_thread_view,
-        name="public-thread",
-    ),
 ]

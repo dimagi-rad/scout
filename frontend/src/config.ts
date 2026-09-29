@@ -22,7 +22,7 @@ export function joinBase(base: string, path: string): string {
 }
 
 /**
- * Strip a base prefix from a pathname (e.g. "/scout/shared/x" → "/shared/x").
+ * Strip a base prefix from a pathname (e.g. "/scout/embed/x" → "/embed/x").
  *
  * Pure helper so it can be unit-tested with an explicit base. Prefer
  * {@link stripBasePath} in app code.
@@ -45,7 +45,7 @@ export function withBasePath(path: string): string {
 
 /**
  * Remove the configured {@link BASE_PATH} from a pathname before matching it
- * against app routes (e.g. share-token regexes anchored at ^/shared/).
+ * against app routes (e.g. regexes anchored at ^/embed).
  */
 export function stripBasePath(pathname: string): string {
   return stripBase(BASE_PATH, pathname)

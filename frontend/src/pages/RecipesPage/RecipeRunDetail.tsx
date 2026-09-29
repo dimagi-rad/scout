@@ -1,4 +1,3 @@
-import { useState } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import {
@@ -8,14 +7,11 @@ import {
   Loader2,
   Clock,
   AlertCircle,
-  Users,
   FileBarChart,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { READ_ONLY_HINT, writeErrorMessage } from "@/hooks/useWorkspaceRole"
-import { cn } from "@/lib/utils"
 import { useAppStore } from "@/store/store"
 import type { Recipe, RecipeRun } from "@/store/recipeSlice"
 
@@ -23,11 +19,6 @@ interface RecipeRunDetailProps {
   recipe: Recipe
   run: RecipeRun
   onBack: () => void
-  onUpdateRun: (
-    runId: string,
-    data: { is_shared?: boolean; is_public?: boolean },
-  ) => Promise<void>
-  canWrite?: boolean
 }
 
 function formatDateTime(dateString: string | null | undefined): string {
@@ -72,23 +63,9 @@ export function RecipeRunDetail({
   recipe,
   run,
   onBack,
-  onUpdateRun,
-  canWrite = true,
 }: RecipeRunDetailProps) {
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
-  const [shareError, setShareError] = useState<string | null>(null)
-
-  const handleShareChange = async (value: boolean) => {
-    setShareError(null)
-    try {
-      await onUpdateRun(run.id, { is_shared: value })
-    } catch (error) {
-      setShareError(
-        writeErrorMessage(error, "Couldn’t update sharing. Try again.", canWrite),
-      )
-    }
-  }
   const variableEntries = run.variable_values
     ? Object.entries(run.variable_values)
     : []
@@ -209,34 +186,6 @@ export function RecipeRunDetail({
           </CardContent>
         </Card>
       )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Sharing</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <label
-            className={cn("flex items-center gap-1.5 text-sm", canWrite && "cursor-pointer")}
-            title={canWrite ? undefined : READ_ONLY_HINT}
-            data-testid="run-sharing-project"
-          >
-            <input
-              type="checkbox"
-              checked={run.is_shared}
-              onChange={(e) => void handleShareChange(e.target.checked)}
-              disabled={!canWrite}
-              className="h-4 w-4 rounded border-gray-300"
-            />
-            <Users className="h-4 w-4 text-muted-foreground" />
-            <span>Share with workspace</span>
-          </label>
-          {shareError && (
-            <p className="text-sm text-destructive" role="alert" data-testid="run-sharing-error">
-              {shareError}
-            </p>
-          )}
-        </CardContent>
-      </Card>
     </div>
   )
 }

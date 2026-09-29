@@ -20,13 +20,12 @@ class RecipeAdmin(admin.ModelAdmin):
         "workspace",
         "prompt_preview",
         "variable_count",
-        "is_shared",
         "created_by",
         "updated_at",
     ]
-    list_filter = ["is_shared", "created_at", "workspace"]
+    list_filter = ["created_at", "workspace"]
     search_fields = ["name", "description", "prompt"]
-    readonly_fields = ["id", "share_token", "created_at", "updated_at"]
+    readonly_fields = ["id", "created_at", "updated_at"]
     autocomplete_fields = ["created_by"]
 
     fieldsets = (
@@ -46,12 +45,6 @@ class RecipeAdmin(admin.ModelAdmin):
                 "description": "Define variables as a JSON list. Each variable should have: "
                 "name, type (string/number/date/boolean/select), label, and optionally "
                 "default and options (for select type).",
-            },
-        ),
-        (
-            "Sharing",
-            {
-                "fields": ("is_shared", "is_public", "share_token"),
             },
         ),
         (
@@ -86,7 +79,7 @@ class RecipeRunAdmin(admin.ModelAdmin):
         "duration_display",
         "created_at",
     ]
-    list_filter = ["status", "is_shared", "is_public", "created_at", "recipe__workspace"]
+    list_filter = ["status", "created_at", "recipe__workspace"]
     search_fields = ["recipe__name", "run_by__email"]
     readonly_fields = [
         "id",
@@ -94,7 +87,6 @@ class RecipeRunAdmin(admin.ModelAdmin):
         "status",
         "variable_values",
         "step_results",
-        "share_token",
         "started_at",
         "completed_at",
         "run_by",
@@ -108,12 +100,6 @@ class RecipeRunAdmin(admin.ModelAdmin):
             "Execution",
             {
                 "fields": ("variable_values", "step_results"),
-            },
-        ),
-        (
-            "Sharing",
-            {
-                "fields": ("is_shared", "is_public", "share_token"),
             },
         ),
         (

@@ -1,4 +1,4 @@
-"""Thread CRUD endpoints: list, messages, share, public."""
+"""Thread CRUD endpoints: list, detail, messages, artifacts, viewed."""
 
 import logging
 from datetime import UTC, datetime
@@ -18,7 +18,6 @@ from apps.chat.helpers import (
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
 from apps.common.http import parse_json_object
-from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -37,28 +36,6 @@ async def _get_thread(thread_id, user, *, workspace_id=None):
         return None
 
 
-async def _get_public_thread(share_token):
-    """Load a shared thread by share token."""
-    try:
-        return await Thread.objects.select_related("user").aget(
-            share_token=share_token, is_shared=True
-        )
-    except Thread.DoesNotExist:
-        return None
-
-
-async def _update_thread_sharing(thread, *, is_shared: bool):
-    """Update sharing settings on a thread."""
-    thread.is_shared = is_shared
-    await thread.asave()
-    return {
-        "id": str(thread.id),
-        "is_shared": thread.is_shared,
-        "is_public": thread.is_shared,
-        "share_token": thread.share_token,
-    }
-
-
 def _thread_summary(thread, *, history_title: str | None = None):
     display_title = _display_thread_title(thread)
     return {
@@ -68,9 +45,6 @@ def _thread_summary(thread, *, history_title: str | None = None):
         "title_is_custom": thread.title_is_custom,
         "created_at": thread.created_at.isoformat(),
         "updated_at": thread.updated_at.isoformat(),
-        "is_shared": thread.is_shared,
-        "is_public": thread.is_shared,
-        "share_token": thread.share_token,
         "last_viewed_at": thread.last_viewed_at.isoformat() if thread.last_viewed_at else None,
     }
 
@@ -121,42 +95,6 @@ async def _first_user_message_title(thread_id) -> str:
         if text:
             return _short_thread_title(text)
     return ""
-
-
-async def _get_thread_artifacts(thread_id):
-    """Load artifacts associated with a thread.
-
-    Returns the artifact ``code`` and ``data`` so a public (unauthenticated)
-    thread page can render each artifact in a client-side sandboxed iframe
-    (``srcdoc``) instead of dumping the source as ``<pre>``.
-
-    Note: the authenticated server sandbox route
-    (``/api/workspaces/<wsid>/artifacts/<id>/sandbox/``) and the live
-    ``query-data`` route both require session auth + workspace membership, so
-    they intentionally are NOT exposed here. Public rendering uses the embedded
-    static ``data`` only; live tenant data is never served to anonymous viewers.
-    """
-    thread = await Thread.objects.filter(id=thread_id).select_related("workspace").afirst()
-    if thread is None:
-        return []
-    await backfill_thread_artifact_links(thread)
-    queryset = (
-        ThreadArtifact.objects.filter(thread=thread, artifact__is_deleted=False)
-        .select_related("artifact")
-        .order_by("artifact__created_at")
-    )
-    links = [link async for link in queryset]
-    return [
-        {
-            "id": str(link.artifact.id),
-            "title": link.artifact.title,
-            "artifact_type": link.artifact.artifact_type,
-            "code": link.artifact.code,
-            "data": link.artifact.data,
-            "version": link.artifact.version,
-        }
-        for link in latest_version_links(links)
-    ]
 
 
 async def _list_threads(user, *, workspace_id):
@@ -325,53 +263,6 @@ async def thread_artifacts_view(request, workspace_id, thread_id):
 
 
 @async_login_required
-async def thread_share_view(request, workspace_id, thread_id):
-    """
-    GET  /api/chat/threads/<thread_id>/share/  — get sharing settings
-    PATCH /api/chat/threads/<thread_id>/share/ — update sharing settings
-    """
-    user = request._authenticated_user
-
-    if request.method == "PATCH":
-        body, err = parse_json_object(request)
-        if err:
-            return err
-        if type(body.get("is_shared")) is not bool:
-            return JsonResponse({"error": "is_shared must be a boolean"}, status=400)
-
-        is_shared = body["is_shared"]
-        # Publishing changes shared content; revocation only removes the owner's exposure.
-        minimum_role = WorkspaceRole.READ_WRITE if is_shared else WorkspaceRole.READ
-        _workspace, err = await aresolve_workspace(user, workspace_id, minimum_role=minimum_role)
-    else:
-        _workspace, err = await aresolve_workspace(user, workspace_id)
-    if err is not None:
-        return err
-
-    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
-    if thread is None:
-        return JsonResponse({"error": "Thread not found"}, status=404)
-
-    if request.method == "GET":
-        return JsonResponse(
-            {
-                "id": str(thread.id),
-                "is_shared": thread.is_shared,
-                "share_token": thread.share_token,
-            }
-        )
-
-    if request.method == "PATCH":
-        result = await _update_thread_sharing(
-            thread,
-            is_shared=is_shared,
-        )
-        return JsonResponse(result)
-
-    return JsonResponse({"error": "Method not allowed"}, status=405)
-
-
-@async_login_required
 async def thread_viewed_view(request, workspace_id, thread_id):
     """POST /api/workspaces/<workspace_id>/threads/<thread_id>/viewed/
 
@@ -394,40 +285,3 @@ async def thread_viewed_view(request, workspace_id, thread_id):
     if not updated:
         return JsonResponse({"error": "Thread not found"}, status=404)
     return JsonResponse({"status": "ok"})
-
-
-async def public_thread_view(request, share_token):
-    """
-    GET /api/chat/threads/shared/<share_token>/
-
-    Public read-only view of a shared thread's messages and artifacts.
-    No authentication required.
-    """
-    if request.method != "GET":
-        return JsonResponse({"error": "Method not allowed"}, status=405)
-
-    thread = await _get_public_thread(share_token)
-    if thread is None:
-        return JsonResponse({"error": "Thread not found"}, status=404)
-
-    try:
-        messages = await _load_thread_messages(thread.id)
-    except CheckpointerUnavailable:
-        return JsonResponse(
-            {"error": "Conversation history is temporarily unavailable. Please try again."},
-            status=503,
-        )
-
-    artifacts = await _get_thread_artifacts(thread.id)
-
-    return JsonResponse(
-        {
-            "thread": {
-                "id": str(thread.id),
-                "title": _thread_summary(thread)["title"],
-                "created_at": thread.created_at.isoformat(),
-            },
-            "messages": messages,
-            "artifacts": artifacts,
-        }
-    )

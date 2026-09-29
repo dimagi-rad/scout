@@ -14,7 +14,6 @@ const recipe: Recipe = {
   description: "Visits per week",
   prompt: "Summarise visits for {{week}}",
   variables: [],
-  is_shared: true,
   created_at: "2026-09-01T10:00:00Z",
   updated_at: "2026-09-01T10:00:00Z",
 }
@@ -27,7 +26,6 @@ function renderDetail(canWrite: boolean, onSave = vi.fn()) {
       onBack={vi.fn()}
       onSave={onSave}
       onRun={vi.fn()}
-      onUpdateRun={vi.fn()}
       onViewRun={vi.fn()}
       canWrite={canWrite}
     />,
@@ -58,7 +56,6 @@ describe("recipes for read-only members", () => {
     expect(screen.getByTestId("recipe-readonly-hint")).toHaveTextContent(READ_ONLY_HINT)
     expect(screen.getByTestId("recipe-prompt-editor")).toHaveAttribute("readonly")
     expect(screen.getByLabelText("Name")).toHaveAttribute("readonly")
-    expect(screen.getByRole("checkbox")).toBeDisabled()
     expect(screen.getByTestId("recipe-detail-run")).toBeEnabled()
   })
 
@@ -67,7 +64,6 @@ describe("recipes for read-only members", () => {
 
     expect(screen.getByTestId("recipe-save")).toBeInTheDocument()
     expect(screen.getByTestId("recipe-prompt-editor")).not.toHaveAttribute("readonly")
-    expect(screen.getByRole("checkbox")).toBeEnabled()
   })
 
   it("explains a role denial instead of leaving an unhandled rejection", async () => {
@@ -76,7 +72,8 @@ describe("recipes for read-only members", () => {
     )
     renderDetail(true, onSave)
 
-    await userEvent.click(screen.getByRole("checkbox"))
+    await userEvent.type(screen.getByLabelText("Name"), " v2")
+    await userEvent.click(screen.getByTestId("recipe-save"))
 
     expect(await screen.findByTestId("recipe-write-error")).toHaveTextContent(READ_ONLY_DENIAL)
   })

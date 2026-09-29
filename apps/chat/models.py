@@ -1,4 +1,3 @@
-import secrets
 import uuid
 
 from django.conf import settings
@@ -21,8 +20,6 @@ class Thread(models.Model):
     )
     title = models.CharField(max_length=203, default="", blank=True)
     title_is_custom = models.BooleanField(default=False)
-    is_shared = models.BooleanField(default=False)
-    share_token = models.CharField(max_length=64, unique=True, null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_viewed_at = models.DateTimeField(null=True, blank=True)
@@ -38,14 +35,6 @@ class Thread(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.id})"
-
-    def save(self, *args, **kwargs):
-        # Maintain the is_shared ↔ share_token invariant — toggle via save(), not update().
-        if self.is_shared and not self.share_token:
-            self.share_token = secrets.token_urlsafe(32)
-        elif not self.is_shared:
-            self.share_token = None
-        super().save(*args, **kwargs)
 
 
 class ThreadArtifact(models.Model):

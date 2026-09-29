@@ -138,9 +138,6 @@ describe("Sidebar hover behavior", () => {
         title_is_custom: false,
         created_at: "2026-07-01T12:00:00Z",
         updated_at: "2026-07-01T12:00:00Z",
-        is_shared: false,
-        is_public: false,
-        share_token: null,
         last_viewed_at: null,
       },
       {
@@ -150,9 +147,6 @@ describe("Sidebar hover behavior", () => {
         title_is_custom: true,
         created_at: "2026-07-01T12:00:00Z",
         updated_at: "2026-07-01T12:00:00Z",
-        is_shared: false,
-        is_public: false,
-        share_token: null,
         last_viewed_at: null,
       },
     ]

@@ -15,7 +15,7 @@ const switchTo = (id: string) => state().domainActions.setActiveDomain(id)
 const artifact = (title: string) => ({ id: "same-id", title, description: "", artifact_type: "html" as const, version: 1, has_live_queries: false, created_at: "", updated_at: "" })
 const table = (name: string) => ({ schema: "public", name, columns: [] })
 const detail = { schema: "public", table: "users", columns: [], annotations: null, sourceMetadata: null }
-const thread = (title: string) => ({ id: "same-id", title, title_is_custom: false, created_at: "", updated_at: "", is_shared: false, is_public: false, share_token: null, last_viewed_at: null })
+const thread = (title: string) => ({ id: "same-id", title, title_is_custom: false, created_at: "", updated_at: "", last_viewed_at: null })
 
 beforeEach(() => {
   store = createAppStore()
@@ -140,7 +140,7 @@ it("clearDictionary invalidates pending dictionary responses", async () => {
   expect(state().dictionaryStatus).toBe("idle")
 })
 
-for (const operation of ["artifact update", "artifact delete", "annotation", "thread title", "thread sharing"]) {
+for (const operation of ["artifact update", "artifact delete", "annotation", "thread title"]) {
   it(`ignores stale ${operation} writes while preserving mutation completion`, async () => {
     const old = deferred()
     vi.spyOn(api, "patch").mockImplementation(() => old.promise as never)
@@ -149,12 +149,11 @@ for (const operation of ["artifact update", "artifact delete", "annotation", "th
     const pending = operation === "artifact update" ? state().artifactActions.updateArtifact("same-id", { title: "old" })
       : operation === "artifact delete" ? state().artifactActions.deleteArtifact("same-id")
       : operation === "annotation" ? state().dictionaryActions.updateAnnotations("public", "users", { description: "old" })
-      : operation === "thread title" ? state().uiActions.updateThreadTitle("same-id", "old", "a")
-      : state().uiActions.updateThreadSharing("same-id", { is_shared: true }, "a")
+      : state().uiActions.updateThreadTitle("same-id", "old", "a")
     switchTo("b")
     store.setState({ artifacts: [artifact("b")], threads: [thread("b")], selectedTable: detail, dataDictionary: { schemas: { public: { users: { columns: [] } } } } })
     const expected = { artifacts: state().artifacts, threads: state().threads, selectedTable: state().selectedTable, dataDictionary: structuredClone(state().dataDictionary) }
-    const response = { ...thread("old"), description: "old", is_shared: true }
+    const response = { ...thread("old"), description: "old" }
     old.resolve(response)
     const result = await pending
     expect({ artifacts: state().artifacts, threads: state().threads, selectedTable: state().selectedTable, dataDictionary: state().dataDictionary }).toEqual(expected)

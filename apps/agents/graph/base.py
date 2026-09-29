@@ -765,7 +765,7 @@ async def build_agent_graph(
         mcp_tools: List of MCP tools to include.
         conversation_id: Optional thread/conversation id. Threaded through to the
             artifact tools so chat-created artifacts record their originating
-            conversation (so shared/public thread pages can find them).
+            conversation (so the thread's artifact list can find them).
         interactive: Whether this graph serves an interactive chat turn (the
             default). Interactive runs own a real Thread + persistent checkpointer
             and use the fire-and-ack MCP ``run_materialization`` + async resume.

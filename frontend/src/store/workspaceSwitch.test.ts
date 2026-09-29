@@ -31,7 +31,6 @@ function recipe(id: string, name: string): Recipe {
     description: `Recipe ${name}`,
     prompt: "do the thing",
     variables: [],
-    is_shared: false,
     variable_count: 0,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",

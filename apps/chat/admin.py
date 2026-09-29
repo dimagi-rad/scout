@@ -14,8 +14,8 @@ from .models import Thread, ThreadArtifact, ThreadJob
 
 @admin.register(Thread)
 class ThreadAdmin(ReadOnlyModelAdmin):
-    list_display = ["title", "workspace", "user", "is_shared", "updated_at"]
-    list_filter = ["is_shared", "updated_at"]
+    list_display = ["title", "workspace", "user", "updated_at"]
+    list_filter = ["updated_at"]
     search_fields = ["title", "user__email", "workspace__name"]
 
 

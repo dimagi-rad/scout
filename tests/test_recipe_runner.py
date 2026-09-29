@@ -52,7 +52,6 @@ def recipe(db, user, workspace):
                 "label": "Start Date",
             },
         ],
-        is_shared=False,
         created_by=user,
     )
 

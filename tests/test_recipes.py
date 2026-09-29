@@ -53,7 +53,6 @@ def recipe(db, user, workspace):
                 "label": "Start Date",
             },
         ],
-        is_shared=False,
         created_by=user,
     )
 
@@ -120,7 +119,6 @@ class TestRecipeModel:
                     "default": 2024,
                 }
             ],
-            is_shared=True,
             created_by=user,
         )
 
@@ -129,7 +127,6 @@ class TestRecipeModel:
         assert recipe.description == "Generate customer analysis report"
         assert len(recipe.variables) == 1
         assert recipe.variables[0]["name"] == "year"
-        assert recipe.is_shared is True
         assert recipe.created_by == user
         assert recipe.workspace == workspace
         assert str(recipe) == f"Customer Report ({workspace.tenant_name})"
@@ -147,13 +144,11 @@ class TestRecipeModel:
         """Test updating a recipe."""
         recipe.name = "Updated Sales Analysis"
         recipe.description = "Updated description"
-        recipe.is_shared = True
         recipe.save()
 
         updated_recipe = Recipe.objects.get(id=recipe.id)
         assert updated_recipe.name == "Updated Sales Analysis"
         assert updated_recipe.description == "Updated description"
-        assert updated_recipe.is_shared is True
 
     def test_delete_recipe(self, recipe):
         """Test deleting a recipe."""
@@ -862,27 +857,6 @@ class TestSaveAsRecipeTool:
         variable_names = recipe.get_variable_names()
         assert "category" in variable_names
         assert "threshold" in variable_names
-
-    @patch("apps.recipes.services.runner.build_agent_graph")
-    @pytest.mark.asyncio
-    async def test_save_as_recipe_sets_sharing(self, mock_build_graph, workspace, user):
-        """Test that save_as_recipe can set is_shared flag."""
-        from apps.agents.tools.recipe_tool import create_recipe_tool
-
-        tool = create_recipe_tool(workspace, user)
-
-        result = await tool.ainvoke(
-            {
-                "name": "Shared Recipe",
-                "description": "Recipe shared with project",
-                "is_shared": True,
-                "variables": [],
-                "prompt": "Show data",
-            }
-        )
-
-        recipe = await Recipe.objects.aget(id=result["recipe_id"])
-        assert recipe.is_shared is True
 
 
 # ============================================================================

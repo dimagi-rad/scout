@@ -255,7 +255,6 @@ Save conversation workflows as reusable templates.
   - `default` (optional): Default value
   - `options` (required for select): Allowed values
 - `prompt` (string, required): Markdown prompt template with `{{variable}}` placeholders, sent to the agent when the recipe runs
-- `is_shared` (bool, optional, default `false`): Stored on the recipe. The recipe list API returns every recipe in the workspace regardless of this flag.
 
 ### describe_table
 

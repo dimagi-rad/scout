@@ -12,17 +12,7 @@ export interface Thread {
   title_is_custom: boolean
   created_at: string
   updated_at: string
-  is_shared: boolean
-  is_public: boolean
-  share_token: string | null
   last_viewed_at: string | null
-}
-
-export interface ThreadShareState {
-  id: string
-  is_shared: boolean
-  is_public: boolean
-  share_token: string | null
 }
 
 export type ThreadsStatus = "idle" | "loading" | "loaded" | "error"
@@ -75,11 +65,6 @@ export interface UiSlice {
       title: string,
       workspaceId: string,
     ) => Promise<Thread>
-    updateThreadSharing: (
-      threadId: string,
-      data: { is_shared?: boolean; is_public?: boolean },
-      workspaceId: string,
-    ) => Promise<ThreadShareState>
     openArtifact: (id: string) => void
     closeArtifact: () => void
   }
@@ -184,26 +169,6 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
               : [result, ...state.threads],
           }
         })
-        return result
-      },
-      updateThreadSharing: async (
-        threadId: string,
-        data: { is_shared?: boolean; is_public?: boolean },
-        workspaceId: string,
-      ) => {
-        const isCurrent = requests.start(undefined, workspaceId)
-        const result = await api.patch<ThreadShareState>(
-          `/api/workspaces/${workspaceId}/threads/${threadId}/share/`,
-          data,
-        )
-        if (!isCurrent()) return result
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? { ...t, is_shared: result.is_shared, is_public: result.is_public, share_token: result.share_token }
-              : t,
-          ),
-        }))
         return result
       },
       openArtifact: (id: string) => {

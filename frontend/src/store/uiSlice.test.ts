@@ -10,9 +10,6 @@ function thread(id: string, title: string): Thread {
     title_is_custom: title !== "Untitled",
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
-    is_shared: false,
-    is_public: false,
-    share_token: null,
     last_viewed_at: null,
   }
 }
