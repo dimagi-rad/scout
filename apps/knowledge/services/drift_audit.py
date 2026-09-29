@@ -131,17 +131,23 @@ def _names(values) -> list[str]:
 
 
 def _table_knowledge_references(row: TableKnowledge, catalog: _Catalog) -> list[DriftedReference]:
-    references = [catalog.table(row.table_name)]
-    if references[0] is None:
-        references += [catalog.column(row.table_name, c) for c in sorted(row.column_notes or {})]
-    related = [
-        relation.get("table") if isinstance(relation, dict) else relation
-        for relation in row.related_tables or []
-    ]
+    column_notes = row.column_notes or {}
+    table_reference = catalog.table(row.table_name)
+    references = [table_reference]
+    # A hidden or missing table already explains every column note on it.
+    if table_reference is None:
+        references += [catalog.column(row.table_name, c) for c in sorted(column_notes)]
+    relations = [r for r in row.related_tables or [] if isinstance(r, dict | str)]
+    related = [r.get("table") if isinstance(r, dict) else r for r in relations]
     references += [catalog.table(name) for name in _names(related)]
-    # Mirrors the prose KnowledgeRetriever renders; use_cases never reaches the prompt.
-    notes = _names(row.data_quality_notes)
-    references += catalog.text_references(row.description, *notes)
+    # Every text field KnowledgeRetriever renders; use_cases never reaches the prompt.
+    prose = [
+        row.description,
+        *_names(row.data_quality_notes),
+        *_names(column_notes.values()),
+        *_names(r.get("join_hint") for r in relations if isinstance(r, dict)),
+    ]
+    references += catalog.text_references(*prose)
     return _unique(references)
 
 
@@ -160,7 +166,7 @@ def _audit_workspace(workspace: Workspace) -> WorkspaceDriftReport:
     catalog = _Catalog(model)
 
     rows: list[tuple[str, str, str, list[DriftedReference]]] = []
-    for entry in KnowledgeEntry.objects.filter(workspace=workspace).order_by("title"):
+    for entry in KnowledgeEntry.objects.filter(workspace=workspace).order_by("title", "id"):
         references = _unique(catalog.text_references(entry.content))
         rows.append(("knowledge_entry", str(entry.id), entry.title, references))
     for table in TableKnowledge.objects.filter(workspace=workspace).order_by("table_name"):
@@ -168,7 +174,7 @@ def _audit_workspace(workspace: Workspace) -> WorkspaceDriftReport:
         rows.append(("table_knowledge", str(table.id), table.table_name, references))
     # Inactive learnings never reach the prompt, so their drift is not actionable.
     for learning in AgentLearning.objects.filter(workspace=workspace, is_active=True).order_by(
-        "created_at"
+        "created_at", "id"
     ):
         references = _unique(
             [catalog.table(name) for name in _names(learning.applies_to_tables)]
@@ -190,16 +196,18 @@ def audit_knowledge_drift(
 ) -> list[WorkspaceDriftReport]:
     """Report, per workspace holding knowledge, rows whose references the catalog no longer serves.
 
-    A workspace without an active semantic model is reported as ``unavailable`` and
+    Explicitly requested workspaces are always reported, even with nothing to check,
+    so a requested id is never silently dropped. A workspace without an active semantic model is reported as ``unavailable`` and
     not audited: with no catalog to compare against, every reference would look drifted.
     Issues about six queries per audited workspace; this is an operator command, so
     that is preferred over batching every workspace's catalog into memory at once.
     """
-    workspaces = Workspace.objects.filter(
-        Exists(KnowledgeEntry.objects.filter(workspace=OuterRef("pk")))
-        | Exists(TableKnowledge.objects.filter(workspace=OuterRef("pk")))
-        | Exists(AgentLearning.objects.filter(workspace=OuterRef("pk"), is_active=True))
-    ).order_by("name", "id")
-    if workspace_ids:
-        workspaces = workspaces.filter(id__in=list(workspace_ids))
-    return [_audit_workspace(workspace) for workspace in workspaces]
+    if workspace_ids is not None:
+        workspaces = Workspace.objects.filter(id__in=list(workspace_ids))
+    else:
+        workspaces = Workspace.objects.filter(
+            Exists(KnowledgeEntry.objects.filter(workspace=OuterRef("pk")))
+            | Exists(TableKnowledge.objects.filter(workspace=OuterRef("pk")))
+            | Exists(AgentLearning.objects.filter(workspace=OuterRef("pk"), is_active=True))
+        )
+    return [_audit_workspace(workspace) for workspace in workspaces.order_by("name", "id")]

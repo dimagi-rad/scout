@@ -31,6 +31,10 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         reports = audit_knowledge_drift(workspace_ids=options["workspace_ids"])
+        found = {report.workspace_id for report in reports}
+        for workspace_id in options["workspace_ids"] or []:
+            if str(workspace_id) not in found:
+                self.stderr.write(f"No workspace with id {workspace_id}.")
         if options["json"]:
             self.stdout.write(
                 json.dumps([report.as_dict() for report in reports], indent=2, sort_keys=True)
