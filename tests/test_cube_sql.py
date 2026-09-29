@@ -288,6 +288,24 @@ def test_relationship_through_hidden_member_is_skipped_and_reported(workspace):
     ]
 
 
+def _stub_cube(monkeypatch, *, valid: bool = True) -> None:
+    validation = {"valid": True} if valid else {"valid": False, "errors": ["Cube compiler down"]}
+    monkeypatch.setattr(
+        cube_schema.CubeClient, "validate_schema", AsyncMock(return_value=validation)
+    )
+    monkeypatch.setattr(cube_schema.CubeClient, "invalidate_schema_cache", AsyncMock())
+    monkeypatch.setattr(
+        cube_schema,
+        "load_workspace_context",
+        AsyncMock(return_value=SimpleNamespace(schema_name="fixture", readonly_role="role")),
+    )
+
+
+def _published(model: SemanticModel, dataset: str) -> dict[str, bool]:
+    catalog = {d["name"]: d for d in serialize_catalog(model)["datasets"]}
+    return {r["name"]: r.get("published", True) for r in catalog[dataset]["relationships"]}
+
+
 @pytest.mark.django_db
 def test_relationship_to_hidden_dataset_is_reported_as_unpublished(workspace):
     model = _stale_relationship_catalog(workspace)
@@ -322,3 +340,45 @@ def test_relationship_from_dataset_without_primary_key_is_reported(workspace):
     assert [(d["code"], d["relationship"]) for d in schema["diagnostics"]] == [
         ("relationship_missing_primary_key", "visits_to_users")
     ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_dropped_join_flags_survive_a_later_failed_build(workspace, monkeypatch, settings):
+    settings.CUBE_SCHEMA_VALIDATION_REQUIRED = False
+    model = _stale_relationship_catalog(workspace)
+    SemanticDataset.objects.filter(name="visits").update(primary_key="")
+    _stub_cube(monkeypatch)
+    active = build_and_promote_cube_schema(workspace, model=model)
+    model.refresh_from_db()
+    assert _published(model, "visits") == {"visits_to_users": False}
+
+    SemanticDataset.objects.filter(name="users").update(description="Changed upstream")
+    _stub_cube(monkeypatch, valid=False)
+    with pytest.raises(CubeSchemaBuildError, match="Cube compiler down"):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    active.refresh_from_db()
+    model.refresh_from_db()
+    assert active.status == CubeSchema.Status.ACTIVE
+    assert [(d["level"], d.get("code")) for d in model.diagnostics] == [
+        ("warning", "relationship_missing_primary_key"),
+        ("error", None),
+    ]
+    assert _published(model, "visits") == {"visits_to_users": False}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_failed_build_without_serving_schema_reports_only_the_failure(
+    workspace, monkeypatch, settings
+):
+    settings.CUBE_SCHEMA_VALIDATION_REQUIRED = False
+    model = _stale_relationship_catalog(workspace)
+    SemanticDataset.objects.filter(name="visits").update(primary_key="")
+    _stub_cube(monkeypatch, valid=False)
+
+    with pytest.raises(CubeSchemaBuildError):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    model.refresh_from_db()
+    assert [d["level"] for d in model.diagnostics] == ["error"]
+    assert _published(model, "visits") == {"visits_to_users": True}
