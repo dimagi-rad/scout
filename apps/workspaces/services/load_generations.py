@@ -58,8 +58,9 @@ _TRANSFORM_PATHS = (
     "apps/common/localized.py",
     "apps/transformations/services",
 )
-# Part of every payload, so a digest stored before the split (one combined
-# revision) never equals a current one: it reads as "both halves changed".
+# Bump when a payload's meaning changes without its keys changing, so digests
+# stored under the old meaning stop matching. The pre-split digests (one
+# combined "revision" key) already differ by key, and read as "both changed".
 _FINGERPRINT_VERSION = 2
 
 

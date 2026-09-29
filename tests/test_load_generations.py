@@ -258,9 +258,8 @@ def _legacy_digest(payload) -> str:
 def test_fingerprints_stored_before_the_split_read_as_both_halves_changed(
     settings, tenant, pipeline
 ):
-    # Pre-split digests over one combined revision. With a configured revision
-    # old and new code feed the same value, so only the payload version keeps a
-    # legacy digest from matching.
+    # Pre-split digests over one combined revision. A configured revision feeds
+    # old and new code the same value, so the payload shape alone must differ.
     settings.SCOUT_IMPLEMENTATION_REVISION = "deploy-a"
     config = load_generations._config_payload(pipeline)
     legacy_raw = _legacy_digest({"pipeline": config, "revision": "deploy-a"})
@@ -298,6 +297,14 @@ def test_resume_only_the_same_pending_generation_with_matching_config(tenant, pi
     assert resumable_candidate(tenant.id, 3, config) is None
     assert resumable_candidate(tenant.id, 2, "changed-config") is None
     assert resumable_candidate(tenant.id, 2, "") is None
+
+
+def test_bumping_the_fingerprint_version_changes_both_digests(tenant, pipeline, monkeypatch):
+    raw, full = raw_load_fingerprint(pipeline), pipeline_fingerprint(pipeline, tenant)
+    monkeypatch.setattr(load_generations, "_FINGERPRINT_VERSION", 3)
+
+    assert raw_load_fingerprint(pipeline) != raw
+    assert pipeline_fingerprint(pipeline, tenant) != full
 
 
 def test_resume_survives_a_transform_only_deploy_but_not_a_raw_load_one(tenant, pipeline):
