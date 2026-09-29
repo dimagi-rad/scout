@@ -22,7 +22,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from apps.agents.graph.state import AgentState, prune_messages
+from apps.agents.graph.state import AgentState, all_tool_calls, prune_messages
 from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
@@ -861,15 +861,15 @@ async def build_agent_graph(
         repaired: list = []
         for msg in state_messages:
             repaired.append(msg)
-            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-                for tc in msg.tool_calls:
+            if isinstance(msg, AIMessage):
+                for tc in all_tool_calls(msg):
                     tc_id = tc.get("id")
                     if tc_id and tc_id not in answered_ids:
                         logger.warning(
                             "agent_node: found dangling tool_call_id=%s tool_name=%s — "
                             "injecting synthetic tool_result to satisfy Anthropic protocol",
                             tc_id,
-                            tc.get("name", "unknown"),
+                            tc.get("name") or "unknown",
                         )
                         repaired.append(
                             ToolMessage(
@@ -878,7 +878,7 @@ async def build_agent_graph(
                                     "before this tool completed."
                                 ),
                                 tool_call_id=tc_id,
-                                name=tc.get("name", "unknown"),
+                                name=tc.get("name") or "unknown",
                             )
                         )
                         answered_ids.add(tc_id)

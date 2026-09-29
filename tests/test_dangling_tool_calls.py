@@ -109,6 +109,26 @@ class TestRepairDanglingToolCalls:
         assert result[0].tool_call_id == "call_2"
 
     @pytest.mark.asyncio
+    async def test_truncated_tool_call_is_repaired(self):
+        """A tool_use cut off by max_tokens parses into invalid_tool_calls, but
+        langchain-anthropic still replays its block, so it needs a tool_result."""
+        messages = [
+            HumanMessage(content="hello"),
+            AIMessage(
+                content=[
+                    {"type": "thinking", "thinking": "", "signature": "sig"},
+                    {"type": "tool_use", "id": "call_9", "name": "query", "input": {}},
+                ],
+                invalid_tool_calls=[
+                    {"id": "call_9", "name": "query", "args": '{"sql": "SEL', "error": None}
+                ],
+            ),
+        ]
+        agent = _mock_agent_with_state(messages)
+        repairs = await repair_dangling_tool_calls(agent, CONFIG)
+        assert [(m.tool_call_id, m.name) for m in repairs] == [("call_9", "query")]
+
+    @pytest.mark.asyncio
     async def test_aget_state_failure_returns_empty(self):
         """Checkpointer errors must not crash the chat view — fall back gracefully."""
         agent = MagicMock()

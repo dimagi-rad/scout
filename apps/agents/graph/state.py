@@ -7,7 +7,7 @@ graph. All fields are JSON-serializable for Postgres checkpoint persistence.
 
 from typing import Annotated
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
@@ -43,6 +43,16 @@ def prune_messages(
         pruned_conversation = pruned_conversation[1:]
 
     return system_messages + pruned_conversation
+
+
+def all_tool_calls(message: AIMessage) -> list[dict]:
+    """Every tool call the message's ``tool_use`` blocks carry, parsed or not.
+
+    A turn cut off by ``max_tokens`` mid-``tool_use`` lands in
+    ``invalid_tool_calls``, yet langchain-anthropic still replays its block, so
+    it needs a ``tool_result`` like any other call or the thread 400s for good.
+    """
+    return [*(message.tool_calls or []), *(message.invalid_tool_calls or [])]
 
 
 class AgentState(TypedDict):
