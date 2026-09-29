@@ -110,6 +110,15 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
                 f"{(view_schema or {}).get('error') or 'unknown error'}. Do NOT retry — "
                 "tell the user a system-side fix is required."
             )
+        elif summary.get("denied_mid_run") and not not_loaded:
+            # Every source was refreshed or already serving, yet access changed
+            # mid-run (e.g. a source already handled was lost): say why, not
+            # "others did not".
+            status = "partial"
+            message = (
+                "Every source was either refreshed or already serving data, but this run "
+                f"was stopped because access changed: {summary['denied_mid_run']['error']}"
+            )
         elif loaded:
             status = "partial"
             message = (
@@ -118,19 +127,20 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
                 "the sources and last successful refresh times used by any answer, disclose "
                 "stale or unknown freshness, and do not infer exclusion from refresh failure."
             )
-            if not view_ok:
-                # Not relaying view_schema["error"]: build_view_schema says "run a
-                # data refresh", which cannot succeed until whatever stopped the
-                # missing sources is fixed (#412). The run's own guidance, appended
-                # below, is the advice that actually applies.
-                message += (
-                    " The workspace's combined query layer is unavailable. Do not query this "
-                    "workspace until it is rebuilt. Investigate the tenant refresh failures "
-                    "and address any reported account/access problems before retrying."
-                )
         else:
             status = "failed"
             message = f"Materialization failed; no data was loaded{named}."
+
+        if status == "partial" and not view_ok:
+            # Not relaying view_schema["error"]: build_view_schema says "run a
+            # data refresh", which cannot succeed until whatever stopped the
+            # missing sources is fixed (#412). The run's own guidance, appended
+            # below, is the advice that actually applies.
+            message += (
+                " The workspace's combined query layer is unavailable. Do not query this "
+                "workspace until it is rebuilt. Investigate the tenant refresh failures "
+                "and address any reported account/access problems before retrying."
+            )
 
         if promotion_deferred:
             message += (

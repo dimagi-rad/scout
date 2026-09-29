@@ -18,7 +18,7 @@ from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
 from apps.transformations.models import TransformationAsset, TransformationScope
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
@@ -30,7 +30,11 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services.data_operation import LockOrderError
+from apps.workspaces.services.data_operation import (
+    LockOrderError,
+    tenant_data_lock,
+    workspace_data_lock,
+)
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     capture_load_intent,
@@ -495,28 +499,71 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
     assert len(await _active_schemas(new_source)) == 1
 
 
-async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, tenant, user):
-    for index in range(2):
-        source = await Tenant.objects.acreate(
-            provider="commcare", external_id=f"denied-source-{index}"
+def _denial(workspace_tenants, code=ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE, per_tenant=None):
+    """The shape _materialization_write_denial returns: one not-run entry per tenant."""
+    per_tenant = per_tenant or {}
+    return {
+        "status": "denied",
+        "error": "Access could not be verified",
+        "error_code": code,
+        "tenants": [
+            workspaces_tasks._preflight_failure(
+                t, "Access could not be verified", per_tenant.get(t.external_id, code)
+            )
+            for t in workspace_tenants
+        ],
+    }
+
+
+async def _deny_after_first_tenant(workspace, **kwargs):
+    tenants = [t async for t in workspace.tenants.all()]
+    return AsyncMock(return_value=_denial(tenants, **kwargs))
+
+
+async def _run_new_source_load_denied_after_first_tenant(workspace, user, *, only_unserved=True):
+    """Run a new-source load whose authority recheck fails from the second tenant on.
+
+    Calls the core without its locking wrapper (the locks are taken here), so
+    every denial check comes from the per-tenant loop and none is spent on the
+    wrapper's own checks, however many it makes.
+    """
+    tenant_ids = [t async for t in workspace.tenants.values_list("id", flat=True)]
+    async with workspace_data_lock(workspace.id), tenant_data_lock(tenant_ids):
+        return await workspaces_tasks.materialize_workspace_core.__wrapped__(
+            str(workspace.id),
+            str(user.id),
+            None,
+            load_intent={},
+            locked_tenant_ids=frozenset(str(t) for t in tenant_ids),
+            only_unserved=only_unserved,
         )
+
+
+async def _add_sources(workspace, user, *, serving, unserved):
+    added = {}
+    for name, is_serving in [(n, True) for n in serving] + [(n, False) for n in unserved]:
+        source = await Tenant.objects.acreate(provider="commcare", external_id=name)
         await agrant_tenant_access(user, source)
         await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=source)
-    for source in [source async for source in workspace.tenants.all()]:
-        await TenantSchema.objects.acreate(
-            tenant=source, schema_name=f"serving_{source.id.hex}", state=SchemaState.ACTIVE
-        )
-    denial = {
-        "tenants": [],
-        "error": "Verification unavailable",
-        "error_code": "verification_unavailable",
-    }
+        if is_serving:
+            await TenantSchema.objects.acreate(
+                tenant=source, schema_name=f"serving_{source.id.hex}", state=SchemaState.ACTIVE
+            )
+        added[name] = source
+    return added
+
+
+async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, tenant, user):
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    await _add_sources(workspace, user, serving=["denied-0", "denied-1"], unserved=[])
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with (
             patch(
                 "apps.workspaces.tasks._materialization_write_denial",
-                AsyncMock(side_effect=[None, None, None, denial]),
+                await _deny_after_first_tenant(workspace),
             ),
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
@@ -524,12 +571,59 @@ async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, 
             ) as dependents,
         ):
             build.return_value.tenant_coverage = {}
-            result = await workspaces_tasks.materialize_workspace_core(
-                str(workspace.id), str(user.id), None, only_unserved=True
-            )
-    assert result["all_succeeded"] is False
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
+    # Every source already serves: the denial stops no load, so nothing failed.
+    assert result["all_succeeded"] is True
     assert pipeline.calls == []
     assert list(dependents.await_args.args[0]) == []
+
+
+async def test_a_transient_denial_never_fails_siblings_the_new_source_load_would_skip(
+    workspace, tenant, user
+):
+    """A denial part-way through a new-source load stops further loads, but a
+    sibling that already serves data would have been skipped, not loaded: it
+    must not be reported failed, or the Cube gate refuses a model over data the
+    run never touched."""
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    added = await _add_sources(workspace, user, serving=["sibling"], unserved=["new-source"])
+    serving_ids = {str(tenant.id), str(added["sibling"].id)}
+    new_id = str(added["new-source"].id)
+    coverage = {
+        "included_tenants": [{"tenant_id": t} for t in sorted(serving_ids)],
+        "excluded_tenants": [{"tenant_id": new_id}],
+    }
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                await _deny_after_first_tenant(workspace),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._included_tenant_snapshot_state",
+                AsyncMock(return_value="safe"),
+            ),
+            patch("apps.workspaces.tasks.record_cube_schema_build_failure") as cube_failure,
+        ):
+            build.return_value.tenant_coverage = coverage
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
+
+    # Keyed by external id: every entry carries it, loaded or not.
+    by_source = {entry["tenant"]: entry for entry in result["tenants"]}
+    for serving in (tenant.external_id, "sibling"):
+        assert by_source[serving]["success"] is True
+        assert by_source[serving]["result"] == {"status": "already_loaded"}
+    new_source_loaded = bool(pipeline.calls)
+    assert by_source["new-source"]["success"] is new_source_loaded
+    # Only the new source can have failed, and it is excluded from the views,
+    # so the Cube build goes ahead over the sources that serve.
+    cube_failure.assert_not_called()
+    assert result["cube_schema"]["ok"] is True
+    assert result["all_succeeded"] is new_source_loaded
 
 
 async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(workspace, tenant, user):
@@ -874,3 +968,163 @@ async def test_an_abort_during_failure_cleanup_still_stops_the_run():
     finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.parametrize("cause", ["access_lost", "membership_archived"])
+async def test_a_denial_that_concerns_a_serving_sibling_still_reports_it(
+    workspace, tenant, user, cause
+):
+    """Only a transient denial for a source the load would merely skip is passed
+    over. A sibling the user lost access to, or whose membership went away, keeps
+    its failure: that is exactly what the denial is there to surface."""
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    await _add_sources(workspace, user, serving=["lost-sibling"], unserved=[])
+    tenants = [t async for t in workspace.tenants.all()]
+    if cause == "access_lost":
+        lost = {t.external_id: ErrorCode.WORKSPACE_TENANT_UNREACHABLE for t in tenants}
+        denial = _denial(tenants, ErrorCode.WORKSPACE_TENANT_UNREACHABLE, lost)
+    else:
+        denial = _denial(tenants)
+
+    async def recheck(*_args):
+        if cause == "membership_archived":
+            # Revoked upstream during the run: the pending source's membership is gone.
+            await TenantMembership.objects.filter(user=user).aupdate(archived_at=timezone.now())
+        return denial
+
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch("apps.workspaces.tasks._materialization_write_denial", side_effect=recheck),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
+
+    # The first source was handled before the recheck; the other one is the one
+    # the denial concerns, and it must stay a failure.
+    outcomes = sorted(entry["success"] for entry in result["tenants"])
+    assert outcomes == [False, True]
+    assert result["all_succeeded"] is False
+
+
+async def test_losing_an_already_handled_source_mid_run_is_never_reported_as_success(
+    workspace, tenant, user
+):
+    """TENANT_ACCESS_LOST names the lost source UNREACHABLE and the rest SKIPPED.
+    When the lost one was handled before the recheck, the SKIPPED serving sibling
+    is still passed over (no false Cube failure), but the run must not come back
+    as a clean success: the user has to be told about the lost source."""
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    await _add_sources(workspace, user, serving=["fine-sibling"], unserved=[])
+    tenants = [t async for t in workspace.tenants.all()]
+
+    async def recheck(*_args):
+        # The source handled before this recheck had its schema touched: that is
+        # the one the user just lost; the other can still be used.
+        handled = {
+            str(t)
+            async for t in TenantSchema.objects.filter(last_accessed_at__isnull=False).values_list(
+                "tenant_id", flat=True
+            )
+        }
+        per_tenant = {
+            t.external_id: (
+                ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+                if str(t.id) in handled
+                else ErrorCode.WORKSPACE_TENANT_SKIPPED
+            )
+            for t in tenants
+        }
+        return _denial(tenants, ErrorCode.WORKSPACE_TENANT_UNREACHABLE, per_tenant)
+
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch("apps.workspaces.tasks._materialization_write_denial", side_effect=recheck),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._included_tenant_snapshot_state",
+                AsyncMock(return_value="safe"),
+            ),
+            patch("apps.workspaces.tasks.record_cube_schema_build_failure") as cube_failure,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
+
+    # Neither source was touched by a failed load, so the Cube gate still builds.
+    assert all(entry["result"] == {"status": "already_loaded"} for entry in result["tenants"])
+    cube_failure.assert_not_called()
+    # But the run was denied for a real reason, and says so.
+    assert result["all_succeeded"] is False
+    assert result["denied_mid_run"]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert result["guidance"]
+
+
+async def test_mid_run_denial_guidance_names_each_source_once(workspace, tenant, user):
+    """The pending sources are reported with the denial's own entries; adding the
+    denial's list again for guidance must not name them twice."""
+    await _add_sources(workspace, user, serving=[], unserved=["second", "third"])
+    tenants = [t async for t in workspace.tenants.all()]
+    denial = _denial(tenants, ErrorCode.AUTH_TOKEN_EXPIRED)
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(return_value=denial),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(
+                workspace, user, only_unserved=False
+            )
+
+    [line] = result["guidance"]
+    for source in tenants:
+        assert line.count(source.external_id) == 1, line
+    assert result["denied_mid_run"]["error_code"] == ErrorCode.AUTH_TOKEN_EXPIRED
+
+
+async def test_an_undenied_run_reports_no_mid_run_denial(workspace, tenant, user):
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        result = await _run(workspace, user)
+    assert result["denied_mid_run"] is None
+
+
+async def test_a_load_failure_then_a_denial_names_the_failed_source_once(workspace, tenant, user):
+    """A source whose load raised is reported by the loop's own entry; the denial's
+    entry for it must not be added to the guidance a second time."""
+    await _add_sources(workspace, user, serving=[], unserved=["second"])
+    tenants = [t async for t in workspace.tenants.all()]
+    denial = _denial(tenants, ErrorCode.AUTH_TOKEN_EXPIRED)
+    expired = RuntimeError("sign-in expired mid-load")
+    expired.code = ErrorCode.AUTH_TOKEN_EXPIRED
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(return_value=denial),
+            ),
+            patch(
+                "apps.workspaces.tasks._load_workspace_candidate",
+                AsyncMock(side_effect=expired),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(
+                workspace, user, only_unserved=False
+            )
+
+    assert all(entry.get("tenant_id") for entry in result["tenants"])
+    [line] = result["guidance"]
+    for source in tenants:
+        assert line.count(source.external_id) == 1, line

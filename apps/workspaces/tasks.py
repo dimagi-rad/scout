@@ -699,6 +699,47 @@ _SOURCE_ADDED_DURING_LOAD = (
 )
 
 
+_DENIAL_CODES_SAFE_TO_SKIP = frozenset(
+    {ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE, ErrorCode.WORKSPACE_TENANT_SKIPPED}
+)
+
+
+async def _skippable_despite_denial(tm, denied_by_tenant, locked_tenant_ids) -> bool:
+    """Whether a new-source load may pass over this source after a mid-run denial.
+
+    Only when the loop would have reached its served check (within the held
+    locks, membership still live) and the denial says nothing is wrong with this
+    source: a transient verification outage, or SKIPPED because a different
+    source was lost. A denial naming a real access problem with this source is
+    what the run must report, so it is never upgraded to success.
+    """
+    if locked_tenant_ids is not None and str(tm.tenant_id) not in locked_tenant_ids:
+        return False
+    entry = denied_by_tenant.get(str(tm.tenant_id)) or {}
+    if entry.get("error_code") not in _DENIAL_CODES_SAFE_TO_SKIP:
+        return False
+    return await TenantMembership.objects.filter(id=tm.id, archived_at__isnull=True).aexists()
+
+
+async def _served_schema(tm):
+    return await TenantSchema.objects.filter(
+        tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
+    ).afirst()
+
+
+async def _already_loaded(tm, served) -> dict:
+    # The views about to be published read this schema, so it counts as used;
+    # otherwise the inactivity sweep could drop it from under them.
+    await served.atouch()
+    return {
+        "tenant": tm.tenant.external_id,
+        "tenant_id": str(tm.tenant_id),
+        "provider": tm.tenant.provider,
+        "success": True,
+        "result": {"status": "already_loaded"},
+    }
+
+
 @serialized_workspace_materialization
 async def materialize_workspace_core(
     workspace_id: str,
@@ -773,6 +814,9 @@ async def materialize_workspace_core(
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
     load_intent = load_intent or {}
+    # A mid-run denial for a real access problem, even one whose sources were all
+    # passed over below: the run must never report it as a clean success.
+    determinate_denial: dict | None = None
 
     for index, tm in enumerate(memberships):
         # The wrapper checked before the first tenant. A long load can outlive a
@@ -780,9 +824,24 @@ async def materialize_workspace_core(
         if index:
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
-                pending = memberships[index:]
-                attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
+                if denial["error_code"] != ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE:
+                    determinate_denial = denial
                 denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
+                pending = []
+                for later in memberships[index:]:
+                    served = (
+                        await _served_schema(later)
+                        if only_unserved
+                        and await _skippable_despite_denial(
+                            later, denied_by_tenant, locked_tenant_ids
+                        )
+                        else None
+                    )
+                    if served is not None:
+                        tenant_results.append(await _already_loaded(later, served))
+                    else:
+                        pending.append(later)
+                attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
                 tenant_results.extend(
                     denied_by_tenant.get(str(later.tenant_id))
                     or _preflight_failure(later.tenant, denial["error"], denial["error_code"])
@@ -790,7 +849,8 @@ async def materialize_workspace_core(
                 )
                 # Only source loads stop here. The derived view and Cube rebuilds below
                 # read already-published tenant data and keep other members' views
-                # consistent; the Cube gate treats these skipped tenants as failed.
+                # consistent; the Cube gate treats the pending (denied) tenants as
+                # failed, while serving siblings passed over above count as served.
                 break
             # The workspace can stay accessible through another tenant after this
             # recheck archived this one, so the membership itself must still be live.
@@ -820,28 +880,11 @@ async def materialize_workspace_core(
                 )
             )
             continue
-        served = (
-            await TenantSchema.objects.filter(
-                tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
-            ).afirst()
-            if only_unserved
-            else None
-        )
+        served = await _served_schema(tm) if only_unserved else None
         if served is not None:
             # A source added to the workspace loads before publication; sources
             # already serving data are only published, never reloaded for it.
-            # The views about to be published read this schema, so it counts as
-            # used; otherwise the inactivity sweep could drop it from under them.
-            await served.atouch()
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "tenant_id": str(tm.tenant_id),
-                    "provider": tm.tenant.provider,
-                    "success": True,
-                    "result": {"status": "already_loaded"},
-                }
-            )
+            tenant_results.append(await _already_loaded(tm, served))
             continue
         attempted_tenant_ids.add(str(tm.tenant_id))
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
@@ -918,6 +961,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": True,
                     "result": result,
@@ -927,6 +971,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": False,
                     "cancelled": True,
@@ -951,6 +996,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": False,
                     "error": str(e),
@@ -962,6 +1008,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": False,
                     "error": str(e),
@@ -975,7 +1022,7 @@ async def materialize_workspace_core(
     # honesty flag callers read, and an uncovered workspace is not a success.
     attempted_succeeded = all(r.get("success") for r in tenant_results)
     failed_attempted_tenant_ids = attempted_tenant_ids - successful_attempted_tenant_ids
-    all_succeeded = attempted_succeeded and not unreachable_results
+    all_succeeded = attempted_succeeded and not unreachable_results and determinate_denial is None
 
     # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
     # leaving the workspace's own view schema ACTIVE-but-missing. Rebuild it
@@ -1101,12 +1148,29 @@ async def materialize_workspace_core(
 
     all_results = tenant_results + unreachable_results
     _set_tenant_display_names(all_results)
+    guidance_sources = all_results
+    denied_mid_run = None
+    if determinate_denial is not None:
+        # The lost source may have been handled before the recheck, so it shows
+        # as a success above; its guidance comes from the denial. Sources already
+        # reported as failed carry that same entry, so they are not added twice.
+        reported_failed = {e.get("tenant_id") for e in all_results if not e.get("success")}
+        guidance_sources = all_results + [
+            entry
+            for entry in determinate_denial["tenants"]
+            if entry.get("tenant_id") not in reported_failed
+        ]
+        denied_mid_run = {
+            "error": determinate_denial["error"],
+            "error_code": determinate_denial["error_code"],
+        }
     return {
         "tenants": all_results,
         "all_succeeded": all_succeeded,
         "view_schema": view_schema_outcome,
         "cube_schema": cube_schema_outcome,
-        "guidance": _credential_guidance(_summary_failures(all_results)),
+        "guidance": _credential_guidance(_summary_failures(guidance_sources)),
+        "denied_mid_run": denied_mid_run,
     }
 
 
