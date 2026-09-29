@@ -36,7 +36,7 @@ Tracks remaining work against the design in `data-explorer-mcp-design.md`.
 
 ## Security
 
-- [ ] **PostgreSQL role isolation** — create per-tenant DB roles (`role_{tenant}`), grant schema-scoped `USAGE`+`SELECT`, use `SET ROLE` at query time instead of relying on `search_path` alone
+- [x] **PostgreSQL role isolation** — per-schema read-only roles (`readonly_role_name`) with schema-scoped `USAGE`+`SELECT`, and `SET ROLE` at query time (`mcp_server/services/query.py`)
 - [ ] **Append-only audit DB table** — `MCPAuditLog` Django model (user ID, tenant ID, tool, args redacted, status, timing); replace logger-only audit trail
 - [ ] **Network isolation for loaders** — restrict loader subprocess egress to configured API endpoints only
 
