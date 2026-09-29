@@ -790,12 +790,25 @@ async def _already_loaded(tm, served) -> dict:
     # The views about to be published read this schema, so it counts as used;
     # otherwise the inactivity sweep could drop it from under them.
     await served.atouch()
+    result = {"status": "already_loaded"}
+    # Named so a chat resumed by this job reports the run that loaded it, not
+    # "the run recorded nothing" (it produced no run of its own).
+    run_id = await (
+        MaterializationRun.objects.filter(
+            tenant_schema=served, state=MaterializationRun.RunState.COMPLETED
+        )
+        .order_by("-completed_at")
+        .values_list("id", flat=True)
+        .afirst()
+    )
+    if run_id is not None:
+        result["run_id"] = str(run_id)
     return {
         "tenant": tm.tenant.external_id,
         "tenant_id": str(tm.tenant_id),
         "provider": tm.tenant.provider,
         "success": True,
-        "result": {"status": "already_loaded"},
+        "result": result,
     }
 
 
@@ -1361,7 +1374,14 @@ def _resume_records(result: dict) -> list[dict]:
             "reused_run_id": str(entry["result"]["run_id"]),
         }
         for entry in tenants
-        if entry.get("reused_generation") and entry.get("tenant_id")
+        if entry.get("tenant_id")
+        and (
+            entry.get("reused_generation")
+            or (
+                (entry.get("result") or {}).get("status") == "already_loaded"
+                and entry["result"].get("run_id")
+            )
+        )
     ]
 
 
