@@ -23,7 +23,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from apps.agents.graph.state import AgentState, all_tool_calls, prune_messages
-from apps.agents.llm_request import chat_model_kwargs
+from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
 from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
@@ -817,7 +817,7 @@ async def build_agent_graph(
     llm = ChatAnthropic(
         model=settings.DEFAULT_LLM_MODEL,
         max_tokens=DEFAULT_MAX_TOKENS,
-        **chat_model_kwargs(),
+        **chat_model_kwargs(MAIN_AGENT_EFFORT),
     )
     llm_tool_schemas = _llm_tool_schemas(tools, hidden_params=hidden_params)
     llm_with_tools = llm.bind_tools(llm_tool_schemas)

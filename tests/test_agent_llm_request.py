@@ -81,3 +81,12 @@ async def test_thinking_is_summarized_so_the_thinking_card_has_text(site_payload
     """The default display ("omitted") streams empty thinking text, and the
     Thinking card (and Opus 5.5's between-tool-call notes) render nothing."""
     assert site_payload["thinking"]["display"] == "summarized"
+
+
+@pytest.mark.asyncio
+async def test_effort_is_explicit_per_site(site_payload, request):
+    """Opus 5.5 defaults to medium; pin it so a model change can't shift it
+    silently, and run the narrow subagents at low."""
+    site = request.node.callspec.params["site_payload"]
+    expected = {"main": "medium", "canvas": "low", "artifact": "low"}[site]
+    assert site_payload["output_config"]["effort"] == expected

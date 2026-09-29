@@ -1,11 +1,17 @@
 """Request options shared by every ChatAnthropic the agent and its subagents build."""
 
-from typing import Any
+from typing import Any, Literal
 
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 
+# Set explicitly: Opus 5.5's API default is "medium", but an unset effort
+# silently follows whatever the next model's default is. The subagents do narrow,
+# well-specified edits and run at "low".
+MAIN_AGENT_EFFORT = "medium"
+SUBAGENT_EFFORT = "low"
 
-def chat_model_kwargs() -> dict[str, Any]:
+
+def chat_model_kwargs(effort: Literal["low", "medium", "high"]) -> dict[str, Any]:
     """Fresh ChatAnthropic kwargs for thinking behaviour (a new dict per call).
 
     Scout edits the replayed prefix on purpose: ``prune_messages`` slides the
@@ -24,5 +30,6 @@ def chat_model_kwargs() -> dict[str, Any]:
             "display": "summarized",
             "block_binding": {"prefix_mismatch_behavior": "drop_block"},
         },
+        "effort": effort,
         "betas": [THINKING_BINDING_BETA],
     }

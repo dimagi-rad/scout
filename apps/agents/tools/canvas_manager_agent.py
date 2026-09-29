@@ -27,7 +27,7 @@ from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
 from apps.agents.graph.state import AgentState
-from apps.agents.llm_request import chat_model_kwargs
+from apps.agents.llm_request import SUBAGENT_EFFORT, chat_model_kwargs
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     reset_subagent_event_queue,
@@ -320,7 +320,9 @@ def _build_canvas_manager_graph(
     tools = [*canvas_tools, *nested_mcp_tools]
     tool_node = _make_nested_tool_node(ToolNode(tools))
     llm = ChatAnthropic(
-        model=settings.DEFAULT_LLM_MODEL, max_tokens=NESTED_MAX_TOKENS, **chat_model_kwargs()
+        model=settings.DEFAULT_LLM_MODEL,
+        max_tokens=NESTED_MAX_TOKENS,
+        **chat_model_kwargs(SUBAGENT_EFFORT),
     )
     llm_with_tools = llm.bind_tools(_nested_llm_tool_schemas(tools))
 

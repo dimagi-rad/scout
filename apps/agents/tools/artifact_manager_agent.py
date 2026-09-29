@@ -24,7 +24,7 @@ from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field, ValidationError
 
 from apps.agents.graph.state import AgentState
-from apps.agents.llm_request import chat_model_kwargs
+from apps.agents.llm_request import SUBAGENT_EFFORT, chat_model_kwargs
 from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
@@ -449,7 +449,9 @@ def _build_artifact_manager_graph(
     tools = [*primitive_tools, *nested_mcp_tools]
     tool_node = _make_nested_tool_node(ToolNode(tools))
     llm = ChatAnthropic(
-        model=settings.DEFAULT_LLM_MODEL, max_tokens=NESTED_MAX_TOKENS, **chat_model_kwargs()
+        model=settings.DEFAULT_LLM_MODEL,
+        max_tokens=NESTED_MAX_TOKENS,
+        **chat_model_kwargs(SUBAGENT_EFFORT),
     )
     llm_with_tools = llm.bind_tools(_nested_llm_tool_schemas(tools))
 
