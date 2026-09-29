@@ -13,6 +13,7 @@ from django.test import AsyncClient, Client
 
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.artifacts.services.export import ArtifactExporter
+from apps.artifacts.views import SANDBOX_HTML_TEMPLATE
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
@@ -255,6 +256,12 @@ class TestArtifactSandboxView:
         assert "Recharts" in content
         assert "Plotly" not in content
         assert "root" in content
+
+    def test_sandbox_has_no_story_renderer(self):
+        # Stories render through the React ArtifactGraph and never load this
+        # iframe; its old block renderer drifted from the story_doc schema.
+        assert "renderStory" not in SANDBOX_HTML_TEMPLATE
+        assert "case 'story'" not in SANDBOX_HTML_TEMPLATE
 
     def test_react_export_loads_recharts_without_plotly(self, artifact):
         content = ArtifactExporter(artifact).export_html()
