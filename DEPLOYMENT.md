@@ -7,8 +7,8 @@ Pushes to `main` trigger an automated deployment via GitHub Actions.
 
 - **EC2** (t3.medium) — runs all containers via Docker/Kamal
 - **RDS PostgreSQL 16** — platform database (password managed by AWS Secrets Manager)
-- **ElastiCache Redis 7** — caching and Celery broker
-- **ECR** — Docker image registry (scout/api, scout/mcp, scout/frontend)
+- **ElastiCache Redis 7** — shared Django cache (`REDIS_URL`); the task queue is Procrastinate on Postgres
+- **ECR** — Docker image registry (`scout/api` for API, MCP and worker; `scout/mcp` holds the Cube image; `scout/frontend`)
 - **GitHub OIDC** — keyless authentication for CI/CD (no long-lived IAM keys)
 
 All infrastructure is defined in `infra/scout-stack.yml` (CloudFormation) and deployed
@@ -48,10 +48,11 @@ repo's CloudFormation template.
 | Cube + schema validator | `deploy-cube.yml` | 4000 / 4010 | No (internal network) |
 | API (Django/uvicorn) | `deploy.yml` | 8000 | No (internal network) |
 | MCP Server | `deploy-mcp.yml` | 8100 | No (internal network) |
-| Worker (Celery) | `deploy-worker.yml` | — | No |
+| Worker (Procrastinate) | `deploy-worker.yml` | — | No |
 | Frontend (nginx) | `deploy-frontend.yml` | 443 | Yes (sole public entry point) |
 
-The frontend nginx container reverse-proxies `/api/` and `/mcp/` to the internal services.
+The frontend nginx container reverse-proxies `/api/`, `/admin/`, `/accounts/`, `/static/` and
+`/health/` to the API. MCP is not proxied; the API and worker reach it over the internal network.
 
 Each config is the production definition. Staging deploys from the same files with
 `-d staging`, which deep-merges the matching `config/<name>.staging.yml` overlay over
