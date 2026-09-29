@@ -63,7 +63,7 @@ frontend reads them from `/api/auth/providers/`.
 | GET | `/api/workspaces/` | — | Workspaces the user belongs to. |
 | POST | `/api/workspaces/` | — | Create a workspace from `name` and `tenant_ids`. The creator becomes its manager. |
 | GET | `…/` | read | Workspace detail. |
-| PATCH | `…/` | manage | Rename. |
+| PATCH | `…/` | manage | Rename (`name`), or set the agent's `system_prompt` (max 10,000 characters). |
 | DELETE | `…/` | manage | Delete. |
 | GET | `…/members/` | read | Members and live invites. |
 | POST | `…/members/` | manage | Add a member by `email` and `role`. Creates an invite if the user has no account or can't yet use every tenant. |
