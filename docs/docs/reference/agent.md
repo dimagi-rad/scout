@@ -75,9 +75,9 @@ The graph is built per turn with two inputs that change its tools and prompts:
 | `artifact_graph_overview`, `get_artifact_semantic_queries` | yes | via `artifact_manager` | via `artifact_manager` |
 | `canvas_read` | chat only | yes | no |
 | `canvas_manager` | no | yes | no |
+| `save_learning`, `save_as_recipe` | no | yes | yes |
 
 Canvas tools need a conversation ID as well as an interactive run.
-| `save_learning`, `save_as_recipe` | no | yes | yes |
 
 `teardown_schema` is never exposed. Leaving a write tool out isn't the only
 guard: each write operation re-checks the role when it runs and is refused if
