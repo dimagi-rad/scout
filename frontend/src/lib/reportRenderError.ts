@@ -82,7 +82,10 @@ export function reportRenderError(report: RenderErrorReport): void {
   reported.add(key)
   reportCounts.set(report.source, count + 1)
 
-  const name = SAFE_ERROR_NAME.test(report.name) ? report.name : "Error"
+  // A boundary gets the raw thrown value, so `name` can be undefined, which
+  // RegExp.test would read as the valid identifier "undefined".
+  const name =
+    typeof report.name === "string" && SAFE_ERROR_NAME.test(report.name) ? report.name : "Error"
   const message = safeText(report.message || "")
   const error = new Error(message)
   error.name = name

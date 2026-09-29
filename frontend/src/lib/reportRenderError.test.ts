@@ -70,6 +70,14 @@ describe("reportRenderError", () => {
     expect(reported.stack).toBe("Error: first at forged (b:2:2)\n    at App (sandbox:1:1)")
   })
 
+  it("names a thrown non-Error, which has no name, Error", () => {
+    const thrown = "boom" as unknown as Error
+    reportRenderError({ source: "boundary", name: thrown.name, message: thrown.message })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.name).toBe("Error")
+  })
+
   it("redacts a quoted value that is broken across lines", () => {
     reportRenderError({
       source: "sandbox",
