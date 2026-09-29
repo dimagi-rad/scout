@@ -1468,8 +1468,14 @@ async def test_refused_load_codes_each_missing_tenant_by_its_recovery(
 
     by_tenant = {r["tenant"]: r for r in result["tenants"]}
     assert by_tenant[other.external_id]["error_code"] == code
+    assert result["error_code"] == code
     assert other.external_id in by_tenant[other.external_id]["error"]
     assert by_tenant[tenant.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_SKIPPED
+
+
+def test_every_coverage_recovery_has_a_refusal_code():
+    # A new recovery must pick its own guidance, not fall back to "connect the account".
+    assert set(workspaces_tasks._RECOVERY_ERROR_CODES) == set(CoverageRecovery)
 
 
 @pytest.mark.asyncio

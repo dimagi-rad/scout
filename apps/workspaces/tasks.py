@@ -578,7 +578,7 @@ _RECOVERY_ERROR_CODES = {
 
 def _missing_tenant_failure(tenant, missing: MissingTenant) -> dict:
     """Describe why the acting user can't use ``tenant``; the advice comes from the code."""
-    code = _RECOVERY_ERROR_CODES.get(missing.recovery, ErrorCode.WORKSPACE_TENANT_UNREACHABLE)
+    code = _RECOVERY_ERROR_CODES[missing.recovery]
     if code == ErrorCode.WORKSPACE_TENANT_UNREACHABLE:
         return _preflight_failure(tenant, _unreachable_tenant_error(tenant), code)
     who = f"the acting user's {tenant.provider}"
@@ -654,8 +654,17 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         # Even a MANAGE member cannot fix this by changing roles. Every tenant gets
         # a recorded not-run entry (the resume path reads one per tenant), and the
         # remedy comes from each entry's code's guidance.
-        code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         results = _missing_tenant_results(tenants, access.missing_tenants)
+        missing_codes = {
+            r["error_code"]
+            for r in results
+            if r["error_code"] != ErrorCode.WORKSPACE_TENANT_SKIPPED
+        }
+        code = (
+            ErrorCode(missing_codes.pop())
+            if len(missing_codes) == 1
+            else ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        )
         error = "The requesting user can't use these data sources: " + (
             ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
         )
@@ -1409,7 +1418,9 @@ def _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id=None):
     (ii) is multi-tenant (>= 2 tenants), and (iii) has a WorkspaceViewSchema row
     that is not retiring. A rebuild marks the row ACTIVE, so rebuilding a TEARDOWN
     or EXPIRED row would revive an idle workspace's views for another TTL (C2);
-    its pending teardown already accounts for the dropped views. When ``exclude_workspace_id`` is given, that workspace is left
+    its pending teardown already accounts for the dropped views.
+
+    When ``exclude_workspace_id`` is given, that workspace is left
     out — used by the materialize path, which rebuilds its own view schema inline
     and only needs to fan out to the *siblings*. The refresh/teardown paths pass
     no exclusion because they are not scoped to a workspace.
