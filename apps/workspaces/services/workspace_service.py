@@ -145,8 +145,8 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
     Deletes the WorkspaceTenant record. If the workspace remains multi-tenant
     (>=2 tenants left), marks any existing WorkspaceViewSchema as PROVISIONING
     and dispatches a rebuild. If the workspace drops to single-tenant (or zero),
-    routing moves to the tenant schema and any active view schema becomes an
-    orphan — mark it TEARDOWN and dispatch teardown so the physical
+    routing moves to the tenant schema and any active or provisioning view schema
+    becomes an orphan — mark it TEARDOWN and dispatch teardown so the physical
     ``ws_<hash>`` schema is dropped.
 
     Both ``defer`` calls are transaction-safe — the procrastinate row is only
@@ -167,8 +167,10 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         _invalidate_on_commit(workspace)
         remaining = len(tenant_ids) - 1
         if remaining <= 1:
+            # A PROVISIONING row has a rebuild queued or running; retiring it makes
+            # that rebuild skip, or drop what it built, instead of publishing ACTIVE.
             for vs in WorkspaceViewSchema.objects.filter(
-                workspace=workspace, state=SchemaState.ACTIVE
+                workspace=workspace, state__in=[SchemaState.ACTIVE, SchemaState.PROVISIONING]
             ):
                 vs.state = SchemaState.TEARDOWN
                 vs.save(update_fields=["state"])
