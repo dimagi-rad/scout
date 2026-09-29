@@ -4,6 +4,7 @@ A refusal, a max_tokens cut-off, or a thinking-only turn would otherwise end
 the chat with a blank reply and a clean finish.
 """
 
+import copy
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -63,13 +64,18 @@ async def _run_turn(response: AIMessage) -> list:
     ],
 )
 async def test_unanswered_turn_ends_with_fallback_message(response, reason):
+    # Snapshot before the run: the fake LLM hands the graph this same object, so
+    # comparing against response.content afterwards could never fail.
+    original_content = copy.deepcopy(response.content)
+
     messages = await _run_turn(response)
 
     last = messages[-1]
     assert last.content == MODEL_STOPPED_MESSAGES[reason]
     assert last.response_metadata[ESCALATION_METADATA_KEY] == f"model_{reason}"
     # The model's own turn stays in history unchanged, thinking block included.
-    assert messages[-2].content == response.content
+    assert messages[-2].content == original_content
+    assert THINKING in messages[-2].content
 
 
 @pytest.mark.asyncio
