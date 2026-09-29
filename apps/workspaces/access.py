@@ -459,10 +459,10 @@ def _resolve_local_access_ex(
     missing = ()
     if require_coverage:
         tenants = _workspace_tenants(wm.workspace)
-        if not tenants:
-            return _no_sources_denied(user, wm.workspace_id)
         missing = missing_workspace_tenants(user, tenants)
         access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
+        if not tenants:
+            return _no_sources_denied(user, wm.workspace_id)
     if missing:
         return _coverage_denied(user, wm.workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):
@@ -480,10 +480,10 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     tenants = await _aworkspace_tenants(wm.workspace)
-    if not tenants:
-        return _no_sources_denied(user, wm.workspace_id)
     missing = await amissing_workspace_tenants(user, tenants)
     access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
+    if not tenants:
+        return _no_sources_denied(user, wm.workspace_id)
     if missing:
         return _coverage_denied(user, wm.workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):

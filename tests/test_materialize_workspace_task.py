@@ -757,7 +757,7 @@ async def test_cancel_endpoint_requires_workspace_membership(workspace, other_us
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_materialize_workspace_defers_resume_on_an_early_return(
+async def test_materialize_workspace_defers_resume_on_no_sources_early_return(
     workspace,
     user,
     context_with_job_id,
@@ -767,7 +767,7 @@ async def test_materialize_workspace_defers_resume_on_an_early_return(
     waiting on a chained resume that never fires."""
     # A workspace with no sources is refused at the access check (#381).
     bare_ws = await Workspace.objects.acreate(
-        name="bare-no-memberships",
+        name="bare-no-sources",
         created_by=user,
     )
     await WorkspaceMembership.objects.acreate(

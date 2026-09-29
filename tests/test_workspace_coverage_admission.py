@@ -310,12 +310,10 @@ class TestSourceAdd:
     def test_a_zero_tenant_workspace_cannot_gain_a_source(self, client, user, t1):
         """It is denied outright (#381); deleting it is the only way out."""
         ws = _workspace(user)
-        _member(ws, "brian@example.com")
         grant_tenant_access(user, t1)
         client.force_login(user)
 
-        with patch(REFRESH, side_effect=_no_refresh):
-            resp = self._post(client, ws, t1)
+        resp = self._post(client, ws, t1)
 
         assert resp.status_code == 403
         assert not ws.workspace_tenants.exists()

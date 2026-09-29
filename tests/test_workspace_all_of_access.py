@@ -4,7 +4,8 @@ A multi-source workspace serves one merged view, so a member who can use only
 some of its sources would read the rest. These tests drive the real authorizer
 with genuinely provisioned credentials and pin: partial coverage is denied on
 every read path with actionable per-source guidance, full coverage is granted,
-zero-tenant workspaces are unchanged, and the list agrees with the gate.
+a zero-tenant workspace is denied (``NO_SOURCES``, #381), and the list agrees
+with the gate.
 """
 
 import json
@@ -238,7 +239,7 @@ def test_list_has_access_agrees_with_the_gate(client, user, partial_member, two_
         ("Source Two", CoverageRecovery.CONNECT_SOURCE)
     ]
     assert entry["missing_tenants"][0]["remedy"]
-    assert _list_entry(client, zero)["has_access"] is True
+    assert _list_entry(client, zero)["has_access"] is False
     assert _list_entry(client, zero)["missing_tenants"] == []
 
     grant_tenant_access(user, two_sources[1])
