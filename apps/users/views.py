@@ -221,8 +221,10 @@ async def tenant_credential_list_view(request):
             .order_by("-created_at")
         ):
             chatbots = []
-            async for tm in conn.memberships.filter(archived_at__isnull=True).select_related(
-                "tenant"
+            async for tm in (
+                conn.memberships.filter(archived_at__isnull=True)
+                .select_related("tenant")
+                .order_by(Lower("tenant__canonical_name"), "id")
             ):
                 chatbots.append(
                     {
