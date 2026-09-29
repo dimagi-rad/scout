@@ -1393,13 +1393,7 @@ async def cancel_materialization(
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
-        in_progress = {
-            MaterializationRun.RunState.STARTED,
-            MaterializationRun.RunState.DISCOVERING,
-            MaterializationRun.RunState.LOADING,
-            MaterializationRun.RunState.TRANSFORMING,
-        }
-        if run.state not in in_progress:
+        if run.state not in MaterializationRun.ACTIVE_STATES:
             tc["result"] = error_response(
                 VALIDATION_ERROR,
                 f"Run '{run_id}' is not in progress (state: {run.state})",
