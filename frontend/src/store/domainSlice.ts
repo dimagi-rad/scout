@@ -130,14 +130,17 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             const added = domains
               .filter((d) => !known.has(d.id) && d.id !== activeDomainId && workspaceHasAccess(d))
               .map((d) => d.id)
-            const listed = new Set(domains.map((d) => d.id))
+            const accessible = new Set(domains.filter(workspaceHasAccess).map((d) => d.id))
+            const kept = current.addedDomainIds.filter(
+              (id) => accessible.has(id) && !added.includes(id),
+            )
             set({
               domains,
               activeDomainId,
-              addedDomainIds: [
-                ...current.addedDomainIds.filter((id) => listed.has(id) && !added.includes(id)),
-                ...added,
-              ],
+              addedDomainIds:
+                added.length === 0 && kept.length === current.addedDomainIds.length
+                  ? current.addedDomainIds
+                  : [...kept, ...added],
             })
             return "fetched"
           })

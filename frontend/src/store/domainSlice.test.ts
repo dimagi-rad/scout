@@ -350,6 +350,30 @@ describe("domainSlice.addedDomainIds — workspaces someone added you to (#355)"
     expect(useAppStore.getState().addedDomainIds).toEqual([])
   })
 
+  it("forgets an added workspace that loses upstream access before you open it", async () => {
+    vi.spyOn(workspaceApi, "list")
+      .mockResolvedValueOnce([ws("x"), ws("a")])
+      .mockResolvedValueOnce([{ ...ws("x"), has_access: false }, ws("a")])
+    const actions = useAppStore.getState().domainActions
+
+    await actions.revalidateDomains()
+    expect(useAppStore.getState().addedDomainIds).toEqual(["x"])
+    await actions.revalidateDomains()
+    expect(useAppStore.getState().addedDomainIds).toEqual([])
+  })
+
+  it("keeps the same added list when a refresh neither adds nor drops one", async () => {
+    vi.spyOn(workspaceApi, "list")
+      .mockResolvedValueOnce([ws("x"), ws("a")])
+      .mockResolvedValueOnce([ws("x"), { ...ws("a"), member_count: 3 }])
+    const actions = useAppStore.getState().domainActions
+
+    await actions.revalidateDomains()
+    const before = useAppStore.getState().addedDomainIds
+    await actions.revalidateDomains()
+    expect(useAppStore.getState().addedDomainIds).toBe(before)
+  })
+
   it("doesn't record anything from a full fetch, such as after creating a workspace yourself", async () => {
     vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("mine"), ws("a")])
 
