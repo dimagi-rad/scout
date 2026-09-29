@@ -2421,7 +2421,13 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                 )
             surface = await recovery_query_surface(recovery)
             action = surface.get("recovery_action")
-            if action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
+            if (
+                recovery.source_type == CHAT_RECOVERY_SOURCE
+                and action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION
+            ):
+                # Nobody approved a reload: a chat only asks for the data model (#714).
+                result = {"error": _CHAT_RECOVERY_NEEDS_RELOAD}
+            elif action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
                 result = await materialize_workspace_core(
                     str(recovery.workspace_id),
                     str(recovery.requested_by_id),
@@ -2482,6 +2488,12 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             completed_at=timezone.now(),
         )
         return {"status": "failed", "error": error, "result": result}
+
+
+CHAT_RECOVERY_SOURCE = "chat"
+_CHAT_RECOVERY_NEEDS_RELOAD = (
+    "The data model can't be rebuilt from the loaded data: it needs a data refresh first."
+)
 
 
 def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:

@@ -14,8 +14,16 @@ from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     acapture_workspace_load_intent,
 )
-from apps.workspaces.services.query_state import synced_runs, workspace_query_surface
-from apps.workspaces.tasks import materialize_workspace, recover_workspace_data
+from apps.workspaces.services.query_state import (
+    semantic_layer_state,
+    synced_runs,
+    workspace_query_surface,
+)
+from apps.workspaces.tasks import (
+    CHAT_RECOVERY_SOURCE,
+    materialize_workspace,
+    recover_workspace_data,
+)
 from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -135,11 +143,12 @@ async def astart_chat_semantic_rebuild(*, workspace, user) -> WorkspaceDataRecov
     nobody is asked to approve one. The recovery task takes the workspace lock,
     waits out running loads, re-checks the requester's write access and the
     snapshot, and rebuilds only what is still needed. Only for a caller who may
-    write. One attempt per sync, so a build that fails the same way is not retried
-    on every message. Never raises: the chat still answers.
+    write. A member whose rebuild failed is not retried until the next sync, so a
+    build that fails the same way does not re-run on every message. Never raises:
+    the chat still answers.
     """
     try:
-        if not await _semantic_rebuild_needed(workspace):
+        if not await _semantic_rebuild_needed(workspace, user):
             return None
         return await _adispatch_semantic_rebuild(workspace_id=workspace.id, user_id=user.id)
     except IntegrityError:
@@ -150,7 +159,11 @@ async def astart_chat_semantic_rebuild(*, workspace, user) -> WorkspaceDataRecov
         return None
 
 
-async def _semantic_rebuild_needed(workspace) -> bool:
+async def _semantic_rebuild_needed(workspace, user) -> bool:
+    # Cheapest first: this runs on every message a writer sends.
+    semantic_state, _error = await semantic_layer_state(workspace)
+    if semantic_state in {"ready", "deferred"}:
+        return False
     if await aworkspace_load_pending(workspace.id):
         # A load, or another recovery, builds the catalog when it finishes.
         return False
@@ -165,12 +178,17 @@ async def _semantic_rebuild_needed(workspace) -> bool:
         .values_list("completed_at", flat=True)
         .afirst()
     )
-    attempts = WorkspaceDataRecovery.objects.filter(
-        workspace=workspace, recovery_type=WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD
+    # Only this member's own failures count: another member's attempt may have
+    # failed on their own access, which says nothing about this one's.
+    failures = WorkspaceDataRecovery.objects.filter(
+        workspace=workspace,
+        requested_by=user,
+        recovery_type=WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD,
+        state=WorkspaceDataRecovery.State.FAILED,
     )
     if last_sync is not None:
-        attempts = attempts.filter(created_at__gt=last_sync)
-    return not await attempts.aexists()
+        failures = failures.filter(created_at__gt=last_sync)
+    return not await failures.aexists()
 
 
 @sync_to_async
@@ -182,7 +200,7 @@ def _adispatch_semantic_rebuild(*, workspace_id, user_id) -> WorkspaceDataRecove
             workspace_id=workspace_id,
             requested_by_id=user_id,
             recovery_type=WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD,
-            source_type="chat",
+            source_type=CHAT_RECOVERY_SOURCE,
         )
         job = recover_workspace_data.defer(recovery_id=str(recovery.id))
         recovery.procrastinate_job_id = getattr(job, "id", job)

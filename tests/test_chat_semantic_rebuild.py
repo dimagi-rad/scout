@@ -194,13 +194,14 @@ async def test_one_attempt_per_sync_so_a_failing_build_is_not_retried_every_mess
     ws, tenant, schema = await _loaded_workspace(
         "attempted", synced_at=timezone.now() - timedelta(hours=2)
     )
+    user, client = await _member(ws, tenant, "attempted@b.c")
     await WorkspaceDataRecovery.objects.acreate(
         workspace=ws,
+        requested_by=user,
         recovery_type=SEMANTIC_REBUILD,
         source_type="chat",
         state=WorkspaceDataRecovery.State.FAILED,
     )
-    _user, client = await _member(ws, tenant, "attempted@b.c")
 
     await _chat(client, ws)
     assert len(await _rebuilds(ws)) == 1
@@ -265,3 +266,81 @@ async def test_the_agent_is_never_sent_to_a_reload_for_the_data_model(rebuilding
     )
     assert expected in context
     assert ("check back" in context) is rebuilding
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_another_members_failed_attempt_does_not_block_this_one(agent_layer, queued_jobs):
+    """That attempt may have failed on the other member's own access."""
+    ws, tenant, _schema = await _loaded_workspace("other-failed")
+    other, _other_client = await _member(ws, tenant, "other-failed@b.c")
+    await WorkspaceDataRecovery.objects.acreate(
+        workspace=ws,
+        requested_by=other,
+        recovery_type=SEMANTIC_REBUILD,
+        source_type="chat",
+        state=WorkspaceDataRecovery.State.FAILED,
+    )
+    _user, client = await _member(ws, tenant, "this-member@b.c")
+
+    await _chat(client, ws)
+
+    assert len(await _rebuilds(ws)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_chat_recovery_never_turns_into_an_unapproved_reload():
+    """The snapshot can go unsafe between the chat opening and the job running."""
+    ws, tenant, schema = await _loaded_workspace("went-unsafe")
+    user, _client = await _member(ws, tenant, "went-unsafe@b.c")
+    recovery = await WorkspaceDataRecovery.objects.acreate(
+        workspace=ws, requested_by=user, recovery_type=SEMANTIC_REBUILD, source_type="chat"
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.FAILED,
+        completed_at=timezone.now(),
+    )
+
+    with patch("apps.workspaces.tasks.materialize_workspace_core", AsyncMock()) as reload:
+        result = await recover_workspace_data.func(
+            SimpleNamespace(job=SimpleNamespace(id=916)), str(recovery.id)
+        )
+
+    reload.assert_not_awaited()
+    assert result["status"] == "failed"
+    await recovery.arefresh_from_db()
+    assert "needs a data refresh" in recovery.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unsafe_snapshot_still_points_the_agent_at_a_refresh():
+    ws, _tenant, schema = await _loaded_workspace("prompt-unsafe")
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.FAILED,
+        completed_at=timezone.now(),
+    )
+
+    context = await _fetch_semantic_model_context(ws, interactive=True, write_capable=True)
+
+    assert graph_base._LOADED_NEEDS_RELOAD_GUIDANCE in context
+    assert "being rebuilt" not in context
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_reloading_recovery_is_not_described_as_a_rebuild():
+    ws, _tenant, _schema = await _loaded_workspace("prompt-reloading")
+    await WorkspaceDataRecovery.objects.acreate(
+        workspace=ws, recovery_type=WorkspaceDataRecovery.RecoveryType.MATERIALIZATION
+    )
+
+    context = await _fetch_semantic_model_context(ws, interactive=True, write_capable=True)
+
+    assert graph_base._INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE in context
+    assert "reloads nothing" not in context

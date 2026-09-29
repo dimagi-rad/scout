@@ -63,7 +63,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_load_pending
-from apps.workspaces.services.query_state import serving_writer_in_flight
+from apps.workspaces.services.query_state import serving_writer_in_flight, workspace_query_surface
 from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
 from mcp_server.pipeline_registry import get_registry
 
@@ -396,7 +396,7 @@ async def _fetch_semantic_model_context(
             # Queued but not yet started, so no run above says so (#408).
             guidance = await _load_in_progress_guidance(interactive, write_capable, conversation_id)
         elif load_state == _LOADED and write_capable and interactive:
-            guidance = await _semantic_rebuild_guidance(workspace)
+            guidance = await _semantic_rebuild_guidance(workspace, conversation_id)
         else:
             guidance = _load_state_guidance(
                 load_state, interactive=interactive, write_capable=write_capable
@@ -441,15 +441,27 @@ async def _catalog_unavailable_load_state(workspace) -> tuple[str, bool]:
     return _NOT_LOADED, False
 
 
-async def _semantic_rebuild_guidance(workspace) -> str:
+async def _semantic_rebuild_guidance(workspace, conversation_id: str | None) -> str:
     """Loaded data with no catalog needs a rebuild, which the chat starts itself (#714).
 
-    It never needs a reload, so the agent must not ask to approve one for it.
+    Only a snapshot a failed load left unsafe needs a reload; the agent must never
+    ask to approve one just to get the data model.
     """
-    rebuilding = await WorkspaceDataRecovery.objects.filter(
-        workspace=workspace, state__in=list(WorkspaceDataRecovery.ACTIVE_STATES)
-    ).aexists()
-    return _SEMANTIC_REBUILDING_GUIDANCE if rebuilding else _SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
+    active = await (
+        WorkspaceDataRecovery.objects.filter(
+            workspace=workspace, state__in=list(WorkspaceDataRecovery.ACTIVE_STATES)
+        )
+        .values_list("recovery_type", flat=True)
+        .afirst()
+    )
+    if active == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
+        return await _load_in_progress_guidance(True, True, conversation_id)
+    if active is not None:
+        return _SEMANTIC_REBUILDING_GUIDANCE
+    surface = await workspace_query_surface(workspace)
+    if surface["recovery_action"] == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
+        return _LOADED_NEEDS_RELOAD_GUIDANCE
+    return _SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
 
 
 def _load_state_guidance(load_state: str, *, interactive: bool, write_capable: bool) -> str:
@@ -536,13 +548,23 @@ _SEMANTIC_REBUILDING_GUIDANCE = (
     "automatically in the background. The rebuild reloads nothing and needs no "
     "approval. Do NOT call `run_materialization` for it and do NOT ask the user to "
     "approve a reload. Tell the user the data model is being rebuilt and to check "
-    f"back in a few minutes for `list_datasets` and `semantic_query`. {_SQL_MEANWHILE}"
+    f"back in a few minutes for `list_datasets` and `semantic_query`. {_SQL_MEANWHILE} "
+    "If the user asks for a data refresh meanwhile, `run_materialization` reports this "
+    "rebuild as already running: tell them to ask again once it has finished."
+)
+
+_LOADED_NEEDS_RELOAD_GUIDANCE = (
+    "Data is loaded, but no semantic datasets are available, and the data model "
+    "cannot be rebuilt from it because the last load did not finish cleanly. Only a "
+    "data refresh (`run_materialization`) fixes this; follow the refresh rules above "
+    f"before starting one. {_SQL_MEANWHILE}"
 )
 
 _SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE = (
     "Data is loaded, but no semantic datasets are available and no automatic rebuild "
     "of the data model is running. Scout starts one itself, without reloading data, "
-    "when a chat opens on loaded data it can build from, and tries once per load. "
+    "when a chat opens on loaded data it can build from, and does not retry a failed "
+    "rebuild until the next load. "
     "Do NOT call `run_materialization` just to get the data model and do NOT ask the "
     "user to approve a reload for it; a reload fetches every source again and is for "
     "newer data the user asks for. Tell the user the data model could not be rebuilt "
