@@ -6,6 +6,7 @@ import pytest
 from langchain_core.tools import StructuredTool
 
 from apps.agents.graph.base import (
+    _MULTI_TENANT_NAMESPACE_HINT,
     ESCALATION_MESSAGE,
     HEADLESS_ESCALATION_MESSAGE,
     READ_ONLY_ESCALATION_MESSAGE,
@@ -140,7 +141,7 @@ async def test_read_missing_catalog_preserves_loaded_sql_guidance(
     assert "read-write workspace role" in context
     assert "Call `run_materialization`" not in context
     if multi:
-        assert "{tenant_name}__{table_name}" in context
+        assert _MULTI_TENANT_NAMESPACE_HINT in context
 
 
 @pytest.mark.asyncio
@@ -329,7 +330,7 @@ async def test_write_multi_tenant_guidance_matches_single_tenant(
         workspace, interactive=interactive, write_capable=True
     )
 
-    assert "{tenant_name}__{table_name}" in context
+    assert _MULTI_TENANT_NAMESPACE_HINT in context
     if loaded:
         assert "Data is loaded" in context
         assert "Run materialization to rebuild the semantic catalog" in context

@@ -40,6 +40,7 @@ from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.common.error_codes import ErrorCode
+from apps.common.identifiers import view_name
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
 from apps.semantic.services.date_context import agent_date_context
@@ -558,12 +559,16 @@ _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
 )
 
 
+# Only shown when the semantic catalog is unavailable, so it covers raw SQL alone.
+# The example name comes from the helper that mints the views (tests pin it).
+_MULTI_TENANT_VIEW_NAME_EXAMPLE = view_name("<tenant_prefix>", "<table_name>")
 _MULTI_TENANT_NAMESPACE_HINT = (
-    "This is a multi-tenant workspace. Prefer the semantic catalog — semantic "
-    "datasets already handle the workspace scope. If you fall back to raw SQL, "
-    "note that tables are namespaced views prefixed with the tenant name using a "
-    "double underscore: `{tenant_name}__{table_name}`, and querying across "
-    "tenants needs explicit JOINs between namespaced tables."
+    "This is a multi-tenant workspace. In raw SQL, each tenant's tables are separate "
+    f"views named `{_MULTI_TENANT_VIEW_NAME_EXAMPLE}`, where the prefix is derived from "
+    "the tenant's name. Long prefixes and names are shortened with a hash, so never "
+    "build a view name yourself: use the exact names `list_tables` returns. Each view "
+    "holds only its own tenant's rows, so combine tenants with `UNION ALL` over their "
+    "matching views, and JOIN only views that share a tenant prefix."
 )
 
 
