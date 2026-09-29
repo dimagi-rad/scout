@@ -222,6 +222,41 @@ class TestChatStartsTheLoad:
 
         assert await _load_jobs(ws) == []
 
+    async def test_a_partly_served_workspace_is_left_to_the_agent(self):
+        ws, tenant = await _workspace("partial")
+        _, client = await _member(ws, tenant, "chatter-partial@b.c")
+        other = await Tenant.objects.acreate(
+            external_id="t-partial-2", provider="commcare", canonical_name="Partial Two"
+        )
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=other)
+        await TenantMembership.objects.acreate(
+            user=await User.objects.aget(email="chatter-partial@b.c"),
+            tenant=other,
+            connection=await ausable_connection(
+                await User.objects.aget(email="chatter-partial@b.c"), other.provider
+            ),
+        )
+        await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="t_partial", state=SchemaState.ACTIVE
+        )
+
+        await _chat(client, ws)
+
+        assert await _load_jobs(ws) == []
+
+    async def test_a_failing_preflight_does_not_fail_the_chat(self):
+        ws, tenant = await _workspace("preflight")
+        _, client = await _member(ws, tenant, "chatter-preflight@b.c")
+
+        with patch.object(
+            thread_job_dispatch,
+            "aunserved_tenant_ids",
+            AsyncMock(side_effect=RuntimeError("db blip")),
+        ):
+            await _chat(client, ws)
+
+        assert await _load_jobs(ws) == []
+
     async def test_a_read_only_member_queues_nothing(self):
         ws, tenant = await _workspace("reader")
         _, client = await _member(ws, tenant, "reader-reader@b.c", role=WorkspaceRole.READ)

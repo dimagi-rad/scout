@@ -69,51 +69,58 @@ def adispatch_thread_materialization(
 
 
 async def astart_chat_load(*, workspace, user, thread_id) -> ThreadJob | None:
-    """Load a workspace's missing data as the chatting user, bound to their chat (#408).
+    """Load a workspace that serves no data yet as the chatting user, bound to their chat (#408).
 
-    Only for a caller who may write: the worker refuses anyone else. Nothing is
+    Only for a caller who may write: the worker refuses anyone else. A workspace
+    that serves any source is left to the agent: its prompt says data is ready,
+    and a load bound here would make the agent's own ``run_materialization``
+    (a refresh the user asked for) report "already running" instead. Nothing is
     queued while a load of the workspace is already queued or running, whoever
-    started it; the agent is told it is in progress instead. The reconcile intent
-    reuses whatever is already published, so only the missing sources are fetched.
-    A chat that already had a load gets no second one: its resume reported how
-    that went, and the agent decides whether to retry.
+    started it; the agent is told it is in progress instead. A chat that already
+    had a load gets no second one: its resume reported how that went, and the
+    agent decides whether to retry. Never raises: the chat still answers.
     """
-    if await ThreadJob.objects.filter(
-        thread_id=thread_id, job_type=ThreadJob.JobType.MATERIALIZATION
-    ).aexists():
-        return None
-    unserved = await aunserved_tenant_ids(workspace.id)
-    if not unserved:
-        return None
-    providers = {config.provider for config in get_registry().list()}
-    if not await Tenant.objects.filter(id__in=unserved, provider__in=providers).aexists():
-        # Every such load fails PIPELINE_UNRESOLVED; the prompt explains that instead.
-        return None
-    if await aworkspace_load_pending(workspace.id):
-        return None
     try:
-        load_intent = await acapture_workspace_load_intent(workspace.id, INTENT_RECONCILE_MISSING)
-    except Exception:
-        # Not fatal: without it the worker captures intent when the job starts.
-        logger.exception("Could not capture load intent for workspace %s", workspace.id)
-        load_intent = None
-    try:
+        if not await _chat_load_needed(workspace, thread_id):
+            return None
+        try:
+            load_intent = await acapture_workspace_load_intent(
+                workspace.id, INTENT_RECONCILE_MISSING
+            )
+        except Exception:
+            # Not fatal: without it the worker captures intent when the job starts.
+            logger.exception("Could not capture load intent for workspace %s", workspace.id)
+            load_intent = None
         return await adispatch_thread_materialization(
             thread_id=thread_id,
             tool_call_id="",
             workspace_id=workspace.id,
             user_id=user.id,
             load_intent=load_intent,
-            # Two chats opening at once both pass the pending check above.
+            # Two chats opening at once both pass the pending check.
             queueing_lock=f"chat-load:{workspace.id}",
             start_in_seconds=CHAT_LOAD_START_DELAY_SECONDS,
-            # Sources already serving are published, not re-fetched: a deploy
-            # that changed the load fingerprint would otherwise reload them too.
+            # A source that starts serving before the job runs is published, not re-fetched.
             only_unserved=True,
         )
     except AlreadyEnqueued:
         return None
     except Exception:
-        # The chat still answers; the agent can start the load itself.
+        # The agent can start the load itself.
         logger.exception("Could not start the first load for workspace %s", workspace.id)
         return None
+
+
+async def _chat_load_needed(workspace, thread_id) -> bool:
+    if await ThreadJob.objects.filter(
+        thread_id=thread_id, job_type=ThreadJob.JobType.MATERIALIZATION
+    ).aexists():
+        return False
+    unserved = await aunserved_tenant_ids(workspace.id)
+    if not unserved or len(unserved) < await workspace.workspace_tenants.acount():
+        return False
+    providers = {config.provider for config in get_registry().list()}
+    if not await Tenant.objects.filter(id__in=unserved, provider__in=providers).aexists():
+        # Every such load fails PIPELINE_UNRESOLVED; the prompt explains that instead.
+        return False
+    return not await aworkspace_load_pending(workspace.id)
