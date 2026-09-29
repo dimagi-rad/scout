@@ -389,8 +389,11 @@ class TestRemediationWithoutCoverage:
         mine = next(m for m in roster if m.get("user_id") == str(manager.id))
         theirs = next(m for m in roster if m is not mine)
         # A3: identity is needed to pick a successor, but nothing beyond it.
+        their_membership = WorkspaceMembership.objects.get(
+            workspace=partial_member, user=other_user
+        )
         assert theirs == {
-            "id": theirs["id"],
+            "id": str(their_membership.id),
             "role": WorkspaceRole.READ,
             "email": other_user.email,
             "name": other_user.get_full_name(),

@@ -597,19 +597,14 @@ class WorkspaceDetailView(APIView):
             )
 
         name = request.data.get("name", "")
-        if not isinstance(name, str):
-            return Response(
-                {"error": "name must be a string."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if error := _name_error(name):
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
         system_prompt = request.data.get("system_prompt")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return Response(
                 {"error": "system_prompt must be a string."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if error := _name_error(name):
-            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
         name = name.strip()
         if name:
             workspace.name = name
