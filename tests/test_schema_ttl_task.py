@@ -27,6 +27,7 @@ from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillRe
 from apps.workspaces.tasks import (
     _RETIRE_MAX_ATTEMPTS,
     _RETIRE_RETRY_BASE_SECONDS,
+    _rebuild_dependent_view_schemas,
     expire_inactive_schemas,
     teardown_schema,
 )
@@ -459,6 +460,36 @@ async def test_teardown_schema_rebuilds_dependent_views_when_surviving_active_sc
     # Data is intact (new schema ACTIVE) → views are rebuildable, NOT failed.
     assert vs_b.state == SchemaState.ACTIVE
     mock_rebuild.assert_awaited_once_with(workspace_id=str(ws_b.id))
+
+
+@pytest.mark.parametrize("retiring_state", [SchemaState.TEARDOWN, SchemaState.EXPIRED])
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_dependent_rebuild_skips_a_retiring_view_schema(tenant, user, retiring_state):
+    """C2: a rebuild turns the row ACTIVE, so rebuilding a view schema that is being
+    torn down, or already expired, would keep an idle workspace live for another TTL."""
+    extra = await Tenant.objects.acreate(
+        provider="commcare", external_id="retiring-extra", canonical_name="Retiring Extra"
+    )
+    retiring = await Workspace.objects.acreate(name="Retiring", created_by=user)
+    live = await Workspace.objects.acreate(name="Live", created_by=user)
+    for ws in (retiring, live):
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=extra)
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=retiring, schema_name="ws_retiring", state=retiring_state
+    )
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=live, schema_name="ws_live", state=SchemaState.ACTIVE
+    )
+
+    with patch(
+        "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+        new_callable=AsyncMock,
+    ) as mock_rebuild:
+        await _rebuild_dependent_view_schemas([tenant.id])
+
+    mock_rebuild.assert_awaited_once_with(workspace_id=str(live.id))
 
 
 # ---------------------------------------------------------------------------

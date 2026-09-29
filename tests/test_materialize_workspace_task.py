@@ -14,6 +14,7 @@ from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import CredentialResolutionError
 from apps.workspaces import tasks as workspaces_tasks
+from apps.workspaces.access import TENANT_ACCESS_LOST, WorkspaceAccess
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -24,6 +25,8 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.access_freshness import CREDENTIAL_EXPIRED
+from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
@@ -1399,6 +1402,113 @@ async def test_partially_covering_requester_is_refused_before_loading(
     # The covered tenant must not inherit the "connect that account" guidance.
     assert by_tenant[tenant.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_SKIPPED
     assert by_tenant[tenant.external_id]["error"].startswith("not attempted")
+    assert not any(tenant.external_id in line for line in result["guidance"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refused_load_advises_reconnect_for_an_unusable_sign_in(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """A4: a member who still belongs to the source but whose sign-in can't be
+    used must be told to reconnect, as the API 403 for the same state says, not
+    to connect an account they already have."""
+    other = await _add_second_tenant(workspace)
+    await TenantMembership.objects.acreate(user=user, tenant=other)
+
+    result, _ = await _materialize_as(
+        user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
+    )
+
+    assert result["status"] == "denied"
+    missing = {r["tenant"]: r for r in result["tenants"]}[other.external_id]
+    assert missing["error_code"] == ErrorCode.AUTH_CREDENTIAL_MISSING
+    assert "no live" not in missing["error"]
+    assert result["guidance"] == [
+        f"{other.external_id}: "
+        f"{workspaces_tasks._CREDENTIAL_GUIDANCE[ErrorCode.AUTH_CREDENTIAL_MISSING]}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("recovery", "code"),
+    [
+        (CoverageRecovery.CONNECT_SOURCE, ErrorCode.WORKSPACE_TENANT_UNREACHABLE),
+        (CoverageRecovery.ACCESS_REMOVED, ErrorCode.WORKSPACE_TENANT_UNREACHABLE),
+        (CoverageRecovery.RECONNECT, ErrorCode.AUTH_CREDENTIAL_MISSING),
+        (CoverageRecovery.CONNECT_TEAM, ErrorCode.AUTH_CREDENTIAL_MISSING),
+        (CoverageRecovery.LEGACY_TEAM_UNKNOWN, ErrorCode.AUTH_CREDENTIAL_MISSING),
+    ],
+)
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refused_load_codes_each_missing_tenant_by_its_recovery(
+    workspace, tenant, tenant_membership_obj, user, recovery, code
+):
+    other = await _add_second_tenant(workspace)
+    access = WorkspaceAccess(
+        denied_reason=TENANT_ACCESS_LOST,
+        missing_tenants=(
+            MissingTenant(
+                tenant_id=str(other.pk),
+                tenant_name=other.canonical_name,
+                provider=other.provider,
+                recovery=recovery,
+                team_slug="field-team",
+            ),
+        ),
+    )
+
+    with patch(
+        "apps.workspaces.tasks.aresolve_workspace_access_ex", AsyncMock(return_value=access)
+    ):
+        result, _ = await _materialize_as(
+            user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
+        )
+
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == code
+    assert result["error_code"] == code
+    assert other.external_id in by_tenant[other.external_id]["error"]
+    assert by_tenant[tenant.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_SKIPPED
+
+
+def test_every_coverage_recovery_has_a_refusal_code():
+    # A new recovery must pick its own guidance, not fall back to "connect the account".
+    assert set(workspaces_tasks._RECOVERY_ERROR_CODES) == set(CoverageRecovery)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refused_load_attributes_an_observed_expiry_to_the_missing_tenant_only(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """A4: when the recheck names an expired sign-in for one source, the covered
+    source must not be told to reconnect too."""
+    other = await _add_second_tenant(workspace)
+    access = WorkspaceAccess(
+        denied_reason=CREDENTIAL_EXPIRED,
+        missing_tenants=(
+            MissingTenant(
+                tenant_id=str(other.pk),
+                tenant_name=other.canonical_name,
+                provider=other.provider,
+                recovery=CoverageRecovery.RECONNECT,
+            ),
+        ),
+    )
+
+    with patch(
+        "apps.workspaces.tasks.aresolve_workspace_access_ex", AsyncMock(return_value=access)
+    ):
+        result, _ = await _materialize_as(
+            user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
+        )
+
+    assert result["error_code"] == ErrorCode.AUTH_TOKEN_EXPIRED
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert by_tenant[tenant.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_SKIPPED
     assert not any(tenant.external_id in line for line in result["guidance"])
 
 
