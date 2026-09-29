@@ -33,8 +33,10 @@ KEEP_INACTIVE_CUBE_SCHEMAS = 5
 VALIDATOR_CONCURRENCY = 2
 VALIDATOR_LOCK_CLASS = 0x53435656
 VALIDATOR_SLOT_WAIT_SECONDS = 300.0
-# A request thread (canvas commit) should fail over to the serving schema quickly.
-INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 20.0
+# A canvas commit builds on its request thread: this wait, VALIDATE_BUDGET_SECONDS
+# (70s) and the 30s warm-up must stay under the API proxy's 120s read timeout
+# (frontend/nginx.prod-kamal.conf), or the user gets a 504 for a commit that landed.
+INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 10.0
 VALIDATOR_SLOT_POLL_SECONDS = 1.0
 
 

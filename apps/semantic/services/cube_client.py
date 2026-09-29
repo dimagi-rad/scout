@@ -46,11 +46,11 @@ SCHEMA_REQUEST_ATTEMPTS = 3
 SCHEMA_RETRY_BASE_DELAY_SECONDS = 2.0
 # The validator abandons a compile at 60s (CUBE_VALIDATOR_COMPILE_TIMEOUT_MS) and
 # answers 503; reading past that lets its answer arrive instead of a ReadTimeout.
-VALIDATE_TIMEOUT = httpx.Timeout(75.0, connect=5.0)
+VALIDATE_TIMEOUT = httpx.Timeout(70.0, connect=5.0)
 # One wall-clock budget across attempts: fast failures (a restarting validator,
 # a dropped connection) get their retries, but a compile that is simply too slow
-# cannot triple a canvas commit's wait.
-VALIDATE_BUDGET_SECONDS = 90.0
+# cannot triple a canvas commit's wait. See INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS.
+VALIDATE_BUDGET_SECONDS = 70.0
 # /v1/meta only starts the compile: Cube finishes it after the client disconnects
 # (large multi-source models outlast 30s, SCOUT-DJANGO-3N), so neither a longer
 # wait nor a retry buys anything, and the warm-up can run on a request thread.
