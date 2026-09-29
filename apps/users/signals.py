@@ -197,8 +197,10 @@ def resolve_pending_invites_on_login(user):
     ).select_related("workspace")
     for invite in invites:
         if invite.is_expired:
-            invite.status = WorkspaceInviteStatus.EXPIRED
-            invite.save(update_fields=["status", "updated_at"])
+            # Conditional, like the awaiting-access move below: keep a revoke's audit trail.
+            WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
+                status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
+            )
             continue
 
         if accept_invite_if_covered(invite, user) is not None:
