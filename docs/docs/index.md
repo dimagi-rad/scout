@@ -14,7 +14,7 @@ Scout is an AI-powered data agent platform that lets teams query their data usin
 
 **Artifacts** — Responses can include rich artifacts: Recharts-powered charts, semantic stories, dashboards, and interactive visualizations.
 
-**Sharing** — Share conversations and recipe runs through public links, and share recipes with the rest of your workspace.
+**Sharing** — Share conversations and recipe runs through public links. Recipes and their runs are visible to everyone in the workspace.
 
 **Recipes** — Save common workflows as reusable recipes with variables, so anyone on your team can re-run them without writing prompts from scratch.
 
