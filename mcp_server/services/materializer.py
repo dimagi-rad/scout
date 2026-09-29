@@ -319,7 +319,11 @@ def run_pipeline(
             current_source = source.name
             load_message = f"Loading {source.name} from {pipeline.provider} API..."
             report(load_message)
-            source_is_resumable = is_resumable_provider and source.resumable
+            source_is_resumable = (
+                is_resumable_provider
+                and source.resumable
+                and source.name in _RESUMABLE_CONNECT_SOURCES
+            )
             start_cursor = prior_cursors.get(source.name) if source_is_resumable else None
             if source_is_resumable:
                 # Surface ``in_progress`` immediately so a crash mid-resume leaves
@@ -812,6 +816,7 @@ def _load_and_commit_source(
             conn,
             provider=provider,
             on_page=on_page,
+            resumable=resumable,
             start_cursor=start_cursor,
             cursor_callback=cursor_callback,
         )
@@ -842,6 +847,7 @@ def _load_source(
     conn: Any,
     provider: str = "commcare",
     on_page: OnPage | None = None,
+    resumable: bool = False,
     start_cursor: int | None = None,
     cursor_callback: CursorCallback | None = None,
 ) -> int:
@@ -853,6 +859,7 @@ def _load_source(
             schema_name,
             conn,
             on_page,
+            resumable=resumable,
             start_cursor=start_cursor,
             cursor_callback=cursor_callback,
         )
@@ -870,12 +877,12 @@ def _load_source(
     raise ValueError(f"Unknown source '{source_name}'. Known sources: cases, forms")
 
 
-# Connect sources that the materializer should drive in resumable mode.
-# ``users`` is intentionally excluded — its rows are mutable, so a partial
-# resume could miss in-place updates behind the cursor (issue #187).
-_RESUMABLE_CONNECT_SOURCES = frozenset(
-    {"visits", "completed_works", "payments", "invoices", "assessments", "completed_modules"}
-)
+# Connect sources whose writer may resume from a prior run's cursor. The cursor
+# is saved only after a page commits, in another database, so a resume can
+# replay the last committed page: membership requires an upsert on a natural
+# key. The other Connect tables have only a surrogate identity key and would
+# append the replay, so they always reload in full whatever the pipeline YAML says.
+_RESUMABLE_CONNECT_SOURCES = frozenset({"visits"})
 
 
 def _load_connect_source(
@@ -885,6 +892,7 @@ def _load_connect_source(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    resumable: bool = False,
     start_cursor: int | None = None,
     cursor_callback: CursorCallback | None = None,
 ) -> int:
@@ -904,7 +912,7 @@ def _load_connect_source(
 
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(opportunity_id=opp_id, credential=credential)
-    if source_name in _RESUMABLE_CONNECT_SOURCES:
+    if resumable:
         pages = loader.load_pages(start_last_id=start_cursor)
         return writer_fn(
             pages,
@@ -1450,8 +1458,17 @@ _CONNECT_VISITS_INSERT = psql.SQL(
          justification, date_created, completed_work_id, deliver_unit_id, images)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (visit_id) DO UPDATE SET
-        status=EXCLUDED.status, form_json=EXCLUDED.form_json,
-        review_status=EXCLUDED.review_status, images=EXCLUDED.images
+        opportunity_id=EXCLUDED.opportunity_id, username=EXCLUDED.username,
+        deliver_unit=EXCLUDED.deliver_unit, entity_id=EXCLUDED.entity_id,
+        entity_name=EXCLUDED.entity_name, visit_date=EXCLUDED.visit_date,
+        status=EXCLUDED.status, reason=EXCLUDED.reason, location=EXCLUDED.location,
+        flagged=EXCLUDED.flagged, flag_reason=EXCLUDED.flag_reason,
+        form_json=EXCLUDED.form_json, completed_work=EXCLUDED.completed_work,
+        status_modified_date=EXCLUDED.status_modified_date,
+        review_status=EXCLUDED.review_status, review_created_on=EXCLUDED.review_created_on,
+        justification=EXCLUDED.justification, date_created=EXCLUDED.date_created,
+        completed_work_id=EXCLUDED.completed_work_id, deliver_unit_id=EXCLUDED.deliver_unit_id,
+        images=EXCLUDED.images
     """
 )
 
@@ -1580,8 +1597,9 @@ def _write_connect_visits(
     already be positioned past ``start_cursor`` (the caller passes
     ``start_last_id`` to the loader).
 
-    Resumable writers commit per page (rather than once per source) so a
-    mid-source crash leaves a partial table the next run can continue.
+    With a ``cursor_callback`` the writer commits per page (rather than once
+    per source) so a mid-source crash leaves a partial table the next run can
+    continue. Without one it leaves the single commit to the caller.
 
     Column types mirror the Django model + DRF serializer output:
     - ``flag_reason`` is a JSONField, serialized as a dict → JSONB
@@ -1626,7 +1644,9 @@ def _write_connect_visits(
         """
         ).format(schema=sid)
     )
-    conn.commit()
+    resuming_by_page = cursor_callback is not None
+    if resuming_by_page:
+        conn.commit()
 
     ins_sql = _CONNECT_VISITS_INSERT.format(schema=sid)
     total = 0
@@ -1665,10 +1685,11 @@ def _write_connect_visits(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        max_id = _max_id(page, "visit_id")
-        conn.commit()
-        if cursor_callback is not None and max_id is not None:
-            cursor_callback(max_id, total)
+        if resuming_by_page:
+            conn.commit()
+            max_id = _max_id(page, "visit_id")
+            if max_id is not None:
+                cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1754,14 +1775,8 @@ def _write_connect_completed_works(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
-    start_cursor: int | None = None,
-    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the completed_works table and bulk-insert all pages. Returns total row count.
-
-    Resumable: when ``start_cursor`` is set, skip DROP and use
-    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
-    ``cursor_callback`` with the page's max ``id``.
 
     Counts become INTEGER, accrued amounts become NUMERIC money, all
     date/datetime fields become TIMESTAMPTZ, opportunity_id becomes BIGINT.
@@ -1769,12 +1784,11 @@ def _write_connect_completed_works(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    if start_cursor is None:
-        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_works CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_works CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE IF NOT EXISTS {schema}.raw_completed_works (
+        CREATE TABLE {schema}.raw_completed_works (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             opportunity_id BIGINT,
@@ -1797,8 +1811,6 @@ def _write_connect_completed_works(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_COMPLETED_WORKS_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -1831,10 +1843,6 @@ def _write_connect_completed_works(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        max_id = _max_id(page, "id")
-        conn.commit()
-        if cursor_callback is not None and max_id is not None:
-            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1846,14 +1854,8 @@ def _write_connect_payments(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
-    start_cursor: int | None = None,
-    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the payments table and bulk-insert all pages. Returns total row count.
-
-    Resumable: when ``start_cursor`` is set, skip DROP and use
-    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
-    ``cursor_callback`` with the page's max ``id``.
 
     ``amount``/``amount_usd`` become NUMERIC(14,2), ``confirmed`` becomes
     BOOLEAN, all date/datetime fields become TIMESTAMPTZ, ``opportunity_id``
@@ -1862,12 +1864,11 @@ def _write_connect_payments(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    if start_cursor is None:
-        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_payments CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_payments CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE IF NOT EXISTS {schema}.raw_payments (
+        CREATE TABLE {schema}.raw_payments (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             opportunity_id BIGINT,
@@ -1886,8 +1887,6 @@ def _write_connect_payments(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_PAYMENTS_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -1916,10 +1915,6 @@ def _write_connect_payments(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        max_id = _max_id(page, "id")
-        conn.commit()
-        if cursor_callback is not None and max_id is not None:
-            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1931,14 +1926,8 @@ def _write_connect_invoices(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
-    start_cursor: int | None = None,
-    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the invoices table and bulk-insert all pages. Returns total row count.
-
-    Resumable: when ``start_cursor`` is set, skip DROP and use
-    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
-    ``cursor_callback`` with the page's max ``id``.
 
     Money fields are NUMERIC(14,2), ``date`` is DATE, ``opportunity_id`` is
     BIGINT. ``service_delivery`` is a BooleanField (not a text label as the
@@ -1948,12 +1937,11 @@ def _write_connect_invoices(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    if start_cursor is None:
-        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_invoices CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_invoices CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE IF NOT EXISTS {schema}.raw_invoices (
+        CREATE TABLE {schema}.raw_invoices (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             opportunity_id BIGINT,
             amount NUMERIC(14, 2),
@@ -1966,8 +1954,6 @@ def _write_connect_invoices(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_INVOICES_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -1990,10 +1976,6 @@ def _write_connect_invoices(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        max_id = _max_id(page, "id")
-        conn.commit()
-        if cursor_callback is not None and max_id is not None:
-            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -2005,14 +1987,8 @@ def _write_connect_assessments(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
-    start_cursor: int | None = None,
-    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the assessments table and bulk-insert all pages. Returns total row count.
-
-    Resumable: when ``start_cursor`` is set, skip DROP and use
-    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
-    ``cursor_callback`` with the page's max ``id``.
 
     Scores become INTEGER, ``passed`` becomes BOOLEAN, ``date`` becomes
     TIMESTAMPTZ, ``opportunity_id`` becomes BIGINT.
@@ -2020,12 +1996,11 @@ def _write_connect_assessments(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    if start_cursor is None:
-        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_assessments CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_assessments CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE IF NOT EXISTS {schema}.raw_assessments (
+        CREATE TABLE {schema}.raw_assessments (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             app BIGINT,
@@ -2038,8 +2013,6 @@ def _write_connect_assessments(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_ASSESSMENTS_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -2062,10 +2035,6 @@ def _write_connect_assessments(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        max_id = _max_id(page, "id")
-        conn.commit()
-        if cursor_callback is not None and max_id is not None:
-            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -2077,14 +2046,8 @@ def _write_connect_completed_modules(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
-    start_cursor: int | None = None,
-    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the completed_modules table and bulk-insert all pages. Returns total row count.
-
-    Resumable: when ``start_cursor`` is set, skip DROP and use
-    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
-    ``cursor_callback`` with the page's max ``id``.
 
     ``duration`` becomes INTEGER (seconds), ``date`` becomes TIMESTAMPTZ,
     ``opportunity_id`` becomes BIGINT.
@@ -2092,12 +2055,11 @@ def _write_connect_completed_modules(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    if start_cursor is None:
-        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_modules CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_modules CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE IF NOT EXISTS {schema}.raw_completed_modules (
+        CREATE TABLE {schema}.raw_completed_modules (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             module BIGINT,
@@ -2108,8 +2070,6 @@ def _write_connect_completed_modules(
         """
         ).format(schema=sid)
     )
-    conn.commit()
-
     ins_sql = _CONNECT_COMPLETED_MODULES_INSERT.format(schema=sid)
     total = 0
     rows_total: int | None = None
@@ -2130,10 +2090,6 @@ def _write_connect_completed_modules(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
-        max_id = _max_id(page, "id")
-        conn.commit()
-        if cursor_callback is not None and max_id is not None:
-            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 

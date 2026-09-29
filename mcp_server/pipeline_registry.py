@@ -18,10 +18,9 @@ class SourceConfig:
     name: str
     description: str = ""
     table_name: str = ""  # Explicit override; empty = use default
-    # Whether this source supports page-level resume on retry (issue #187).
-    # Append-mostly Connect resources (visits, completed_works, etc.) keep the
-    # default True. Mutable rows like Connect ``users`` set this to False so
-    # the writer always does a full DROP/CREATE/INSERT.
+    # Whether this source may resume on retry (issue #187). Setting False forces
+    # a full DROP/CREATE/INSERT; True only takes effect for writers listed in the
+    # materializer's _RESUMABLE_CONNECT_SOURCES, which upsert a replayed page.
     resumable: bool = True
     # Display unit for progress counts (issue #221). Most sources page through
     # the rows they write ("rows"); OCS messages advance one session-detail

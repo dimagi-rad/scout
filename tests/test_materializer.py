@@ -1098,7 +1098,7 @@ class TestResumableMaterialization:
         prior.state = "partial"  # must match RunState.PARTIAL set in _setup_run_mock
         prior.result = {
             "sources": {
-                "completed_works": {
+                "visits": {
                     "state": "in_progress",
                     "rows": 100,
                     "cursor_state": {"last_id": 1500, "last_committed_at": "2026-05-27T00:00:00Z"},
@@ -1106,6 +1106,39 @@ class TestResumableMaterialization:
             }
         }
 
+        visits_loader_cls = MagicMock()
+        visits_loader_cls.return_value.load_pages.return_value = iter([])
+
+        _, invocations = self._run_connect_pipeline(
+            sources=[SourceConfig(name="visits", resumable=True)],
+            loader_mocks={"visits": visits_loader_cls},
+            prior_run=prior,
+        )
+
+        # load_pages must have been called with start_last_id=1500.
+        call = invocations["visits"].return_value.load_pages.call_args
+        assert call.kwargs.get("start_last_id") == 1500, (
+            f"Expected start_last_id=1500, got {call.kwargs}"
+        )
+
+    def test_identity_pk_source_never_resumes_even_when_flagged_resumable(self):
+        """completed_works has no natural key to upsert on, so a replayed page
+        would append duplicates. It must reload in full even if its pipeline
+        entry forgets ``resumable: false`` (the SourceConfig default is True).
+        """
+        from mcp_server.pipeline_registry import SourceConfig
+
+        prior = MagicMock()
+        prior.state = "failed"
+        prior.result = {
+            "sources": {
+                "completed_works": {
+                    "state": "in_progress",
+                    "rows": 100,
+                    "cursor_state": {"last_id": 1500, "last_committed_at": None},
+                }
+            }
+        }
         cw_loader_cls = MagicMock()
         cw_loader_cls.return_value.load_pages.return_value = iter([])
 
@@ -1115,11 +1148,8 @@ class TestResumableMaterialization:
             prior_run=prior,
         )
 
-        # load_pages must have been called with start_last_id=1500.
         call = invocations["completed_works"].return_value.load_pages.call_args
-        assert call.kwargs.get("start_last_id") == 1500, (
-            f"Expected start_last_id=1500, got {call.kwargs}"
-        )
+        assert "start_last_id" not in (call.kwargs or {})
 
     def test_clean_run_ignores_cursor_state_for_non_resumable_source(self):
         """Non-resumable sources (e.g. users) MUST do a clean full reload
@@ -1169,14 +1199,14 @@ class TestResumableMaterialization:
             pipeline = MagicMock(name="connect_sync")
             pipeline.name = "connect_sync"
             source_results = {}
-            cb = _make_cursor_callback(run, pipeline, source_results, "completed_works")
+            cb = _make_cursor_callback(run, pipeline, source_results, "visits")
             cb(100, 50)
-            assert source_results["completed_works"]["state"] == "in_progress"
-            assert source_results["completed_works"]["rows"] == 50
-            assert source_results["completed_works"]["cursor_state"]["last_id"] == 100
+            assert source_results["visits"]["state"] == "in_progress"
+            assert source_results["visits"]["rows"] == 50
+            assert source_results["visits"]["cursor_state"]["last_id"] == 100
             cb(250, 100)
-            assert source_results["completed_works"]["cursor_state"]["last_id"] == 250
-            assert source_results["completed_works"]["rows"] == 100
+            assert source_results["visits"]["cursor_state"]["last_id"] == 250
+            assert source_results["visits"]["rows"] == 100
         # The _persist_source_results CAS update was called once per page.
         # We don't pin the exact call count to the mock here because the
         # callback re-imports MaterializationRun via the module under test,
@@ -1184,12 +1214,12 @@ class TestResumableMaterialization:
 
     def test_resume_does_not_drop_table_when_start_cursor_present(self):
         """The resumable writer skips DROP and uses CREATE IF NOT EXISTS."""
-        from mcp_server.services.materializer import _write_connect_completed_works
+        from mcp_server.services.materializer import _write_connect_visits
 
         conn = MagicMock()
         cur = MagicMock()
         conn.cursor.return_value = cur
-        _write_connect_completed_works(
+        _write_connect_visits(
             pages=iter([]),
             schema_name="t_x",
             conn=conn,
@@ -1204,16 +1234,16 @@ class TestResumableMaterialization:
         """First-ever run (no PARTIAL/FAILED history) behaves like pre-#187."""
         from mcp_server.pipeline_registry import SourceConfig
 
-        cw_loader_cls = MagicMock()
-        cw_loader_cls.return_value.load_pages.return_value = iter([])
+        visits_loader_cls = MagicMock()
+        visits_loader_cls.return_value.load_pages.return_value = iter([])
 
         _, invocations = self._run_connect_pipeline(
-            sources=[SourceConfig(name="completed_works", resumable=True)],
-            loader_mocks={"completed_works": cw_loader_cls},
+            sources=[SourceConfig(name="visits", resumable=True)],
+            loader_mocks={"visits": visits_loader_cls},
             prior_run=None,
         )
 
-        call = invocations["completed_works"].return_value.load_pages.call_args
+        call = invocations["visits"].return_value.load_pages.call_args
         # start_last_id is None on a clean run.
         assert call.kwargs.get("start_last_id") is None
 
@@ -1239,7 +1269,7 @@ class TestResumableMaterialization:
         prior_completed.state = "completed"  # matches RunState.COMPLETED mock value
         prior_completed.result = {
             "sources": {
-                "completed_works": {
+                "visits": {
                     "state": "completed",
                     "rows": 5000,
                     "cursor_state": None,
@@ -1247,16 +1277,16 @@ class TestResumableMaterialization:
             }
         }
 
-        cw_loader_cls = MagicMock()
-        cw_loader_cls.return_value.load_pages.return_value = iter([])
+        visits_loader_cls = MagicMock()
+        visits_loader_cls.return_value.load_pages.return_value = iter([])
 
         _, invocations = self._run_connect_pipeline(
-            sources=[SourceConfig(name="completed_works", resumable=True)],
-            loader_mocks={"completed_works": cw_loader_cls},
+            sources=[SourceConfig(name="visits", resumable=True)],
+            loader_mocks={"visits": visits_loader_cls},
             prior_run=prior_completed,
         )
 
-        call = invocations["completed_works"].return_value.load_pages.call_args
+        call = invocations["visits"].return_value.load_pages.call_args
         assert call.kwargs.get("start_last_id") is None, (
             "A COMPLETED prior run must cause a clean full reload, "
             f"not a resume from a stale cursor; got start_last_id={call.kwargs.get('start_last_id')}"
@@ -1269,7 +1299,7 @@ class TestResumableMaterialization:
         from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
         from mcp_server.services.materializer import run_pipeline
 
-        pipeline_cfg_sources = [SourceConfig(name="completed_works", resumable=True)]
+        pipeline_cfg_sources = [SourceConfig(name="visits", resumable=True)]
 
         pipeline = PipelineConfig(
             name="connect_sync",
@@ -1292,9 +1322,9 @@ class TestResumableMaterialization:
             patch("mcp_server.services.materializer.TenantMetadata"),
             patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
-            patch("mcp_server.services.materializer.ConnectCompletedWorkLoader") as mock_cw,
+            patch("mcp_server.services.materializer.ConnectVisitLoader") as mock_visits,
             patch(
-                "mcp_server.services.materializer._write_connect_completed_works",
+                "mcp_server.services.materializer._write_connect_visits",
                 side_effect=fake_writer_side_effect,
             ),
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -1303,7 +1333,7 @@ class TestResumableMaterialization:
             mock_mgr.return_value.provision.return_value = schema
             run = self._setup_run_mock(mock_run_cls)
             mock_meta.return_value.load.return_value = {}
-            mock_cw.return_value.load_pages.return_value = iter([])
+            mock_visits.return_value.load_pages.return_value = iter([])
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -1314,8 +1344,8 @@ class TestResumableMaterialization:
         # The final saved result must show the source failed with cursor_state
         # preserved so the next run resumes from id=777.
         sources = run.result["sources"]
-        assert sources["completed_works"]["state"] == "failed"
-        assert sources["completed_works"]["cursor_state"]["last_id"] == 777
+        assert sources["visits"]["state"] == "failed"
+        assert sources["visits"]["cursor_state"]["last_id"] == 777
         # And because the cursor advanced (some pages committed), the run is
         # PARTIAL — not FAILED — so the next run knows it has resume work.
         assert run.state == "partial"
@@ -1646,7 +1676,15 @@ class TestConnectPageReplayIdempotency:
             )
 
             # Replay with an updated status (DO UPDATE should apply the change).
-            updated_page = [{**page[0], "status": "approved"}]
+            updated_page = [
+                {
+                    **page[0],
+                    "status": "approved",
+                    "flagged": True,
+                    "justification": "reviewed",
+                    "status_modified_date": "2026-01-02T00:00:00Z",
+                }
+            ]
             _write_connect_visits(
                 pages=iter([(updated_page, 1)]),
                 schema_name=test_schema,
@@ -1655,13 +1693,19 @@ class TestConnectPageReplayIdempotency:
             )
 
             with conn.cursor() as cur:
-                cur.execute(f"SELECT COUNT(*), MAX(status) FROM {test_schema}.raw_visits")
-                count, status = cur.fetchone()
+                cur.execute(
+                    f"SELECT COUNT(*), MAX(status), BOOL_AND(flagged), MAX(justification), "
+                    f"MAX(status_modified_date) IS NOT NULL FROM {test_schema}.raw_visits"
+                )
+                count, status, flagged, justification, has_modified = cur.fetchone()
 
             assert count == 1, f"Expected 1 row after visit page replay, got {count}"
             assert status == "approved", (
                 f"Expected status='approved' after DO UPDATE, got '{status}'"
             )
+            # A replay must not leave the row half-updated: the fields that change
+            # alongside status come from the same fetch.
+            assert (flagged, justification, has_modified) == (True, "reviewed", True)
         finally:
             conn.rollback()
             conn.autocommit = True
