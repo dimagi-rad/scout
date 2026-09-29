@@ -6,7 +6,8 @@ from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from asgiref.sync import async_to_sync
 from django.conf import settings
-from django.contrib.auth import get_user_model
+from django.contrib.auth import SESSION_KEY, get_user_model
+from django.contrib.sessions.models import Session
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
@@ -83,6 +84,24 @@ def _canonical_provably_owns_email(canonical, email: str) -> bool:
         if account_email.strip().lower() == email.strip().lower():
             return True
     return False
+
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def end_sessions_on_deactivation(sender, instance, created, **kwargs):
+    """Drop all DB sessions of a user once they are saved as inactive (#385).
+
+    Sessions are keyed by opaque ids, so we must decode each live one to find the owner.
+    QuerySet.update() bypasses signals; deactivate via save().
+    """
+    if created or instance.is_active:
+        return
+    user_pk = str(instance.pk)
+    stale = [
+        s.pk
+        for s in Session.objects.filter(expire_date__gt=timezone.now())
+        if s.get_decoded().get(SESSION_KEY) == user_pk
+    ]
+    Session.objects.filter(pk__in=stale).delete()
 
 
 @receiver(post_save, sender="users.TenantMembership")
