@@ -221,6 +221,9 @@ def pytest_runtest_teardown(item, nextitem):
     guard.enabled = True
 
 
+# trylast: pytest's own pytest_sessionfinish tears down fixtures a run left set up
+# (pytest.exit, Ctrl-C); anything they send must land before this sweep.
+@pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
     leftovers = guard.drain()
     if leftovers:
