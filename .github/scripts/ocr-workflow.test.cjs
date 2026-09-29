@@ -186,16 +186,21 @@ function skipped(h) {
   return h;
 }
 
-test('zero OCR-reviewable files pass the gate and send Claude over the whole diff', async () => {
-  for (const make of [() => skipped(harness()), () => skipped(incremental(harness({ CLAUDE_HEAD: PRIOR })))]) {
+test('zero OCR-reviewable files pass the gate and Claude reviews its usual range', async () => {
+  for (const [make, from, mode] of [
+    [() => skipped(harness()), MERGE, 'full'],
+    [() => skipped(incremental(harness({ CLAUDE_HEAD: '' }))), MERGE, 'full'],
+    [() => skipped(incremental(harness({ CLAUDE_HEAD: PRIOR }))), PRIOR, 'incremental'],
+  ]) {
     const h = make();
     await finishReview(h);
     assert.equal(h.outputs.passed, 'true');
     assert.deepEqual(h.failures, []);
-    assert.equal(h.outputs.claude_mode, 'full');
-    assert.equal(h.outputs.claude_from, MERGE);
-    assert.match(h.outputs.claude_scope, /only review/);
-    assert.match(h.summary, /OCR gate: passed[\s\S]*no reviewable code files[\s\S]*whole PR diff/);
+    assert.equal(h.outputs.claude_mode, mode);
+    assert.equal(h.outputs.claude_from, from);
+    const ocrFrom = h.env.RANGE_MODE === 'checkpoint' ? PRIOR : MERGE;
+    assert.ok(h.outputs.claude_scope.includes(`range ${ocrFrom}..${HEAD}, so no OCR review covers those changes`));
+    assert.match(h.summary, /OCR gate: passed[\s\S]*no reviewable code files[\s\S]*cover every changed file/);
     assert.equal(readState(h.comments).passed, true);
   }
   const h = harness();
@@ -208,6 +213,7 @@ test('zero OCR-reviewable files block fork PRs, which get no Claude review', asy
   await finishReview(h);
   assert.equal(h.outputs.passed, 'false');
   assert.equal(h.failures.length, 1);
+  assert.equal(h.outputs.claude_scope, '');
   assert.match(h.summary, /OCR gate: blocked[\s\S]*disabled for fork PRs[\s\S]*maintainer review/);
   assert.equal(readState(h.comments).passed, false);
 });

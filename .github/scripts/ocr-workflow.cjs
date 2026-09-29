@@ -190,8 +190,8 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
     from = '';
     decision = { passed: false, reason: 'OCR output could not be validated. See the run logs and review artifacts.' };
   }
-  // With no OCR-reviewable files, Claude is the only reviewer. Fork PRs get no
-  // Claude follow-up, so passing there would report a review nobody performed.
+  // With no OCR-reviewable files in the range, only Claude reviews it. Fork PRs get
+  // no Claude follow-up, so passing there would report a review nobody performed.
   const claudeOnly = decision.passed && decision.skipped === true;
   if (claudeOnly && env.SAME_REPO !== 'true') {
     decision = { passed: false, reason: 'OCR selected no reviewable code files, and the Claude review that would cover them is disabled for fork PRs.' };
@@ -204,17 +204,17 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
     version: 1, head: env.REVIEW_HEAD, base: env.REVIEW_BASE, policy: env.POLICY,
     run: String(context.runId), passed: decision.passed, claudeHead: null,
   };
-  const claudeIncremental = decision.passed && !claudeOnly && env.RANGE_MODE === 'checkpoint'
+  const claudeIncremental = decision.passed && env.RANGE_MODE === 'checkpoint'
     && env.CLAUDE_HEAD === from;
   core.setOutput('claude_from', claudeIncremental ? from : mergeBase);
   core.setOutput('claude_mode', claudeIncremental ? 'incremental' : 'full');
-  core.setOutput('claude_scope', claudeOnly
-    ? 'OCR selected no reviewable code files (documentation or other non-code changes only), so this Claude review is the only review of the PR. Review every changed file, including documentation accuracy against the code it describes.'
+  core.setOutput('claude_scope', claudeOnly && decision.passed
+    ? `OCR selected no reviewable code files in its range ${from}..${env.REVIEW_HEAD}, so no OCR review covers those changes. Review every changed file in your range, including documentation accuracy against the code it describes.`
     : '');
   let followup;
   if (decision.passed) {
     followup = env.SAME_REPO === 'true'
-      ? (claudeOnly ? 'Claude will review the whole PR diff next.' : 'Claude review will run next.')
+      ? (claudeOnly ? 'OCR reviewed no files in this range; Claude review will run next and cover every changed file.' : 'Claude review will run next.')
       : 'Claude follow-up is disabled for fork PRs.';
   } else if (claudeOnly) {
     followup = 'This PR needs a maintainer review instead.';
