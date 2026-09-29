@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from django.db import connections
 
 from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticDataset, SemanticField, SemanticModel
@@ -84,7 +85,7 @@ def cube_http(monkeypatch, settings):
     """Route CubeClient's real HTTP code through a scripted transport."""
     settings.CUBE_API_URL = "http://cube.test"
     settings.CUBE_VALIDATOR_URL = "http://validator.test"
-    settings.CUBEJS_API_SECRET = "secret"
+    settings.CUBEJS_API_SECRET = "s" * 32
     monkeypatch.setattr(cube_client, "SCHEMA_RETRY_BASE_DELAY_SECONDS", 0, raising=False)
     monkeypatch.setattr(
         cube_schema,
@@ -173,3 +174,65 @@ def test_failed_cache_warmup_logs_one_warning_without_a_traceback(
     assert [record.levelno for record in records] == [logging.WARNING]
     assert records[0].exc_info is None
     assert str(workspace.id) in records[0].getMessage()
+
+
+@pytest.fixture
+def other_connection():
+    other = connections.create_connection("default")
+    yield other
+    other.close()
+
+
+def _hold_validator_slots(conn, slots):
+    with conn.cursor() as cursor:
+        for slot in slots:
+            cursor.execute(
+                "SELECT pg_advisory_lock(%s, %s)", [cube_schema.VALIDATOR_LOCK_CLASS, slot]
+            )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_validation_waits_for_a_free_validator_slot(
+    workspace, model, cube_http, other_connection, monkeypatch
+):
+    monkeypatch.setattr(cube_schema, "VALIDATOR_SLOT_WAIT_SECONDS", 0)
+    _hold_validator_slots(other_connection, range(cube_schema.VALIDATOR_CONCURRENCY))
+
+    with pytest.raises(CubeSchemaBuildError) as raised:
+        build_and_promote_cube_schema(workspace, model=model)
+
+    assert isinstance(raised.value, ExpectedStateError)
+    assert cube_http.calls["validate"] == 0
+
+    other_connection.close()
+    build_and_promote_cube_schema(workspace, model=model)
+    assert cube_http.calls["validate"] == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_validation_uses_a_free_slot_and_releases_it(workspace, model, cube_http, other_connection):
+    _hold_validator_slots(other_connection, range(cube_schema.VALIDATOR_CONCURRENCY - 1))
+
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert cube_http.calls["validate"] == 1
+    with other_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_try_advisory_lock(%s, %s)",
+            [cube_schema.VALIDATOR_LOCK_CLASS, cube_schema.VALIDATOR_CONCURRENCY - 1],
+        )
+        assert cursor.fetchone()[0] is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_failed_validation_releases_its_slot(workspace, model, cube_http, other_connection):
+    cube_http.handlers["validate"] = _read_timeout
+    with pytest.raises(CubeSchemaBuildError):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    with other_connection.cursor() as cursor:
+        for slot in range(cube_schema.VALIDATOR_CONCURRENCY):
+            cursor.execute(
+                "SELECT pg_try_advisory_lock(%s, %s)", [cube_schema.VALIDATOR_LOCK_CLASS, slot]
+            )
+            assert cursor.fetchone()[0] is True

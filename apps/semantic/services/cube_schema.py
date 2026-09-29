@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
+from contextlib import contextmanager
 from typing import Any
 
 from asgiref.sync import async_to_sync
 from django.conf import settings
-from django.db import close_old_connections, transaction
+from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from apps.common.errors import ExpectedStateError
@@ -24,6 +26,15 @@ logger = logging.getLogger(__name__)
 # are pruned at promote time so rebuilds don't accumulate rows forever.
 KEEP_INACTIVE_CUBE_SCHEMAS = 5
 
+# The validator compiles on a single worker thread and, when a request passes its
+# 60s timeout, restarts that worker and fails everything pending. On 2026-09-29
+# ~20 workspace reloads validated at once, interleaved there, and all timed out
+# (SCOUT-DJANGO-3Q/3R/3V). Session advisory locks cap it across worker processes.
+VALIDATOR_CONCURRENCY = 2
+VALIDATOR_LOCK_CLASS = 0x53435656
+VALIDATOR_SLOT_WAIT_SECONDS = 300.0
+VALIDATOR_SLOT_POLL_SECONDS = 1.0
+
 
 class CubeSchemaBuildError(RuntimeError):
     """Raised when generated Cube schema content cannot be promoted."""
@@ -35,6 +46,38 @@ class CubeValidatorUnavailableError(CubeSchemaBuildError, ExpectedStateError):
     Expected for the reasons on ``CubeServiceUnavailable``; the failure is
     recorded on ``model.metadata["last_build"]`` for the resume task to disclose.
     """
+
+
+@contextmanager
+def _validator_slot():
+    """Hold one of ``VALIDATOR_CONCURRENCY`` slots shared by every worker process."""
+    deadline = time.monotonic() + VALIDATOR_SLOT_WAIT_SECONDS
+    while (slot := _try_acquire_validator_slot()) is None:
+        if time.monotonic() >= deadline:
+            raise CubeValidatorUnavailableError(
+                "Cube schema validation could not start: every validator slot stayed busy "
+                f"for {VALIDATOR_SLOT_WAIT_SECONDS:.0f}s."
+            )
+        time.sleep(VALIDATOR_SLOT_POLL_SECONDS)
+    try:
+        yield
+    finally:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [VALIDATOR_LOCK_CLASS, slot])
+        except Exception:
+            logger.exception("Failed to release Cube validator slot %s", slot)
+            # A session lock outlives the transaction; only closing frees it.
+            connection.close()
+
+
+def _try_acquire_validator_slot() -> int | None:
+    with connection.cursor() as cursor:
+        for slot in range(VALIDATOR_CONCURRENCY):
+            cursor.execute("SELECT pg_try_advisory_lock(%s, %s)", [VALIDATOR_LOCK_CLASS, slot])
+            if cursor.fetchone()[0]:
+                return slot
+    return None
 
 
 def get_active_cube_schema(workspace, *, model: SemanticModel) -> CubeSchema:
@@ -168,7 +211,8 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
     try:
-        validation = async_to_sync(CubeClient().validate_schema)(content)
+        with _validator_slot():
+            validation = async_to_sync(CubeClient().validate_schema)(content)
     except CubeServiceUnavailable as exc:
         raise CubeValidatorUnavailableError(str(exc)) from exc
     validation_diagnostics = _diagnostics_from_validation(validation)
