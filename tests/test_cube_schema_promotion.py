@@ -181,6 +181,9 @@ def test_failed_cache_warmup_logs_one_warning_without_a_traceback(
 def other_connection():
     other = connections.create_connection("default")
     yield other
+    # Postgres drops session locks only once the backend exits, after close() returns.
+    with other.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_unlock_all()")
     other.close()
 
 
@@ -331,7 +334,7 @@ def test_failed_release_closes_the_session_only_outside_a_transaction(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_schema_generation_does_not_hold_a_validator_slot(
+def test_explicit_model_build_generates_without_holding_a_validator_slot(
     workspace, model, cube_http, other_connection, monkeypatch
 ):
     real_generate = cube_schema.generate_cube_schema
