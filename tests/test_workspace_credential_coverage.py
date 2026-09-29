@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import timedelta
 from io import StringIO
+from unittest import mock
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync, sync_to_async
+from cryptography.fernet import Fernet
 from django.core.management import CommandError, call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
-from apps.users.adapters import encrypt_credential
+from apps.users.adapters import decrypt_credential, encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.credential_resolver import (
     CredentialResolutionError,
@@ -658,6 +661,89 @@ def test_ocs_api_key_memberships_on_one_connection_must_have_one_team(user):
     assert {gap.code for gap in report.gaps} == {"ocs_api_key_team_ambiguous"}
     assert all(gap.membership_id for gap in report.gaps)
     assert str(membership.id) in {gap.membership_id for gap in report.gaps}
+
+
+def _shared_api_connection(user, workspace, *, tenants, key="usable-key"):
+    first = _tenant(workspace, "commcare", "domain-0", "Domain 0")
+    _membership, conn = _api_membership(user, first, key=key)
+    for index in range(1, tenants):
+        tenant = _tenant(workspace, "commcare", f"domain-{index}", f"Domain {index}")
+        TenantMembership.objects.create(user=user, tenant=tenant, connection=conn)
+    return conn
+
+
+@pytest.mark.parametrize("key", ["usable-key", ""])
+def test_api_key_decrypts_once_per_connection_per_evaluation(user, key):
+    workspace = _workspace()
+    _member(workspace, user)
+    _shared_api_connection(user, workspace, tenants=4, key=key)
+
+    with mock.patch(
+        "apps.workspaces.services.credential_coverage.decrypt_credential",
+        wraps=decrypt_credential,
+    ) as decrypt:
+        report = _only_report(workspace, user)
+        assert decrypt.call_count == 1
+        _only_report(workspace, user)
+        assert decrypt.call_count == 2
+
+    if key:
+        assert report.covered is True
+    else:
+        assert {gap.code for gap in report.gaps} == {"api_key_missing"}
+        assert len(report.gaps) == 4
+
+
+def test_rotated_key_logs_one_error_with_safe_fields_only(user, settings, caplog):
+    workspace = _workspace()
+    _member(workspace, user)
+    conn = _shared_api_connection(user, workspace, tenants=3, key="secret-api-key")
+    other_tenant = _tenant(workspace, "ocs", "bot", "Bot")
+    _other_membership, other_conn = _api_membership(user, other_tenant, key="other-secret")
+    old_key = settings.DB_CREDENTIAL_KEY
+    settings.DB_CREDENTIAL_KEY = Fernet.generate_key().decode()
+
+    with (
+        mock.patch(
+            "apps.workspaces.services.credential_coverage.decrypt_credential",
+            wraps=decrypt_credential,
+        ) as decrypt,
+        caplog.at_level(logging.ERROR, logger="apps.workspaces.services.credential_coverage"),
+    ):
+        report = _only_report(workspace, user)
+
+    assert decrypt.call_count == 2
+    assert {gap.code for gap in report.gaps} == {"api_key_decrypt_failed"}
+    assert len(report.gaps) == 4
+    records = [r for r in caplog.records if r.name.endswith("credential_coverage")]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is None
+    message = record.getMessage()
+    assert str(sorted([conn.pk, other_conn.pk])) in message
+    assert "['commcare', 'ocs']" in message
+    assert "InvalidToken" in message
+    for secret in (
+        "secret-api-key",
+        "other-secret",
+        conn.encrypted_credential,
+        other_conn.encrypted_credential,
+        old_key,
+        settings.DB_CREDENTIAL_KEY,
+    ):
+        assert secret not in message
+
+
+def test_readable_api_keys_log_nothing(user, caplog):
+    workspace = _workspace()
+    _member(workspace, user)
+    _shared_api_connection(user, workspace, tenants=2)
+
+    with caplog.at_level(logging.DEBUG, logger="apps.workspaces.services.credential_coverage"):
+        assert _only_report(workspace, user).covered is True
+
+    assert not [r for r in caplog.records if r.name.endswith("credential_coverage")]
 
 
 def test_archived_membership_is_not_covered(user):
