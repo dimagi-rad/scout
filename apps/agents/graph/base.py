@@ -58,6 +58,7 @@ from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
+    WorkspaceDataRecovery,
     WorkspaceRole,
     WorkspaceViewSchema,
 )
@@ -394,6 +395,8 @@ async def _fetch_semantic_model_context(
         elif load_state != _LOADED and await aworkspace_load_pending(workspace.id):
             # Queued but not yet started, so no run above says so (#408).
             guidance = await _load_in_progress_guidance(interactive, write_capable, conversation_id)
+        elif load_state == _LOADED and write_capable and interactive:
+            guidance = await _semantic_rebuild_guidance(workspace)
         else:
             guidance = _load_state_guidance(
                 load_state, interactive=interactive, write_capable=write_capable
@@ -438,9 +441,22 @@ async def _catalog_unavailable_load_state(workspace) -> tuple[str, bool]:
     return _NOT_LOADED, False
 
 
+async def _semantic_rebuild_guidance(workspace) -> str:
+    """Loaded data with no catalog needs a rebuild, which the chat starts itself (#714).
+
+    It never needs a reload, so the agent must not ask to approve one for it.
+    """
+    rebuilding = await WorkspaceDataRecovery.objects.filter(
+        workspace=workspace, state__in=list(WorkspaceDataRecovery.ACTIVE_STATES)
+    ).aexists()
+    return _SEMANTIC_REBUILDING_GUIDANCE if rebuilding else _SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
+
+
 def _load_state_guidance(load_state: str, *, interactive: bool, write_capable: bool) -> str:
     if load_state == _LOADED:
-        return _LOADED_REBUILD_GUIDANCE if write_capable else _READ_ONLY_LOADED_SQL_GUIDANCE
+        return (
+            _HEADLESS_LOADED_REBUILD_GUIDANCE if write_capable else _READ_ONLY_LOADED_SQL_GUIDANCE
+        )
     if not write_capable:
         return _READ_ONLY_MATERIALIZE_GUIDANCE
     return _INTERACTIVE_MATERIALIZE_GUIDANCE if interactive else _HEADLESS_MATERIALIZE_GUIDANCE
@@ -510,7 +526,32 @@ _INTERACTIVE_MATERIALIZE_GUIDANCE = (
     "conversation automatically when materialization completes."
 )
 
-_LOADED_REBUILD_GUIDANCE = (
+_SQL_MEANWHILE = (
+    "Meanwhile `list_tables`, `describe_table` and read-only `query` SQL work on the "
+    "loaded tables if the user wants an answer now."
+)
+
+_SEMANTIC_REBUILDING_GUIDANCE = (
+    "Data is loaded, and its data model (the semantic datasets) is being rebuilt "
+    "automatically in the background. The rebuild reloads nothing and needs no "
+    "approval. Do NOT call `run_materialization` for it and do NOT ask the user to "
+    "approve a reload. Tell the user the data model is being rebuilt and to check "
+    f"back in a few minutes for `list_datasets` and `semantic_query`. {_SQL_MEANWHILE}"
+)
+
+_SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE = (
+    "Data is loaded, but no semantic datasets are available and no automatic rebuild "
+    "of the data model is running. Scout starts one itself, without reloading data, "
+    "when a chat opens on loaded data it can build from, and tries once per load. "
+    "Do NOT call `run_materialization` just to get the data model and do NOT ask the "
+    "user to approve a reload for it; a reload fetches every source again and is for "
+    "newer data the user asks for. Tell the user the data model could not be rebuilt "
+    f"automatically. {_SQL_MEANWHILE}"
+)
+
+# Headless runs have no chat to start the rebuild and no user to ask, and the
+# blocking load rebuilds the catalog before it returns.
+_HEADLESS_LOADED_REBUILD_GUIDANCE = (
     "Data is loaded, but no semantic datasets are available yet. "
     "Run materialization to rebuild the semantic catalog, then use "
     "`list_datasets` and `semantic_query`."

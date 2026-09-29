@@ -18,6 +18,8 @@ from django.test import AsyncClient
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 
+from apps.agents.graph import base as graph_base
+from apps.agents.graph.base import _fetch_semantic_model_context
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
@@ -239,3 +241,27 @@ async def test_the_recovery_rebuilds_a_serving_catalog_whose_last_build_failed()
 
     rebuild_core.assert_awaited_once_with(str(ws.id))
     assert result["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("rebuilding", [True, False])
+async def test_the_agent_is_never_sent_to_a_reload_for_the_data_model(rebuilding):
+    ws, _tenant, _schema = await _loaded_workspace(f"prompt-{rebuilding}")
+    if rebuilding:
+        await WorkspaceDataRecovery.objects.acreate(
+            workspace=ws, recovery_type=SEMANTIC_REBUILD, source_type="chat"
+        )
+
+    context = await _fetch_semantic_model_context(ws, interactive=True, write_capable=True)
+
+    assert "Run materialization to rebuild" not in context
+    assert "Do NOT call `run_materialization`" in context
+    assert "approve a reload" in context
+    expected = (
+        graph_base._SEMANTIC_REBUILDING_GUIDANCE
+        if rebuilding
+        else graph_base._SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
+    )
+    assert expected in context
+    assert ("check back" in context) is rebuilding
