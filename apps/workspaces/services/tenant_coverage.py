@@ -1,4 +1,5 @@
-"""Interpret persisted view coverage without treating malformed data as complete."""
+"""Build view-coverage entries, and interpret persisted coverage without treating
+malformed data as complete."""
 
 
 def coverage_entry(tenant) -> dict[str, str]:

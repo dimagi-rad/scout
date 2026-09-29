@@ -118,8 +118,10 @@ def test_adding_an_unloaded_source_reports_it_missing_before_the_rebuild_runs(
 def test_adding_an_unloaded_source_to_a_legacy_view_reports_it_missing(
     workspace, tenant, user, tenant2, tenant_membership2, tenant3, tenant_membership3
 ):
-    """A view built before coverage was recorded served every source it had."""
+    """A view built before coverage was recorded can only serve sources with an
+    ACTIVE schema, so a linked source without one is named missing too."""
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    TenantSchema.objects.create(tenant=tenant, schema_name="live_one", state=SchemaState.ACTIVE)
     vs = WorkspaceViewSchema.objects.create(
         workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
     )
@@ -127,11 +129,10 @@ def test_adding_an_unloaded_source_to_a_legacy_view_reports_it_missing(
     _add_unloaded(workspace, tenant3, user)
 
     vs.refresh_from_db()
-    assert {e["tenant_id"] for e in vs.tenant_coverage["included_tenants"]} == {
-        str(tenant.id),
-        str(tenant2.id),
+    assert vs.tenant_coverage == {
+        "included_tenants": [_entry(tenant)],
+        "excluded_tenants": [_entry(tenant2), _entry(tenant3)],
     }
-    assert vs.tenant_coverage["excluded_tenants"] == [_entry(tenant3)]
 
 
 @pytest.mark.django_db
