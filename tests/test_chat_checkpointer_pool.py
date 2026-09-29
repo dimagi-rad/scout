@@ -1,7 +1,9 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from django.test import override_settings
+from psycopg.conninfo import conninfo_to_dict
 
 from apps.chat import checkpointer
 
@@ -58,3 +60,71 @@ def test_pool_config_rejects_min_size_above_max_size():
     ):
         with pytest.raises(ValueError, match="MIN_SIZE must be <= .*MAX_SIZE"):
             checkpointer._get_pool_config()
+
+
+@pytest.mark.asyncio
+async def test_init_failure_raises_and_caches_nothing(settings):
+    """No MemorySaver fallback, even under DEBUG: the error surfaces and the next
+    call retries instead of reusing an in-memory saver (#266 07#8)."""
+    settings.DEBUG = True
+    with (
+        patch("apps.chat.checkpointer.get_database_url", return_value="postgresql://example/db"),
+        patch("apps.chat.checkpointer.AsyncConnectionPool", side_effect=OSError("db down")),
+        pytest.raises(OSError, match="db down"),
+    ):
+        await checkpointer.ensure_checkpointer()
+
+    assert checkpointer._checkpointer is None
+
+
+def _use_databases(monkeypatch, databases):
+    # Patch the module's settings reference rather than DATABASES itself, which
+    # Django warns against overriding under a live test database.
+    monkeypatch.setattr(checkpointer, "settings", SimpleNamespace(DATABASES=databases))
+
+
+def test_database_url_prefers_env(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:6543/scout?sslmode=require")
+    assert checkpointer.get_database_url() == "postgresql://u:p@db:6543/scout?sslmode=require"
+
+
+def test_database_url_falls_back_to_settings_with_libpq_defaults(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    _use_databases(
+        monkeypatch,
+        {
+            "default": {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": "scout",
+                "HOST": "",
+                "PORT": "",
+                "USER": "",
+                "PASSWORD": "",
+            }
+        },
+    )
+    assert conninfo_to_dict(checkpointer.get_database_url()) == {"dbname": "scout"}
+
+
+def test_database_url_quotes_credentials(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    _use_databases(
+        monkeypatch,
+        {
+            "default": {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": "scout",
+                "HOST": "db",
+                "PORT": 5432,
+                "USER": "platform",
+                "PASSWORD": "p@ss w/:?#",
+            }
+        },
+    )
+    assert conninfo_to_dict(checkpointer.get_database_url()) == {
+        "dbname": "scout",
+        "host": "db",
+        "port": "5432",
+        "user": "platform",
+        "password": "p@ss w/:?#",
+    }

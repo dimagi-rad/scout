@@ -1,4 +1,4 @@
-"""Lazy singleton for the LangGraph async PostgreSQL checkpointer."""
+"""Lazy singleton for the LangGraph async PostgreSQL checkpointer and its conninfo."""
 
 import asyncio
 import logging
@@ -6,6 +6,7 @@ import os
 
 from django.conf import settings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg.conninfo import make_conninfo
 from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ _init_lock = asyncio.Lock()
 
 
 def get_database_url() -> str:
-    """Resolve the platform Postgres URL: ``DATABASE_URL``, else Django's default DB."""
+    """Resolve the platform Postgres conninfo: ``DATABASE_URL``, else Django's default DB."""
     # DATABASE_URL first so query-string options (e.g. sslmode) survive; the
     # DATABASES dict below would drop them.
     database_url = os.environ.get("DATABASE_URL")
@@ -28,17 +29,19 @@ def get_database_url() -> str:
     engine = db_config.get("ENGINE", "")
     if "postgres" not in engine.lower():
         raise ValueError(f"Django default database is not PostgreSQL: {engine}")
+    if not db_config.get("NAME"):
+        raise ValueError("Django default database has no NAME")
 
-    host = db_config.get("HOST", "localhost")
-    port = db_config.get("PORT", 5432)
-    name = db_config.get("NAME")
-    user = db_config.get("USER")
-    password = db_config.get("PASSWORD", "")
-    if not all([host, name, user]):
-        raise ValueError("Incomplete Django database configuration")
-
-    password_part = f":{password}" if password else ""
-    return f"postgresql://{user}{password_part}@{host}:{port}/{name}"
+    # Django stores unset keys as "", so drop them and let libpq apply its own
+    # defaults (socket/localhost, 5432, OS user); make_conninfo also quotes values.
+    params = {
+        "dbname": db_config.get("NAME"),
+        "host": db_config.get("HOST"),
+        "port": db_config.get("PORT"),
+        "user": db_config.get("USER"),
+        "password": db_config.get("PASSWORD"),
+    }
+    return make_conninfo(**{key: str(value) for key, value in params.items() if value})
 
 
 def _pool_is_usable(pool) -> bool:
