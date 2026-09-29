@@ -11,10 +11,11 @@ from django.conf import settings
 from django.db import close_old_connections, transaction
 from django.utils import timezone
 
+from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.catalog import ensure_semantic_model
 from apps.semantic.services.cube import DROPPED_JOIN_CODES, cube_schema_yaml, generate_cube_schema
-from apps.semantic.services.cube_client import CubeClient
+from apps.semantic.services.cube_client import CubeClient, CubeServiceUnavailable
 from mcp_server.context import QueryContext, load_workspace_context
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,14 @@ KEEP_INACTIVE_CUBE_SCHEMAS = 5
 
 class CubeSchemaBuildError(RuntimeError):
     """Raised when generated Cube schema content cannot be promoted."""
+
+
+class CubeValidatorUnavailableError(CubeSchemaBuildError, ExpectedStateError):
+    """Validation could not run, so the build fails and the last good schema serves (#622).
+
+    Expected for the reasons on ``CubeServiceUnavailable``; the failure is
+    recorded on ``model.metadata["last_build"]`` for the resume task to disclose.
+    """
 
 
 def get_active_cube_schema(workspace, *, model: SemanticModel) -> CubeSchema:
@@ -158,7 +167,10 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
         raise CubeSchemaBuildError(f"Could not generate Cube schema: {exc}") from exc
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
-    validation = async_to_sync(CubeClient().validate_schema)(content)
+    try:
+        validation = async_to_sync(CubeClient().validate_schema)(content)
+    except CubeServiceUnavailable as exc:
+        raise CubeValidatorUnavailableError(str(exc)) from exc
     validation_diagnostics = _diagnostics_from_validation(validation)
     diagnostics = [
         *(model.metadata or {}).get("catalog_diagnostics", []),
@@ -237,6 +249,11 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
                     cube_schema,
                     ctx,
                 )
+            )
+        except CubeServiceUnavailable as exc:
+            # Cube still serves the new schema: it compiles on the first query instead.
+            logger.warning(
+                "Cube schema warm-up did not complete for workspace %s: %s", workspace.id, exc
             )
         except Exception:
             logger.exception(

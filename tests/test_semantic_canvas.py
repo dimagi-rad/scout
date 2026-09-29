@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -37,6 +38,7 @@ from apps.semantic.models import (
 from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services.catalog import PhysicalTable
 from apps.semantic.services.cube import generate_cube_schema
+from apps.semantic.services.cube_schema import CubeValidatorUnavailableError
 
 
 @pytest.fixture
@@ -618,6 +620,39 @@ def test_saved_invalid_dimension_sql_cannot_be_promoted_by_compiler(semantic_mod
     )
     with pytest.raises(ValueError, match="not allowed"):
         generate_cube_schema(semantic_model)
+
+
+def test_unreachable_validator_after_commit_warns_without_an_error(
+    canvas, semantic_model, user, monkeypatch, caplog
+):
+    def unavailable(ws, model):
+        raise CubeValidatorUnavailableError("Cube schema validation could not complete")
+
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", unavailable)
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "amount_copy",
+                    "field_type": "dimension",
+                    "expression": "amount",
+                    "data_type": "text",
+                },
+            }
+        ],
+        user,
+    )
+    assert result["can_commit"]
+
+    with caplog.at_level(logging.INFO, logger=canvas_commit_module.__name__):
+        outcome = commit_canvas(canvas, user)["cube_schema"]
+
+    assert outcome["ok"] is False
+    assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [logging.WARNING]
 
 
 def test_draft_column_dimension_can_be_converted_to_calculated_dimension(
