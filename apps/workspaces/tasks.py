@@ -42,6 +42,7 @@ from apps.users.services.credential_resolver import (
     aresolve_credential,
 )
 from apps.workspaces.access import (
+    NO_SOURCES,
     TENANT_ACCESS_LOST,
     WorkspaceAccess,
     access_denied_body,
@@ -672,6 +673,11 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         error = "The requesting user can't use these data sources: " + (
             ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
         )
+    elif access is not None and access.denied_reason == NO_SOURCES:
+        # No role change fixes this; there is nothing to load.
+        code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        error = "This workspace has no data sources to load."
+        results = []
     elif access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
         code = FRESHNESS_ERROR_CODES[access.denied_reason]
         error = access_denied_body(access)["error"]

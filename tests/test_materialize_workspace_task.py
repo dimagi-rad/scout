@@ -792,6 +792,7 @@ async def test_materialize_workspace_defers_resume_on_no_sources_early_return(
         )
 
     assert result["status"] == "denied"
+    assert result["error_code"] == "WORKSPACE_TENANT_UNREACHABLE"
     assert result["tenants"] == []
     assert result["all_succeeded"] is False
     # But the resume task IS still deferred (in the finally block).

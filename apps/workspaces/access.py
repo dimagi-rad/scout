@@ -103,9 +103,9 @@ class WorkspaceAccess:
 
     ``workspace``/``membership`` are set iff access is granted. On denial they are
     ``None`` and ``denied_reason`` is one of ``NOT_MEMBER`` / ``TENANT_ACCESS_LOST`` /
-    ``INSUFFICIENT_ROLE`` or an upstream-freshness reason; for ``TENANT_ACCESS_LOST``,
-    ``missing_tenants`` lists each workspace tenant the member cannot use, with its
-    remedy.
+    ``INSUFFICIENT_ROLE`` / ``NO_SOURCES`` or an upstream-freshness reason; for
+    ``TENANT_ACCESS_LOST``, ``missing_tenants`` lists each workspace tenant the
+    member cannot use, with its remedy.
     """
 
     workspace: object | None = None
@@ -433,7 +433,9 @@ def _no_sources_denied(user, workspace_id) -> WorkspaceAccess:
     """Deny a workspace with no sources: nothing defines who may read it (#381).
 
     ERROR so Sentry raises it: creating one and emptying one are both refused,
-    so reaching this means a path that bypasses them exists.
+    so reaching this means a path that bypasses them exists. Deduplicated per
+    HTTP request only; the MCP server and worker open no scope, so they log
+    each resolution.
     """
     if access_cache.first_in_scope(user, workspace_id, _NO_SOURCES_LOGGED):
         logger.error(
