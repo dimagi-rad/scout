@@ -113,7 +113,7 @@ class TestWorkspaceCreate:
             workspace_id=resp.json()["id"], user=user, role=WorkspaceRole.MANAGE
         ).exists()
 
-    def test_multi_source_create_labels_workspace_by_its_own_name(self, client, user):
+    def test_multi_source_create_labels_workspace_with_source_count(self, client, user):
         bots = [
             Tenant.objects.create(provider="ocs", external_id=bot_id, canonical_name=name)
             for bot_id, name in [("bot-b", "Bravo"), ("bot-a", "Alpha")]
@@ -129,12 +129,12 @@ class TestWorkspaceCreate:
         )
 
         assert resp.status_code == 201
-        assert resp.json()["display_name"] == "Demo"
+        assert resp.json()["display_name"] == "Demo \u00b7 2 sources"
         ws_id = resp.json()["id"]
         detail = client.get(f"/api/workspaces/{ws_id}/")
-        assert detail.json()["display_name"] == "Demo"
+        assert detail.json()["display_name"] == "Demo \u00b7 2 sources"
         listed = next(w for w in client.get("/api/workspaces/").json() if w["id"] == ws_id)
-        assert listed["display_name"] == "Demo"
+        assert listed["display_name"] == "Demo \u00b7 2 sources"
 
     def test_single_source_create_keeps_the_decorated_label(self, client, user):
         bot = Tenant.objects.create(provider="ocs", external_id="bot-a", canonical_name="Alpha")

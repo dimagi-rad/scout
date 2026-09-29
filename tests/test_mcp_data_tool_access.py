@@ -181,7 +181,7 @@ async def test_materialization_status_denies_a_thread_job_lookup_too(workspace, 
     assert "t_secret_schema" not in str(result)
 
 
-async def test_workspace_summary_labels_a_multi_bot_workspace_by_its_own_name(user):
+async def test_workspace_summary_labels_a_multi_bot_workspace_with_its_source_count(user):
     ws = await Workspace.objects.acreate(name="Demo", created_by=user)
     for bot_id, name in [("bot-b", "Bravo"), ("bot-a", "Alpha")]:
         bot = await Tenant.objects.acreate(provider="ocs", external_id=bot_id, canonical_name=name)
@@ -189,7 +189,7 @@ async def test_workspace_summary_labels_a_multi_bot_workspace_by_its_own_name(us
 
     summary = await server._workspace_summary(ws)
 
-    assert summary["display_name"] == "Demo"
+    assert summary["display_name"] == "Demo \u00b7 2 sources"
     assert summary["tenant_count"] == 2
 
 
