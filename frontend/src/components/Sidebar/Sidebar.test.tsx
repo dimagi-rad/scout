@@ -6,6 +6,7 @@ import { Sidebar } from "./Sidebar"
 
 const mocks = vi.hoisted(() => {
   const fetchDomains = vi.fn()
+  const revalidateDomains = vi.fn()
   const fetchThreads = vi.fn()
   const logout = vi.fn()
   const newThread = vi.fn()
@@ -19,11 +20,12 @@ const mocks = vi.hoisted(() => {
       threadId: null,
       threads: [] as Thread[],
       threadsStatus: "loaded",
-      domainActions: { fetchDomains },
+      domainActions: { fetchDomains, revalidateDomains },
       authActions: { logout },
       uiActions: { fetchThreads, newThread, selectThread },
     },
     fetchDomains,
+    revalidateDomains,
     fetchThreads,
     logout,
     newThread,
@@ -169,5 +171,47 @@ describe("Sidebar hover behavior", () => {
     expect(screen.getByTestId("sidebar-thread-thread-title")).not.toHaveTextContent(
       "Old prompt text",
     )
+  })
+})
+
+describe("Sidebar workspace revalidation (#355)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-09-29T12:00:00Z"))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("revalidates silently when the tab becomes visible again, at most every 15s", () => {
+    renderSidebar()
+    expect(mocks.fetchDomains).toHaveBeenCalledOnce()
+    expect(mocks.revalidateDomains).not.toHaveBeenCalled()
+
+    fireEvent(document, new Event("visibilitychange"))
+    expect(mocks.revalidateDomains).toHaveBeenCalledOnce()
+
+    // A tab switch also focuses the window; one refetch covers both.
+    fireEvent.focus(window)
+    expect(mocks.revalidateDomains).toHaveBeenCalledOnce()
+
+    vi.setSystemTime(new Date("2026-09-29T12:00:16Z"))
+    fireEvent.focus(window)
+    expect(mocks.revalidateDomains).toHaveBeenCalledTimes(2)
+    // The mount-time full fetch is the only one that may show loading state.
+    expect(mocks.fetchDomains).toHaveBeenCalledOnce()
+  })
+
+  it("does not revalidate while the tab is hidden", () => {
+    renderSidebar()
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" })
+    try {
+      fireEvent(document, new Event("visibilitychange"))
+      expect(mocks.revalidateDomains).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" })
+    }
   })
 })

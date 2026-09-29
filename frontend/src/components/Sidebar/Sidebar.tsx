@@ -20,6 +20,9 @@ import { Button } from "@/components/ui/button"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 
+// Focus and visibilitychange both fire on a tab switch, and alt-tabbing fires focus often.
+const DOMAIN_REVALIDATE_MIN_INTERVAL_MS = 15_000
+
 export function Sidebar() {
   const navigate = useNavigate()
   const sidebarRef = useRef<HTMLDivElement>(null)
@@ -33,6 +36,7 @@ export function Sidebar() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const domains = useAppStore((s) => s.domains)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
+  const revalidateDomains = useAppStore((s) => s.domainActions.revalidateDomains)
   const logout = useAppStore((s) => s.authActions.logout)
   const threadId = useAppStore((s) => s.threadId)
   const threads = useAppStore((s) => s.threads)
@@ -142,6 +146,25 @@ export function Sidebar() {
   useEffect(() => {
     fetchDomains()
   }, [fetchDomains])
+
+  // Workspaces someone else added you to stay invisible until the list is
+  // fetched again (#355); coming back to the tab is when you'd look for them.
+  const lastRevalidatedAtRef = useRef(0)
+  useEffect(() => {
+    const revalidate = () => {
+      if (document.visibilityState === "hidden") return
+      const now = Date.now()
+      if (now - lastRevalidatedAtRef.current < DOMAIN_REVALIDATE_MIN_INTERVAL_MS) return
+      lastRevalidatedAtRef.current = now
+      void revalidateDomains()
+    }
+    document.addEventListener("visibilitychange", revalidate)
+    window.addEventListener("focus", revalidate)
+    return () => {
+      document.removeEventListener("visibilitychange", revalidate)
+      window.removeEventListener("focus", revalidate)
+    }
+  }, [revalidateDomains])
 
   // Fetch threads when domain changes
   useEffect(() => {

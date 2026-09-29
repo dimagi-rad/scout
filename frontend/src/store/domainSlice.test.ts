@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
+import { workspaceApi } from "@/api/workspaces"
+import type { TenantMembership } from "@/store/domainSlice"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 
 describe("domainSlice.setActiveDomain — threadId leak guard (00c423d)", () => {
@@ -106,5 +108,117 @@ describe("domainSlice.fetchDomains — default pick skips lost-access workspaces
     await useAppStore.getState().domainActions.fetchDomains()
 
     expect(useAppStore.getState().activeDomainId).toBe("skelly")
+  })
+})
+
+describe("domainSlice.revalidateDomains — silent background refresh (#355)", () => {
+  const ws = (id: string): TenantMembership => ({
+    id,
+    name: id,
+    display_name: id,
+    is_auto_created: false,
+    role: "manage",
+    tenants: [],
+    has_access: true,
+    member_count: 1,
+    schema_status: "available",
+    last_synced_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  })
+
+  beforeEach(() => {
+    useAppStore.setState({ activeDomainId: "a", domains: [ws("a")], domainsStatus: "loaded", domainsError: null })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("adds new workspaces without ever passing through loading", async () => {
+    let resolve!: (value: TenantMembership[]) => void
+    vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((r) => { resolve = r }))
+    const statuses: string[] = []
+    const unsubscribe = useAppStore.subscribe((s) => statuses.push(s.domainsStatus))
+
+    const pending = useAppStore.getState().domainActions.revalidateDomains()
+    expect(useAppStore.getState().domainsStatus).toBe("loaded")
+    resolve([ws("new"), ws("a")])
+    await pending
+    unsubscribe()
+
+    expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["new", "a"])
+    expect(useAppStore.getState().activeDomainId).toBe("a")
+    expect(statuses.every((s) => s === "loaded")).toBe(true)
+  })
+
+  it("moves to the default workspace when the active one disappears from the list", async () => {
+    useAppStore.setState({ domains: [ws("a"), ws("b")] })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("b")])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("b")
+  })
+
+  it("keeps an active id that was never in the list, such as a deep link being checked", async () => {
+    useAppStore.setState({ activeDomainId: "linked" })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("b")])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("linked")
+  })
+
+  it("keeps the same list object when nothing changed, so subscribers don't re-run", async () => {
+    const before = useAppStore.getState().domains
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a")])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().domains).toBe(before)
+  })
+
+  it("keeps the current list and status when the refresh fails", async () => {
+    const before = useAppStore.getState().domains
+    vi.spyOn(workspaceApi, "list").mockRejectedValue(new Error("503"))
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().domains).toBe(before)
+    expect(useAppStore.getState().domainsStatus).toBe("loaded")
+    expect(useAppStore.getState().domainsError).toBeNull()
+  })
+
+  it("leaves an initial load alone", async () => {
+    useAppStore.setState({ domainsStatus: "loading" })
+    const list = vi.spyOn(workspaceApi, "list")
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it("shares one request between overlapping calls", async () => {
+    const list = vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a")])
+    const actions = useAppStore.getState().domainActions
+
+    await Promise.all([actions.revalidateDomains(), actions.revalidateDomains()])
+
+    expect(list).toHaveBeenCalledOnce()
+  })
+
+  it("drops its result when a full fetch starts after it", async () => {
+    let resolveStale!: (value: TenantMembership[]) => void
+    vi.spyOn(workspaceApi, "list")
+      .mockReturnValueOnce(new Promise((r) => { resolveStale = r }))
+      .mockResolvedValueOnce([ws("fresh")])
+    const actions = useAppStore.getState().domainActions
+
+    const stale = actions.revalidateDomains()
+    await actions.fetchDomains()
+    resolveStale([ws("stale")])
+    await stale
+
+    expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["fresh"])
   })
 })
