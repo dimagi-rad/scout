@@ -9,6 +9,7 @@ import {
 const POLL_INTERVAL_MS = 3000
 
 interface State {
+  workspaceId: string | null
   jobs: ActiveJob[]
   workspaceLoads: WorkspaceLoad[]
   recentTerminations: RecentTermination[]
@@ -47,6 +48,7 @@ export interface UseWorkspaceJobs {
 export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJobs {
   const [state, setState] = useState<State>({
     jobs: [],
+    workspaceId,
     workspaceLoads: [],
     recentTerminations: [],
     lastError: null,
@@ -68,6 +70,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       prevThreadIdsRef.current = currentThreadIds
       setState({
         jobs: data.jobs,
+        workspaceId,
         workspaceLoads: data.workspace_loads ?? [],
         recentTerminations: data.recent_terminations ?? [],
         lastError: null,
@@ -143,7 +146,8 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
 
   return {
     jobs: state.jobs,
-    workspaceLoads: state.workspaceLoads,
+    // Else a switch shows the previous workspace's load until the first poll lands.
+    workspaceLoads: state.workspaceId === workspaceId ? state.workspaceLoads : [],
     jobsByThreadId,
     recentlyCompletedThreadIds,
     recentTerminations: state.recentTerminations,
