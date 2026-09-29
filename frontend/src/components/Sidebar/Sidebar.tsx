@@ -22,6 +22,8 @@ import { CONNECTIONS_PATH } from "@/lib/routes"
 
 // Focus and visibilitychange both fire on a tab switch, and alt-tabbing fires focus often.
 const DOMAIN_REVALIDATE_MIN_INTERVAL_MS = 15_000
+// Catches a grant while you stay on the tab. Slow on purpose: prod and staging share one RDS.
+const DOMAIN_REVALIDATE_POLL_MS = 60_000
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -148,7 +150,7 @@ export function Sidebar() {
   }, [fetchDomains])
 
   // Workspaces someone else added you to stay invisible until the list is
-  // fetched again (#355); coming back to the tab is when you'd look for them.
+  // fetched again (#355): on coming back to the tab, and on a slow poll while you stay.
   const lastRevalidatedAtRef = useRef(0)
   useEffect(() => {
     const revalidate = () => {
@@ -167,7 +169,9 @@ export function Sidebar() {
     }
     document.addEventListener("visibilitychange", revalidate)
     window.addEventListener("focus", revalidate)
+    const pollId = window.setInterval(revalidate, DOMAIN_REVALIDATE_POLL_MS)
     return () => {
+      window.clearInterval(pollId)
       document.removeEventListener("visibilitychange", revalidate)
       window.removeEventListener("focus", revalidate)
     }
