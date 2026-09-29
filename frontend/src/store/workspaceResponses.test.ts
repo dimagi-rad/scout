@@ -13,8 +13,6 @@ let store = createAppStore()
 const state = () => store.getState()
 const switchTo = (id: string) => state().domainActions.setActiveDomain(id)
 const artifact = (title: string) => ({ id: "same-id", title, description: "", artifact_type: "html" as const, version: 1, has_live_queries: false, created_at: "", updated_at: "" })
-const table = (name: string) => ({ schema: "public", name, columns: [] })
-const detail = { schema: "public", table: "users", columns: [], annotations: null, sourceMetadata: null }
 const thread = (title: string) => ({ id: "same-id", title, title_is_custom: false, created_at: "", updated_at: "", last_viewed_at: null })
 
 beforeEach(() => {
@@ -25,7 +23,6 @@ afterEach(() => vi.restoreAllMocks())
 
 const lists = [
   { name: "artifacts", start: () => state().artifactActions.fetchArtifacts(), response: (label: string) => ({ results: [artifact(label)] }), read: () => ({ data: state().artifacts, status: state().artifactsStatus, error: state().artifactsError }) },
-  { name: "dictionary", start: () => state().dictionaryActions.fetchDictionary(), response: (label: string) => ({ tables: { [label]: table(label) } }), read: () => ({ data: state().dataDictionary, status: state().dictionaryStatus, error: state().dictionaryError }) },
   { name: "threads", start: () => state().uiActions.fetchThreads(state().activeDomainId!), response: (label: string) => [thread(label)], read: () => ({ data: state().threads, status: state().threadsStatus, error: state().threadsAccessLostMessage }) },
 ]
 for (const list of lists) {
@@ -63,7 +60,6 @@ for (const list of lists) {
       switchTo("b")
       const empty = list.read().data
       expect(JSON.stringify(empty)).not.toContain("same-id")
-      if (list.name === "dictionary") expect(empty).toBeNull()
       await list.start()
       expect(list.read().data).toEqual(empty)
       expect(list.read().status).toBe("error")
@@ -90,57 +86,7 @@ it("does not refresh threads after a stale mark-viewed completes", async () => {
   expect(get).not.toHaveBeenCalled()
 })
 
-it("does not follow a stale schema refresh with a dictionary load", async () => {
-  const refresh = deferred()
-  vi.spyOn(api, "post").mockImplementationOnce(() => refresh.promise as never)
-  const get = vi.spyOn(api, "get").mockResolvedValue({ tables: {} })
-  const pending = state().dictionaryActions.refreshSchema()
-  switchTo("b")
-  refresh.resolve({})
-  await pending
-  expect(get).not.toHaveBeenCalled()
-  expect(state().dictionaryStatus).toBe("idle")
-})
-
-it("refresh and fetch dictionary share latest-request ownership", async () => {
-  const old = deferred()
-  vi.spyOn(api, "post").mockImplementationOnce(() => old.promise as never)
-  const get = vi.spyOn(api, "get").mockResolvedValue({ tables: { fresh: table("fresh") } })
-  const pending = state().dictionaryActions.refreshSchema()
-  await state().dictionaryActions.fetchDictionary()
-  old.resolve({})
-  await pending
-  expect(get).toHaveBeenCalledTimes(1)
-  expect(state().dataDictionary?.schemas.public.fresh).toBeDefined()
-})
-
-for (const scenario of ["switch", "overlap", "clear"]) {
-  it(`ignores stale table details after ${scenario}`, async () => {
-    const old = deferred()
-    vi.spyOn(api, "get").mockImplementationOnce(() => old.promise as never).mockResolvedValue(table("new"))
-    const pending = state().dictionaryActions.fetchTable("public", "old")
-    if (scenario === "switch") switchTo("b")
-    if (scenario === "clear") state().dictionaryActions.clearDictionary()
-    else await state().dictionaryActions.fetchTable("public", "new")
-    const expected = state().selectedTable
-    old.resolve(table("old"))
-    await pending
-    expect(state().selectedTable).toEqual(expected)
-  })
-}
-
-it("clearDictionary invalidates pending dictionary responses", async () => {
-  const old = deferred()
-  vi.spyOn(api, "get").mockImplementationOnce(() => old.promise as never)
-  const pending = state().dictionaryActions.fetchDictionary()
-  state().dictionaryActions.clearDictionary()
-  old.resolve({ tables: {} })
-  await pending
-  expect(state().dataDictionary).toBeNull()
-  expect(state().dictionaryStatus).toBe("idle")
-})
-
-for (const operation of ["artifact update", "artifact delete", "annotation", "thread title"]) {
+for (const operation of ["artifact update", "artifact delete", "thread title"]) {
   it(`ignores stale ${operation} writes while preserving mutation completion`, async () => {
     const old = deferred()
     vi.spyOn(api, "patch").mockImplementation(() => old.promise as never)
@@ -148,15 +94,14 @@ for (const operation of ["artifact update", "artifact delete", "annotation", "th
     vi.spyOn(api, "put").mockImplementation(() => old.promise as never)
     const pending = operation === "artifact update" ? state().artifactActions.updateArtifact("same-id", { title: "old" })
       : operation === "artifact delete" ? state().artifactActions.deleteArtifact("same-id")
-      : operation === "annotation" ? state().dictionaryActions.updateAnnotations("public", "users", { description: "old" })
       : state().uiActions.updateThreadTitle("same-id", "old", "a")
     switchTo("b")
-    store.setState({ artifacts: [artifact("b")], threads: [thread("b")], selectedTable: detail, dataDictionary: { schemas: { public: { users: { columns: [] } } } } })
-    const expected = { artifacts: state().artifacts, threads: state().threads, selectedTable: state().selectedTable, dataDictionary: structuredClone(state().dataDictionary) }
+    store.setState({ artifacts: [artifact("b")], threads: [thread("b")] })
+    const expected = { artifacts: state().artifacts, threads: state().threads }
     const response = { ...thread("old"), description: "old" }
     old.resolve(response)
     const result = await pending
-    expect({ artifacts: state().artifacts, threads: state().threads, selectedTable: state().selectedTable, dataDictionary: state().dataDictionary }).toEqual(expected)
+    expect({ artifacts: state().artifacts, threads: state().threads }).toEqual(expected)
     expect(result).toEqual(operation.startsWith("thread") ? response : undefined)
   })
 }
@@ -215,46 +160,8 @@ it("a missing-workspace detail call leaves no orphaned loading state", async () 
   expect(state().selectedDatasetStatus).toBe("loading")
   store.setState({ activeDomainId: null })
   await expect(state().datasetActions.fetchDataset("records")).rejects.toThrow("No active workspace")
-  await expect(state().dictionaryActions.fetchTable("public", "records")).rejects.toThrow("No active domain")
   old.resolve({ dataset: { name: "records" } })
   await pending
   expect(state().selectedDatasetStatus).toBe("idle")
   expect(state().selectedDataset).toBeNull()
-})
-
-it("keeps the dictionary usable while surfacing a partial refresh warning", async () => {
-  vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "Some sources could not be refreshed: source B needs operator recovery." })
-  const get = vi.spyOn(api, "get").mockResolvedValue({ tables: {} })
-  await state().dictionaryActions.refreshSchema()
-  expect(state().dictionaryStatus).toBe("loaded")
-  expect(state().dictionaryWarning).toContain("source B needs operator recovery")
-  expect(state().dataDictionary).not.toBeNull()
-  expect(get).toHaveBeenCalledTimes(1)
-})
-
-it("preserves partial refresh guidance when the dictionary is not available yet", async () => {
-  vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "source B needs operator recovery" })
-  vi.spyOn(api, "get").mockRejectedValue(new ApiError(503, "Data unavailable"))
-  await state().dictionaryActions.refreshSchema()
-  expect(state().dictionaryStatus).toBe("not_materialized")
-  expect(state().dictionaryWarning).toContain("source B needs operator recovery")
-})
-
-
-it("clears refresh warnings when switching workspaces", async () => {
-  vi.spyOn(api, "post").mockResolvedValue({ status: "partial", error: "source B needs operator recovery" })
-  vi.spyOn(api, "get").mockResolvedValue({ tables: {} })
-  await state().dictionaryActions.refreshSchema()
-  switchTo("b")
-  expect(state().dictionaryWarning).toBeNull()
-})
-
-it("keeps a refused refresh's server reason but hides developer error text", async () => {
-  vi.spyOn(api, "post").mockRejectedValueOnce(new ApiError(409, "A refresh is already in progress."))
-  await state().dictionaryActions.refreshSchema()
-  expect(state().dictionaryError).toBe("A refresh is already in progress.")
-
-  vi.spyOn(api, "post").mockRejectedValueOnce(new TypeError("Cannot read properties of undefined"))
-  await state().dictionaryActions.refreshSchema()
-  expect(state().dictionaryError).toBe("Failed to refresh schema")
 })
