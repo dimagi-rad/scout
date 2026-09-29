@@ -1,81 +1,61 @@
 # Artifact types
 
-Scout supports several artifact types, each suited to different visualization and reporting needs.
-
-## React
-
-**Type identifier:** `react`
-
-Interactive React components rendered in a sandboxed iframe. Best for complex, interactive visualizations and dashboards.
-
-The agent writes a React component that receives the query data as props. The component is rendered in an isolated sandbox with access to common libraries, including Recharts for charts.
-
-**Use cases:**
-- Multi-panel dashboards
-- Interactive data explorers
-- Custom visualizations with user controls
-- Forms and filters
-
-## HTML
-
-**Type identifier:** `html`
-
-Static HTML documents rendered in a sandboxed iframe. Best for formatted reports and styled tables.
-
-**Use cases:**
-- Formatted reports with custom styling
-- Styled data tables
-- Summary pages
-
-## Markdown
-
-**Type identifier:** `markdown`
-
-Markdown documents rendered to HTML. Best for narrative reports and text-heavy content.
-
-**Use cases:**
-- Analysis write-ups
-- Data summaries
-- Narrative reports with embedded tables
-
-## SVG
-
-**Type identifier:** `svg`
-
-SVG graphics rendered inline. Best for diagrams and simple illustrations.
-
-**Use cases:**
-- Entity relationship diagrams
-- Flowcharts
-- Simple data graphics
+Every artifact has an `artifact_type`. The agent creates and updates only
+`story` artifacts, through the `artifact_manager` subagent. The other four
+types are still stored and rendered, but nothing in Scout creates new ones.
 
 ## Story
 
 **Type identifier:** `story`
 
-Semantic-query-backed analysis stories rendered from `data.story_doc`. A story is an ordered list of typed blocks
-such as `title`, `section`, `date_filter`, `semantic_query`, `graph`, `table`, and `stat`.
+Stories are semantic-query-backed analyses rendered natively by the frontend
+from `data.story_doc`. A story is an ordered list of typed blocks: `title`,
+`section`, `question`, `tldr`, `markdown`, `date_filter`, `period_selector`,
+`semantic_query`, `graph`, `table`, and `stat`. The backend validates the
+document before saving it.
 
-Blocks render vertically by default. Consecutive visible blocks with the same top-level `row_group` render side by
-side in a responsive row; use this for KPI strips, chart pairs, filter rows, and comparison sections. Keep hidden
-compute blocks outside the visible row group.
+Blocks render vertically by default. Consecutive visible blocks with the same
+top-level `row_group` render side by side in a responsive row; use this for KPI
+strips, chart pairs, filter rows, and comparison sections. Keep hidden compute
+blocks outside the visible row group.
 
-Story graph blocks render with Recharts. Compact `line`, `bar`, `area`, `pie`, and `donut` configurations cover common charts; explicit Recharts element trees support more advanced composition. Compact charts use a bounded `style` vocabulary for named palettes, legends, grids, curves, orientation, and value labels. Stat blocks can show absolute or percent comparisons with a semantic higher/lower/neutral goal, so favorable color is only applied when metric meaning supports it.
+Graph blocks render with Recharts. Compact `line`, `bar`, `area`, `pie`, and
+`donut` configurations cover common charts; explicit Recharts element trees
+support more advanced composition. Compact charts use a bounded `style`
+vocabulary for named palettes, legends, grids, curves, orientation, and value
+labels. Stat blocks can show absolute or percent comparisons with a `goal` of
+`higher`, `lower`, or `neutral`, so favorable color is applied only when the
+metric's meaning supports it.
+
+`semantic_query` blocks hold the live queries. When a story opens, the
+frontend calls the artifact's `query-data` endpoint, which runs those queries
+against the workspace's semantic model, with any date-filter selections applied.
+
+## Sandboxed types
+
+These types render in a sandboxed iframe served by the artifact's `sandbox/`
+endpoint, under a strict Content Security Policy. The artifact's `code` field
+holds the source, and `data` is passed to it.
+
+| Type | `code` holds | Rendering |
+|------|--------------|-----------|
+| `react` | A JSX component | Transformed with Babel and given React, Recharts, D3, lodash and lucide icons, plus `data`. |
+| `html` | HTML markup | Injected as-is; `{{key}}` placeholders are filled from `data` and inline scripts run. |
+| `markdown` | Markdown text | Rendered with `marked`. |
+| `svg` | SVG markup, or D3 code | Markup is inserted directly. Code containing `d3.` or `function` runs with an `svg` root selection, `d3` and `data`. |
 
 ## Versioning
 
-All artifact types support versioning. When the agent creates an updated version of an artifact, it links the new version to the original via the `parent_artifact` field. The version number is automatically incremented.
+Updating a story creates a new artifact row with `version` incremented and
+`parent_artifact` pointing at the previous version. Artifact lists show only
+the latest visible version of each artifact.
 
-## Data field
+## Fields
 
-Artifacts have a `data` JSON field that stores structured data used by the artifact. For example:
-
-- **React** artifacts may store static data that the component renders.
-- **Story** artifacts store a structured story document and named semantic query specs for live data.
-
-The `code` field contains the source code (React JSX, HTML markup, Markdown text, or SVG markup), and the `data` field contains supplementary structured data.
-
-## Semantic query provenance
-
-Story artifacts track the named `semantic_queries` that provide their live data.
-Legacy SQL-backed `source_queries` are disabled and are not executed.
+- `code`: source for sandboxed types. Empty for stories.
+- `data`: structured JSON. For stories it holds `story_doc`.
+- `semantic_queries`: the story's valid semantic queries, derived from its
+  `semantic_query` blocks.
+- `semantic_query_manifest`: per-query validation status, members and datasets,
+  used to decide whether the artifact's data can be served or needs repair.
+- `source_queries`: legacy SQL-backed queries. They are never executed.
