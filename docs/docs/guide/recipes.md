@@ -86,4 +86,4 @@ The Recipes page polls while a run is pending or running, so results appear with
 
 ## Visibility
 
-Recipes and runs belong to the workspace, and every member of the workspace can see all of them. The **Share with workspace** checkbox on a recipe or run (labelled **Project** in a recipe's run history) sets a flag but does not change who can see it.
+Recipes and runs belong to the workspace, and every member of the workspace can see all of them. There is no per-recipe or per-run sharing setting.

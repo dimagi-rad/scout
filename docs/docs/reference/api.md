@@ -84,11 +84,9 @@ frontend reads them from `/api/auth/providers/`.
 | GET, PATCH | `…/threads/<thread_id>/` | Thread summary, or rename it (`title`). |
 | GET | `…/threads/<thread_id>/messages/` | Messages for a thread. |
 | GET | `…/threads/<thread_id>/artifacts/` | Artifacts linked to a thread. |
-| GET, PATCH | `…/threads/<thread_id>/share/` | Sharing state, or set `is_shared`. Publishing needs `read_write`; unsharing needs `read`. |
 | POST | `…/threads/<thread_id>/viewed/` | Mark the thread as viewed. |
-| GET | `/api/chat/threads/shared/<share_token>/` | A shared thread's messages and artifacts. No authentication. |
 
-Threads are private to the user who created them.
+Threads are private to the user who created them. They cannot be shared.
 
 ### Chat request
 
@@ -155,8 +153,6 @@ Artifacts have no public share links.
 | DELETE | `…/recipes/<recipe_id>/` | read_write | Soft-delete a recipe. There is no undelete endpoint. |
 | POST | `…/recipes/<recipe_id>/run/` | read | Start a run with `variable_values`. Returns 202 with the pending run; the run executes in the background worker. |
 | GET | `…/recipes/<recipe_id>/runs/` | read | Runs for a recipe, newest first. |
-| PATCH | `…/recipes/<recipe_id>/runs/<run_id>/` | read_write | Set `is_shared` or `is_public` on a run. |
-| GET | `/api/recipes/runs/shared/<share_token>/` | — | A run with `is_public` set. No authentication. |
 
 ## Knowledge
 
