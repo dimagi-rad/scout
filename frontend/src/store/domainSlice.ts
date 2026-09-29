@@ -63,6 +63,11 @@ function nextActiveDomainId(
   return removed ? defaultDomainId(next) : activeId
 }
 
+// Same array when absent, so subscribers selecting the list don't re-render.
+function withoutId(ids: string[], id: string): string[] {
+  return ids.includes(id) ? ids.filter((other) => other !== id) : ids
+}
+
 export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => {
   // Bumped by every list request, so a background result never overwrites a newer foreground one.
   let listRequestSeq = 0
@@ -114,20 +119,25 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
             if (JSON.stringify(domains) === JSON.stringify(current.domains)) return "fetched"
+            const activeDomainId = nextActiveDomainId(
+              current.domains,
+              domains,
+              current.activeDomainId,
+            )
             const known = new Set(current.domains.map((d) => d.id))
-            // The active one is already open, e.g. a deep link waiting on this very refresh.
+            // The active one is already open, e.g. a deep link waiting on this very refresh,
+            // and one without upstream access would only open the lost-access gate.
             const added = domains
+              .filter((d) => !known.has(d.id) && d.id !== activeDomainId && workspaceHasAccess(d))
               .map((d) => d.id)
-              .filter((id) => !known.has(id) && id !== current.activeDomainId)
+            const listed = new Set(domains.map((d) => d.id))
             set({
               domains,
-              activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
-              ...(added.length > 0 && {
-                addedDomainIds: [
-                  ...current.addedDomainIds.filter((id) => !added.includes(id)),
-                  ...added,
-                ],
-              }),
+              activeDomainId,
+              addedDomainIds: [
+                ...current.addedDomainIds.filter((id) => listed.has(id) && !added.includes(id)),
+                ...added,
+              ],
             })
             return "fetched"
           })
@@ -140,22 +150,13 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
       },
 
       dismissAddedDomain: (id: string) => {
-        const { addedDomainIds } = get()
-        if (addedDomainIds.includes(id)) {
-          set({ addedDomainIds: addedDomainIds.filter((added) => added !== id) })
-        }
+        set({ addedDomainIds: withoutId(get().addedDomainIds, id) })
       },
 
       setActiveDomain: (id: string) => {
         if (!get().accountSession.isCurrent()) return
         recordWorkspaceUse(id)
-        const { addedDomainIds } = get()
-        set({
-          activeDomainId: id,
-          ...(addedDomainIds.includes(id) && {
-            addedDomainIds: addedDomainIds.filter((added) => added !== id),
-          }),
-        })
+        set({ activeDomainId: id, addedDomainIds: withoutId(get().addedDomainIds, id) })
       },
 
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
