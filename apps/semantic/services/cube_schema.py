@@ -54,9 +54,37 @@ class CubeValidatorBusyError(CubeValidatorUnavailableError):
     """No validator slot freed up in time; the build never started."""
 
 
+class _ValidatorSlot:
+    """One of ``VALIDATOR_CONCURRENCY`` slots shared by every worker process.
+
+    Acquired before the build's transaction opens, so the wait never holds row
+    locks, and released as soon as validation returns, so promotion and the
+    Cube warm-up never hold it.
+    """
+
+    def __init__(self, slot: int) -> None:
+        self._slot: int | None = slot
+
+    def release(self) -> None:
+        if self._slot is None:
+            return
+        slot, self._slot = self._slot, None
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [VALIDATOR_LOCK_CLASS, slot])
+                released = cursor.fetchone()[0]
+        except Exception as exc:
+            # A session lock outlives the transaction; closing the session frees it.
+            logger.warning("Closing the session to release Cube validator slot %s: %s", slot, exc)
+            connection.close()
+            return
+        if not released:
+            # The session was replaced mid-build, dropping the slot early.
+            logger.warning("Cube validator slot %s was already released", slot)
+
+
 @contextmanager
 def _validator_slot(wait_seconds: float):
-    """Hold one of ``VALIDATOR_CONCURRENCY`` slots shared by every worker process."""
     deadline = time.monotonic() + wait_seconds
     while (slot := _try_acquire_validator_slot()) is None:
         if time.monotonic() >= deadline:
@@ -65,16 +93,11 @@ def _validator_slot(wait_seconds: float):
                 f"for {wait_seconds:.0f}s."
             )
         time.sleep(VALIDATOR_SLOT_POLL_SECONDS)
+    held = _ValidatorSlot(slot)
     try:
-        yield
+        yield held
     finally:
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [VALIDATOR_LOCK_CLASS, slot])
-        except Exception as exc:
-            # A session lock outlives the transaction; closing the session frees it.
-            logger.warning("Closing the session to release Cube validator slot %s: %s", slot, exc)
-            connection.close()
+        held.release()
 
 
 def _try_acquire_validator_slot() -> int | None:
@@ -116,18 +139,15 @@ def build_and_promote_cube_schema(
     ``model.metadata["last_build"]`` so the resume task can disclose it; the
     model is flipped to ERROR only when there is no active schema to fall
     back to.
-
-    The validator slot is taken before any transaction opens, so waiting for
-    it never holds catalog row locks or leaves a session idle in transaction.
     """
     try:
         close_old_connections()
         try:
-            with _validator_slot(slot_wait_seconds):
+            with _validator_slot(slot_wait_seconds) as slot:
                 if model is None:
-                    return _build_and_promote_refreshed_model(workspace)
+                    return _build_and_promote_refreshed_model(workspace, slot)
                 try:
-                    return _build_validate_and_promote(workspace, model)
+                    return _build_validate_and_promote(workspace, model, slot)
                 except Exception as exc:
                     _record_build_failure(workspace, model, exc)
                     raise
@@ -182,7 +202,7 @@ def record_cube_schema_build_deferred(workspace, reason: str) -> None:
         logger.exception("Failed to record deferred Cube promotion for workspace %s", workspace.id)
 
 
-def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
+def _build_and_promote_refreshed_model(workspace, slot: _ValidatorSlot) -> CubeSchema:
     """Refresh physical datasets and promote them atomically when possible.
 
     Materialization rebuilds the physical semantic catalog from newly loaded
@@ -203,7 +223,7 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
     if not has_active:
         model = ensure_semantic_model(workspace)
         try:
-            return _build_validate_and_promote(workspace, model)
+            return _build_validate_and_promote(workspace, model, slot)
         except Exception as exc:
             _record_build_failure(workspace, model, exc)
             raise
@@ -211,7 +231,7 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
     try:
         with transaction.atomic():
             model = ensure_semantic_model(workspace)
-            return _build_validate_and_promote(workspace, model)
+            return _build_validate_and_promote(workspace, model, slot)
     except Exception as exc:
         # The atomic block rolled back the attempted catalog refresh, so record
         # the failure on the last-known-good model rather than the rolled-back
@@ -222,7 +242,9 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
         raise
 
 
-def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
+def _build_validate_and_promote(
+    workspace, model: SemanticModel, slot: _ValidatorSlot
+) -> CubeSchema:
     try:
         schema = generate_cube_schema(model)
         content = cube_schema_yaml(schema)
@@ -236,6 +258,8 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
         validation = async_to_sync(CubeClient().validate_schema)(content)
     except CubeServiceUnavailable as exc:
         raise CubeValidatorUnavailableError(str(exc)) from exc
+    finally:
+        slot.release()
     validation_diagnostics = _diagnostics_from_validation(validation)
     diagnostics = [
         *(model.metadata or {}).get("catalog_diagnostics", []),

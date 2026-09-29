@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
+import psycopg
 import pytest
-from django.db import connections
+from django.db import connection, connections
 
 from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticDataset, SemanticField, SemanticModel
@@ -252,3 +253,62 @@ def test_failed_validation_releases_its_slot(
                 "SELECT pg_try_advisory_lock(%s, %s)", [cube_schema.VALIDATOR_LOCK_CLASS, slot]
             )
             assert cursor.fetchone()[0] is True
+
+
+def _free_slots(conn):
+    free = []
+    with conn.cursor() as cursor:
+        for slot in range(cube_schema.VALIDATOR_CONCURRENCY):
+            cursor.execute(
+                "SELECT pg_try_advisory_lock(%s, %s)", [cube_schema.VALIDATOR_LOCK_CLASS, slot]
+            )
+            if cursor.fetchone()[0]:
+                free.append(slot)
+                cursor.execute(
+                    "SELECT pg_advisory_unlock(%s, %s)", [cube_schema.VALIDATOR_LOCK_CLASS, slot]
+                )
+    return free
+
+
+@pytest.mark.django_db(transaction=True)
+def test_slot_is_released_before_promotion_and_warmup(
+    workspace, model, cube_http, keep_build_session
+):
+    settings_dict = connection.settings_dict
+    # The scripted handlers run on async_to_sync's loop thread, which Django's
+    # thread-bound connections refuse; a plain psycopg session can observe from there.
+    observer = psycopg.connect(
+        dbname=settings_dict["NAME"],
+        user=settings_dict["USER"],
+        password=settings_dict["PASSWORD"],
+        host=settings_dict["HOST"],
+        port=settings_dict["PORT"] or None,
+        autocommit=True,
+    )
+    seen = {}
+
+    def validate(request):
+        seen["validate"] = _free_slots(observer)
+        return httpx.Response(200, json={"valid": True, "errors": []})
+
+    def meta(request):
+        seen["meta"] = _free_slots(observer)
+        return httpx.Response(200, json={})
+
+    cube_http.handlers["validate"] = validate
+    cube_http.handlers["meta"] = meta
+    try:
+        build_and_promote_cube_schema(workspace, model=model)
+    finally:
+        observer.close()
+
+    assert len(seen["validate"]) == cube_schema.VALIDATOR_CONCURRENCY - 1
+    assert seen["meta"] == list(range(cube_schema.VALIDATOR_CONCURRENCY))
+
+
+@pytest.mark.django_db(transaction=True)
+def test_releasing_a_slot_the_session_no_longer_holds_warns(caplog):
+    with caplog.at_level(logging.WARNING, logger=cube_schema.__name__):
+        cube_schema._ValidatorSlot(0).release()
+
+    assert "already released" in caplog.text
