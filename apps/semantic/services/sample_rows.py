@@ -8,6 +8,7 @@ from uuid import UUID
 
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
+from apps.semantic.services.column_policy import is_listed
 from apps.semantic.services.query import run_semantic_query_sync
 
 MAX_SAMPLE_ROWS = 20
@@ -84,7 +85,8 @@ def _selected_fields(dataset: SemanticDataset, field_refs: list[str] | None) -> 
         selected = [
             field
             for field in visible
-            if field.field_type
+            if is_listed(field)
+            and field.field_type
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
         if not selected:

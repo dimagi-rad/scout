@@ -18,6 +18,11 @@ from apps.semantic.models import (
     SemanticModel,
     SemanticRelationship,
 )
+from apps.semantic.services.column_policy import (
+    HIDDEN_METADATA_KEY,
+    column_hidden_reason,
+    is_listed,
+)
 from apps.semantic.services.cube import DROPPED_JOIN_CODES
 from apps.semantic.services.custom_datasets import (
     CustomDatasetError,
@@ -73,6 +78,7 @@ class PhysicalTable:
     source_tenant_ids: tuple[str, ...] = ()
     identity: dict[str, Any] | None = None
     source_table_name: str = ""
+    provider: str = ""
 
 
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_]+")
@@ -327,6 +333,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                     if sources is not None
                     else ""
                 ),
+                provider=source_provider or "",
             )
         )
     return schema_name, physical_tables
@@ -456,7 +463,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                 defaults=defaults,
             )
             existing_physical_dataset_ids.add(str(dataset.id))
-            _sync_fields(dataset, table.columns, annotation)
+            _sync_fields(dataset, table.columns, annotation, provider=table.provider)
 
         SemanticDataset.objects.filter(
             workspace=workspace,
@@ -795,7 +802,13 @@ def _relationship_key_type(data_type: str) -> str | None:
     return None
 
 
-def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annotation) -> None:
+def _sync_fields(
+    dataset: SemanticDataset,
+    columns: list[dict[str, Any]],
+    annotation,
+    *,
+    provider: str = "",
+) -> None:
     column_notes = annotation.column_notes if annotation else {}
     active_names: set[str] = set()
     existing_by_name = {field.name: field for field in dataset.fields.all()}
@@ -849,6 +862,12 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
             if _is_time(data_type) or text_event_time
             else SemanticField.FieldType.DIMENSION
         )
+        # Custom datasets list exactly the columns their author selected.
+        hidden_reason = (
+            column_hidden_reason(provider, column_name, data_type)
+            if dataset.source_kind == SemanticDataset.SourceKind.PHYSICAL
+            else ""
+        )
         upsert_field(
             field_name,
             {
@@ -865,6 +884,7 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                     "default": column.get("default"),
                     **({"event_time": event_time} if event_time else {}),
                     **({"cube_sql": event_time_sql(column_name)} if text_event_time else {}),
+                    **({HIDDEN_METADATA_KEY: hidden_reason} if hidden_reason else {}),
                     **(
                         {}
                         if _is_identifier_column(column_name, dataset)
@@ -939,7 +959,7 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
         .prefetch_related("fields")
         .order_by("name")
     ):
-        fields = [f for f in dataset.fields.all() if f.is_visible]
+        fields = [f for f in dataset.fields.all() if is_listed(f)]
         dimensions = [
             _serialize_field(f) for f in fields if f.field_type == SemanticField.FieldType.DIMENSION
         ]

@@ -45,6 +45,7 @@ from apps.semantic.services.catalog import (
     serialize_catalog,
     serialize_dataset,
 )
+from apps.semantic.services.column_policy import is_listed
 from apps.semantic.services.query import run_semantic_query
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import TenantMembership, User
@@ -692,6 +693,7 @@ async def _dataset_summary(dataset: SemanticDataset, include_fields: bool) -> di
         fields = [
             _field_summary(field)
             async for field in dataset.fields.filter(is_visible=True).order_by("field_type", "name")
+            if is_listed(field)
         ]
         payload["fields"] = fields
     return payload
