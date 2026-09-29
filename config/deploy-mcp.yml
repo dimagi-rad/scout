@@ -39,6 +39,7 @@ env:
     SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     # All-of workspace access (#380). The API, worker and MCP server all evaluate
     # access, so change it in all three deploy files together; "False" rolls back.
+    # The staging overlays don't set it, so staging inherits this value.
     WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT: "True"
   secret:
     - DATABASE_URL
