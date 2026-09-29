@@ -108,6 +108,35 @@ async def test_fallback_message_streams_to_the_chat():
 
 
 @pytest.mark.asyncio
+async def test_retry_after_rejected_truncated_call_streams_as_a_new_text_part():
+    """The rejection fires no tool events, so the stream must close the cut-off text."""
+    agent = MagicMock()
+
+    def text_chunk(text):
+        return {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": MagicMock(content=[{"type": "text", "text": text}])},
+        }
+
+    async def fake_events(*args, **kwargs):
+        yield text_chunk("Let me pull the top orders")
+        yield {"event": "on_chain_end", "name": "truncated_tool_calls", "data": {"output": {}}}
+        yield text_chunk("There are 42 orders.")
+
+    agent.astream_events = fake_events
+
+    events = []
+    async for sse in langgraph_to_ui_stream(agent, {}, {}):
+        for line in sse.strip().split("\n"):
+            if line.strip().startswith("data: "):
+                events.append(json.loads(line.strip()[6:]))
+
+    deltas = [(e["id"], e["delta"]) for e in events if e["type"] == "text-delta"]
+    assert len(deltas) == 2
+    assert deltas[0][0] != deltas[1][0]
+
+
+@pytest.mark.asyncio
 async def test_fallback_after_partial_answer_streams_as_its_own_text_part():
     """After a max_tokens cut, the fallback must not run on from the partial text."""
     agent = MagicMock()
