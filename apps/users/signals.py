@@ -176,6 +176,7 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     # identical to "account has no opportunities", with nobody told (07#6).
     elif provider == "commcare_connect":
         try:
+            # allauth signal receivers are sync.
             async_to_sync(resolve_connect_opportunities)(
                 sociallogin.user, token.token, social_account=sociallogin.account
             )
@@ -183,6 +184,7 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
             logger.exception("Failed to resolve Connect opportunities after OAuth")
     elif provider == "ocs":
         try:
+            # allauth signal receivers are sync.
             async_to_sync(resolve_ocs_chatbots)(
                 sociallogin.user, token.token, social_account=sociallogin.account
             )
@@ -190,6 +192,7 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
             logger.exception("Failed to resolve OCS chatbots after OAuth")
     elif provider.startswith("commcare"):
         try:
+            # allauth signal receivers are sync.
             async_to_sync(resolve_commcare_domains)(
                 sociallogin.user, token.token, social_account=sociallogin.account
             )
