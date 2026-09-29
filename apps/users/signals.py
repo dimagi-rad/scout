@@ -9,6 +9,7 @@ from django.conf import settings
 from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.sessions.models import Session
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
@@ -23,9 +24,12 @@ from apps.users.services.tenant_resolution import (
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
+    Workspace,
     WorkspaceInvite,
     WorkspaceInviteStatus,
     WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
 )
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
@@ -120,12 +124,6 @@ def auto_create_workspace_on_membership(sender, instance, created, **kwargs):
     """Auto-create a workspace for newly created TenantMembership records."""
     if not created:
         return
-    from apps.workspaces.models import (
-        Workspace,
-        WorkspaceRole,
-        WorkspaceTenant,
-    )
-
     # Idempotent: skip if an auto-created workspace for this user+tenant already exists
     existing = Workspace.objects.filter(
         is_auto_created=True,
@@ -135,17 +133,20 @@ def auto_create_workspace_on_membership(sender, instance, created, **kwargs):
     if existing:
         return
 
-    workspace = Workspace.objects.create(
-        name=instance.tenant.canonical_name,
-        is_auto_created=True,
-        created_by=instance.user,
-    )
-    WorkspaceTenant.objects.create(workspace=workspace, tenant=instance.tenant)
-    WorkspaceMembership.objects.create(
-        workspace=workspace,
-        user=instance.user,
-        role=WorkspaceRole.MANAGE,
-    )
+    # Atomic so a failure cannot leave a tenantless workspace that
+    # load_workspace_context rejects.
+    with transaction.atomic():
+        workspace = Workspace.objects.create(
+            name=instance.tenant.canonical_name,
+            is_auto_created=True,
+            created_by=instance.user,
+        )
+        WorkspaceTenant.objects.create(workspace=workspace, tenant=instance.tenant)
+        WorkspaceMembership.objects.create(
+            workspace=workspace,
+            user=instance.user,
+            role=WorkspaceRole.MANAGE,
+        )
 
 
 def resolve_existing_tenants_on_social_login(request, sociallogin, **kwargs):
