@@ -744,6 +744,34 @@ class TestRecipeRunner:
         assert run.step_results[0]["response"] == "Top customers: A, B."
 
     @pytest.mark.asyncio
+    async def test_recipe_runner_response_skips_tool_call_preamble(
+        self, recipe, user, recipe_step_1
+    ):
+        """An empty final answer is not replaced by an earlier tool-call preamble."""
+        values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
+        preamble = AIMessage(
+            content=[
+                {"type": "text", "text": "Let me query the sales table."},
+                {"type": "tool_use", "id": "tc-1", "name": "query", "input": {}},
+            ],
+            tool_calls=[{"id": "tc-1", "name": "query", "args": {}}],
+        )
+        empty_answer = AIMessage(content=[{"type": "thinking", "thinking": "", "signature": "sig"}])
+        mock_graph = Mock()
+        mock_graph.ainvoke = AsyncMock(return_value={"messages": [preamble, empty_answer]})
+
+        _run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, values, user, run=_run, graph=mock_graph).execute_async()
+
+        assert run.step_results[0]["response"] == ""
+
+    @pytest.mark.asyncio
     async def test_recipe_runner_handles_execution_failure(self, recipe, user, recipe_step_1):
         """RecipeRunner records a failed run when the graph raises."""
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
