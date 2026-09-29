@@ -49,6 +49,33 @@ def derive_schema_status(
     return "unavailable"
 
 
+def classify_tenant_schemas(rows: Iterable[tuple[Any, str]]) -> tuple[set, set]:
+    """``(tenants with an ACTIVE schema, tenants with one mid-provisioning)`` from
+    ``(tenant_id, state)`` rows. Counting tenants, not rows, keeps a source with
+    two ACTIVE schema rows from reading as a different status in list and detail.
+    """
+    active, provisioning = set(), set()
+    for tenant_id, state in rows:
+        if state == SchemaState.ACTIVE:
+            active.add(tenant_id)
+        elif state in (SchemaState.PROVISIONING, SchemaState.MATERIALIZING):
+            provisioning.add(tenant_id)
+    return active, provisioning
+
+
+def workspace_schema_status(
+    tenant_ids: Iterable[Any], active: set, provisioning: set, view_schema_state: str | None
+) -> str:
+    """``derive_schema_status`` for a workspace over ``classify_tenant_schemas`` output."""
+    tenant_ids = set(tenant_ids)
+    return derive_schema_status(
+        tenant_count=len(tenant_ids),
+        active_count=len(tenant_ids & active),
+        provisioning=bool(tenant_ids & provisioning),
+        view_schema_state=view_schema_state,
+    )
+
+
 # Every state a source can report, most severe first. "unavailable" (never
 # loaded, e.g. just added) ranks last: it describes only that source, which the
 # per-source list reports, so it must not mask the state of sources that have data.
