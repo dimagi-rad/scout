@@ -22,7 +22,17 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from apps.agents.graph.state import AgentState, prune_messages
+from apps.agents.graph.state import (
+    TRUNCATED_TOOL_CALLS_NODE,
+    AgentState,
+    all_tool_calls,
+    prune_messages,
+    reject_truncated_tool_calls,
+    truncated_retries_exhausted,
+    truncated_tool_calls,
+    unfinished_turn_reason,
+)
+from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
 from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
@@ -124,7 +134,10 @@ INJECTED_TOOL_PARAMS = frozenset(
 )
 
 
-DEFAULT_MAX_TOKENS = 4096
+# Adaptive thinking counts toward max_tokens, so 4096 could cut a turn off
+# mid-answer or mid-tool-call. 16k stays under the Anthropic SDK's 21,333-token
+# guard for non-streamed requests (recipes and the resume task use ainvoke).
+DEFAULT_MAX_TOKENS = 16_000
 
 # Anthropic prompt-caching breakpoint (arch #254, finding 02#3).
 # Default 5-min ephemeral TTL breaks even at ~2 reads, which a single agent turn
@@ -240,6 +253,18 @@ READ_ONLY_ESCALATION_MESSAGE = (
 # Marks the escalation node's message so headless callers (recipe runs) can tell
 # an ended-on-escalation turn from a real answer without matching its prose.
 ESCALATION_METADATA_KEY = "scout_escalation"
+
+# A refusal, a max_tokens cut-off, or a turn with only thinking would otherwise
+# end the chat with a blank reply and a clean finish.
+MODEL_STOPPED_MESSAGES = {
+    "refusal": "The model declined to answer this request. Try rephrasing it.",
+    "max_tokens": "The model stopped before finishing its answer; try again.",
+    "empty": "The model stopped before answering; try again.",
+}
+
+# Graph nodes that end a turn with a fixed AIMessage instead of an LLM call, so
+# the chat stream must emit their text itself.
+FIXED_MESSAGE_NODES = frozenset({"escalate", "model_stopped"})
 
 
 def _should_escalate(messages: list) -> bool:
@@ -841,6 +866,7 @@ async def build_agent_graph(
     llm = ChatAnthropic(
         model=settings.DEFAULT_LLM_MODEL,
         max_tokens=DEFAULT_MAX_TOKENS,
+        **chat_model_kwargs(MAIN_AGENT_EFFORT),
     )
     llm_tool_schemas = _llm_tool_schemas(tools, hidden_params=hidden_params)
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
@@ -887,15 +913,15 @@ async def build_agent_graph(
         repaired: list = []
         for msg in state_messages:
             repaired.append(msg)
-            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-                for tc in msg.tool_calls:
+            if isinstance(msg, AIMessage):
+                for tc in all_tool_calls(msg):
                     tc_id = tc.get("id")
                     if tc_id and tc_id not in answered_ids:
                         logger.warning(
                             "agent_node: found dangling tool_call_id=%s tool_name=%s — "
                             "injecting synthetic tool_result to satisfy Anthropic protocol",
                             tc_id,
-                            tc.get("name", "unknown"),
+                            tc.get("name") or "unknown",
                         )
                         repaired.append(
                             ToolMessage(
@@ -904,7 +930,7 @@ async def build_agent_graph(
                                     "before this tool completed."
                                 ),
                                 tool_call_id=tc_id,
-                                name=tc.get("name", "unknown"),
+                                name=tc.get("name") or "unknown",
                             )
                         )
                         answered_ids.add(tc_id)
@@ -918,17 +944,40 @@ async def build_agent_graph(
         response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
         return {"messages": [response]}
 
-    def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
-        """Route to tools if the last message has tool calls, else end."""
+    def should_continue(
+        state: AgentState,
+    ) -> Literal["tools", "truncated_tool_calls", "model_stopped", "__end__"]:
+        """Route to tools on tool calls, to model_stopped on an unanswered turn, else end."""
         messages = state.get("messages", [])
         if not messages:
             return END
 
         last_message = messages[-1]
+        if truncated_tool_calls(last_message):
+            return TRUNCATED_TOOL_CALLS_NODE
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
+        if unfinished_turn_reason(last_message) is not None:
+            return "model_stopped"
 
         return END
+
+    def model_stopped_node(state: AgentState) -> dict[str, Any]:
+        """Terminal node: tell the user the model stopped instead of leaving a blank reply."""
+        reason = unfinished_turn_reason(state["messages"][-1]) or "empty"
+        logger.warning(
+            "agent graph: model turn ended without an answer (reason=%s, workspace=%s)",
+            reason,
+            workspace.id,
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=MODEL_STOPPED_MESSAGES[reason],
+                    response_metadata={ESCALATION_METADATA_KEY: f"model_{reason}"},
+                )
+            ]
+        }
 
     def post_tools_router(state: AgentState) -> Literal["agent", "escalate"]:
         """Route post-tools: escalate if the agent is in a panic loop, else agent.
@@ -971,6 +1020,8 @@ async def build_agent_graph(
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
     graph.add_node("escalate", escalation_node)
+    graph.add_node("model_stopped", model_stopped_node)
+    graph.add_node(TRUNCATED_TOOL_CALLS_NODE, reject_truncated_tool_calls)
 
     graph.set_entry_point("agent")
 
@@ -979,6 +1030,8 @@ async def build_agent_graph(
         should_continue,
         {
             "tools": "tools",
+            TRUNCATED_TOOL_CALLS_NODE: TRUNCATED_TOOL_CALLS_NODE,
+            "model_stopped": "model_stopped",
             END: END,
         },
     )
@@ -993,6 +1046,14 @@ async def build_agent_graph(
         },
     )
     graph.add_edge("escalate", END)
+    graph.add_edge("model_stopped", END)
+    graph.add_conditional_edges(
+        TRUNCATED_TOOL_CALLS_NODE,
+        lambda state: (
+            "model_stopped" if truncated_retries_exhausted(state["messages"]) else "agent"
+        ),
+        {"agent": "agent", "model_stopped": "model_stopped"},
+    )
 
     compiled = graph.compile(checkpointer=checkpointer)
 
@@ -1243,6 +1304,7 @@ __all__ = [
     "ESCALATION_MESSAGE",
     "ESCALATION_METADATA_KEY",
     "ESCALATION_TRIGGER_COUNT",
+    "FIXED_MESSAGE_NODES",
     "HEADLESS_ESCALATION_MESSAGE",
     "READ_ONLY_ESCALATION_MESSAGE",
     "_should_escalate",

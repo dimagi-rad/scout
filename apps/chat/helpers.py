@@ -4,6 +4,7 @@ import logging
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from apps.agents.graph.state import all_tool_calls
 from apps.users.decorators import (  # noqa: F401 — re-exported for backwards compat
     LoginRequiredJsonMixin,
     async_login_required,
@@ -67,14 +68,14 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
     dangling: list[ToolMessage] = []
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
-            for tc in getattr(msg, "tool_calls", []) or []:
+            for tc in all_tool_calls(msg):
                 tc_id = tc.get("id")
                 if tc_id and tc_id not in answered_ids:
                     logger.warning(
                         "repair_dangling_tool_calls: injecting synthetic tool_result "
                         "for dangling tool_call_id=%s tool_name=%s",
                         tc_id,
-                        tc.get("name", "unknown"),
+                        tc.get("name") or "unknown",
                     )
                     dangling.append(
                         ToolMessage(
@@ -84,7 +85,7 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
                                 "respond to the user's latest message."
                             ),
                             tool_call_id=tc_id,
-                            name=tc.get("name", "unknown"),
+                            name=tc.get("name") or "unknown",
                         )
                     )
             break  # only inspect the most recent AIMessage

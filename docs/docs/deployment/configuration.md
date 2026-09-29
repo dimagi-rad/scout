@@ -79,7 +79,7 @@ These are staged-rollout switches.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEFAULT_LLM_MODEL` | `claude-opus-4-8` | Claude model the agent uses. |
+| `DEFAULT_LLM_MODEL` | `claude-opus-5-5` | Claude model the agent uses. |
 | `LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE` | `1` (`0` in development) | Minimum size of each process's connection pool for conversation checkpoints. |
 | `LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE` | `20` (`4` in development) | Maximum size of that pool. The pool is per process, so multiply by the number of API and worker processes when sizing PostgreSQL `max_connections`. |
 | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_BASE_URL` | (empty) | Langfuse tracing for agent runs. Leave blank to disable. |

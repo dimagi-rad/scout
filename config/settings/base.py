@@ -301,13 +301,15 @@ WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = env.bool(
 
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
-DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-4-8")
+DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-5-5")
 
-# Hard ceiling on the materialization-resume agent.ainvoke. The agent's
-# recursion_limit is 50; 120s is generous for any sane follow-up response.
-# Beyond this, the user sees a synthetic "took too long" message instead of
-# a forever-spinner. Override per-test to exercise the timeout path.
-AGENT_RESUME_TIMEOUT_S = env.int("AGENT_RESUME_TIMEOUT_S", default=120)
+# Hard ceiling on the materialization-resume agent.ainvoke. Beyond this, the
+# user sees a synthetic "took too long" message instead of a forever-spinner.
+# 300s because the model thinks on every call (Opus 5.5 can't turn it off) and
+# one call may now generate up to 16k tokens, several minutes on its own; the
+# old 120s was sized for a model that didn't think. Override per-test to
+# exercise the timeout path.
+AGENT_RESUME_TIMEOUT_S = env.int("AGENT_RESUME_TIMEOUT_S", default=300)
 
 # LangGraph checkpoint persistence uses a psycopg pool per Python process.
 # Keep these settings explicit because worker/process fan-out multiplies the

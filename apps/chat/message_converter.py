@@ -5,6 +5,7 @@ import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from apps.agents.graph.state import is_rejected_tool_result
 from apps.agents.subagents.events import SUBAGENT_TOOL_NAMES
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.stream import _redact_tool_input, _tool_content_to_str
@@ -61,6 +62,11 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
                 parts.append({"type": "text", "text": text})
 
             for tc in getattr(msg, "tool_calls", []) or []:
+                tr = tool_results.get(tc["id"])
+                # The live stream never shows a call the graph refused to run
+                # (its half-written args are meaningless), so reload mustn't either.
+                if tr is not None and is_rejected_tool_result(tr):
+                    continue
                 tool_part = {
                     "type": f"tool-{tc['name']}",
                     "toolCallId": tc["id"],
@@ -68,7 +74,6 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
                     "input": _redact_tool_input(tc.get("args", {})),
                     "state": "output-available",
                 }
-                tr = tool_results.get(tc["id"])
                 output_text = None
                 if tr:
                     output_text = _tool_content_to_str(tr)

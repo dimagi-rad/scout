@@ -10,6 +10,7 @@ from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.agents.graph.base import ESCALATION_METADATA_KEY, build_agent_graph
+from apps.agents.graph.state import all_tool_calls
 from apps.agents.mcp_client import get_mcp_tools
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.workspaces.models import Workspace
@@ -133,13 +134,16 @@ class RecipeRunner:
 
     def _extract_response_content(self, messages: list) -> str:
         """Extract the final response content from agent messages."""
+        # ``.text`` rather than ``content``: with thinking on, the final answer
+        # arrives as a block list (thinking + text), and str() of it would store
+        # the thinking signatures as the recipe's response. Tool-call turns are
+        # skipped so a "Let me query X" preamble never stands in for the answer.
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and msg.content:
-                if hasattr(msg, "tool_calls") and msg.tool_calls and not msg.content.strip():
-                    continue
-                if msg.response_metadata.get(ESCALATION_METADATA_KEY):
-                    continue
-                return str(msg.content)
+            if not isinstance(msg, AIMessage) or all_tool_calls(msg):
+                continue
+            if msg.response_metadata.get(ESCALATION_METADATA_KEY):
+                continue
+            return msg.text
 
         return ""
 

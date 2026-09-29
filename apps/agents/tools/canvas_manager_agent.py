@@ -26,7 +26,16 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
-from apps.agents.graph.state import AgentState
+from apps.agents.graph.state import (
+    TRUNCATED_TOOL_CALLS_NODE,
+    UNFINISHED_TURN_DESCRIPTIONS,
+    AgentState,
+    model_cut_off_reason,
+    reject_truncated_tool_calls,
+    truncated_retries_exhausted,
+    truncated_tool_calls,
+)
+from apps.agents.llm_request import SUBAGENT_EFFORT, chat_model_kwargs
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     reset_subagent_event_queue,
@@ -45,7 +54,8 @@ logger = logging.getLogger(__name__)
 SUBAGENT_NAME = "canvas_manager"
 NESTED_MCP_TOOL_NAMES = frozenset({"list_datasets", "describe_dataset", "semantic_query"})
 NESTED_RECURSION_LIMIT = 18
-NESTED_MAX_TOKENS = 4096
+# Sized for adaptive thinking plus the reply; see DEFAULT_MAX_TOKENS.
+NESTED_MAX_TOKENS = 16_000
 
 
 class CanvasManagerInput(BaseModel):
@@ -269,6 +279,14 @@ def create_canvas_manager_tool(
                     if isinstance(maybe_messages, list):
                         # Node outputs can contain only the newest AI message, not the history.
                         messages = add_messages(messages, maybe_messages)
+            if reason := model_cut_off_reason(messages):
+                return await _failure_result(
+                    forwarder,
+                    messages,
+                    "MODEL_STOPPED",
+                    bool(unfinished_commits),
+                    detail=UNFINISHED_TURN_DESCRIPTIONS[reason],
+                )
             result = _summarize_result(messages)
             failed = result["status"] in {"blocked", "error"}
             await forwarder.status(
@@ -317,7 +335,11 @@ def _build_canvas_manager_graph(
     ]
     tools = [*canvas_tools, *nested_mcp_tools]
     tool_node = _make_nested_tool_node(ToolNode(tools))
-    llm = ChatAnthropic(model=settings.DEFAULT_LLM_MODEL, max_tokens=NESTED_MAX_TOKENS)
+    llm = ChatAnthropic(
+        model=settings.DEFAULT_LLM_MODEL,
+        max_tokens=NESTED_MAX_TOKENS,
+        **chat_model_kwargs(SUBAGENT_EFFORT),
+    )
     llm_with_tools = llm.bind_tools(_nested_llm_tool_schemas(tools))
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
@@ -329,11 +351,13 @@ def _build_canvas_manager_graph(
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
-    def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
+    def should_continue(state: AgentState) -> Literal["tools", "truncated_tool_calls", "__end__"]:
         messages = state.get("messages", [])
         if not messages:
             return END
         last_message = messages[-1]
+        if truncated_tool_calls(last_message):
+            return TRUNCATED_TOOL_CALLS_NODE
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
         return END
@@ -341,9 +365,19 @@ def _build_canvas_manager_graph(
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
+    graph.add_node(TRUNCATED_TOOL_CALLS_NODE, reject_truncated_tool_calls)
     graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", TRUNCATED_TOOL_CALLS_NODE: TRUNCATED_TOOL_CALLS_NODE, END: END},
+    )
     graph.add_edge("tools", "agent")
+    graph.add_conditional_edges(
+        TRUNCATED_TOOL_CALLS_NODE,
+        lambda state: END if truncated_retries_exhausted(state["messages"]) else "agent",
+        {"agent": "agent", END: END},
+    )
     return graph.compile()
 
 
@@ -417,11 +451,15 @@ async def _failure_result(
     messages: list[Any],
     error_code: str,
     commit_unconfirmed: bool,
+    detail: str | None = None,
 ) -> dict[str, Any]:
     result = _summarize_result(messages)
-    reason = (
-        "reached its step limit" if error_code == "STEP_LIMIT_REACHED" else "stopped unexpectedly"
-    )
+    if detail:
+        reason = f"stopped because {detail}"
+    elif error_code == "STEP_LIMIT_REACHED":
+        reason = "reached its step limit"
+    else:
+        reason = "stopped unexpectedly"
     message = f"Canvas Manager {reason} before completing the task. "
     if result["committed"]:
         message += "Some changes were committed and were not rolled back. "

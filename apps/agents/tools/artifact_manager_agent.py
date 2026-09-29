@@ -23,7 +23,16 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field, ValidationError
 
-from apps.agents.graph.state import AgentState
+from apps.agents.graph.state import (
+    TRUNCATED_TOOL_CALLS_NODE,
+    UNFINISHED_TURN_DESCRIPTIONS,
+    AgentState,
+    model_cut_off_reason,
+    reject_truncated_tool_calls,
+    truncated_retries_exhausted,
+    truncated_tool_calls,
+)
+from apps.agents.llm_request import SUBAGENT_EFFORT, chat_model_kwargs
 from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
@@ -49,7 +58,8 @@ NESTED_MCP_TOOL_NAMES = frozenset(
     }
 )
 NESTED_RECURSION_LIMIT = 50
-NESTED_MAX_TOKENS = 8192
+# Sized for adaptive thinking plus the reply; see DEFAULT_MAX_TOKENS.
+NESTED_MAX_TOKENS = 16_000
 MAX_RUNTIME_FAILURES = 8
 SUBAGENT_TRACE_MAX_EVENTS = 200
 SUBAGENT_MESSAGE_MAX_CHARS = 40_000
@@ -306,6 +316,15 @@ def create_artifact_manager_tool(
                     maybe_messages = output.get("messages")
                     if isinstance(maybe_messages, list):
                         messages = maybe_messages
+            if reason := model_cut_off_reason(messages):
+                return await _artifact_manager_failure_result(
+                    parent_tool_call_id,
+                    trace,
+                    messages,
+                    final_text,
+                    "Artifact Manager stopped before completion: "
+                    f"{UNFINISHED_TURN_DESCRIPTIONS[reason]}.",
+                )
             if messages:
                 final_text = _extract_final_text(messages)
             result = _summarize_result(messages, final_text)
@@ -446,7 +465,11 @@ def _build_artifact_manager_graph(
     ]
     tools = [*primitive_tools, *nested_mcp_tools]
     tool_node = _make_nested_tool_node(ToolNode(tools))
-    llm = ChatAnthropic(model=settings.DEFAULT_LLM_MODEL, max_tokens=NESTED_MAX_TOKENS)
+    llm = ChatAnthropic(
+        model=settings.DEFAULT_LLM_MODEL,
+        max_tokens=NESTED_MAX_TOKENS,
+        **chat_model_kwargs(SUBAGENT_EFFORT),
+    )
     llm_with_tools = llm.bind_tools(_nested_llm_tool_schemas(tools))
 
     system_prompt = ARTIFACT_MANAGER_SYSTEM_PROMPT + agent_date_context()
@@ -460,11 +483,13 @@ def _build_artifact_manager_graph(
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
-    def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
+    def should_continue(state: AgentState) -> Literal["tools", "truncated_tool_calls", "__end__"]:
         messages = state.get("messages", [])
         if not messages:
             return END
         last_message = messages[-1]
+        if truncated_tool_calls(last_message):
+            return TRUNCATED_TOOL_CALLS_NODE
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
         return END
@@ -472,9 +497,19 @@ def _build_artifact_manager_graph(
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
+    graph.add_node(TRUNCATED_TOOL_CALLS_NODE, reject_truncated_tool_calls)
     graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", TRUNCATED_TOOL_CALLS_NODE: TRUNCATED_TOOL_CALLS_NODE, END: END},
+    )
     graph.add_edge("tools", "agent")
+    graph.add_conditional_edges(
+        TRUNCATED_TOOL_CALLS_NODE,
+        lambda state: END if truncated_retries_exhausted(state["messages"]) else "agent",
+        {"agent": "agent", END: END},
+    )
     return graph.compile()
 
 
