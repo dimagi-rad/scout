@@ -1,5 +1,6 @@
 """Execution receipts hash the exact config and assets consumed by one load."""
 
+import os
 import uuid
 from copy import deepcopy
 from types import SimpleNamespace
@@ -17,6 +18,11 @@ from mcp_server.services.materializer import run_pipeline
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
+# Deferred promotion clears prior transform outputs on the managed database first; without
+# one that step fails, transforms are skipped, and the assertions fail far from the cause.
+@pytest.mark.skipif(
+    not os.environ.get("MANAGED_DATABASE_URL"), reason="MANAGED_DATABASE_URL not set"
+)
 @pytest.mark.parametrize("mutate_registry", [False, True])
 def test_pipeline_uses_snapshot_across_registry_and_asset_edits(tenant, mutate_registry):
     pipeline = PipelineConfig(
