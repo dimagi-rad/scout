@@ -67,7 +67,7 @@ describe("reportRenderError", () => {
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.name).toBe("Error")
     expect(reported.message).toBe("first at forged (b:2:2)")
-    expect(reported.stack).toBe("    at App (sandbox:1:1)")
+    expect(reported.stack).toBe("Error: render error\n    at App (sandbox:1:1)")
   })
 
   it("keeps a message that looks like a frame out of the stack", () => {
@@ -80,7 +80,21 @@ describe("reportRenderError", () => {
 
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.message).toBe("x@https://evil.example/a.js:2:2")
-    expect(reported.stack).toBe("    at App (sandbox:1:1)")
+    expect(reported.stack).toBe("Error: render error\n    at App (sandbox:1:1)")
+  })
+
+  it("keeps the top frame of a minified React error, whose first line Sentry skips", async () => {
+    reportRenderError({
+      source: "boundary",
+      name: "Error",
+      message: "Minified React error #418; visit https://react.dev/errors/418 for the full message",
+      stack: "Error: Minified React error #418\n    at App (app.js:1:1)\n    at render (app.js:2:2)",
+    })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    const { defaultStackParser } = await vi.importActual<typeof Sentry>("@sentry/react")
+    const frames = defaultStackParser(reported.stack ?? "", 1).map((frame) => frame.function)
+    expect(frames).toEqual(["render", "App"])
   })
 
   it("names a thrown non-Error, which has no name, Error", () => {

@@ -29,6 +29,9 @@ const STACK_FRAME = /^\s+at\s|^[^\s]*@\S+:\d+:\d+$/
 // so anything but a plain identifier could carry text or split Sentry grouping.
 export const SAFE_ERROR_NAME = /^[\w$.]{1,80}$/
 
+// Sentry's parser skips any line matching /\S*Error: /.
+const STACK_HEADER = "Error: render error"
+
 const reported = new Set<string>()
 const reportCounts = new Map<RenderErrorSource, number>()
 
@@ -90,10 +93,12 @@ export function reportRenderError(report: RenderErrorReport): void {
   const error = new Error(message)
   error.name = name
   const stack = safeStack(report.stack)
-  // No "name: message" header: Sentry takes both from the error itself, and parses
-  // a header whose name doesn't end in "Error" as a frame, so artifact text there
-  // like "x@https://evil.example/a.js:2:2" would become a fake frame.
-  error.stack = stack ?? ""
+  // The header is fixed text, not "name: message": Sentry takes both from the error
+  // itself, and parses a header whose name doesn't end in "Error" as a frame, so
+  // artifact text there like "x@https://evil.example/a.js:2:2" would become a fake
+  // frame. A header is still needed because Sentry drops the first stack line of a
+  // "Minified React error", which would otherwise be a real frame.
+  error.stack = stack ? `${STACK_HEADER}\n${stack}` : ""
 
   Sentry.withScope((scope) => {
     scope.setTag("render_error_source", report.source)
