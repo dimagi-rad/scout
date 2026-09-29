@@ -22,8 +22,12 @@ export interface DomainSlice {
   domainsError: string | null
   domainActions: {
     fetchDomains: () => Promise<void>
-    /** Background refresh: never shows loading or error, and keeps state when nothing changed. */
-    revalidateDomains: () => Promise<void>
+    /**
+     * Background refresh: never shows loading or error, and keeps state when nothing changed.
+     * Resolves false when it skipped the request because a full load owns the list.
+     * `fresh` never joins a request that started before the call.
+     */
+    revalidateDomains: (options?: { fresh?: boolean }) => Promise<boolean>
     setActiveDomain: (id: string) => void
     setActiveDomainByTenantId: (provider: string, tenantId: string) => void
     ensureTenant: (provider: string, tenantId: string) => Promise<void>
@@ -83,10 +87,15 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         }
       },
 
-      revalidateDomains: () => {
+      revalidateDomains: async ({ fresh = false } = {}) => {
         // An initial or retried load shows its own state; don't race it.
-        if (get().domainsStatus !== "loaded") return Promise.resolve()
-        if (revalidation) return revalidation
+        if (get().domainsStatus !== "loaded") return false
+        if (revalidation) {
+          await revalidation
+          if (!fresh) return true
+          // That request may predate what the caller is waiting for (a grant, #355).
+          return get().domainActions.revalidateDomains()
+        }
         listRequestSeq += 1
         const seq = listRequestSeq
         revalidation = workspaceApi
@@ -107,7 +116,8 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
           .finally(() => {
             revalidation = null
           })
-        return revalidation
+        await revalidation
+        return true
       },
 
       setActiveDomain: (id: string) => {

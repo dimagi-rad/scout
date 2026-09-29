@@ -225,6 +225,32 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     expect(list).toHaveBeenCalledOnce()
   })
 
+  it("reports whether it fetched, so callers can tell a skip from a refresh (D1, D5)", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a")])
+    const actions = useAppStore.getState().domainActions
+
+    expect(await actions.revalidateDomains()).toBe(true)
+    useAppStore.setState({ domainsStatus: "loading" })
+    expect(await actions.revalidateDomains()).toBe(false)
+  })
+
+  it("makes a fresh request rather than joining one that started before it (D1)", async () => {
+    let resolveOlder!: (value: TenantMembership[]) => void
+    const list = vi.spyOn(workspaceApi, "list")
+      .mockReturnValueOnce(new Promise((r) => { resolveOlder = r }))
+      .mockResolvedValueOnce([ws("granted"), ws("a")])
+    const actions = useAppStore.getState().domainActions
+
+    const older = actions.revalidateDomains()
+    const fresh = actions.revalidateDomains({ fresh: true })
+    resolveOlder([ws("a")])
+
+    expect(await fresh).toBe(true)
+    await older
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["granted", "a"])
+  })
+
   it("drops its result when a full fetch starts after it", async () => {
     let resolveStale!: (value: TenantMembership[]) => void
     vi.spyOn(workspaceApi, "list")

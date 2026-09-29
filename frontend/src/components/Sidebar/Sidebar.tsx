@@ -155,8 +155,12 @@ export function Sidebar() {
       if (document.visibilityState === "hidden") return
       const now = Date.now()
       if (now - lastRevalidatedAtRef.current < DOMAIN_REVALIDATE_MIN_INTERVAL_MS) return
+      const previous = lastRevalidatedAtRef.current
       lastRevalidatedAtRef.current = now
-      void revalidateDomains()
+      void revalidateDomains().then((fetched) => {
+        // Skipped for the mount load: don't let it use up the window for a real return.
+        if (!fetched && lastRevalidatedAtRef.current === now) lastRevalidatedAtRef.current = previous
+      })
     }
     document.addEventListener("visibilitychange", revalidate)
     window.addEventListener("focus", revalidate)
