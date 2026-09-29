@@ -19,7 +19,9 @@ const run = (id, run_number, head_sha, status, extra = {}) => ({
 });
 
 // `deployed` maps a run id to its deploy job's conclusion (default success).
-function fakeGithub({ runs = [], deployed = {}, commitDate = minutesAgo(120), issues = [], comments = [] } = {}) {
+function fakeGithub({
+  runs = [], deployed = {}, commitDate = minutesAgo(120), issues = [], comments = [], author = 'merger',
+} = {}) {
   const calls = [];
   const record = (name, result) => async (args) => {
     calls.push([name, args]);
@@ -30,7 +32,9 @@ function fakeGithub({ runs = [], deployed = {}, commitDate = minutesAgo(120), is
     paginate: async (fn, args) => (await fn(args)).data,
     rest: {
       repos: {
-        getBranch: record('branch', { commit: { sha: HEAD, commit: { committer: { date: commitDate } } } }),
+        getBranch: record('branch', {
+          commit: { sha: HEAD, author: author && { login: author }, commit: { committer: { date: commitDate } } },
+        }),
       },
       actions: {
         listWorkflowRuns: record('runs', { workflow_runs: runs }),
@@ -144,7 +148,7 @@ test('being behind opens the deploy-failure issue with a re-run instruction', as
   const [, created] = github.calls.at(-1);
   assert.equal(created.title, TITLE);
   assert.deepEqual(created.labels, [LABEL]);
-  assert.match(created.body, /Production is behind main: main is at `hhhhhhhhhhhh`, production runs `llllllllllll`/);
+  assert.match(created.body, /Production is behind main: main is at `hhhhhhhhhhhh` \(by @merger\), production runs `llllllllllll`/);
   assert.match(created.body, /ahead for 90 minutes/);
   assert.ok(created.body.includes('ended `cancelled`: https://github.com/o/r/actions/runs/12'), created.body);
   assert.match(created.body, /Re-run the latest deploy/);
@@ -224,4 +228,16 @@ test('no recent deploy says the live commit is unknown, not that a guard is off'
   const github = fakeGithub({ runs: strandedRuns(), deployed: { ...strandedDeploys, 10: 'failure' } });
   await assessDeployLag({ github, context, core, workflowId, jobName, now: NOW, thresholdMinutes: 45 });
   assert.match(core.out.warnings[0], /the commit production runs is unknown\.$/);
+});
+
+test('without a GitHub author the head run\'s actor is mentioned, else nobody', async () => {
+  const runs = strandedRuns();
+  runs[0] = { ...runs[0], actor: { login: 'dispatcher' } };
+  const github = fakeGithub({ runs, deployed: strandedDeploys, author: null });
+  await check(github);
+  assert.match(github.calls.at(-1)[1].body, /`hhhhhhhhhhhh` \(by @dispatcher\), production/);
+
+  const nobody = fakeGithub({ runs: strandedRuns(), deployed: strandedDeploys, author: null });
+  await check(nobody);
+  assert.match(nobody.calls.at(-1)[1].body, /`hhhhhhhhhhhh`, production/);
 });

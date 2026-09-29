@@ -6,7 +6,7 @@
 // purpose (host trouble, a held migration), and an unattended redeploy drains
 // workers on a host shared with staging.
 const { WAITING, findLiveRun } = require('./deploy-supersede.cjs');
-const { LABEL, TITLE, findOpenIssue, ensureLabel } = require('./deploy-failure-issue.cjs');
+const { findOpenIssue, fileOrComment } = require('./deploy-failure-issue.cjs');
 
 const THRESHOLD_MINUTES = 45;
 
@@ -47,7 +47,9 @@ async function assessDeployLag({ github, context, core, workflowId, jobName, now
   if (minutes < thresholdMinutes) state = 'waiting';
   // deploy.yml's own `report` job already filed a failed test or deploy stage.
   else if (latest && latest.conclusion === 'failure') state = 'reported';
-  return { state, head, live, latest, minutes };
+  // A schedule has no pusher to mention; the head commit's author is the nearest.
+  const author = branch.commit.author?.login || latest?.actor?.login || null;
+  return { state, head, live, latest, minutes, author };
 }
 
 function describeLag({ context, env, workflowId, lag }) {
@@ -63,7 +65,7 @@ function describeLag({ context, env, workflowId, lag }) {
   }
   return [
     marker(lag.head),
-    `Production is behind main: main is at \`${lag.head.slice(0, 12)}\`, production runs ${liveText}.`,
+    `Production is behind main: main is at \`${lag.head.slice(0, 12)}\`${lag.author ? ` (by @${lag.author})` : ''}, production runs ${liveText}.`,
     `Main has been ahead for ${lag.minutes} minutes and no production deploy is queued or running.`,
     latestText,
     '',
@@ -95,20 +97,12 @@ async function checkDeployLag({
   // it with production still behind, say so again.
   if (lag.state === 'reported' && existing) return quiet();
   const body = describeLag({ context, env, workflowId, lag });
-  if (existing) {
-    if (await alreadyReported({ github, context, issue: existing, head: lag.head })) {
-      core.warning(`Production is behind main; already reported on #${existing.number}.`);
-      return lag;
-    }
-    await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body });
-    core.warning(`Production is behind main; updated #${existing.number}.`);
+  if (existing && await alreadyReported({ github, context, issue: existing, head: lag.head })) {
+    core.warning(`Production is behind main; already reported on #${existing.number}.`);
     return lag;
   }
-  await ensureLabel({ github, context });
-  const { data: issue } = await github.rest.issues.create({
-    ...context.repo, title: TITLE, labels: [LABEL], body,
-  });
-  core.warning(`Production is behind main; opened #${issue.number}.`);
+  const issue = await fileOrComment({ github, context, existing, comment: body, body });
+  core.warning(`Production is behind main; ${issue.opened ? 'opened' : 'updated'} #${issue.number}.`);
   return lag;
 }
 
