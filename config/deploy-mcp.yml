@@ -37,6 +37,9 @@ env:
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
+    # All-of workspace access (#380). The API, worker and MCP server all evaluate
+    # access, so change it in all three deploy files together; "False" rolls back.
+    WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT: "True"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL

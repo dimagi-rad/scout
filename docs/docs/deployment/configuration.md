@@ -72,7 +72,7 @@ These are staged-rollout switches.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT` | `False` | When on, a member can use a workspace only if their own credentials cover every one of its data sources; when off, any one is enough. Run `manage.py report_workspace_credential_coverage` before turning it on. |
+| `WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT` | `False` | When on, a member can use a workspace only if their own credentials cover every one of its data sources; when off, any one is enough. Run `manage.py report_workspace_credential_coverage` before turning it on. Production runs with it on (set in `config/deploy.yml`, `config/deploy-worker.yml` and `config/deploy-mcp.yml`); each denial it causes is logged at INFO as `workspace_access_denied_coverage` with the user, workspace, tenant ids and gap codes. To roll back, set it to `"False"` in all three and redeploy. |
 | `UPSTREAM_ACCESS_FRESHNESS_ENFORCED` | `False` | When on, workspace access also requires the user's access to have been confirmed with the upstream provider recently. Enable it in the API, worker and MCP server together. |
 
 ### LLM and agent
