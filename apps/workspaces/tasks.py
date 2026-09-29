@@ -2421,7 +2421,13 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                 )
             surface = await recovery_query_surface(recovery)
             action = surface.get("recovery_action")
-            if action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
+            if (
+                recovery.source_type == CHAT_RECOVERY_SOURCE
+                and action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION
+            ):
+                # Nobody approved a reload: a chat only asks for the data model (#714).
+                result = {"error": _CHAT_RECOVERY_NEEDS_RELOAD}
+            elif action == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
                 result = await materialize_workspace_core(
                     str(recovery.workspace_id),
                     str(recovery.requested_by_id),
@@ -2434,6 +2440,12 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
                 result = await rebuild_workspace_view_schema.func(
                     str(recovery.workspace_id), revive_retired=True
                 )
+            elif (
+                recovery.recovery_type == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD
+                and surface.get("semantic_status") == "stale"
+            ):
+                # The catalog still serves but its latest build failed; chat asks for this (#714).
+                result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))
             elif surface["status"] == "ready":
                 result = {"status": "already_recovered"}
             else:
@@ -2476,6 +2488,12 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             completed_at=timezone.now(),
         )
         return {"status": "failed", "error": error, "result": result}
+
+
+CHAT_RECOVERY_SOURCE = "chat"
+_CHAT_RECOVERY_NEEDS_RELOAD = (
+    "The data model can't be rebuilt from the loaded data: it needs a data refresh first."
+)
 
 
 def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:

@@ -131,7 +131,7 @@ async def artifact_data_state(artifact) -> dict[str, Any]:
 async def recovery_query_surface(recovery) -> dict[str, Any]:
     """Use the durable request's artifact even after its page has closed."""
     if recovery.source_id is None:
-        # Older/headless recovery rows predate artifact-scoped requests.
+        # Chat-started rebuilds, and older rows from before artifact-scoped requests.
         return await workspace_query_surface(recovery.workspace)
     artifact = None
     if recovery.source_type == "artifact":
