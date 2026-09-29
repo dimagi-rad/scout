@@ -18,9 +18,9 @@ Lists the members and their roles, plus any pending invites. Managers can:
 
 - **Add a member** by email and role.
 - **Change a member's role**.
-- **Remove a member**. Any member can remove themselves.
+- **Remove a member**.
 
-A workspace always keeps at least one manager, so the last manager cannot be removed or demoted.
+A workspace always keeps at least one manager, so the last manager cannot be removed or demoted. Other members can only leave through the API (`DELETE /api/workspaces/<workspace_id>/members/<membership_id>/` on their own membership).
 
 When a manager adds someone by email:
 
