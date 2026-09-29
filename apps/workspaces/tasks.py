@@ -125,6 +125,7 @@ from apps.workspaces.services.schema_manager import (
     SchemaStillReferenced,
     ViewSchemaRetired,
 )
+from apps.workspaces.services.source_freshness import arecord_load_outcomes
 from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app
 from mcp_server.loaders.connect_base import ConnectExportError
@@ -1256,6 +1257,7 @@ async def materialize_workspace_core(
         "cube_schema": cube_schema_outcome,
         "guidance": _credential_guidance(_summary_failures(guidance_sources)),
         "denied_mid_run": denied_mid_run,
+        "source_freshness": await arecord_load_outcomes(workspace.id, all_results),
     }
 
 
