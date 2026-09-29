@@ -13,6 +13,8 @@ import httpx
 import jwt
 from django.conf import settings
 
+from apps.common.errors import ExpectedStateError
+
 logger = logging.getLogger(__name__)
 
 # Cube's /v1/load long-polls up to continueWaitTimeout (~5s default) and then
@@ -39,6 +41,16 @@ TRANSIENT_ERROR_MARKERS = (
     "the database system is shutting down",
 )
 
+SCHEMA_REQUEST_ATTEMPTS = 3
+# Long enough for a restarted validator or a busy Cube to come back.
+SCHEMA_RETRY_BASE_DELAY_SECONDS = 2.0
+# The validator abandons a compile at 60s (CUBE_VALIDATOR_COMPILE_TIMEOUT_MS) and
+# answers 503; reading past that lets its answer arrive instead of a ReadTimeout.
+VALIDATE_TIMEOUT = httpx.Timeout(75.0, connect=5.0)
+# /v1/meta compiles the workspace schema inside Cube, which takes tens of seconds
+# for large multi-source models (SCOUT-DJANGO-3N timed out at the old flat 30s).
+META_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+
 
 class CubeConfigurationError(RuntimeError):
     """Raised when Cube is not configured for live query execution."""
@@ -54,6 +66,16 @@ class CubeAuthenticationError(CubeQueryError):
 
 class CubeConnectionError(RuntimeError):
     """A transient Cube failure, distinct from an invalid semantic query."""
+
+
+class CubeServiceUnavailable(CubeConnectionError, ExpectedStateError):
+    """Cube or its validator stayed unreachable through a schema operation's retries.
+
+    Expected under ``apps.common.errors``' test: overload and restarts are routine
+    for a single Cube container; the caller records the failed build (or skips a
+    warm-up) at WARNING; and the last good schema keeps serving until the next
+    rebuild retries.
+    """
 
 
 class CubeClient:
@@ -207,10 +229,58 @@ class CubeClient:
         """Force Cube to observe the latest schemaVersion for this context."""
         if not self.is_configured:
             return
-        url = f"{self.base_url}/cubejs-api/v1/meta"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=self._headers(security_context))
-            response.raise_for_status()
+        await self._schema_request(
+            "GET",
+            f"{self.base_url}/cubejs-api/v1/meta",
+            operation="schema warm-up",
+            limits=META_TIMEOUT,
+            headers=self._headers(security_context),
+        )
+
+    async def _schema_request(
+        self, method: str, url: str, *, operation: str, limits: httpx.Timeout, **kwargs: Any
+    ) -> httpx.Response:
+        """Send a schema-maintenance request, retrying only transient failures.
+
+        Both endpoints are idempotent and share work across retries: Cube keeps
+        compiling a /meta schema after the client gives up, and the validator
+        joins a repeated request to the compile already in flight for that hash.
+        """
+        last_error: Exception | None = None
+        async with httpx.AsyncClient(timeout=limits) as client:
+            for attempt in range(1, SCHEMA_REQUEST_ATTEMPTS + 1):
+                try:
+                    response = await client.request(method, url, **kwargs)
+                    response.raise_for_status()
+                except httpx.TransportError as exc:
+                    last_error = exc
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code not in RETRYABLE_HTTP_STATUSES:
+                        raise
+                    last_error = exc
+                else:
+                    if attempt > 1:
+                        logger.info(
+                            "Cube %s recovered after %s transient failure(s)",
+                            operation,
+                            attempt - 1,
+                        )
+                    return response
+                if attempt == SCHEMA_REQUEST_ATTEMPTS:
+                    break
+                logger.info(
+                    "Retrying Cube %s after transient failure (%s), retry %s/%s",
+                    operation,
+                    _describe_transient(last_error),
+                    attempt,
+                    SCHEMA_REQUEST_ATTEMPTS - 1,
+                )
+                delay = SCHEMA_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                await asyncio.sleep(delay * random.uniform(0.5, 1.5))  # noqa: S311 -- retry jitter
+        raise CubeServiceUnavailable(
+            f"Cube {operation} failed after {SCHEMA_REQUEST_ATTEMPTS} attempts: "
+            f"{_describe_transient(last_error)}"
+        ) from last_error
 
     async def validate_schema(self, content: str) -> dict[str, Any]:
         """Validate Cube YAML through the optional validator sidecar."""
@@ -224,14 +294,21 @@ class CubeClient:
             }
         if not self.api_secret:
             raise CubeConfigurationError("CUBEJS_API_SECRET is not configured.")
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{validator_url}/internal/validate-cube-schema",
-                json={"schema": content},
-                headers={"Authorization": f"Bearer {self.api_secret}"},
-            )
-            response.raise_for_status()
+        response = await self._schema_request(
+            "POST",
+            f"{validator_url}/internal/validate-cube-schema",
+            operation="schema validation",
+            limits=VALIDATE_TIMEOUT,
+            json={"schema": content},
+            headers={"Authorization": f"Bearer {self.api_secret}"},
+        )
         return response.json()
+
+
+def _describe_transient(error: Exception | None) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"HTTP {error.response.status_code}"
+    return type(error).__name__
 
 
 def _columns_from_cube_payload(data: list[dict[str, Any]], payload: dict[str, Any]) -> list[str]:
