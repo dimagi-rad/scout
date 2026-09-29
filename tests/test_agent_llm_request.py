@@ -74,3 +74,10 @@ async def test_stale_thinking_blocks_are_dropped_not_rejected(site_payload):
     assert thinking["type"] == "adaptive"
     assert thinking["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
     assert THINKING_BINDING_BETA in site_payload["betas"]
+
+
+@pytest.mark.asyncio
+async def test_thinking_is_summarized_so_the_thinking_card_has_text(site_payload):
+    """The default display ("omitted") streams empty thinking text, and the
+    Thinking card (and Opus 5.5's between-tool-call notes) render nothing."""
+    assert site_payload["thinking"]["display"] == "summarized"

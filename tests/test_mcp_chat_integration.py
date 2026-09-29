@@ -672,6 +672,52 @@ class TestSSEStreamFormat:
         assert "text-delta" in types
 
     @pytest.mark.asyncio
+    async def test_summarized_thinking_chunks_stream_as_reasoning(self):
+        """langchain-anthropic's streamed shape for summarized thinking
+        (thinking_delta text, then a signature-only block) and a between-tool
+        note after a tool call each reach the Thinking card; the signature-only
+        chunk adds no empty reasoning part."""
+        mock_agent = AsyncMock()
+
+        def chunk(*blocks):
+            return {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": MagicMock(content=list(blocks))},
+            }
+
+        async def fake_events(*args, **kwargs):
+            yield chunk({"type": "thinking", "thinking": "Plan: count orders.", "index": 0})
+            yield chunk({"type": "thinking", "signature": "sig-1", "index": 0})
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-1",
+                "name": "semantic_query",
+                "data": {
+                    "output": ToolMessage(
+                        content="{}", tool_call_id="call-1", name="semantic_query"
+                    )
+                },
+            }
+            yield chunk({"type": "thinking", "thinking": "Got 42 rows; summarising.", "index": 0})
+            yield chunk({"type": "text", "text": "There are 42 orders.", "index": 1})
+
+        mock_agent.astream_events = fake_events
+
+        events = []
+        async for sse in langgraph_to_ui_stream(mock_agent, {}, {}):
+            for line in sse.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        reasoning = [e["delta"] for e in events if e["type"] == "reasoning-delta"]
+        assert reasoning == ["Plan: count orders.", "Got 42 rows; summarising."]
+        starts = [e for e in events if e["type"] == "reasoning-start"]
+        assert len(starts) == 2
+        text = [e["delta"] for e in events if e["type"] == "text-delta"]
+        assert text == ["There are 42 orders."]
+
+    @pytest.mark.asyncio
     async def test_empty_content_chunks_skipped(self):
         """Chunks with no content should be skipped."""
         mock_agent = AsyncMock()
