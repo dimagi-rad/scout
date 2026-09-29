@@ -91,7 +91,7 @@ it("tells the manager a directly added member was emailed", async () => {
   await userEvent.click(screen.getByTestId("add-member-submit"))
 
   expect(await screen.findByTestId("member-row-m-2")).toBeInTheDocument()
-  expect(screen.getByTestId("add-member-invite-info")).toHaveTextContent(
+  expect(screen.getByTestId("add-member-added-info")).toHaveTextContent(
     "Added new@example.com. We've emailed them to let them know.",
   )
 })
