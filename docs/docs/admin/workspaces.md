@@ -18,9 +18,9 @@ Lists the members and their roles, plus any pending invites. Managers can:
 
 - **Add a member** by email and role.
 - **Change a member's role**.
-- **Remove a member**.
+- **Remove a member**. This also deletes all of that member's chat threads in the workspace, and cannot be undone.
 
-A workspace always keeps at least one manager, so the last manager cannot be removed or demoted. Other members can only leave through the API (`DELETE /api/workspaces/<workspace_id>/members/<membership_id>/` on their own membership).
+A workspace always keeps at least one manager, so the last manager cannot be removed or demoted. Other members can only leave through the API (`DELETE /api/workspaces/<workspace_id>/members/<membership_id>/` on their own membership), which deletes their threads in the same way.
 
 When a manager adds someone by email:
 
