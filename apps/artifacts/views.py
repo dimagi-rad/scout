@@ -635,8 +635,14 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
         // promises), where neither the React boundary nor showError sees it.
         window.addEventListener('error', (event) => {
             const error = event.error;
-            ArtifactRenderer.notifyParentOfError(
-                'Uncaught Error', error?.message ?? event.message, error?.stack ?? null, error?.name ?? null);
+            if (error instanceof Error) {
+                ArtifactRenderer.notifyParentOfError(
+                    'Uncaught Error', error.message, error.stack, error.name);
+                return;
+            }
+            // A thrown non-Error may be a row the artifact loaded, so none of its
+            // fields are read; event.message is the browser's "Uncaught ..." text.
+            ArtifactRenderer.notifyParentOfError('Uncaught Error', event.message, null, null);
         });
         window.addEventListener('unhandledrejection', (event) => {
             const reason = event.reason;

@@ -233,6 +233,34 @@ class TestArtifactListView:
         assert [item["id"] for item in response.json()["results"]] == [str(artifact.id)]
 
 
+def _run_sandbox_error_listeners(dispatch: str) -> list:
+    """Run the template's real window error listeners under node with a stubbed window.
+
+    `dispatch` calls `handlers.error(...)` / `handlers.unhandledrejection(...)`. Returns
+    the notifyParentOfError calls, with any stack replaced by the string "stack".
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    start = SANDBOX_HTML_TEMPLATE.index("window.addEventListener('error'")
+    last = SANDBOX_HTML_TEMPLATE.index("window.addEventListener('unhandledrejection'")
+    end = SANDBOX_HTML_TEMPLATE.index("\n        });", last) + len("\n        });")
+    harness = (
+        "const handlers = {}; const calls = [];\n"
+        "const window = { addEventListener: (type, fn) => { handlers[type] = fn } };\n"
+        "const ArtifactRenderer = { notifyParentOfError: (...args) => calls.push(args) };\n"
+        f"{SANDBOX_HTML_TEMPLATE[start:end]}\n"
+        f"{dispatch}"
+        "const stackless = calls.map(([t, m, s, n]) => [t, m, s && 'stack', n]);\n"
+        "console.log(JSON.stringify(stackless));\n"
+    )
+    result = subprocess.run(  # noqa: S603 - node from PATH runs a fixed harness
+        [node, "-e", harness], capture_output=True, text=True, check=False, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 # ============================================================================
 # 4. TestArtifactSandboxView
 # ============================================================================
@@ -390,38 +418,32 @@ class TestArtifactSandboxView:
         assert "error: { title, message, details, name }" in content
 
     def test_sandbox_reports_non_error_rejections_without_their_value(self):
-        """`Promise.reject("query timed out")` must reach Sentry, but a rejected row must not.
-
-        Runs the real listener from the template under node with a stubbed window.
-        """
-        node = shutil.which("node")
-        if node is None:
-            pytest.skip("node is not installed")
-        start = SANDBOX_HTML_TEMPLATE.index("window.addEventListener('unhandledrejection'")
-        end = SANDBOX_HTML_TEMPLATE.index("\n        });", start) + len("\n        });")
-        harness = (
-            "const handlers = {}; const calls = [];\n"
-            "const window = { addEventListener: (type, fn) => { handlers[type] = fn } };\n"
-            "const ArtifactRenderer = { notifyParentOfError: (...args) => calls.push(args) };\n"
-            f"{SANDBOX_HTML_TEMPLATE[start:end]}\n"
+        """`Promise.reject("query timed out")` must reach Sentry, but a rejected row must not."""
+        calls = _run_sandbox_error_listeners(
             "const reasons = ['query timed out', { rows: [{ patient: 'Alice' }] }, 42, null,"
             " new TypeError('bad')];\n"
             "for (const reason of reasons) handlers.unhandledrejection({ reason });\n"
-            "const stackless = calls.map(([t, m, s, n]) => [t, m, s && 'stack', n]);\n"
-            "console.log(JSON.stringify(stackless));\n"
         )
 
-        result = subprocess.run(  # noqa: S603 - node from PATH runs a fixed harness
-            [node, "-e", harness], capture_output=True, text=True, check=True, timeout=30
-        )
-
-        calls = json.loads(result.stdout)
         assert calls == [
             ["Unhandled Rejection", "query timed out", None, "UnhandledRejection"],
             ["Unhandled Rejection", "Non-Error rejection (object)", None, "UnhandledRejection"],
             ["Unhandled Rejection", "Non-Error rejection (number)", None, "UnhandledRejection"],
             ["Unhandled Rejection", "Non-Error rejection (null)", None, "UnhandledRejection"],
             ["Unhandled Rejection", "bad", "stack", "TypeError"],
+        ]
+
+    def test_sandbox_reads_no_fields_of_a_thrown_non_error(self):
+        """`throw row` must not forward the row's `message` or `name` fields."""
+        calls = _run_sandbox_error_listeners(
+            "handlers.error({ error: { message: 'Alice', name: 'Bob' },"
+            " message: 'Uncaught [object Object]' });\n"
+            "handlers.error({ error: new RangeError('bad'), message: 'Uncaught RangeError: bad' });\n"
+        )
+
+        assert calls == [
+            ["Uncaught Error", "Uncaught [object Object]", None, None],
+            ["Uncaught Error", "bad", "stack", "RangeError"],
         ]
 
     def test_sandbox_never_fetches_live_data_itself(
