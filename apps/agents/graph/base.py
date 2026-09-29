@@ -396,7 +396,9 @@ async def _fetch_semantic_model_context(
             # Queued but not yet started, so no run above says so (#408).
             guidance = await _load_in_progress_guidance(interactive, write_capable, conversation_id)
         elif load_state == _LOADED and write_capable and interactive:
-            guidance = await _semantic_rebuild_guidance(workspace, conversation_id)
+            guidance = await _semantic_rebuild_guidance(
+                workspace, interactive, write_capable, conversation_id
+            )
         else:
             guidance = _load_state_guidance(
                 load_state, interactive=interactive, write_capable=write_capable
@@ -441,7 +443,9 @@ async def _catalog_unavailable_load_state(workspace) -> tuple[str, bool]:
     return _NOT_LOADED, False
 
 
-async def _semantic_rebuild_guidance(workspace, conversation_id: str | None) -> str:
+async def _semantic_rebuild_guidance(
+    workspace, interactive: bool, write_capable: bool, conversation_id: str | None
+) -> str:
     """Loaded data with no catalog needs a rebuild, which the chat starts itself (#714).
 
     Only a snapshot a failed load left unsafe needs a reload; the agent must never
@@ -455,7 +459,7 @@ async def _semantic_rebuild_guidance(workspace, conversation_id: str | None) -> 
         .afirst()
     )
     if active == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
-        return await _load_in_progress_guidance(True, True, conversation_id)
+        return await _load_in_progress_guidance(interactive, write_capable, conversation_id)
     if active is not None:
         return _SEMANTIC_REBUILDING_GUIDANCE
     surface = await workspace_query_surface(workspace)
