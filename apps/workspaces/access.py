@@ -338,8 +338,14 @@ def missing_tenants_by_workspace(user, workspaces) -> dict:
 
 def missing_tenants_for_member(user, workspace) -> tuple[MissingTenant, ...]:
     """:func:`missing_workspace_tenants` for one workspace, for handlers that
-    resolved with ``require_coverage=False`` and must narrow what they allow."""
-    return missing_workspace_tenants(user, _workspace_tenants(workspace))
+    resolved with ``require_coverage=False`` and must narrow what they allow.
+
+    Reuses what the gate computed earlier in the request (A5)."""
+    missing = access_cache.lookup(user, workspace.id, access_cache.COVERAGE)
+    if missing is None:
+        missing = missing_workspace_tenants(user, _workspace_tenants(workspace))
+        access_cache.store(user, workspace.id, access_cache.COVERAGE, missing)
+    return missing
 
 
 def _workspace_tenants(workspace) -> list:
@@ -366,11 +372,10 @@ def _resolve_local_access_ex(
         )
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
-    missing = (
-        missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
-        if require_coverage
-        else ()
-    )
+    missing = ()
+    if require_coverage:
+        missing = missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
+        access_cache.store(user, workspace_id, access_cache.COVERAGE, missing)
     if missing:
         return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not role_satisfies(wm.role, minimum_role):
@@ -387,6 +392,7 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     missing = await amissing_workspace_tenants(user, await _aworkspace_tenants(wm.workspace))
+    access_cache.store(user, workspace_id, access_cache.COVERAGE, missing)
     if missing:
         return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not role_satisfies(wm.role, minimum_role):

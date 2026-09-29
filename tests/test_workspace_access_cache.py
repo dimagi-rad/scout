@@ -25,6 +25,7 @@ from apps.workspaces.access import (
     WorkspaceAccess,
     aresolve_workspace_access_ex,
     aworkspace_write_allowed,
+    missing_tenants_for_member,
     resolve_workspace_access_ex,
     workspace_write_allowed,
 )
@@ -35,6 +36,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.access_freshness import VerificationBudget
+from apps.workspaces.services.workspace_service import remove_workspace_tenant
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
 from tests.tenant_access import grant_tenant_access
 
@@ -320,3 +322,57 @@ def test_an_upstream_denial_drops_the_users_cached_decisions(scope, user, worksp
     )
 
     assert resolve_workspace_access_ex(user, workspace.id).denied_reason == TENANT_ACCESS_LOST
+
+
+@pytest.fixture
+def uncovered_manager(user):
+    t1 = Tenant.objects.create(provider="commcare", external_id="u1", canonical_name="One")
+    t2 = Tenant.objects.create(provider="commcare", external_id="u2", canonical_name="Two")
+    ws = Workspace.objects.create(name="Partial", created_by=user)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    for tenant in (t1, t2):
+        WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    grant_tenant_access(user, t1)
+    return ws, t2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("path", ["", "members/"])
+def test_exempt_pages_evaluate_readiness_once_per_request(
+    client, user, uncovered_manager, mocker, path
+):
+    """A5: the gate already computed what the caller is missing; the exempt
+    handler narrowing on it must not run the readiness batch again."""
+    ws, _missing = uncovered_manager
+    client.force_login(user)
+    spy = mocker.spy(access_module, "member_coverage_gaps")
+
+    resp = client.get(f"/api/workspaces/{ws.id}/{path}")
+
+    assert resp.status_code == 200
+    assert spy.call_count == 1
+
+
+@pytest.mark.django_db
+def test_removing_the_missing_source_evaluates_readiness_once(
+    client, user, uncovered_manager, mocker
+):
+    ws, missing = uncovered_manager
+    wt = WorkspaceTenant.objects.get(workspace=ws, tenant=missing)
+    client.force_login(user)
+    spy = mocker.spy(access_module, "member_coverage_gaps")
+
+    resp = client.delete(f"/api/workspaces/{ws.id}/tenants/{wt.id}/")
+
+    assert resp.status_code == 204
+    assert spy.call_count == 1
+
+
+@pytest.mark.django_db
+def test_changing_a_workspaces_sources_drops_its_cached_coverage(scope, user, uncovered_manager):
+    ws, missing = uncovered_manager
+    assert [t.tenant_name for t in missing_tenants_for_member(user, ws)] == ["Two"]
+
+    remove_workspace_tenant(ws, WorkspaceTenant.objects.get(workspace=ws, tenant=missing))
+
+    assert missing_tenants_for_member(user, ws) == ()

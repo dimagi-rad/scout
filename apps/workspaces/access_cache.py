@@ -25,6 +25,10 @@ from contextvars import ContextVar
 # on a tool call a few seconds later; long enough to absorb a turn's burst of checks.
 MAX_AGE_SECONDS = 10.0
 
+# The ``options`` slot for a member's missing tenants, which the gate computes and
+# the coverage-exempt handlers need again to narrow what they allow.
+COVERAGE = "coverage"
+
 
 class Scope(dict):
     """Cached decisions for one request. A plain mutable dict, so tasks and threads
