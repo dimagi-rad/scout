@@ -146,6 +146,18 @@ class UpstreamAccessDenied(ExpectedUpstreamError):
     code = ErrorCode.AUTH_ACCESS_DENIED
 
 
+class UpstreamUnavailable(ExpectedUpstreamError):
+    """The provider kept failing transiently after the loader's bounded retries.
+
+    Expected under the module's four-part test: known (5xx, throttle or timeout
+    that survived the retry policy), routine (providers have brief outages),
+    surfaced (the materialization failure summary), and resolved (run the load
+    again later).
+    """
+
+    code = ErrorCode.UPSTREAM_UNAVAILABLE
+
+
 # The provider classes below are deliberately NOT expected states. They are the
 # base that ``apps/users/services/tenant_resolution.py`` raises from the login
 # signal, which today has NO user-facing surface at all — a failed resolution
@@ -192,6 +204,12 @@ class ConnectTokenExpiredError(ConnectAuthError, UpstreamTokenExpired):
 
 class ConnectAccessDeniedError(ConnectAuthError, UpstreamAccessDenied):
     """Connect returned 403 for a specific opportunity."""
+
+
+class ConnectUnavailableError(UpstreamUnavailable):
+    """Connect kept failing transiently (5xx, throttle, timeout) after retries."""
+
+    provider = "commcare_connect"
 
 
 class OCSAuthError(Exception):

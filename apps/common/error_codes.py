@@ -94,6 +94,11 @@ class ErrorCode(StrEnum):
     # untouched; retrying later can succeed without any user action.
     ACCESS_VERIFICATION_UNAVAILABLE = "ACCESS_VERIFICATION_UNAVAILABLE"
 
+    # The provider kept failing (5xx, throttling, timeout) after the loader's
+    # bounded retries. Nothing is wrong with the credential or with Scout;
+    # running the load again later can succeed.
+    UPSTREAM_UNAVAILABLE = "UPSTREAM_UNAVAILABLE"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.

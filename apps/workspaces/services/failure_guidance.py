@@ -42,6 +42,10 @@ CREDENTIAL_GUIDANCE: dict[str, str] = {
         "access could not be confirmed with the provider just now — nothing was "
         "removed; retry shortly."
     ),
+    ErrorCode.UPSTREAM_UNAVAILABLE: (
+        "the provider is temporarily unavailable — nothing is wrong with your "
+        "connection; retry shortly."
+    ),
 }
 
 # Stored credential failures must not permanently hide Retry after reconnecting.
