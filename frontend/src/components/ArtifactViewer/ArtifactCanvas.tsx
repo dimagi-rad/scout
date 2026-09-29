@@ -3,13 +3,20 @@ import { Loader2 } from "lucide-react"
 
 import { ArtifactGraphRenderer, type ArtifactDetail } from "@/components/ArtifactGraph"
 import type { DateRange } from "@/components/ArtifactGraph/types"
+import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { withBasePath } from "@/config"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { reportRenderError } from "@/lib/reportRenderError"
 import { cn } from "@/lib/utils"
 import { ArtifactDataRecovery } from "./ArtifactDataRecovery"
 import type { QueryDataResponse } from "./types"
 import { useArtifactDataRecovery } from "./useArtifactDataRecovery"
 import { useArtifactPrint } from "./useArtifactPrint"
+
+function errorClassFromStack(stack: unknown): string | undefined {
+  if (typeof stack !== "string") return undefined
+  return /^([A-Z][\w$]{0,60}):/.exec(stack)?.[1]
+}
 
 export interface ArtifactCanvasHandle {
   exportPdf: () => void
@@ -61,17 +68,33 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
       },
     }), [isGraphArtifact, printArtifact])
 
+    const artifactVersion = artifact?.version
+
     useEffect(() => {
       function handleMessage(event: MessageEvent) {
-        if (!onQueryData) return
         if (event.source !== iframeRef.current?.contentWindow) return
+        if (event.data?.type === "artifact-error") {
+          // Only the error text leaves the page; nothing else in the message is read.
+          const { title, message, details } = event.data.error ?? {}
+          reportRenderError({
+            source: "sandbox",
+            stage: typeof title === "string" ? title : undefined,
+            name: errorClassFromStack(details) ?? "SandboxRenderError",
+            message: typeof message === "string" ? message : "",
+            stack: typeof details === "string" ? details : undefined,
+            artifactId,
+            artifactVersion,
+          })
+          return
+        }
+        if (!onQueryData) return
         if (event.data?.type === "artifact-query-data" && event.data.artifactId === artifactId) {
           onQueryData(event.data.queryData as QueryDataResponse)
         }
       }
       window.addEventListener("message", handleMessage)
       return () => window.removeEventListener("message", handleMessage)
-    }, [artifactId, onQueryData])
+    }, [artifactId, artifactVersion, onQueryData])
 
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
@@ -107,7 +130,9 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
               />
             )}
             {dataIsReady && isGraphArtifact && (
-              <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} onDateSourcesChange={onDateSourcesChange} />
+              <ErrorBoundary artifactId={artifactId} artifactVersion={artifactVersion}>
+                <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} onDateSourcesChange={onDateSourcesChange} />
+              </ErrorBoundary>
             )}
             {dataIsReady && !isGraphArtifact && (
               <iframe

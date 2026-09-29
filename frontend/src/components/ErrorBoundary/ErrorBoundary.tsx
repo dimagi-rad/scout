@@ -1,10 +1,13 @@
 import { Component, type ReactNode } from "react"
 import { AlertTriangle, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { reportRenderError } from "@/lib/reportRenderError"
 
 interface Props {
   children: ReactNode
   fallback?: ReactNode
+  artifactId?: string
+  artifactVersion?: number
 }
 
 interface State {
@@ -28,6 +31,16 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error("ErrorBoundary caught an error:", error, errorInfo)
+    // React 19 does not rethrow errors a boundary catches, so Sentry's global
+    // handlers never see them.
+    reportRenderError({
+      source: "boundary",
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+      artifactId: this.props.artifactId,
+      artifactVersion: this.props.artifactVersion,
+    })
   }
 
   handleReset = () => {
