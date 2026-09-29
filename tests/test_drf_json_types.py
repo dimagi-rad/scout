@@ -1,5 +1,7 @@
 """The DRF views answer a non-object body or a wrong-typed field with a 400, not a 500."""
 
+import uuid
+
 import pytest
 from django.test import Client
 
@@ -138,6 +140,22 @@ class TestFieldTypes:
 
         assert resp.status_code == 400
         assert resp.json()["error"] == "workspace_id must be a string."
+
+    @pytest.mark.parametrize(
+        "workspace_id,status",
+        [(["x"], 400), ({"a": 1}, 400), ("nope", 403), (str(uuid.uuid4()), 403)],
+        ids=["list", "object", "malformed", "unknown"],
+    )
+    def test_rejected_trigger_does_not_reset_the_schema_ttl(
+        self, client, tenant, tenant_membership, active_schema, workspace_id, status
+    ):
+        body = {"tenant_id": str(tenant.id), "workspace_id": workspace_id}
+
+        resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
+
+        assert resp.status_code == status
+        active_schema.refresh_from_db()
+        assert active_schema.last_accessed_at is None
 
     def test_trigger_malformed_workspace_id_is_forbidden_like_an_unknown_one(
         self, client, tenant, tenant_membership, active_schema
