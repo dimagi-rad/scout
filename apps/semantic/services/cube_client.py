@@ -263,6 +263,8 @@ class CubeClient:
         Retrying validation is cheap: the validator joins a repeated request to
         the compile already in flight for that schema hash.
         """
+        if attempts < 1:
+            raise ValueError(f"Cube {operation} needs at least one attempt.")
         last_error: Exception | None = None
         deadline = time.monotonic() + budget_seconds
         async with httpx.AsyncClient(timeout=limits) as client:
@@ -277,7 +279,12 @@ class CubeClient:
                     )
                     response.raise_for_status()
                 except httpx.TransportError as exc:
-                    last_error = exc
+                    # A budget-shortened retry timing out says less than the 503 before it.
+                    if not (
+                        isinstance(exc, httpx.TimeoutException)
+                        and isinstance(last_error, httpx.HTTPStatusError)
+                    ):
+                        last_error = exc
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code not in RETRYABLE_HTTP_STATUSES:
                         raise

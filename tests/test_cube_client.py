@@ -446,3 +446,19 @@ async def test_slow_validator_failure_is_not_retried_past_the_budget(monkeypatch
 
     assert len(read_timeouts) == 1
     assert read_timeouts[0] <= 5.2
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_reports_the_503_not_a_later_shortened_timeout(monkeypatch, validator_url):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, json={"valid": False})
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    _patched_async_client(monkeypatch, handler)
+    with pytest.raises(cube_client_module.CubeServiceUnavailable, match="HTTP 503"):
+        await _schema_operation("validate")
+    assert len(calls) == 3
