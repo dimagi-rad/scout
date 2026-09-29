@@ -397,7 +397,7 @@ async def test_missing_view_keeps_existing_source_data(recovery_setup):
             SimpleNamespace(job=SimpleNamespace(id=920)), str(recovery.id)
         )
     assert result["status"] == "completed"
-    rebuild.assert_awaited_once_with(str(recovery_setup.workspace.id))
+    rebuild.assert_awaited_once_with(str(recovery_setup.workspace.id), revive_retired=True)
     materialize.assert_not_awaited()
 
 

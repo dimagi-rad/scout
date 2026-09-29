@@ -118,7 +118,11 @@ from apps.workspaces.services.refresh_requests import (
     find_legacy_refresh_jobs,
     reconcile_legacy_refresh_candidates,
 )
-from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
+from apps.workspaces.services.schema_manager import (
+    SchemaManager,
+    SchemaStillReferenced,
+    ViewSchemaRetired,
+)
 from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app
 from mcp_server.loaders.connect_base import ConnectExportError
@@ -2116,11 +2120,16 @@ async def _defer_cube_promotion(workspace) -> dict:
 
 @app.task
 @serialized_workspace_data
-async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
+async def rebuild_workspace_view_schema(workspace_id: str, revive_retired: bool = False) -> dict:
     """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
 
     On success: marks WorkspaceViewSchema.state = ACTIVE.
     On failure: marks state = FAILED and returns an error dict.
+
+    A row that went TEARDOWN or EXPIRED after this job was queued is skipped: the
+    retirement is the later decision, and reviving it would make its queued
+    teardown abort. Whoever means to bring the views back (adding a source, an
+    explicit recovery) moves the row to PROVISIONING or passes ``revive_retired``.
     """
     try:
         workspace = await Workspace.objects.prefetch_related("tenants").aget(id=workspace_id)
@@ -2130,7 +2139,16 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
 
     manager = SchemaManager()
     try:
-        vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
+        vs = await _to_thread_fresh_db(
+            manager.build_view_schema, workspace, revive_retired=revive_retired
+        )
+    except ViewSchemaRetired as exc:
+        logger.info(
+            "rebuild_workspace_view_schema: skipping workspace %s — its view schema is %s",
+            workspace_id,
+            exc.state,
+        )
+        return {"status": "skipped", "reason": str(exc)}
     except Exception:
         # build_view_schema owns the row state (FAILED for a first build, ACTIVE
         # plus last_error when the rolled-back views still serve), so don't
@@ -2362,7 +2380,9 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             elif action == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD:
                 result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))
             elif action == WorkspaceDataRecovery.RecoveryType.VIEW_REBUILD:
-                result = await rebuild_workspace_view_schema.func(str(recovery.workspace_id))
+                result = await rebuild_workspace_view_schema.func(
+                    str(recovery.workspace_id), revive_retired=True
+                )
             elif surface["status"] == "ready":
                 result = {"status": "already_recovered"}
             else:

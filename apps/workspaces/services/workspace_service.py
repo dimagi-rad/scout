@@ -51,6 +51,11 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 )
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
             else:
+                # A retired row serves nothing, and the rebuild below skips it
+                # unless it is marked as wanted again.
+                WorkspaceViewSchema.objects.filter(
+                    workspace=workspace, state__in=(SchemaState.TEARDOWN, SchemaState.EXPIRED)
+                ).update(state=SchemaState.PROVISIONING)
                 _record_pending_source(workspace, tenant)
                 # Queued first: both take the workspace lock W, and the load holds
                 # it for its whole run, so on a worker with more than one slot a

@@ -154,6 +154,24 @@ def test_adding_an_unloaded_source_leaves_unknown_coverage_unknown(
     assert coverage_complete(vs.tenant_coverage) is None
 
 
+@pytest.mark.parametrize("retired", [SchemaState.TEARDOWN, SchemaState.EXPIRED])
+@pytest.mark.django_db
+def test_adding_an_unloaded_source_marks_a_retired_view_schema_wanted_again(
+    workspace, tenant, user, tenant2, tenant_membership2, retired
+):
+    """The queued rebuild skips a retired row, so the add must say it wants the views
+    back, as adding a loaded source already does."""
+    TenantSchema.objects.create(tenant=tenant, schema_name="live_one", state=SchemaState.ACTIVE)
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=retired
+    )
+
+    _add_unloaded(workspace, tenant2, user)
+
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.PROVISIONING
+
+
 @pytest.mark.django_db
 def test_remove_tenant_dispatches_view_schema_teardown_when_count_drops_to_one(
     workspace, tenant2, tenant_membership2

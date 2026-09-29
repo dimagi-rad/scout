@@ -156,7 +156,7 @@ def test_recursive_build_is_rejected_and_next_build_can_proceed(workspace):
     with patch.object(
         manager,
         "_build_view_schema",
-        side_effect=lambda current: manager.build_view_schema(current),
+        side_effect=lambda current, **_: manager.build_view_schema(current),
     ):
         with pytest.raises(RuntimeError, match="Recursive view build"):
             manager.build_view_schema(workspace)
@@ -171,7 +171,7 @@ def test_other_workspace_build_does_not_wait_for_busy_workspace(workspace):
     release_first = threading.Event()
     other_workspace = MagicMock(id="independent-workspace")
 
-    def build_plan(current):
+    def build_plan(current, **_):
         if current.id == workspace.id:
             first_started.set()
             assert release_first.wait(5)
