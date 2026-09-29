@@ -63,6 +63,7 @@ from apps.workspaces.services.access_freshness import (
     FRESHNESS_ERROR_CODES,
     VerificationBudget,
 )
+from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.services.data_operation import (
     DataLockTimeout,
     LockOrderError,
@@ -564,6 +565,57 @@ def _no_reachable_tenants_result(
     }
 
 
+# The code picks the guidance, so it must match what the member has to do: only
+# a member with no usable membership is told to connect the account (A4).
+_RECOVERY_ERROR_CODES = {
+    CoverageRecovery.CONNECT_SOURCE: ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+    CoverageRecovery.ACCESS_REMOVED: ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+    CoverageRecovery.RECONNECT: ErrorCode.AUTH_CREDENTIAL_MISSING,
+    CoverageRecovery.CONNECT_TEAM: ErrorCode.AUTH_CREDENTIAL_MISSING,
+    CoverageRecovery.LEGACY_TEAM_UNKNOWN: ErrorCode.AUTH_CREDENTIAL_MISSING,
+}
+
+
+def _missing_tenant_failure(tenant, missing: MissingTenant) -> dict:
+    """Describe why the acting user can't use ``tenant``; the advice comes from the code."""
+    code = _RECOVERY_ERROR_CODES.get(missing.recovery, ErrorCode.WORKSPACE_TENANT_UNREACHABLE)
+    if code == ErrorCode.WORKSPACE_TENANT_UNREACHABLE:
+        return _preflight_failure(tenant, _unreachable_tenant_error(tenant), code)
+    who = f"the acting user's {tenant.provider}"
+    if missing.recovery == CoverageRecovery.RECONNECT:
+        problem = f"{who} sign-in for '{tenant.external_id}' can't be used"
+    elif missing.recovery == CoverageRecovery.LEGACY_TEAM_UNKNOWN:
+        problem = f"{who} connection for '{tenant.external_id}' records no team"
+    else:
+        team = missing.team_name or missing.team_slug
+        problem = f"{who} credential is not for the team that owns '{tenant.external_id}'" + (
+            f" ('{team}')" if team else ""
+        )
+    error = f"{problem}, so this tenant was not attempted"
+    return _preflight_failure(tenant, error, code)
+
+
+def _covered_tenant_skipped(tenant) -> dict:
+    # Its own code: the missing tenants' guidance is not about this one.
+    return _preflight_failure(
+        tenant,
+        "not attempted: the requesting user can't use every data source of this workspace",
+        ErrorCode.WORKSPACE_TENANT_SKIPPED,
+    )
+
+
+def _missing_tenant_results(tenants: Iterable, missing_tenants: Iterable[MissingTenant]) -> list:
+    missing = {t.tenant_id: t for t in missing_tenants}
+    results = [
+        _missing_tenant_failure(tenant, missing[str(tenant.pk)])
+        if str(tenant.pk) in missing
+        else _covered_tenant_skipped(tenant)
+        for tenant in tenants
+    ]
+    _set_tenant_display_names(results)
+    return results
+
+
 _ROLE_DENIED_MESSAGE = (
     "The requesting user no longer has a read-write or manage workspace role. "
     "Ask a workspace member with write access to retry."
@@ -599,31 +651,24 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         )
     ]
     if access is not None and access.denied_reason == TENANT_ACCESS_LOST:
-        # Even a MANAGE member cannot fix this by changing roles. Every tenant
-        # gets a recorded not-run entry (the resume path reads one per tenant),
-        # and the remedy comes once, from the code's guidance, as it did before.
+        # Even a MANAGE member cannot fix this by changing roles. Every tenant gets
+        # a recorded not-run entry (the resume path reads one per tenant), and the
+        # remedy comes from each entry's code's guidance.
         code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
-        missing = {t.tenant_id for t in access.missing_tenants}
-        # Covered tenants get their own code: the unreachable code's guidance
-        # ("connect that account") is for the missing ones only.
-        results = [
-            _preflight_failure(t, _unreachable_tenant_error(t), code)
-            if str(t.pk) in missing
-            else _preflight_failure(
-                t,
-                "not attempted: the requesting user can't use every data source of this workspace",
-                ErrorCode.WORKSPACE_TENANT_SKIPPED,
-            )
-            for t in tenants
-        ]
-        _set_tenant_display_names(results)
+        results = _missing_tenant_results(tenants, access.missing_tenants)
         error = "The requesting user can't use these data sources: " + (
             ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
         )
     elif access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
         code = FRESHNESS_ERROR_CODES[access.denied_reason]
         error = access_denied_body(access)["error"]
-        results = [_preflight_failure(tenant, error, code) for tenant in tenants]
+        missing = {t.tenant_id for t in access.missing_tenants}
+        results = [
+            _preflight_failure(tenant, error, code)
+            if not missing or str(tenant.pk) in missing
+            else _covered_tenant_skipped(tenant)
+            for tenant in tenants
+        ]
         _set_tenant_display_names(results)
     else:
         code = ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
