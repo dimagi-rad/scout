@@ -1424,6 +1424,9 @@ def test_concurrent_manifest_persistence_does_not_collide(
         for thread in threads:
             thread.join(timeout=15)
 
+    # A hung writer would otherwise surface as a misleading assertion below, with
+    # its transaction still open into the next test.
+    assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert len(inserts) == expected_inserts
     assert list(
