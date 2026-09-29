@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # request_started/request_finished cycle, so a connection that dies underneath
 # it (RDS restart/upgrade, idle TCP timeout) is reused — closed — forever, and
 # every ORM-touching tool call fails until the process restarts. Mirroring the
-# procrastinate worker's fix (config/procrastinate.py), we close stale/dead
+# procrastinate worker's DjangoApp task middleware (#225), we close stale/dead
 # connections around every tool call so the next ORM use re-opens them. The
 # cleanup must run on the asgiref thread-sensitive executor — the same thread
 # the async ORM routes queries through — so it reaches the right connection.

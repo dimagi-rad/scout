@@ -13,12 +13,12 @@ import logging
 
 from apps.recipes.models import RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner
-from config.procrastinate import task
+from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
 
 
-@task(pass_context=True, queue="recipes")
+@app.task(pass_context=True, queue="recipes")
 async def run_recipe(context, recipe_run_id: str) -> dict:
     """Execute a recipe run the API has already created (status PENDING).
 
