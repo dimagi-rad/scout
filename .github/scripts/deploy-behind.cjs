@@ -41,11 +41,12 @@ async function assessDeployLag({ github, context, core, workflowId, jobName, now
     .filter((run) => run.head_sha === head)
     .sort((a, b) => b.run_number - a.run_number);
   const latest = headRuns[0] || null;
-  // deploy.yml's own `report` job already filed a failed test or deploy stage.
-  if (latest && latest.conclusion === 'failure') return { state: 'reported', head, live, latest };
   const since = behindSince({ headRuns, commitDate: branch.commit.commit.committer.date });
   const minutes = Math.floor((now - since) / 60000);
-  const state = minutes >= thresholdMinutes ? 'behind' : 'waiting';
+  let state = 'behind';
+  if (minutes < thresholdMinutes) state = 'waiting';
+  // deploy.yml's own `report` job already filed a failed test or deploy stage.
+  else if (latest && latest.conclusion === 'failure') state = 'reported';
   return { state, head, live, latest, minutes };
 }
 
@@ -54,9 +55,12 @@ function describeLag({ context, env, workflowId, lag }) {
   const liveText = lag.live
     ? `\`${lag.live.head_sha.slice(0, 12)}\` (${lag.live.html_url})`
     : 'unknown (no recent run deployed)';
-  const latestText = lag.latest
-    ? `Its latest deploy run ended \`${lag.latest.conclusion}\`: ${lag.latest.html_url}`
-    : 'No deploy run exists for it.';
+  let latestText = 'No deploy run exists for it.';
+  if (lag.latest) {
+    const outcome = lag.latest.status === 'completed'
+      ? `ended \`${lag.latest.conclusion}\`` : `is stuck in \`${lag.latest.status}\``;
+    latestText = `Its latest deploy run ${outcome}: ${lag.latest.html_url}`;
+  }
   return [
     marker(lag.head),
     `Production is behind main: main is at \`${lag.head.slice(0, 12)}\`, production runs ${liveText}.`,
@@ -81,12 +85,16 @@ async function checkDeployLag({
   now = Date.now(), thresholdMinutes = THRESHOLD_MINUTES,
 }) {
   const lag = await assessDeployLag({ github, context, core, workflowId, jobName, now, thresholdMinutes });
-  if (lag.state !== 'behind') {
+  const quiet = () => {
     core.info(`Production deploy state: ${lag.state} (main at ${lag.head.slice(0, 12)}).`);
     return lag;
-  }
-  const body = describeLag({ context, env, workflowId, lag });
+  };
+  if (lag.state !== 'behind' && lag.state !== 'reported') return quiet();
   const existing = await findOpenIssue({ github, context });
+  // A failed run's report is enough while its issue is open; once someone closes
+  // it with production still behind, say so again.
+  if (lag.state === 'reported' && existing) return quiet();
+  const body = describeLag({ context, env, workflowId, lag });
   if (existing) {
     if (await alreadyReported({ github, context, issue: existing, head: lag.head })) {
       core.warning(`Production is behind main; already reported on #${existing.number}.`);

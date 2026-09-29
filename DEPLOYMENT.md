@@ -373,12 +373,13 @@ counts as newer). A production run also skips when a newer commit is already
 live, so re-running an old run cannot roll production back (redeploying the
 live commit still works). A skipped run shows green but deployed nothing and
 reports nothing itself. If you cancel a queued production run, run `Deploy Scout
-(Production)` on `main` from the Actions tab. Re-running an older skipped run
-ships only that run's commit. If nobody does, the `Watch Production Deploy`
-workflow (every 20 minutes) files the `deploy-failure` issue once main has been
-ahead of production for 45 minutes with no production run queued or running,
-unless main's own run already failed and reported there. It only alerts and never
-starts a deploy, because a cancelled run was usually cancelled on purpose. Manual shell commands and workflows dispatched from
+(Production)` on `main` from the Actions tab; re-running an older skipped run
+ships only that run's commit. If nobody deploys main, the `Watch Production
+Deploy` workflow (every 20 minutes) files the `deploy-failure` issue once main
+has been ahead of production for 45 minutes with no production run queued or
+running, unless main's own run already failed and that issue is still open. It
+only alerts and never starts a deploy, because a cancelled run was usually
+cancelled on purpose. Manual shell commands and workflows dispatched from
 older branch revisions are outside this updated group: check
 both destinations before starting those, and do not overlap them with Actions.
 See [GitHub's concurrency queue contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).

@@ -192,7 +192,9 @@ test('a run parked outside the queue does not hold the alert back', async () => 
   const github = fakeGithub({
     runs: [run(13, 113, HEAD, 'action_required'), ...strandedRuns()], deployed: strandedDeploys,
   });
-  assert.equal((await assess(github)).state, 'behind');
+  assert.equal((await check(github)).state, 'behind');
+  const [, created] = github.calls.at(-1);
+  assert.ok(created.body.includes('is stuck in `action_required`: https://github.com/o/r/actions/runs/13'), created.body);
 });
 
 test('a head run that failed was already reported by deploy.yml', async () => {
@@ -204,7 +206,17 @@ test('a head run that failed was already reported by deploy.yml', async () => {
   const lag = await check(github);
   assert.equal(lag.state, 'reported');
   assert.equal(lag.latest.id, 12);
-  assert.deepEqual(names(github).filter((n) => !['branch', 'runs', 'jobs'].includes(n)), []);
+  assert.deepEqual(names(github).filter((n) => !['branch', 'runs', 'jobs'].includes(n)), ['list']);
+
+  // Closing that issue while production is still behind does not silence it.
+  const closed = fakeGithub({ runs, deployed: { 12: 'failure' } });
+  assert.equal((await check(closed)).state, 'reported');
+  const [, created] = closed.calls.at(-1);
+  assert.ok(created.body.includes('ended `failure`: https://github.com/o/r/actions/runs/12'), created.body);
+
+  // Within the threshold it waits like any other lag.
+  const fresh = [{ ...runs[0], created_at: minutesAgo(10) }, runs[1]];
+  assert.equal((await assess(fakeGithub({ runs: fresh, deployed: { 12: 'failure' } }))).state, 'waiting');
 });
 
 test('no recent deploy says the live commit is unknown, not that a guard is off', async () => {
