@@ -35,8 +35,13 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 
 function compareWorkspaces(sort: SortKey) {
   return (a: TenantMembership, b: TenantMembership): number => {
-    if (sort === "name") return a.display_name.localeCompare(b.display_name)
-    const byDate = a.created_at.localeCompare(b.created_at)
+    if (sort === "name") {
+      return (
+        a.display_name.localeCompare(b.display_name, undefined, { numeric: true }) ||
+        a.id.localeCompare(b.id)
+      )
+    }
+    const byDate = Date.parse(a.created_at) - Date.parse(b.created_at)
     return sort === "oldest" ? byDate : -byDate
   }
 }
@@ -272,20 +277,20 @@ export function WorkspacesPage() {
         </div>
       ) : (
         <div className="space-y-4">
-          <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
-            {(filterGroups.length > 0 || domains.length > 5) && (
-              <div className="min-w-0 flex-1">
-                <SearchFilterBar
-                  search={search}
-                  onSearchChange={handleSearchChange}
-                  placeholder="Search workspaces..."
-                  filters={filterGroups}
-                  activeFilters={activeFilters}
-                  onFilterChange={handleFilterChange}
-                />
-              </div>
-            )}
-            <label className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground sm:ml-auto">
+          {(filterGroups.length > 0 || domains.length > 5) && (
+            <SearchFilterBar
+              search={search}
+              onSearchChange={handleSearchChange}
+              placeholder="Search workspaces..."
+              filters={filterGroups}
+              activeFilters={activeFilters}
+              onFilterChange={handleFilterChange}
+            />
+          )}
+
+          {/* Own row: the filter bar's chips don't shrink, so sharing it would squeeze search. */}
+          <div className="flex justify-end">
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
               Sort
               <select
                 value={sort}
@@ -319,7 +324,7 @@ export function WorkspacesPage() {
               </div>
               {filtered.length > PAGE_SIZE && (
                 <div className="flex items-center justify-between gap-3 text-sm text-muted-foreground">
-                  <span data-testid="workspaces-count">
+                  <span data-testid="workspaces-count" aria-live="polite">
                     Showing {visible.length} of {filtered.length}
                   </span>
                   {visible.length < filtered.length && (

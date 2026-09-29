@@ -102,6 +102,31 @@ describe("WorkspacesPage", () => {
     expect(rowIds()).toHaveLength(50)
   })
 
+  it("starts from one page again when the sort changes", async () => {
+    useAppStore.setState({ domains: many(120) })
+    renderPage()
+    const user = userEvent.setup()
+
+    await user.click(screen.getByTestId("workspaces-show-more"))
+    expect(rowIds()).toHaveLength(100)
+
+    await user.selectOptions(screen.getByTestId("workspaces-sort"), "oldest")
+    expect(rowIds()).toHaveLength(50)
+    expect(rowIds()[0]).toBe("w001")
+  })
+
+  it("sorts names with numbers in natural order", async () => {
+    useAppStore.setState({
+      domains: [
+        ws("ten", "Site 10", "2026-01-01T00:00:00Z"),
+        ws("two", "Site 2", "2026-01-02T00:00:00Z"),
+      ],
+    })
+    renderPage()
+    await userEvent.setup().selectOptions(screen.getByTestId("workspaces-sort"), "name")
+    expect(rowIds()).toEqual(["two", "ten"])
+  })
+
   it("does not offer show more when everything fits", () => {
     useAppStore.setState({ domains: many(3) })
     renderPage()
