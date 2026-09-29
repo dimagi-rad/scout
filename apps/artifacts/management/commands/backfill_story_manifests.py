@@ -54,7 +54,7 @@ class Command(BaseCommand):
         skipped = 0
         failed = 0
         for artifact_id in artifact_ids:
-            artifact = Artifact.objects.filter(pk=artifact_id).first()
+            artifact = Artifact.objects.select_related("workspace").filter(pk=artifact_id).first()
             if artifact is None:
                 skipped += 1
                 continue

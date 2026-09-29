@@ -102,6 +102,7 @@ def backfill_missing_semantic_query_manifest(artifact: Artifact) -> bool:
             Artifact.objects.select_for_update()
             .only("artifact_type", "data", "semantic_queries", "semantic_query_manifest")
             .filter(pk=artifact.pk)
+            .order_by()
             .first()
         )
         if stored is None:
