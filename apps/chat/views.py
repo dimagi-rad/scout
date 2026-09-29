@@ -8,7 +8,6 @@ does not support async streaming responses.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import time
 import uuid
@@ -29,6 +28,7 @@ from apps.chat.helpers import (
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
+from apps.common.http import parse_json_object
 from apps.workspaces.access import access_denied_body
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
 
@@ -86,10 +86,9 @@ async def chat_view(request):
 
     user = request._authenticated_user
 
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request)
+    if err:
+        return err
 
     messages = body.get("messages", [])
     data = body.get("data", {})

@@ -23,6 +23,7 @@ from django.shortcuts import get_object_or_404
 from django.views import View
 
 from apps.artifacts.services.query_context import resolve_artifact_queries
+from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
 from apps.semantic.services.query import run_semantic_query
@@ -1151,10 +1152,9 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
         )
         if err:
             return err
-        try:
-            data = json.loads(request.body)
-        except (json.JSONDecodeError, ValueError):
-            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        data, err = parse_json_object(request)
+        if err:
+            return err
         update_fields = []
         if "title" in data:
             artifact.title = data["title"]

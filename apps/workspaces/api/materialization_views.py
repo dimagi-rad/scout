@@ -1,12 +1,12 @@
 """Async API views for materialization lifecycle (cancel, retry)."""
 
-import json
 import logging
 from datetime import UTC, datetime
 
 from django.http import JsonResponse
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.http import parse_json_object
 from apps.users.decorators import async_login_required
 from apps.workspaces.access import access_denied_body, aresolve_workspace_access_ex
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
@@ -163,10 +163,9 @@ async def materialization_retry_view(request, workspace_id):
     if err is not None:
         return err
 
-    try:
-        payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+    payload, err = parse_json_object(request, allow_empty=True)
+    if err:
+        return err
     thread_id = payload.get("thread_id") or ""
     tool_call_id = payload.get("tool_call_id") or ""
 

@@ -1,6 +1,5 @@
 """Auth endpoints: csrf, me, login, logout, signup, providers, disconnect."""
 
-import json
 import logging
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
@@ -17,6 +16,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
+from apps.common.http import parse_json_object
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
     SCOPED_OAUTH_PROVIDERS,
@@ -152,10 +152,9 @@ async def me_view(request):
 @require_POST
 def login_view(request):
     """Email/password login."""
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request)
+    if err:
+        return err
 
     email = body.get("email", "").strip()
     password = body.get("password", "")
@@ -193,10 +192,9 @@ def logout_view(request):
 @require_POST
 def signup_view(request):
     """Create a new account with email and password, then log in."""
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request)
+    if err:
+        return err
 
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
