@@ -7,6 +7,7 @@ import requests_mock as rm
 from urllib3.connectionpool import HTTPSConnectionPool
 from urllib3.response import HTTPResponse
 
+from apps.common.error_codes import ErrorCode, code_of
 from apps.common.errors import ConnectUnavailableError, ExpectedUpstreamError
 from mcp_server.loaders.connect_base import (
     EXPORT_ACCEPT_HEADER,
@@ -346,6 +347,10 @@ class TestConnectRetryBehaviour:
         assert len(calls) == 1
 
 
+def _reset_connection(self, conn, method, url, **kwargs):
+    raise ConnectionResetError("reset")
+
+
 class TestConnectGetTransientFailures:
     URL = "https://connect.example.com/export/opportunity/1/"
 
@@ -367,6 +372,7 @@ class TestConnectGetTransientFailures:
 
         assert isinstance(exc.value, ExpectedUpstreamError)
         assert not isinstance(exc.value, requests.HTTPError)
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
         assert len(calls) == RETRY_TOTAL + 1
 
     def test_repeated_502_on_export_page_is_expected_and_keeps_context(self, fast_retry_loader):
@@ -377,15 +383,13 @@ class TestConnectGetTransientFailures:
         assert isinstance(exc.value, ExpectedUpstreamError)
         assert exc.value.status == 502
         assert exc.value.attempts == RETRY_TOTAL + 1
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
 
     def test_persistent_connection_error_raises_expected_upstream_error(self, fast_retry_loader):
-        def boom(self, conn, method, url, **kwargs):
-            raise ConnectionResetError("reset")
-
         with (
             patch.multiple(
                 HTTPSConnectionPool,
-                _make_request=boom,
+                _make_request=_reset_connection,
                 _get_conn=lambda self, timeout=None: MagicMock(),
                 _put_conn=lambda self, conn: None,
             ),
@@ -399,3 +403,31 @@ class TestConnectGetTransientFailures:
             fast_retry_loader._get(self.URL)
 
         assert len(calls) == 1
+
+    def test_connection_error_on_export_page_keeps_structured_context(self, fast_retry_loader):
+        with (
+            patch.multiple(
+                HTTPSConnectionPool,
+                _make_request=_reset_connection,
+                _get_conn=lambda self, timeout=None: MagicMock(),
+                _put_conn=lambda self, conn: None,
+            ),
+            pytest.raises(ConnectExportError) as exc,
+        ):
+            list(fast_retry_loader._paginate_export_pages("user_visits/", start_last_id=7))
+
+        assert isinstance(exc.value, ExpectedUpstreamError)
+        assert exc.value.attempts == RETRY_TOTAL + 1
+        assert exc.value.last_id == 7
+
+    @pytest.mark.parametrize(
+        "error", [requests.exceptions.SSLError, requests.exceptions.ProxyError]
+    )
+    def test_tls_and_proxy_failures_stay_reportable(self, fast_retry_loader, error):
+        with (
+            patch.object(fast_retry_loader._session, "get", side_effect=error("broken")),
+            pytest.raises(error) as exc,
+        ):
+            fast_retry_loader._get(self.URL)
+
+        assert not isinstance(exc.value, ExpectedUpstreamError)

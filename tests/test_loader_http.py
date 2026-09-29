@@ -14,6 +14,7 @@ from apps.users.services.token_refresh import TokenRefreshUnavailable
 from apps.workspaces.tasks import _CREDENTIAL_GUIDANCE
 from mcp_server.loaders._http import (
     MAX_RETRY_AFTER_SECONDS,
+    RETRY_BACKOFF_JITTER,
     RETRY_STATUS_FORCELIST,
     RETRY_TOTAL,
     BoundedRetry,
@@ -47,6 +48,7 @@ def test_build_retry_returns_bounded_retry():
     assert isinstance(retry, BoundedRetry)
     assert retry.total == RETRY_TOTAL
     assert retry.respect_retry_after_header is True
+    assert retry.backoff_jitter == RETRY_BACKOFF_JITTER
     assert 429 in RETRY_STATUS_FORCELIST
 
 

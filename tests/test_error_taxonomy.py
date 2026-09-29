@@ -13,6 +13,7 @@ from apps.common.errors import (
     ConnectAccessDeniedError,
     ConnectAuthError,
     ConnectTokenExpiredError,
+    ConnectUnavailableError,
     ExpectedStateError,
     ExpectedUpstreamError,
     OCSAccessDeniedError,
@@ -124,6 +125,7 @@ class TestBeforeSend:
             ConnectAccessDeniedError,
             OCSTokenExpiredError,
             OCSAccessDeniedError,
+            ConnectUnavailableError,
         ],
     )
     def test_loader_leaf_classes_are_dropped(self, leaf):

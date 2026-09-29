@@ -156,6 +156,7 @@ class UpstreamUnavailable(ExpectedUpstreamError):
     """
 
     code = ErrorCode.UPSTREAM_UNAVAILABLE
+    denial_scope = DenialScope.UNKNOWN
 
 
 # The provider classes below are deliberately NOT expected states. They are the

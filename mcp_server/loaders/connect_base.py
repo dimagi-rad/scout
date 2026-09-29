@@ -167,6 +167,10 @@ class ConnectBaseLoader:
                 timeout=HTTP_TIMEOUT,
                 **kwargs,
             )
+        except (requests.exceptions.SSLError, requests.exceptions.ProxyError):
+            # A broken TLS chain or proxy is a Scout-side config fault that retrying
+            # cannot clear, so it must stay reportable.
+            raise
         except (requests.ConnectionError, requests.Timeout) as e:
             raise ConnectUnavailableError(
                 f"CommCare Connect could not be reached for opportunity "
@@ -240,7 +244,14 @@ class ConnectBaseLoader:
         first_page = True
 
         while url is not None:
-            resp = self._send(url, params=request_params, headers=headers)
+            try:
+                resp = self._send(url, params=request_params, headers=headers)
+            except ConnectUnavailableError as e:
+                raise ConnectExportUnavailableError(
+                    str(e),
+                    attempts=RETRY_TOTAL + 1,
+                    last_id=_extract_last_id(url, request_params),
+                ) from e
             self._raise_for_auth(resp.status_code)
             if not resp.ok:
                 # A status in the forcelist means the urllib3 Retry policy
