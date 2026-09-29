@@ -16,7 +16,11 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 
-from apps.users.token_encryption import CIPHERTEXT_PREFIX, encrypt_token_value
+from apps.users.token_encryption import (
+    CIPHERTEXT_PREFIX,
+    decrypt_token_value,
+    encrypt_token_value,
+)
 
 migration = importlib.import_module("apps.users.migrations.0017_encrypt_socialtoken_values")
 TARGET = ("users", "0017_encrypt_socialtoken_values")
@@ -37,14 +41,18 @@ def _raw(token_pk):
         return cursor.fetchone()
 
 
-def _seed(user, uid, access, refresh):
-    account = SocialAccount.objects.create(user=user, provider="commcare", uid=uid)
-    token = SocialToken.objects.create(account=account)
+def _store(token_pk, access, refresh):
     with connection.cursor() as cursor:
         cursor.execute(
             f"UPDATE {TOKEN_TABLE} SET token = %s, token_secret = %s WHERE id = %s",
-            [access, refresh, token.pk],
+            [access, refresh, token_pk],
         )
+
+
+def _seed(user, uid, access, refresh):
+    account = SocialAccount.objects.create(user=user, provider="commcare", uid=uid)
+    token = SocialToken.objects.create(account=account)
+    _store(token.pk, access, refresh)
     return token.pk
 
 
@@ -130,17 +138,22 @@ def test_reverse_restores_plaintext(historical_apps, mixed_rows):
 
 
 @pytest.mark.django_db
-def test_reverse_raises_before_writing_a_batch_it_cannot_decrypt(
+def test_reverse_commits_readable_batches_and_stops_at_an_unreadable_one(
     historical_apps, mixed_rows, monkeypatch
 ):
     migration.encrypt_tokens(historical_apps, None)
     monkeypatch.setattr(migration, "BATCH_SIZE", 2)
-    before = {pk: _raw(pk) for pk in mixed_rows.values()}
+    first_batch = sorted(mixed_rows.values())[:2]
+    later_rows = sorted(mixed_rows.values())[2:]
+    other_key = Fernet.generate_key().decode()
+    plaintext = {pk: tuple(decrypt_token_value(v) for v in _raw(pk)) for pk in first_batch}
+    with override_settings(DB_CREDENTIAL_KEY=other_key):
+        for pk in first_batch:
+            _store(pk, *(encrypt_token_value(v) for v in plaintext[pk]))
+    unreadable = {pk: _raw(pk) for pk in later_rows}
 
-    with (
-        override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()),
-        pytest.raises(InvalidToken),
-    ):
+    with override_settings(DB_CREDENTIAL_KEY=other_key), pytest.raises(InvalidToken):
         migration.decrypt_tokens(historical_apps, None)
 
-    assert {pk: _raw(pk) for pk in mixed_rows.values()} == before
+    assert {pk: _raw(pk) for pk in first_batch} == plaintext
+    assert {pk: _raw(pk) for pk in later_rows} == unreadable

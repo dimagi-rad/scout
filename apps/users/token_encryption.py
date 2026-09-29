@@ -82,10 +82,11 @@ def decrypt_token_value_strict(value: str | None) -> str | None:
 def decrypt_token_value(value: str | None) -> str | None:
     """Plaintext for a stored value; legacy plaintext rows are returned unchanged.
 
-    An undecryptable ciphertext (a rotated, missing or malformed key) reads as
-    an empty :class:`UndecryptableToken` so callers treat the connection as needing reconnection instead of
-    sending ciphertext upstream as a bearer token. Callers comparing credentials
-    must therefore never treat an empty value as a match.
+    An undecryptable ciphertext (a rotated, missing or malformed key) reads as an
+    empty :class:`UndecryptableToken` so callers treat the connection as needing
+    reconnection instead of sending ciphertext upstream as a bearer token.
+    Callers comparing credentials must therefore never treat an empty value as a
+    match.
     """
     try:
         return decrypt_token_value_strict(value)

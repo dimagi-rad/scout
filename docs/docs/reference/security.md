@@ -99,6 +99,11 @@ see plaintext and cannot filter on token values in SQL. Values without the
 encrypts those rows. `EncryptingSocialAccountAdapter` also encrypts the copy
 allauth serializes into the session during login. Changing `DB_CREDENTIAL_KEY`
 makes every stored token unreadable, so OAuth users must reconnect.
+An unreadable token is never overwritten with an empty value: saving the row
+writes the old ciphertext back, so restoring the previous key recovers it. If a
+user reconnects under the new key and the provider returns no refresh token,
+the row can hold values under both keys. Delete that user's `SocialToken` row
+and have them reconnect.
 
 ## Rate limiting
 

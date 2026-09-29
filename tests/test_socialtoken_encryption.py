@@ -212,6 +212,7 @@ class TestValueComparisonsAgainstEncryptedRows:
         assert kept_refresh == stored[1]
         assert decrypt_token_value(kept_refresh) == "plain-refresh"
         assert reconnected_access != stored[0]
+        assert reconnected_access.startswith(CIPHERTEXT_PREFIX)
 
     def test_undecryptable_row_never_matches_an_empty_credential(self, user, commcare_token):
         token, conn = commcare_token
