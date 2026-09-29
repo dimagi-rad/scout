@@ -161,8 +161,8 @@ async def acheck_freshness_many(user_id, tenant_ids_by_key: dict) -> dict:
         for connection_id, ids in grouped.items()
     }
     rows_by_tenant = defaultdict(list)
-    for row in rows:
-        rows_by_tenant[row[0]].append(row)
+    for tenant_id, connection_id in rows:
+        rows_by_tenant[tenant_id].append((tenant_id, connection_id))
     checks = {}
     for key, ids in tenant_ids_by_key.items():
         own, unbound = _group_by_connection(

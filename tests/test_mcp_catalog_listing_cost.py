@@ -86,6 +86,25 @@ async def test_each_workspace_keeps_its_own_verdict():
     assert data["has_more"] is True
 
 
+@pytest.mark.parametrize("all_of", [True, False])
+async def test_partial_coverage_follows_the_rollout_switch(settings, all_of):
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = all_of
+    user = await User.objects.acreate_user(email="partial@example.com", password="pw")
+    covered, uncovered = await _tenant("covered"), await _tenant("uncovered")
+    await agrant_tenant_access(user, covered)
+    partial = await _workspace(user, "Partial", [covered, uncovered])
+    none = await _workspace(user, "None", [uncovered])
+
+    result = await server.list_workspaces(user_id=str(user.id))
+
+    data = result["data"]
+    listed = [] if all_of else [str(partial.id)]
+    assert [w["id"] for w in data["workspaces"]] == listed
+    assert set(data["inaccessible_workspace_ids"]) == {str(none.id)} | (
+        {str(partial.id)} if all_of else set()
+    )
+
+
 async def test_one_stale_proof_on_a_shared_connection_blocks_only_its_workspaces():
     user = await User.objects.acreate_user(email="shared@example.com", password="pw")
     fresh, stale = await _tenant("fresh-domain"), await _tenant("stale-domain")

@@ -515,7 +515,11 @@ async def aresolve_local_access_many(
     The rules of ``aresolve_workspace_access_ex(..., verification=None)``, with
     readiness evaluated once over the union of tenants so a user's workspace
     listing costs a fixed number of queries rather than several per membership.
-    Performs no upstream recheck and bypasses ``access_cache``.
+    ``memberships`` must be loaded with ``select_related("workspace")``.
+
+    This is not the full gate: it performs no upstream recheck, checks no proof
+    freshness and bypasses ``access_cache``. A caller that releases protected data
+    must also apply ``acheck_freshness_many`` when ``freshness_enforced()``.
     """
     own = [m for m in memberships if m.user_id == user.pk]
     tenants_by_ws = {m.workspace_id: [] for m in own}
