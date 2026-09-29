@@ -28,7 +28,8 @@ jobs:
     # drain/deploy handoff with the staging destination is unchanged.
     # Trade-off: if that newer run fails tests, this commit is not deployed either
     # (the deploy-failure issue reports that run). If it is cancelled while
-    # pending, nothing reports it: re-run the newest skipped run instead.
+    # pending, deploy-watch.yml files that issue once main has been ahead of
+    # production for 45 minutes with no production run queued or running.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -79,4 +79,4 @@ async function reportDeploy({ github, context, core, env }) {
   return result;
 }
 
-module.exports = { LABEL, TITLE, outcome, reportDeploy };
+module.exports = { LABEL, TITLE, outcome, findOpenIssue, ensureLabel, reportDeploy };

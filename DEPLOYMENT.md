@@ -372,8 +372,13 @@ a burst of merges deploys once instead of once per commit (a staging run never
 counts as newer). A production run also skips when a newer commit is already
 live, so re-running an old run cannot roll production back (redeploying the
 live commit still works). A skipped run shows green but deployed nothing and
-reports nothing; if you cancel a queued production run, re-run the newest run
-that skipped because of it. Manual shell commands and workflows dispatched from
+reports nothing itself. If you cancel a queued production run, run `Deploy Scout
+(Production)` on `main` from the Actions tab (or re-run the newest run that
+skipped because of it). If nobody does, the `Watch Production Deploy` workflow
+(every 20 minutes) files the `deploy-failure` issue once main has been ahead of
+production for 45 minutes with no production run queued or running. It only
+alerts and never starts a deploy, because a cancelled run was usually cancelled
+on purpose. Manual shell commands and workflows dispatched from
 older branch revisions are outside this updated group: check
 both destinations before starting those, and do not overlap them with Actions.
 See [GitHub's concurrency queue contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
@@ -712,7 +717,8 @@ pending drain receipt (see [Migration-safe backend handoff](#migration-safe-back
 A failed production deploy on `main` opens (or comments on) a single GitHub issue
 labelled `deploy-failure` and mentions whoever pushed; the next successful deploy
 closes it. A run that skipped because a newer run covers its commit neither opens
-nor closes the issue.
+nor closes the issue. If that newer run never deploys, `Watch Production Deploy`
+opens (or comments on) the same issue to say production is behind main.
 
 ## Infrastructure Changes
 

@@ -85,4 +85,4 @@ async function checkSuperseded({ github, context, core, workflowId, jobName }) {
   return reason;
 }
 
-module.exports = { findReasonToSkip, checkSuperseded };
+module.exports = { findLiveRun, findReasonToSkip, checkSuperseded };
