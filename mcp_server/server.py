@@ -1815,8 +1815,9 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
 
     ``sources`` lists each data source with ``last_fetched_at`` (when its serving
     data was fetched) and ``last_load`` (``refreshed``, ``reused`` or ``skipped``
-    by this workspace's latest load). ``last_materialized_at`` is only the newest
-    of those times, so read ``sources`` for any one source's age. A source with
+    by this workspace's latest load, or null before this workspace has loaded it).
+    ``last_materialized_at`` is only the newest of those times, so read ``sources``
+    for any one source's age. A source with
     ``not_refreshed: true`` was not fetched by the latest load; ``serving`` says
     whether its older data is still queryable and ``remedy`` what gets it fetched.
 
@@ -1845,6 +1846,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 "exists": False,
                 "state": "not_provisioned",
                 "last_materialized_at": None,
+                "sources": [],
                 "tables": [],
             },
             schema="",
