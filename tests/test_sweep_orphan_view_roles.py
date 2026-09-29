@@ -6,10 +6,12 @@ with --role to roles this test created.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import uuid
 from io import StringIO
 
+import psycopg
 import psycopg.sql
 import pytest
 from django.core.management import call_command
@@ -35,12 +37,16 @@ def managed():
     conn = get_managed_db_connection()
     created = {"schemas": [], "roles": []}
     yield conn, created
-    with conn.cursor() as cur:
-        for schema in created["schemas"]:
-            cur.execute(Q("DROP SCHEMA IF EXISTS {} CASCADE").format(ID(schema)))
-        for role in created["roles"]:
-            cur.execute(Q("DROP ROLE IF EXISTS {}").format(ID(role)))
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            for schema in created["schemas"]:
+                with contextlib.suppress(psycopg.Error):
+                    cur.execute(Q("DROP SCHEMA IF EXISTS {} CASCADE").format(ID(schema)))
+            for role in created["roles"]:
+                with contextlib.suppress(psycopg.Error):
+                    cur.execute(Q("DROP ROLE IF EXISTS {}").format(ID(role)))
+    finally:
+        conn.close()
 
 
 def _role_exists(conn, role):
@@ -59,7 +65,7 @@ def _orphan_view_roles(conn, created):
     schema = f"ws_{uuid.uuid4().hex[:16]}"
     tenant_schema = f"sweep_t_{uuid.uuid4().hex[:8]}"
     ro, dbt = readonly_role_name(schema), dbt_role_name(schema)
-    created["schemas"].append(tenant_schema)
+    created["schemas"] += [schema, tenant_schema]
     created["roles"] += [ro, dbt]
     with conn.cursor() as cur:
         cur.execute(Q("CREATE SCHEMA {}").format(ID(schema)))
@@ -80,7 +86,7 @@ def test_orphan_is_reported_by_default_and_dropped_with_apply(managed):
     conn, created = managed
     ro, dbt = _orphan_view_roles(conn, created)
 
-    report = _sweep()
+    report = _sweep("--role", ro, "--role", dbt)
     assert f"{ro}: would drop" in report
     assert f"{dbt}: would drop" in report
     assert _role_exists(conn, ro) and _role_exists(conn, dbt)

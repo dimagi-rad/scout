@@ -77,14 +77,15 @@ class Command(BaseCommand):
         conn = _schema_manager.get_managed_db_connection()
         outcomes = Counter()
         try:
-            cursor = conn.cursor()
-            for role, privileged in self._candidates(cursor, options["role"]):
-                outcome = self._sweep(cursor, mgr, role, privileged, apply=apply)
-                outcomes[outcome] += 1
-            cursor.close()
+            with conn.cursor() as cursor:
+                rows, not_candidates = self._candidates(cursor, options["role"])
+                outcomes["not a candidate"] += not_candidates
+                for role, privileged in rows:
+                    outcome = self._sweep(cursor, mgr, role, privileged, apply=apply)
+                    outcomes[outcome] += 1
         finally:
             conn.close()
-        summary = ", ".join(f"{count} {name}" for name, count in sorted(outcomes.items()))
+        summary = ", ".join(f"{count} {name}" for name, count in sorted(outcomes.items()) if count)
         self._log(f"Done: {summary or 'no candidate roles'}.")
         if outcomes["failed"]:
             raise CommandError(f"{outcomes['failed']} role(s) could not be dropped")
@@ -92,18 +93,20 @@ class Command(BaseCommand):
     def _candidates(self, cursor, only_roles):
         cursor.execute(_ROLES_SQL)
         rows = cursor.fetchall()
+        missing = set()
         if only_roles:
             wanted = set(only_roles)
             rows = [row for row in rows if row[0] in wanted]
-            for missing in sorted(wanted - {row[0] for row in rows}):
-                self._log(f"  {missing}: not found")
+            missing = wanted - {row[0] for row in rows}
+            for role in sorted(missing):
+                self._log(f"  {role}: not a candidate (no ws_ prefix, or no such role)")
 
         # _ro first: its default-ACL entries may be owned by the sibling _dbt role.
         def order(row):
             match = _VIEW_ROLE_RE.match(row[0])
             return (row[0] if match is None else match["hex"], row[0].endswith("_dbt"))
 
-        return sorted(rows, key=order)
+        return sorted(rows, key=order), len(missing)
 
     def _sweep(self, cursor, mgr, role, privileged, *, apply) -> str:
         match = _VIEW_ROLE_RE.match(role)
@@ -131,7 +134,7 @@ class Command(BaseCommand):
                 # scan and acquiring W.
                 if WorkspaceViewSchema.objects.filter(schema_name=schema).exists():
                     self._log(f"  {role}: skipped, a view schema was published meanwhile")
-                    return "live"
+                    return "skipped"
                 blocker = self._blocker(cursor, schema, role)
                 if blocker:
                     self._log(f"  {role}: skipped, {blocker}")
@@ -140,9 +143,10 @@ class Command(BaseCommand):
                     mgr._drop_readonly_role(cursor, schema)
                 else:
                     mgr._drop_dbt_role(cursor, schema)
-        except Exception:
+        except Exception as exc:
             logger.exception("sweep_orphan_view_roles: dropping %s failed", role)
-            self.stderr.write(self.style.ERROR(f"  {role}: FAILED (see log)"))
+            # Logging may not reach the console of a one-off prod container.
+            self.stderr.write(self.style.ERROR(f"  {role}: FAILED: {str(exc)[:500]}"))
             return "failed"
         self._log(f"  {role}: dropped")
         return "dropped"
