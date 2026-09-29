@@ -84,6 +84,10 @@ logger = logging.getLogger(__name__)
 
 # Bounded so a slow upstream export can't tie up the sync DRF worker thread.
 SHARE_REFRESH_TIMEOUT = 8  # seconds
+# The whole renew pass for a directly added user, across providers and identities.
+# A renewal already under way still runs to completion (it must never be cancelled
+# mid-rotation), so this bounds what starts, not a hard wall-clock ceiling.
+TARGET_REFRESH_BUDGET = 2 * SHARE_REFRESH_TIMEOUT
 
 _PROVIDER_RESOLVERS = {
     "commcare": resolve_commcare_domains,
@@ -100,7 +104,7 @@ class Rediscovery:
 
     # A provider error or timeout: retrying may give a different answer.
     failed: bool = False
-    # Upstream refused a stored sign-in; only the user signing in again settles it.
+    # Upstream refused a stored sign-in (401); only the user signing in again settles it.
     needs_sign_in: bool = False
 
 
@@ -129,13 +133,14 @@ def _usable_as_is(token, now) -> bool:
     return bool(token.token) and not (token.expires_at and token.expires_at <= now)
 
 
-async def _arenewed_access_tokens(user, provider) -> tuple[list[tuple], bool]:
+async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple], bool]:
     """``(pairs, failed)``: *user*'s tokens, renewing any that need it.
 
     Only for the user a request names (G2). They did not start the request, so a
     failed renewal records nothing on their credential (G1). A token that isn't
     renewed is used as it stands while unexpired; ``failed`` is set only when a
-    transient failure leaves nothing to use.
+    transient failure, or the ``deadline`` (event-loop time) passing before a
+    renewal starts, leaves nothing to use.
     """
     token_url = get_token_url(provider)
     now = timezone.now()
@@ -146,6 +151,12 @@ async def _arenewed_access_tokens(user, provider) -> tuple[list[tuple], bool]:
         if not can_refresh or not token_needs_refresh(token.expires_at):
             if stored:
                 pairs.append(stored)
+            continue
+        if asyncio.get_running_loop().time() >= deadline:
+            if stored:
+                pairs.append(stored)
+            else:
+                failed = True
             continue
         try:
             # Bounded by its own timeouts, never cancelled: cancelling between the
@@ -187,17 +198,26 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
     tenant they can in fact reach — the false negative multi-token OAuth exists
     to remove (#156).
     """
+    loop = asyncio.get_running_loop()
+    # The member fan-out bounds the non-renew pass as a whole; renew runs inline.
+    deadline = loop.time() + TARGET_REFRESH_BUDGET if renew else None
     failed = needs_sign_in = False
     for provider in providers:
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
         if renew:
-            pairs, renewal_failed = await _arenewed_access_tokens(target, provider)
+            pairs, renewal_failed = await _arenewed_access_tokens(target, provider, deadline)
             failed = failed or renewal_failed
         else:
             pairs = await _aunexpired_access_tokens(target, provider)
         for account, token in pairs:
+            timeout = SHARE_REFRESH_TIMEOUT
+            if deadline is not None:
+                timeout = min(timeout, deadline - loop.time())
+                if timeout <= 0:
+                    failed = True
+                    break
             try:
                 await asyncio.wait_for(
                     resolve(
@@ -207,12 +227,16 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
                         allow_replace=False,
                         may_revoke=False,
                     ),
-                    timeout=SHARE_REFRESH_TIMEOUT,
+                    timeout=timeout,
                 )
-            except _UPSTREAM_AUTH_ERRORS:
-                needs_sign_in = True
+            except _UPSTREAM_AUTH_ERRORS as refused:
+                # A 403 is upstream withholding access, which signing in again cannot
+                # change (#372): it stays a plain "not covered", neither flag set.
+                needs_sign_in = needs_sign_in or refused.status_code == 401
                 logger.info(
-                    "Share-time refresh refused upstream for target=%s provider=%s account=%s",
+                    "Share-time refresh refused upstream (HTTP %s) for target=%s "
+                    "provider=%s account=%s",
+                    refused.status_code,
                     target.id,
                     provider,
                     account.pk,
@@ -845,12 +869,15 @@ class WorkspaceMemberListView(APIView):
             workspace=workspace, user=target
         ).exists()
         gaps = () if already_member else missing_for_user(target, workspace)
+        rediscovery = Rediscovery()
         if gaps:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
             # using their own token, renewed if it has expired, then re-check.
             providers = sorted({t.provider for t in gaps})
-            async_to_sync(_arefresh_target_for_workspace)(target, providers, renew=True)
+            rediscovery = async_to_sync(_arefresh_target_for_workspace)(
+                target, providers, renew=True
+            )
 
         # Every member must cover every source (#381), so a target still missing
         # one after the refresh gets an invite that awaits it rather than a hard
@@ -869,7 +896,11 @@ class WorkspaceMemberListView(APIView):
             # The manager just performed this action, so don't email them.
             notify_awaiting_access(invite, target, notify_manager=False)
             return Response(
-                _serialize_invite(invite, result="invite_awaiting_access"),
+                {
+                    **_serialize_invite(invite, result="invite_awaiting_access"),
+                    "recheck_complete": not rediscovery.failed,
+                    "needs_sign_in": rediscovery.needs_sign_in,
+                },
                 status=status.HTTP_201_CREATED,
             )
 

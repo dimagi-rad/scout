@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api import workspace_views
-from apps.workspaces.api.workspace_views import WorkspaceInviteDetailView
+from apps.workspaces.api.workspace_views import Rediscovery, WorkspaceInviteDetailView
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
     Workspace,
@@ -665,7 +665,7 @@ class TestMemberAdd:
                 tenant=tenant,
                 connection=await ausable_connection(target, tenant.provider),
             )
-            return True
+            return Rediscovery()
 
         mocker.patch(
             "apps.workspaces.api.workspace_views._arefresh_target_for_workspace", new=fake_refresh
@@ -686,7 +686,7 @@ class TestMemberAdd:
         User.objects.create_user(email="noaccess@example.com", password="pass")
 
         async def fake_refresh(target, providers, **_kwargs):
-            return True  # a token existed, but no new membership resulted
+            return Rediscovery()  # a token existed, but no new membership resulted
 
         mocker.patch(
             "apps.workspaces.api.workspace_views._arefresh_target_for_workspace", new=fake_refresh
@@ -699,6 +699,8 @@ class TestMemberAdd:
         )
         assert resp.status_code == 201, resp.json()
         assert resp.json()["result"] == "invite_awaiting_access"
+        assert resp.json()["recheck_complete"] is True
+        assert resp.json()["needs_sign_in"] is False
 
     def test_non_manager_cannot_add_members(self, client, workspace, tenant, db):
         writer = User.objects.create_user(email="wr@example.com", password="pass")

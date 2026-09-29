@@ -391,14 +391,14 @@ def test_connection_wide_denial_archives_alias_tenants_but_not_connect(user):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    ("provider", "scope", "resolve"),
+    ("provider", "scope", "resolve", "error"),
     [
-        ("commcare_connect", "", resolve_connect_opportunities),
-        ("ocs", "team-a", resolve_ocs_chatbots),
+        ("commcare_connect", "", resolve_connect_opportunities, ConnectAuthError),
+        ("ocs", "team-a", resolve_ocs_chatbots, OCSAuthError),
     ],
 )
 async def test_discovery_the_user_did_not_start_never_revokes(
-    user, httpx_mock, provider, scope, resolve
+    user, httpx_mock, provider, scope, resolve, error
 ):
     """#561 G1: a manager's add replays members' stored tokens; a 401 there is not
     the member's own sign-in failing, so it must neither archive nor fence."""
@@ -409,7 +409,7 @@ async def test_discovery_the_user_did_not_start_never_revokes(
             "apps.users.services.tenant_resolution.adetect_team_name_from_oauth",
             new=AsyncMock(return_value="A"),
         ),
-        pytest.raises((ConnectAuthError, OCSAuthError)),
+        pytest.raises(error),
     ):
         await resolve(user, token.token, social_account=account, may_revoke=False)
     assert await TenantMembership.objects.filter(pk=tm.pk).aexists()
