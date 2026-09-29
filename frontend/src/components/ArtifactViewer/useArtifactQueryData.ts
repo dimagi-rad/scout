@@ -53,5 +53,5 @@ export function useArtifactQueryData(
     return () => { generation.current += 1 }
   }, [enabled, refetch])
 
-  return { queryData, isLoading, error, refetch, setQueryData }
+  return { queryData, isLoading, error, refetch }
 }

@@ -24,7 +24,6 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
     isLoading: isDataLoading,
     error: dataError,
     refetch: refetchData,
-    setQueryData,
   } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
     as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
   } : undefined, dataOpen)
@@ -56,7 +55,6 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
         artifact={artifact}
         isLoading={isLoading}
         error={error}
-        onQueryData={setQueryData}
         onDateSourcesChange={setDateSources}
       />
       <ArtifactDataDialog

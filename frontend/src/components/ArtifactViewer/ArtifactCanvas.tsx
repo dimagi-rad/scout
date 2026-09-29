@@ -9,7 +9,6 @@ import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { reportRenderError } from "@/lib/reportRenderError"
 import { cn } from "@/lib/utils"
 import { ArtifactDataRecovery } from "./ArtifactDataRecovery"
-import type { QueryDataResponse } from "./types"
 import { useArtifactDataRecovery } from "./useArtifactDataRecovery"
 import { useArtifactPrint } from "./useArtifactPrint"
 
@@ -33,13 +32,12 @@ interface ArtifactCanvasProps {
   isLoading: boolean
   error: string | null
   className?: string
-  onQueryData?: (queryData: QueryDataResponse) => void
   onDateSourcesChange?: (sources: Record<string, DateRange | null>) => void
 }
 
 export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasProps>(
   function ArtifactCanvas(
-    { artifactId, workspaceId, artifact, isLoading, error, className, onQueryData, onDateSourcesChange },
+    { artifactId, workspaceId, artifact, isLoading, error, className, onDateSourcesChange },
     ref,
   ) {
     const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -89,16 +87,11 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
             artifactId,
             artifactVersion,
           })
-          return
-        }
-        if (!onQueryData) return
-        if (event.data?.type === "artifact-query-data" && event.data.artifactId === artifactId) {
-          onQueryData(event.data.queryData as QueryDataResponse)
         }
       }
       window.addEventListener("message", handleMessage)
       return () => window.removeEventListener("message", handleMessage)
-    }, [artifactId, artifactVersion, onQueryData])
+    }, [artifactId, artifactVersion])
 
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>

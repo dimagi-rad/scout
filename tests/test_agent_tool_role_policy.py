@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
-from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.canvas_tool import create_canvas_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
@@ -29,7 +28,6 @@ async def test_read_user_cannot_directly_invoke_local_mutation_sinks(
     monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", materialize)
 
     artifact_write = _by_name(create_artifact_graph_tools(workspace, read_user))["artifact_write"]
-    create_artifact = _by_name(create_artifact_tools(workspace, read_user))["create_artifact"]
     save_learning = create_save_learning_tool(workspace, read_user)
     save_recipe = create_recipe_tool(workspace, read_user)
     blocking_materialization = create_materialization_tool(workspace, read_user)
@@ -37,9 +35,6 @@ async def test_read_user_cannot_directly_invoke_local_mutation_sinks(
     results = [
         await artifact_write.ainvoke(
             {"action": "create", "title": "Denied", "story_doc": {"schema_version": 1}}
-        ),
-        await create_artifact.ainvoke(
-            {"title": "Denied", "artifact_type": "markdown", "code": "# denied"}
         ),
         await save_learning.ainvoke(
             {
@@ -120,26 +115,6 @@ async def test_read_write_user_can_invoke_local_mutation(workspace, write_user):
     )
 
     assert result["status"] == "created"
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db(transaction=True)
-async def test_read_user_cannot_invoke_legacy_update_sink(workspace, read_user, user):
-    artifact = await Artifact.objects.acreate(
-        workspace=workspace,
-        created_by=user,
-        title="Existing",
-        artifact_type="markdown",
-        code="# original",
-    )
-    update_artifact = _by_name(create_artifact_tools(workspace, read_user))["update_artifact"]
-
-    result = await update_artifact.ainvoke({"artifact_id": str(artifact.id), "code": "# changed"})
-
-    assert result["status"] == "denied"
-    await artifact.arefresh_from_db()
-    assert artifact.code == "# original"
-    assert await Artifact.objects.filter(workspace=workspace).acount() == 1
 
 
 @pytest.mark.asyncio

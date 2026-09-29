@@ -10,7 +10,7 @@ export interface RenderErrorReport {
   stack?: string
   artifactId?: string
   artifactVersion?: number
-  /** Which sandbox renderer step failed, e.g. "Data Fetch Error". */
+  /** Which sandbox renderer step failed, e.g. "React Render Error". */
   stage?: string
 }
 
