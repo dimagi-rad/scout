@@ -214,7 +214,7 @@ async function finishReview({ github, context, core, fs, execFileSync, env }) {
   let followup;
   if (decision.passed) {
     followup = env.SAME_REPO === 'true'
-      ? (claudeOnly ? 'OCR reviewed no files in this range; Claude review will run next and cover every changed file.' : 'Claude review will run next.')
+      ? (claudeOnly ? 'OCR reviewed no files in this range; Claude review will run next and cover every changed file in its range.' : 'Claude review will run next.')
       : 'Claude follow-up is disabled for fork PRs.';
   } else if (claudeOnly) {
     followup = 'This PR needs a maintainer review instead.';
