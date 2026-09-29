@@ -14,7 +14,19 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.status import SYNCED_RUN_STATES, serving_excluded_tenant_ids
 from apps.workspaces.services.tenant_coverage import parse_coverage
+
+
+def synced_runs():
+    """Runs whose data counts as the workspace's last sync, newest first.
+
+    ``completed_at`` must be set: Postgres sorts NULLs first under DESC, so one
+    synced run without a timestamp would otherwise shadow every real one.
+    """
+    return MaterializationRun.objects.filter(
+        state__in=SYNCED_RUN_STATES, completed_at__isnull=False
+    ).order_by("-completed_at")
 
 
 async def included_tenant_snapshot_state(workspace, tenant_coverage) -> str:
@@ -44,6 +56,38 @@ async def included_tenant_snapshot_state(workspace, tenant_coverage) -> str:
     if states - MaterializationRun.ACTIVE_STATES - {MaterializationRun.RunState.COMPLETED}:
         return "unsafe"
     return "in_progress" if states & MaterializationRun.ACTIVE_STATES else "safe"
+
+
+async def serving_writer_in_flight(active_runs, coverage) -> bool:
+    """Whether any of *active_runs* may be rewriting data the workspace serves now.
+
+    A blue-green refresh (PROVISIONING target while an ACTIVE schema serves the
+    tenant) and a source the serving view explicitly excluded leave the served
+    data untouched; every other active run counts. *coverage* is the parsed
+    coverage of the ACTIVE view, or None for a single source or no usable view.
+    """
+    excluded = serving_excluded_tenant_ids(coverage)
+    serving_runs = active_runs
+    if excluded:
+        # Compare stringified run tenant ids so a malformed coverage id cannot
+        # reach the query as a UUID and crash the caller.
+        excluded_run_tenants = [
+            tenant_id
+            async for tenant_id in active_runs.values_list("tenant_schema__tenant_id", flat=True)
+            if str(tenant_id) in excluded
+        ]
+        serving_runs = active_runs.exclude(tenant_schema__tenant_id__in=excluded_run_tenants)
+    return (
+        await serving_runs.annotate(
+            has_serving_schema=Exists(
+                TenantSchema.objects.filter(
+                    tenant_id=OuterRef("tenant_schema__tenant_id"), state=SchemaState.ACTIVE
+                )
+            )
+        )
+        .exclude(tenant_schema__state=SchemaState.PROVISIONING, has_serving_schema=True)
+        .aexists()
+    )
 
 
 async def semantic_layer_state(workspace) -> tuple[str, str]:
@@ -127,28 +171,7 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
         state__in=MaterializationRun.ACTIVE_STATES,
     )
     in_progress = await runs.aexists()
-    serving_runs = runs
-    if coverage is not None:
-        excluded = {entry["tenant_id"] for entry in coverage["excluded_tenants"]} - {
-            entry["tenant_id"] for entry in coverage["included_tenants"]
-        }
-        excluded_run_tenants = [
-            tenant_id
-            async for tenant_id in runs.values_list("tenant_schema__tenant_id", flat=True)
-            if str(tenant_id) in excluded
-        ]
-        serving_runs = serving_runs.exclude(tenant_schema__tenant_id__in=excluded_run_tenants)
-    unsafe_writer = (
-        await serving_runs.annotate(
-            has_serving_schema=Exists(
-                TenantSchema.objects.filter(
-                    tenant_id=OuterRef("tenant_schema__tenant_id"), state=SchemaState.ACTIVE
-                )
-            )
-        )
-        .exclude(tenant_schema__state=SchemaState.PROVISIONING, has_serving_schema=True)
-        .aexists()
-    )
+    unsafe_writer = await serving_writer_in_flight(runs, coverage)
     semantic_status, semantic_error = await semantic_layer_state(workspace)
     base = {
         "physical_status": physical_status,

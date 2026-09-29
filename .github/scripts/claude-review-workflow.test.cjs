@@ -429,6 +429,10 @@ test("Claude reviewer tools are an exact read-only allowlist", () => {
     "Glob",
   ]);
   assert.match(workflow, /one command per Bash call, with no pipes, redirects/);
+  // git grep was the most common denied call even after "search with Grep and Glob"
+  // was in the prompt, so the prompt must name it and the replacement tools.
+  assert.match(workflow, /git grep is not permitted and will fail the review/);
+  assert.match(workflow, /To search file contents, use the Grep tool/);
   assert.doesNotMatch(workflow, /Bash\(gh pr comment|gh pr view or comment/);
   assert.match(workflow, /never run gh pr comment/);
   const schema = JSON.parse(workflow.match(/--json-schema '([^']*)'/)[1]);

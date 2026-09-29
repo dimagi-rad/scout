@@ -32,7 +32,6 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
-    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -58,6 +57,8 @@ from apps.workspaces.services.member_coverage import (
     missing_for_user,
     requester_gaps,
 )
+from apps.workspaces.services.query_state import synced_runs
+from apps.workspaces.services.status import derive_schema_status
 from apps.workspaces.services.workspace_service import remove_workspace_tenant
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -65,17 +66,6 @@ logger = logging.getLogger(__name__)
 
 # Bounded so a slow upstream export can't tie up the sync DRF worker thread.
 SHARE_REFRESH_TIMEOUT = 8  # seconds
-
-# A PARTIAL run loaded some sources but not all — the data it wrote is present
-# and queryable, so it counts as a sync. Excluding it made a workspace whose runs
-# are perpetually PARTIAL report last_synced_at=null alongside
-# schema_status="available", i.e. "never synced" about data the agent can query.
-# Every other read of the "latest data-bearing run" already uses this pair (e.g.
-# mcp_server/services/metadata.py, apps/workspaces/api/views.py).
-SYNCED_RUN_STATES = (
-    MaterializationRun.RunState.COMPLETED,
-    MaterializationRun.RunState.PARTIAL,
-)
 
 _PROVIDER_RESOLVERS = {
     "commcare": resolve_commcare_domains,
@@ -284,30 +274,6 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
     )
 
 
-def _derive_schema_status(tenant_count, active_count, provisioning, view_schema_state):
-    """Derive a workspace's schema status, shared by the list and detail endpoints
-    so they never drift. Returns "available" | "provisioning" | "unavailable" | "failed".
-
-    - Single-tenant: available iff every tenant is ACTIVE; provisioning if any is
-      mid-provisioning; else unavailable.
-    - Multi-tenant: tracked by the view schema — ACTIVE ⇒ available, FAILED ⇒
-      failed (per-tenant data may have loaded but there's no queryable surface),
-      else provisioning.
-    """
-    if tenant_count > 1:
-        if view_schema_state == SchemaState.ACTIVE:
-            return "available"
-        if view_schema_state == SchemaState.FAILED:
-            return "failed"
-        return "provisioning"
-
-    if active_count == tenant_count and tenant_count > 0:
-        return "available"
-    if provisioning:
-        return "provisioning"
-    return "unavailable"
-
-
 def _schema_status_for_workspaces(workspaces):
     """Compute schema_status for many workspaces with bulk queries (no N+1).
 
@@ -345,7 +311,7 @@ def _schema_status_for_workspaces(workspaces):
         ws_tenant_ids = [wt.tenant_id for wt in w.workspace_tenants.all()]
         active_count = sum(1 for tid in ws_tenant_ids if tid in active_tenants)
         provisioning = any(tid in provisioning_tenants for tid in ws_tenant_ids)
-        statuses[w.id] = _derive_schema_status(
+        statuses[w.id] = derive_schema_status(
             tenant_count=len(ws_tenant_ids),
             active_count=active_count,
             provisioning=provisioning,
@@ -363,16 +329,9 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # completed_at__isnull=False because Postgres sorts NULLs first under
-        # DESC — one state-bearing run without a timestamp would otherwise shadow
-        # every real one and return null.
         latest_run = (
-            MaterializationRun.objects.filter(
-                state__in=SYNCED_RUN_STATES,
-                completed_at__isnull=False,
-                tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
-            )
-            .order_by("-completed_at")
+            synced_runs()
+            .filter(tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"))
             .values("completed_at")[:1]
         )
 
@@ -538,7 +497,7 @@ class WorkspaceDetailView(APIView):
             except WorkspaceViewSchema.DoesNotExist:
                 view_schema_state = None
 
-        schema_status = _derive_schema_status(
+        schema_status = derive_schema_status(
             tenant_count=len(tenants),
             active_count=active_schemas,
             provisioning=provisioning,
@@ -546,12 +505,8 @@ class WorkspaceDetailView(APIView):
         )
 
         last_run_at = (
-            MaterializationRun.objects.filter(
-                state__in=SYNCED_RUN_STATES,
-                completed_at__isnull=False,
-                tenant_schema__tenant__in=tenants,
-            )
-            .order_by("-completed_at")
+            synced_runs()
+            .filter(tenant_schema__tenant__in=tenants)
             .values_list("completed_at", flat=True)
             .first()
         )
