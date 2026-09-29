@@ -11,9 +11,10 @@ calls return the same ``WorkspaceAccess`` and model instances, not fresh rows.
 
 Only credential readiness is really served from here: ``access`` re-reads the
 membership row on every cached grant, so a removal or demotion made by another
-request or process lands on the next check. What readiness cannot see from
-outside the request (a provider revoking access mid-turn) is dropped with
-``invalidate``.
+request or process lands on the next check. Writers of coverage inputs that can
+run inside a request call ``invalidate``: recording an upstream denial, membership
+rediscovery, and adding or removing a workspace source. A change made by another
+request or process (a disconnect, say) is seen within ``MAX_AGE_SECONDS``.
 """
 
 from __future__ import annotations
@@ -96,9 +97,10 @@ def invalidate(*, user_id=None, workspace_id=None) -> None:
     if scope is None:
         return
     workspace_id = None if workspace_id is None else str(workspace_id)
+    user_id = None if user_id is None else str(user_id)
     for key in list(scope):
         entry_user, entry_workspace, _options = key
-        if (user_id is None or entry_user == user_id) and (
+        if (user_id is None or str(entry_user) == user_id) and (
             workspace_id is None or entry_workspace == workspace_id
         ):
             scope.pop(key, None)

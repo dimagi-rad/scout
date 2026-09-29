@@ -36,7 +36,10 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.access_freshness import VerificationBudget
-from apps.workspaces.services.workspace_service import remove_workspace_tenant
+from apps.workspaces.services.workspace_service import (
+    add_workspace_tenant,
+    remove_workspace_tenant,
+)
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
 from tests.tenant_access import grant_tenant_access
 
@@ -287,10 +290,24 @@ def test_a_demoted_member_loses_a_cached_write_grant(scope, user, workspace):
     )
 
     assert not workspace_write_allowed(user, workspace.id)
-    again = resolve_workspace_access_ex(user, workspace.id)
-    assert again.granted
-    # Views branch on membership.role (MANAGE-only actions), so it must be live too.
-    assert read_grant.membership.role == again.membership.role == WorkspaceRole.READ
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    # Views branch on membership.role (MANAGE-only actions), so a reference taken
+    # before the demotion must see it too.
+    assert read_grant.membership.role == WorkspaceRole.READ
+
+
+@pytest.mark.django_db
+def test_an_exempt_grant_reflects_a_demotion(scope, user, uncovered_manager):
+    ws, _missing = uncovered_manager
+    assert resolve_workspace_access_ex(
+        user, ws.id, minimum_role=WorkspaceRole.MANAGE, require_coverage=False
+    ).granted
+
+    WorkspaceMembership.objects.filter(workspace=ws, user=user).update(role=WorkspaceRole.READ)
+
+    assert not resolve_workspace_access_ex(
+        user, ws.id, minimum_role=WorkspaceRole.MANAGE, require_coverage=False
+    ).granted
 
 
 @pytest.mark.asyncio
@@ -311,15 +328,22 @@ async def test_async_cached_write_grant_rechecks_the_role(user, workspace):
 
 
 @pytest.mark.django_db
-def test_an_upstream_denial_drops_the_users_cached_decisions(scope, user, workspace, tenant):
+def test_an_upstream_denial_drops_the_users_cached_decisions(
+    scope, user, workspace, tenant, django_capture_on_commit_callbacks
+):
     """A6: a tool call that sees the provider revoke access must not leave the rest
     of the turn running on the grant cached before it."""
     assert resolve_workspace_access_ex(user, workspace.id).granted
     connection = TenantMembership.objects.get(user=user, tenant=tenant).connection
 
-    record_validated_upstream_denial(
-        connection, code=ErrorCode.AUTH_ACCESS_DENIED, tenant_id=tenant.id
-    )
+    with django_capture_on_commit_callbacks() as callbacks:
+        record_validated_upstream_denial(
+            connection, code=ErrorCode.AUTH_ACCESS_DENIED, tenant_id=tenant.id
+        )
+        # Not before commit: a sibling tool call could re-cache the unarchived rows.
+        assert resolve_workspace_access_ex(user, workspace.id).granted
+    for callback in callbacks:
+        callback()
 
     assert resolve_workspace_access_ex(user, workspace.id).denied_reason == TENANT_ACCESS_LOST
 
@@ -376,3 +400,22 @@ def test_changing_a_workspaces_sources_drops_its_cached_coverage(scope, user, un
     remove_workspace_tenant(ws, WorkspaceTenant.objects.get(workspace=ws, tenant=missing))
 
     assert missing_tenants_for_member(user, ws) == ()
+
+
+@pytest.mark.django_db
+def test_adding_a_source_drops_the_workspaces_cached_coverage(scope, user, workspace):
+    """Adding a source widens what members must cover, so a stale entry fails open."""
+    assert missing_tenants_for_member(user, workspace) == ()
+    extra = Tenant.objects.create(provider="commcare", external_id="x9", canonical_name="Extra")
+
+    add_workspace_tenant(workspace, extra)
+
+    assert [t.tenant_name for t in missing_tenants_for_member(user, workspace)] == ["Extra"]
+
+
+def test_invalidate_matches_a_stringified_user_id(scope, user):
+    access_cache.store(user, "ws", access_cache.COVERAGE, ())
+
+    access_cache.invalidate(user_id=str(user.pk))
+
+    assert access_cache.lookup(user, "ws", access_cache.COVERAGE) is None

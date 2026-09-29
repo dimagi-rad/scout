@@ -113,9 +113,12 @@ def record_validated_upstream_denial(connection, *, code, tenant_id=None, now=No
         connection.upstream_denial_code = code
     connection.upstream_denied_at = now
     connection.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
+    archived = memberships.update(archived_at=now)
     # The turn that saw the denial must not keep running on a grant cached before it.
-    access_cache.invalidate(user_id=connection.user_id)
-    return memberships.update(archived_at=now)
+    # After commit, or a sibling tool call could re-cache from the unarchived rows.
+    user_id = connection.user_id
+    transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
+    return archived
 
 
 arecord_upstream_denial = sync_to_async(record_upstream_denial)
