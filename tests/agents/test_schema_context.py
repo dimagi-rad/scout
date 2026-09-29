@@ -436,8 +436,12 @@ async def test_excluded_source_loading_does_not_block_serving_view(
         assert "do not call other data tools" in result.lower()
 
 
-async def _unresolvable_workspace(workspace, tenant, *, multi, loaded, partial=False):
-    """Make ``workspace``'s providers unresolvable: all of them, or one of two if ``partial``."""
+async def _unresolvable_workspace(workspace, tenant, *, multi, state, partial=False):
+    """Make ``workspace``'s providers unresolvable: all of them, or one of two if ``partial``.
+
+    ``state`` is the serving schema's state, or None for nothing loaded. No run is active,
+    so a MATERIALIZING schema here is a stuck load (G12).
+    """
     if not partial:
         await Tenant.objects.filter(id=tenant.id).aupdate(provider="retired_provider")
     if multi:
@@ -446,14 +450,15 @@ async def _unresolvable_workspace(workspace, tenant, *, multi, loaded, partial=F
             provider="retired_provider", external_id="retired", canonical_name="Retired"
         )
         await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
-        if loaded:
+        if state is not None:
             await WorkspaceViewSchema.objects.acreate(
-                workspace=workspace, schema_name="ws_view", state=SchemaState.ACTIVE
+                workspace=workspace, schema_name="ws_view", state=state
             )
-    elif loaded:
-        await TenantSchema.objects.acreate(
-            tenant=tenant, schema_name="loaded", state=SchemaState.ACTIVE
-        )
+    elif state is not None:
+        await TenantSchema.objects.acreate(tenant=tenant, schema_name="loaded", state=state)
+
+
+_SERVING_STATES = [None, SchemaState.ACTIVE, SchemaState.MATERIALIZING]
 
 
 @pytest.mark.asyncio
@@ -461,13 +466,14 @@ async def _unresolvable_workspace(workspace, tenant, *, multi, loaded, partial=F
 @pytest.mark.parametrize("interactive", [True, False])
 @pytest.mark.parametrize("write_capable", [True, False])
 @pytest.mark.parametrize("multi", [False, True])
-@pytest.mark.parametrize("loaded", [False, True])
+@pytest.mark.parametrize("state", _SERVING_STATES)
 async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
-    workspace, tenant, interactive, write_capable, multi, loaded
+    workspace, tenant, interactive, write_capable, multi, state
 ):
     """F2: a re-run fails PIPELINE_UNRESOLVED for a provider with no pipeline, so
-    telling the agent to (re-)run materialization only wastes a job every turn."""
-    await _unresolvable_workspace(workspace, tenant, multi=multi, loaded=loaded)
+    telling the agent to (re-)run materialization only wastes a job every turn.
+    G12: a stuck MATERIALIZING load can't finish either, so waiting is no better."""
+    await _unresolvable_workspace(workspace, tenant, multi=multi, state=state)
 
     context = await _fetch_semantic_model_context(
         workspace, interactive=interactive, write_capable=write_capable
@@ -478,32 +484,53 @@ async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
     assert "Run materialization to rebuild" not in context
     assert "Call `run_materialization`" not in context
     assert "No data has been loaded yet" not in context
+    assert "in progress" not in context
+    assert "A load skips" not in context
     if not write_capable:
         assert "run_materialization" not in context
     # Loaded data stays queryable: SQL never resolves a pipeline.
+    loaded = state == SchemaState.ACTIVE
     assert ("`query` SQL still works" in context) is loaded
+    assert ("materialization cannot load it" in context) is not loaded
+
+
+def _expected_load_guidance(state, *, interactive, write_capable):
+    if state == SchemaState.MATERIALIZING:
+        if not write_capable:
+            return graph_base._READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
+        if interactive:
+            return graph_base._INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
+        return graph_base._HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+    if state == SchemaState.ACTIVE:
+        if write_capable:
+            return graph_base._LOADED_REBUILD_GUIDANCE
+        return graph_base._READ_ONLY_LOADED_SQL_GUIDANCE
+    if not write_capable:
+        return graph_base._READ_ONLY_MATERIALIZE_GUIDANCE
+    if interactive:
+        return graph_base._INTERACTIVE_MATERIALIZE_GUIDANCE
+    return graph_base._HEADLESS_MATERIALIZE_GUIDANCE
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [True, False])
 @pytest.mark.parametrize("write_capable", [True, False])
-@pytest.mark.parametrize("loaded", [False, True])
+@pytest.mark.parametrize("state", _SERVING_STATES)
 async def test_partly_unresolvable_pipeline_keeps_the_load_guidance(
-    workspace, tenant, write_capable, loaded
+    workspace, tenant, interactive, write_capable, state
 ):
     """A load still loads the resolvable sources, so their guidance stands; the
-    unresolvable provider only adds a note."""
-    await _unresolvable_workspace(workspace, tenant, multi=True, loaded=loaded, partial=True)
+    unresolvable provider only adds a note. Asserting the exact guidance catches a
+    mixed workspace regressing to the fully-unresolved text (G13)."""
+    await _unresolvable_workspace(workspace, tenant, multi=True, state=state, partial=True)
 
     context = await _fetch_semantic_model_context(
-        workspace, interactive=True, write_capable=write_capable
+        workspace, interactive=interactive, write_capable=write_capable
     )
 
-    assert "retired_provider" in context and "administrator" in context
-    if loaded:
-        assert "`list_tables`" in context or "Run materialization to rebuild" in context
-        assert "Data is loaded" in context
-    elif write_capable:
-        assert "Call `run_materialization`" in context
-    else:
-        assert "not currently queryable" in context
+    expected = _expected_load_guidance(state, interactive=interactive, write_capable=write_capable)
+    assert expected in context
+    assert "A load skips this workspace's provider retired_provider sources" in context
+    assert "materialization cannot load it" not in context
+    assert "materialization cannot rebuild them" not in context
