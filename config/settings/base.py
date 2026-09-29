@@ -412,6 +412,7 @@ CSRF_COOKIE_NAME = "csrftoken_scout"
 CSRF_COOKIE_HTTPONLY = False  # SPA must read the CSRF cookie via JavaScript
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
 SESSION_COOKIE_NAME = "sessionid_scout"
+SESSION_COOKIE_AGE = 14 * 24 * 3600  # explicit 14 days, matching Django's default (#385)
 
 EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
