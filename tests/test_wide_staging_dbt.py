@@ -107,7 +107,7 @@ def _commcare_setup(conn, schema):
     }
 
 
-# (provider, setup, upsert, [(model, kept column, raw column, folded key path)])
+# provider -> (setup, upsert, [(model, kept column, raw column, folded key path)])
 CASES = {
     "commcare_connect": (
         _connect_setup,
