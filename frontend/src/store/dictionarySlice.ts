@@ -192,7 +192,7 @@ export const createDictionarySlice: StateCreator<
             error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
           set({
             dictionaryStatus: status,
-            dictionaryError: error instanceof Error ? error.message : "Failed to load data dictionary",
+            dictionaryError: error instanceof ApiError ? error.message : "Failed to load data dictionary",
           })
         }
       },
@@ -225,7 +225,8 @@ export const createDictionarySlice: StateCreator<
           if (!isCurrent()) return
           const status =
             error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
-          const message = error instanceof Error ? error.message : "Failed to refresh schema"
+          // Only server-curated ApiError text is user copy; anything else is developer text.
+          const message = error instanceof ApiError ? error.message : "Failed to refresh schema"
           set({
             dictionaryStatus: status,
             dictionaryError: message,

@@ -5,7 +5,7 @@ import { DataDictionaryPage } from "./DataDictionaryPage"
 const { state, network } = vi.hoisted(() => ({
   network: { status: "online" },
   state: {
-    dataDictionary: { schemas: {} },
+    dataDictionary: { schemas: {} } as { schemas: Record<string, unknown> } | null,
     dictionaryStatus: "loaded",
     dictionaryWarning: "Some sources could not be refreshed: source B needs operator recovery." as string | null,
     dictionaryError: null as string | null,
@@ -22,6 +22,7 @@ vi.mock("./SchemaTree", () => ({ SchemaTree: () => <div>Available tables</div> }
 vi.mock("./TableDetail", () => ({ TableDetail: () => null }))
 
 beforeEach(() => {
+  state.dataDictionary = { schemas: {} }
   state.dictionaryStatus = "loaded"
   state.dictionaryWarning = "Some sources could not be refreshed: source B needs operator recovery."
   state.dictionaryError = null
@@ -60,4 +61,26 @@ it("keeps normal first-load errors out of onboarding guidance", () => {
   render(<DataDictionaryPage />)
   expect(screen.getByText("Start a chat to automatically fetch your schema data.")).toBeVisible()
   expect(screen.queryByText(state.dictionaryError)).not.toBeInTheDocument()
+})
+
+// B2: the server's reason was stored but never rendered, so every refusal read as a generic failure.
+it("keeps the loaded dictionary and shows the server's reason when a refresh is refused", () => {
+  state.dictionaryStatus = "error"
+  state.dictionaryWarning = null
+  state.dictionaryError = "A refresh is already in progress."
+  render(<DataDictionaryPage />)
+  expect(screen.getByTestId("refresh-schema-error")).toHaveTextContent("A refresh is already in progress.")
+  expect(screen.getByText("Available tables")).toBeVisible()
+  expect(screen.getByTestId("refresh-schema-btn")).toBeEnabled()
+  expect(screen.queryByText("Failed to load dictionary")).not.toBeInTheDocument()
+})
+
+it("shows the server's reason when the dictionary itself fails to load", () => {
+  state.dataDictionary = null
+  state.dictionaryStatus = "error"
+  state.dictionaryWarning = null
+  state.dictionaryError = "Workspace not found."
+  render(<DataDictionaryPage />)
+  expect(screen.getByText("Failed to load dictionary")).toBeVisible()
+  expect(screen.getByTestId("dictionary-error-message")).toHaveTextContent("Workspace not found.")
 })

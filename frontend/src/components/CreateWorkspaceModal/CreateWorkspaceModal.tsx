@@ -23,6 +23,7 @@ import {
 } from "@/components/SearchFilterBar/SearchFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
+import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 
 interface Props {
   onClose: () => void
@@ -112,14 +113,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   }, [domains, selected])
 
   const normalizedSearch = search.trim().replace(/^#/, "").toLowerCase()
-  // The server's order puts never-selected sources first (#357); a picker wants names.
-  const sortedSources = useMemo(
-    () =>
-      [...sources].sort(
-        (a, b) => a.tenant_name.localeCompare(b.tenant_name) || a.tenant_id.localeCompare(b.tenant_id),
-      ),
-    [sources],
-  )
+  const sortedSources = useMemo(() => [...sources].sort(compareUserTenantsByName), [sources])
   const filteredSources = sortedSources.filter((t) => {
     if (providerFilter && t.provider !== providerFilter) return false
     if (

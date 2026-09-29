@@ -133,4 +133,13 @@ describe("WorkspacesPage", () => {
     expect(rowIds()).toHaveLength(3)
     expect(screen.queryByTestId("workspaces-show-more")).toBeNull()
   })
+
+  // E4: a transparent native select showed white-on-white options under the dark theme.
+  it("paints the sort select with an opaque background paired with its text colour", () => {
+    useAppStore.setState({ domains: many(2) })
+    renderPage()
+    const select = screen.getByTestId("workspaces-sort")
+    expect(select).toHaveClass("bg-background", "text-foreground")
+    expect(select).not.toHaveClass("bg-transparent")
+  })
 })

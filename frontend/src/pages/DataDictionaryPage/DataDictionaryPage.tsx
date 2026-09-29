@@ -10,6 +10,7 @@ export function DataDictionaryPage() {
   const dataDictionary = useAppStore((s) => s.dataDictionary)
   const dictionaryStatus = useAppStore((s) => s.dictionaryStatus)
   const dictionaryWarning = useAppStore((s) => s.dictionaryWarning)
+  const dictionaryError = useAppStore((s) => s.dictionaryError)
   const selectedTable = useAppStore((s) => s.selectedTable)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const { fetchDictionary, refreshSchema, fetchTable, clearDictionary } =
@@ -69,14 +70,18 @@ export function DataDictionaryPage() {
     )
   }
 
-  if (dictionaryStatus === "error" && networkStatus === "online") {
+  const showError = dictionaryStatus === "error" && networkStatus === "online"
+
+  // A refused refresh (e.g. 409 "already in progress") leaves the loaded dictionary valid,
+  // so keep it on screen and explain the refusal instead of replacing it with a failure page.
+  if (showError && !dataDictionary) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
           <Database className="mx-auto h-12 w-12 text-muted-foreground" />
           <h2 className="mt-4 text-lg font-medium">Failed to load dictionary</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            There was an error loading the data dictionary
+          <p className="mt-2 text-sm text-muted-foreground" data-testid="dictionary-error-message">
+            {dictionaryError ?? "There was an error loading the data dictionary"}
           </p>
           {dictionaryWarning && (
             <p role="status" className="mt-2 text-sm text-muted-foreground">{dictionaryWarning}</p>
@@ -91,6 +96,11 @@ export function DataDictionaryPage() {
 
   return (
     <div className="flex h-full flex-col">
+      {showError && dictionaryError && (
+        <div role="alert" data-testid="refresh-schema-error" className="border-b bg-muted px-4 py-3 text-sm text-destructive">
+          {dictionaryError}
+        </div>
+      )}
       {dictionaryWarning && (
         <div role="status" data-testid="refresh-schema-warning" className="border-b bg-muted px-4 py-3 text-sm">
           {dictionaryWarning}
