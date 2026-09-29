@@ -1330,11 +1330,28 @@ async def materialize_workspace(
         published = reported_publication and (outcome is None or outcome.get("ok"))
         if only_unserved and not published:
             try:
-                await rebuild_workspace_view_schema.defer_async(workspace_id=str(workspace_id))
+                if await _fallback_views_buildable(workspace_id):
+                    await rebuild_workspace_view_schema.defer_async(workspace_id=str(workspace_id))
             except Exception:
                 logger.exception("Could not queue the view rebuild for workspace %s", workspace_id)
         if notify_thread:
             await _defer_resume_for_job(job_id, preflight_failures)
+
+
+async def _fallback_views_buildable(workspace_id) -> bool:
+    """Whether a bare view rebuild after an unpublished load can build anything.
+
+    A single source is served from its own schema, so a view schema there is an
+    orphan; and with no source served at all (a new workspace whose first load
+    never ran) the rebuild can only mark the views FAILED although nothing did.
+    """
+    tenant_ids = await _workspace_tenant_ids(workspace_id)
+    return (
+        len(tenant_ids) > 1
+        and await TenantSchema.objects.filter(
+            tenant_id__in=tenant_ids, state=SchemaState.ACTIVE
+        ).aexists()
+    )
 
 
 def _resume_records(result: dict) -> list[dict]:

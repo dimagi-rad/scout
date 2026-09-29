@@ -779,6 +779,10 @@ async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_vie
             new_callable=AsyncMock,
         ) as rebuild,
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as resume,
+        patch(
+            "apps.workspaces.tasks._fallback_views_buildable",
+            new=AsyncMock(return_value=True),
+        ),
     ):
         call = workspaces_tasks.materialize_workspace(
             MagicMock(job=MagicMock(id=7)),
@@ -795,6 +799,47 @@ async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_vie
 
     assert rebuild.await_count == (1 if rebuilds else 0)
     resume.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("sources", "served", "rebuilds"),
+    [(2, 0, False), (1, 1, False), (2, 1, True)],
+)
+async def test_an_unpublished_new_source_load_rebuilds_views_only_when_they_can_build(
+    user, sources, served, rebuilds
+):
+    """A new workspace whose first load was refused has nothing to build views
+    from (#353), and a single source needs no view schema at all."""
+    ws = await Workspace.objects.acreate(name="Fresh", created_by=user)
+    for index in range(sources):
+        tenant = await Tenant.objects.acreate(
+            provider="commcare", external_id=f"fresh-{index}", canonical_name=f"Fresh {index}"
+        )
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        if index < served:
+            await TenantSchema.objects.acreate(
+                tenant=tenant, schema_name=f"t_fresh_{index}", state=SchemaState.ACTIVE
+            )
+    denial = {"status": "denied", "error": "verification unavailable", "tenants": []}
+    with (
+        patch(
+            "apps.workspaces.tasks.materialize_workspace_core",
+            new=AsyncMock(return_value=denial),
+        ),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as rebuild,
+    ):
+        await workspaces_tasks.materialize_workspace(
+            MagicMock(job=MagicMock(id=7)),
+            workspace_id=str(ws.id),
+            user_id=str(user.id),
+            only_unserved=True,
+            notify_thread=False,
+        )
+
+    assert rebuild.await_count == (1 if rebuilds else 0)
 
 
 async def test_reusing_a_generation_resets_its_inactivity_clock(workspace, tenant, user):
