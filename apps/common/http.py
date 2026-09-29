@@ -13,10 +13,10 @@ def parse_json_object(
 
     ``json.loads`` happily returns a list, string or number, and callers go on to
     ``.get()`` it — so a well-formed but non-object body used to surface as a 500.
-    ``allow_empty`` treats an empty body as ``{}`` for endpoints where every field
-    is optional.
+    ``allow_empty`` treats an empty or whitespace-only body as ``{}`` for endpoints
+    where every field is optional.
     """
-    if not request.body and allow_empty:
+    if allow_empty and not request.body.strip():
         return {}, None
     try:
         body = json.loads(request.body)

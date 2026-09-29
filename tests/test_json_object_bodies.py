@@ -40,6 +40,7 @@ class TestParseJsonObject:
 
     def test_allow_empty_treats_empty_body_as_empty_object(self):
         assert parse_json_object(_post(""), allow_empty=True) == ({}, None)
+        assert parse_json_object(_post(" \n"), allow_empty=True) == ({}, None)
 
     def test_allow_empty_still_rejects_a_non_object(self):
         _parsed, err = parse_json_object(_post("[]"), allow_empty=True)
