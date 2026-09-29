@@ -333,10 +333,9 @@ def validator_url(settings, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["validate", "invalidate"])
 @pytest.mark.parametrize("failure", ["read_timeout", "disconnect", "connect", 502, 503, 504])
-async def test_schema_operations_retry_transient_failures_then_succeed(
-    monkeypatch, caplog, validator_url, operation, failure
+async def test_validation_retries_transient_failures_then_succeeds(
+    monkeypatch, caplog, validator_url, failure
 ):
     calls = []
 
@@ -356,7 +355,7 @@ async def test_schema_operations_retry_transient_failures_then_succeed(
 
     _patched_async_client(monkeypatch, handler)
     with caplog.at_level(logging.INFO, logger=cube_client_module.__name__):
-        await _schema_operation(operation)
+        await _schema_operation("validate")
 
     assert len(calls) == 2
     assert calls[0].url == calls[1].url
@@ -364,10 +363,11 @@ async def test_schema_operations_retry_transient_failures_then_succeed(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["validate", "invalidate"])
+# Cube finishes a /meta compile after the client leaves, so the warm-up never retries.
+@pytest.mark.parametrize(("operation", "attempts"), [("validate", 3), ("invalidate", 1)])
 @pytest.mark.parametrize("failure", ["read_timeout", "disconnect", 503])
 async def test_schema_operations_give_up_after_bounded_attempts(
-    monkeypatch, caplog, validator_url, operation, failure
+    monkeypatch, caplog, validator_url, operation, attempts, failure
 ):
     calls = []
 
@@ -386,7 +386,7 @@ async def test_schema_operations_give_up_after_bounded_attempts(
     ):
         await _schema_operation(operation)
 
-    assert len(calls) == 3
+    assert len(calls) == attempts
     assert isinstance(raised.value, ExpectedStateError)
     assert raised.value.__cause__ is not None
     # The caller owns the single WARNING; retries themselves stay below Sentry.

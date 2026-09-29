@@ -47,9 +47,11 @@ SCHEMA_RETRY_BASE_DELAY_SECONDS = 2.0
 # The validator abandons a compile at 60s (CUBE_VALIDATOR_COMPILE_TIMEOUT_MS) and
 # answers 503; reading past that lets its answer arrive instead of a ReadTimeout.
 VALIDATE_TIMEOUT = httpx.Timeout(75.0, connect=5.0)
-# /v1/meta compiles the workspace schema inside Cube, which takes tens of seconds
-# for large multi-source models (SCOUT-DJANGO-3N timed out at the old flat 30s).
-META_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+# /v1/meta only starts the compile: Cube finishes it after the client disconnects
+# (large multi-source models outlast 30s, SCOUT-DJANGO-3N), so neither a longer
+# wait nor a retry buys anything, and the warm-up can run on a request thread.
+META_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+META_ATTEMPTS = 1
 
 
 class CubeConfigurationError(RuntimeError):
@@ -234,21 +236,28 @@ class CubeClient:
             f"{self.base_url}/cubejs-api/v1/meta",
             operation="schema warm-up",
             limits=META_TIMEOUT,
+            attempts=META_ATTEMPTS,
             headers=self._headers(security_context),
         )
 
     async def _schema_request(
-        self, method: str, url: str, *, operation: str, limits: httpx.Timeout, **kwargs: Any
+        self,
+        method: str,
+        url: str,
+        *,
+        operation: str,
+        limits: httpx.Timeout,
+        attempts: int = SCHEMA_REQUEST_ATTEMPTS,
+        **kwargs: Any,
     ) -> httpx.Response:
         """Send a schema-maintenance request, retrying only transient failures.
 
-        Both endpoints are idempotent and share work across retries: Cube keeps
-        compiling a /meta schema after the client gives up, and the validator
-        joins a repeated request to the compile already in flight for that hash.
+        Retrying validation is cheap: the validator joins a repeated request to
+        the compile already in flight for that schema hash.
         """
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=limits) as client:
-            for attempt in range(1, SCHEMA_REQUEST_ATTEMPTS + 1):
+            for attempt in range(1, attempts + 1):
                 try:
                     response = await client.request(method, url, **kwargs)
                     response.raise_for_status()
@@ -266,19 +275,19 @@ class CubeClient:
                             attempt - 1,
                         )
                     return response
-                if attempt == SCHEMA_REQUEST_ATTEMPTS:
+                if attempt == attempts:
                     break
                 logger.info(
                     "Retrying Cube %s after transient failure (%s), retry %s/%s",
                     operation,
                     _describe_transient(last_error),
                     attempt,
-                    SCHEMA_REQUEST_ATTEMPTS - 1,
+                    attempts - 1,
                 )
                 delay = SCHEMA_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
                 await asyncio.sleep(delay * random.uniform(0.5, 1.5))  # noqa: S311 -- retry jitter
         raise CubeServiceUnavailable(
-            f"Cube {operation} failed after {SCHEMA_REQUEST_ATTEMPTS} attempts: "
+            f"Cube {operation} failed after {attempts} attempt(s): "
             f"{_describe_transient(last_error)}"
         ) from last_error
 

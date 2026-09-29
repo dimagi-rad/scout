@@ -169,7 +169,7 @@ def test_failed_cache_warmup_logs_one_warning_without_a_traceback(
         promoted = build_and_promote_cube_schema(workspace, model=model)
 
     assert promoted.status == CubeSchema.Status.ACTIVE
-    assert cube_http.calls["meta"] == 3
+    assert cube_http.calls["meta"] == 1
     records = _warnings_and_errors(caplog)
     assert [record.levelno for record in records] == [logging.WARNING]
     assert records[0].exc_info is None
