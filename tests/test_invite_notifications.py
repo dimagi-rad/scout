@@ -477,6 +477,20 @@ class TestMemberRemovedEmail:
         assert resp.status_code == 403
         mock_task.defer.assert_not_called()
 
+    def test_composing_failure_does_not_fail_the_removal(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mocker.patch.object(invite_notifications, "send_email")
+        mocker.patch.object(invite_notifications, "_user_label", side_effect=RuntimeError)
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, target)
+
+        assert resp.status_code == 204
+        assert not WorkspaceMembership.objects.filter(pk=target.pk).exists()
+
 
 class TestInviteRevokedEmail:
     """#382: an invitee whose invite is revoked is told, since the invite or

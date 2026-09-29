@@ -6,6 +6,7 @@ CommCare Connect opportunities, Open Chat Studio bots, and CommCare HQ projects.
 Delivery goes through the async ``send_email`` task off the request path.
 """
 
+import functools
 import logging
 
 from django.conf import settings
@@ -67,6 +68,20 @@ def _dispatch(subject, message, recipient_list):
         logger.exception("Failed to enqueue invite email to %s", recipient_list)
 
 
+def _post_commit_notice(fn):
+    """These run from on_commit hooks after the change has landed, so a failure while
+    composing (say, a row deleted concurrently) must not turn that request into a 500."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            logger.exception("Failed to send %s", fn.__name__)
+
+    return wrapper
+
+
 def send_pending_invite_email(invite):
     """Phase 2: tell someone with no Scout account they've been invited."""
     workspace_name = invite.workspace.name
@@ -126,6 +141,7 @@ def notify_invite_accepted(invite, invitee):
         )
 
 
+@_post_commit_notice
 def notify_member_added(membership, added_by):
     """Tell a user a manager added them straight to a workspace (#382): the direct
     path creates a membership with no invite, so no other notice ever reaches them."""
@@ -149,6 +165,7 @@ _ROLE_LABELS = {
 }
 
 
+@_post_commit_notice
 def notify_role_changed(membership, changed_by):
     """Tell a member a manager changed their role (#382)."""
     workspace = membership.workspace
@@ -166,6 +183,7 @@ def notify_role_changed(membership, changed_by):
     )
 
 
+@_post_commit_notice
 def notify_member_removed(workspace, user, removed_by):
     """Tell a user a manager removed them from a workspace (#382). Removal also
     deletes their conversations there, so the notice says so."""
@@ -181,6 +199,7 @@ def notify_member_removed(workspace, user, removed_by):
     )
 
 
+@_post_commit_notice
 def notify_invite_revoked(invite, revoked_by):
     """Tell an invitee their invite was withdrawn (#382): the invite and awaiting-access
     emails may have sent them off to sign in or get upstream access."""
