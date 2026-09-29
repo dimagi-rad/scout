@@ -115,6 +115,21 @@ def store(user, workspace_id, options, result, *, since: int | None) -> None:
         scope.pop(key, None)
 
 
+def first_in_scope(user, workspace_id, tag) -> bool:
+    """Whether ``tag`` is new for this user and workspace in the active scope.
+
+    Always true outside a scope, where each resolution is its own unit of work.
+    An ``invalidate`` forgets it, since the state it described may have changed.
+    """
+    scope = _active()
+    key = _key(user, workspace_id, tag)
+    if scope is None or key is None:
+        return True
+    marker = object()
+    # setdefault is one atomic step on the dict shared with sync_to_async threads.
+    return scope.setdefault(key, marker) is marker
+
+
 def invalidate(*, user_id=None, workspace_id=None) -> None:
     """Drop the active scope's entries for ``user_id`` and/or ``workspace_id``."""
     scope = _active()

@@ -124,7 +124,7 @@ one. Each user gets their own auto-created workspace; they are not shared.
 Access to a workspace requires a workspace membership and a usable credential
 for its tenants. With `WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT` off (the
 default), one covered tenant is enough. With it on, the member must be able to
-use every tenant in the workspace.
+use every tenant in the workspace. Production runs with it on.
 
 A member who loses a tenant is denied access, with a message naming each
 missing source and how to fix it. Their membership is kept, and access returns

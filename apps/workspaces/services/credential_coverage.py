@@ -12,7 +12,7 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from uuid import UUID
 
@@ -626,9 +626,14 @@ class MissingTenant:
     recovery: CoverageRecovery
     team_slug: str = ""
     team_name: str = ""
+    # For the operator log only: ``recovery`` is the member-facing contract, and
+    # replayed denials are rebuilt from ``as_dict`` without it.
+    gap_code: str = field(default="", compare=False)
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        del value["gap_code"]
+        return value
 
 
 def _recovery(item: TenantCredentialReadiness, removed_pairs) -> CoverageRecovery:
@@ -652,6 +657,7 @@ def _missing_tenant(item: TenantCredentialReadiness, removed_pairs) -> MissingTe
         recovery=_recovery(item, removed_pairs),
         team_slug=item.gap.team_slug,
         team_name=item.gap.team_name,
+        gap_code=item.gap.code,
     )
 
 

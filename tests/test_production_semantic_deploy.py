@@ -89,3 +89,13 @@ def test_cube_secret_resolver_prefers_staging_override_without_kamal():
     )
 
     assert result.stdout == "staging-secret"
+
+
+def test_production_services_agree_on_the_all_of_access_rule():
+    values = {
+        name: _load_config(name)["env"]["clear"].get("WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT")
+        for name in ("deploy.yml", "deploy-worker.yml", "deploy-mcp.yml")
+    }
+    # Equal, not pinned: a rollback flips all three and needs no test change.
+    assert len(set(values.values())) == 1, values
+    assert None not in values.values(), values
