@@ -130,6 +130,13 @@ class Tenant(models.Model):
     def __str__(self):
         return f"{self.provider}:{self.external_id} ({self.canonical_name})"
 
+    def save(self, *args, **kwargs):
+        # Names come straight from provider APIs; one that is missing or too long
+        # must not fail tenant resolution for every other tenant (#263, 02#7).
+        max_length = self._meta.get_field("canonical_name").max_length
+        self.canonical_name = str(self.canonical_name or self.external_id)[:max_length]
+        super().save(*args, **kwargs)
+
     def format_display_name(self, workspace_name: str) -> str:
         """Apply this tenant's provider template to ``workspace_name``.
 

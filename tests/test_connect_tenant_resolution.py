@@ -67,6 +67,24 @@ class TestResolveConnectOpportunities:
         assert tenant.canonical_name == "New Name"
 
     @pytest.mark.asyncio
+    async def test_bounds_provider_names_that_do_not_fit(self, user, httpx_mock):
+        # A >255-char name raised DataError mid-resolution, so the user saw no
+        # opportunities at all (#263, finding 02#7).
+        httpx_mock.add_response(
+            json={
+                "opportunities": [
+                    {"id": 42, "name": "x" * 300},
+                    {"id": 43, "name": None},
+                ],
+            },
+        )
+
+        memberships = await resolve_connect_opportunities(user, "fake-token")
+
+        names = {tm.tenant.external_id: tm.tenant.canonical_name for tm in memberships}
+        assert names == {"42": "x" * 255, "43": "43"}
+
+    @pytest.mark.asyncio
     async def test_auth_error_raises(self, user, httpx_mock):
         httpx_mock.add_response(status_code=401)
 
