@@ -481,6 +481,16 @@ class _RefreshOutcome:
     http_status: int
 
 
+def _refresh_source(tenant) -> dict:
+    return {"tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name}
+
+
+def _unstarted_refresh(tenant, state, error, http_status, code=None) -> _RefreshOutcome:
+    """The outcome of a source whose refresh was not queued, refused or failed."""
+    body = {"error": error, **({"code": code} if code else {})}
+    return _RefreshOutcome({**_refresh_source(tenant), "status": state, **body}, body, http_status)
+
+
 class RefreshSchemaView(APIView):
     """
     POST /api/workspaces/<workspace_id>/refresh/
@@ -517,19 +527,48 @@ class RefreshSchemaView(APIView):
         }
 
         outcomes = []
-        with transaction.atomic():
-            # One global order, so two refreshes over overlapping sources can't deadlock.
-            locked = (
-                Tenant.objects.select_for_update()
-                .filter(id__in=[tenant.id for tenant in tenants])
-                .order_by("id")
-            )
-            for tenant in locked:
+        # One transaction per source, in ascending id order: a failure on one source
+        # can't roll back the refreshes already queued for the others, and no two
+        # Tenant row locks are ever held together.
+        for tenant in tenants:
+            membership = memberships.get(tenant.id)
+            if membership is None:
+                # Not locked: the caller can't refresh it, and holding a shared
+                # tenant's row would stall its loads for unrelated workspaces.
                 outcomes.append(
-                    self._queue_tenant_refresh(
-                        request, workspace, tenant, memberships.get(tenant.id), legacy_jobs
+                    _unstarted_refresh(
+                        tenant,
+                        state="no_membership",
+                        error="No tenant membership found for this workspace.",
+                        http_status=status.HTTP_400_BAD_REQUEST,
                     )
                 )
+                continue
+            try:
+                with transaction.atomic():
+                    locked = Tenant.objects.select_for_update().filter(id=tenant.id).first()
+                    if locked is None:
+                        # Deleted since the list was read; there is nothing to refresh,
+                        # as when the old single transaction's lock query skipped it.
+                        continue
+                    outcome = self._queue_tenant_refresh(
+                        request, workspace, locked, membership, legacy_jobs
+                    )
+            # Deliberately broad: this is the bulkhead that keeps one source's failure,
+            # whatever it is, from undoing the others (B1). It is logged at error.
+            except Exception:
+                logger.exception(
+                    "Refresh of tenant %s in workspace %s could not be queued",
+                    tenant.id,
+                    workspace.id,
+                )
+                outcome = _unstarted_refresh(
+                    tenant,
+                    state="error",
+                    error="The refresh could not be started because of a server error.",
+                    http_status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            outcomes.append(outcome)
 
         if not outcomes:
             return Response(
@@ -574,29 +613,25 @@ class RefreshSchemaView(APIView):
         if started:
             return Response(body, status=status.HTTP_202_ACCEPTED)
         # 400 only when every source was a bad request, as the single-source path.
-        http_status = (
-            status.HTTP_400_BAD_REQUEST
-            if all(o.http_status == status.HTTP_400_BAD_REQUEST for o in outcomes)
-            else status.HTTP_409_CONFLICT
-        )
+        # When nothing started, a server error on any source outranks the refusals:
+        # the refusal alone would misstate why nothing ran. (Once something started
+        # the response is a 202 "partial", and tenants[] carries each "error".)
+        http_statuses = {o.http_status for o in outcomes}
+        if status.HTTP_500_INTERNAL_SERVER_ERROR in http_statuses:
+            http_status = status.HTTP_500_INTERNAL_SERVER_ERROR
+        elif http_statuses == {status.HTTP_400_BAD_REQUEST}:
+            http_status = status.HTTP_400_BAD_REQUEST
+        else:
+            http_status = status.HTTP_409_CONFLICT
         return Response(body, status=http_status)
 
     @staticmethod
     def _queue_tenant_refresh(
         request, workspace, tenant, tenant_membership, legacy_jobs
     ) -> _RefreshOutcome:
-        source = {"tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name}
-
         def refused(state, error, http_status, code=None):
-            body = {"error": error, **({"code": code} if code else {})}
-            return _RefreshOutcome({**source, "status": state, **body}, body, http_status)
+            return _unstarted_refresh(tenant, state, error, http_status, code)
 
-        if tenant_membership is None:
-            return refused(
-                "no_membership",
-                "No tenant membership found for this workspace.",
-                status.HTTP_400_BAD_REQUEST,
-            )
         legacy = settle_finished_refresh_candidates(tenant, legacy_jobs[tenant.id])
         if legacy.recovery_needed:
             return refused(
@@ -634,7 +669,7 @@ class RefreshSchemaView(APIView):
             ]
         )
         return _RefreshOutcome(
-            {**source, "status": "provisioning", "schema_id": str(new_schema.id)},
+            {**_refresh_source(tenant), "status": "provisioning", "schema_id": str(new_schema.id)},
             {},
             status.HTTP_202_ACCEPTED,
         )
@@ -680,15 +715,17 @@ class RefreshStatusView(APIView):
         )
 
 
-# Every state a source can report, most severe first.
+# Every state a source can report, most severe first. "unavailable" (never
+# loaded, e.g. just added) ranks last: it describes only that source, which
+# tenants[] reports, so it must not mask the state of sources that have data.
 _AGGREGATE_STATE_ORDER = (
     SchemaState.FAILED,
     SchemaState.PROVISIONING,
     SchemaState.MATERIALIZING,
-    "unavailable",
     SchemaState.TEARDOWN,
     SchemaState.EXPIRED,
     SchemaState.ACTIVE,
+    "unavailable",
 )
 
 
