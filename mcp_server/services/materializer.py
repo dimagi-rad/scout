@@ -1799,6 +1799,10 @@ def _write_connect_users(
 ) -> int:
     """Create the users table and bulk-insert all pages. Returns total row count.
 
+    Connect money columns are unconstrained NUMERIC: a fixed NUMERIC(14,2)
+    rounded sub-cent amounts and failed the page on values of 1e12 or more,
+    e.g. minor units (#263, finding 02#7).
+
     ``payment_accrued`` is NUMERIC money, ``suspended`` is BOOLEAN, all
     date/datetime fields become TIMESTAMPTZ. ``claim_limits`` is a
     ``SerializerMethodField`` that returns a list of dicts — store as JSONB.
@@ -1816,7 +1820,7 @@ def _write_connect_users(
             phone TEXT,
             date_learn_started TIMESTAMPTZ,
             user_invite_status TEXT,
-            payment_accrued NUMERIC(14, 2),
+            payment_accrued NUMERIC,
             suspended BOOLEAN,
             suspension_date TIMESTAMPTZ,
             suspension_reason TEXT,
@@ -1899,10 +1903,10 @@ def _write_connect_completed_works(
             date_created TIMESTAMPTZ,
             saved_completed_count INTEGER,
             saved_approved_count INTEGER,
-            saved_payment_accrued NUMERIC(14, 2),
-            saved_payment_accrued_usd NUMERIC(14, 2),
-            saved_org_payment_accrued NUMERIC(14, 2),
-            saved_org_payment_accrued_usd NUMERIC(14, 2)
+            saved_payment_accrued NUMERIC,
+            saved_payment_accrued_usd NUMERIC,
+            saved_org_payment_accrued NUMERIC,
+            saved_org_payment_accrued_usd NUMERIC
         )
         """
         ).format(schema=sid)
@@ -1953,7 +1957,7 @@ def _write_connect_payments(
 ) -> int:
     """Create the payments table and bulk-insert all pages. Returns total row count.
 
-    ``amount``/``amount_usd`` become NUMERIC(14,2), ``confirmed`` becomes
+    ``amount``/``amount_usd`` become unconstrained NUMERIC, ``confirmed`` becomes
     BOOLEAN, all date/datetime fields become TIMESTAMPTZ, ``opportunity_id``
     becomes BIGINT.
     """
@@ -1969,8 +1973,8 @@ def _write_connect_payments(
             username TEXT,
             opportunity_id BIGINT,
             created_at TIMESTAMPTZ,
-            amount NUMERIC(14, 2),
-            amount_usd NUMERIC(14, 2),
+            amount NUMERIC,
+            amount_usd NUMERIC,
             date_paid TIMESTAMPTZ,
             payment_unit BIGINT,
             confirmed BOOLEAN,
@@ -2025,7 +2029,7 @@ def _write_connect_invoices(
 ) -> int:
     """Create the invoices table and bulk-insert all pages. Returns total row count.
 
-    Money fields are NUMERIC(14,2), ``date`` is DATE, ``opportunity_id`` is
+    Money fields are unconstrained NUMERIC, ``date`` is DATE, ``opportunity_id`` is
     BIGINT. ``service_delivery`` is a BooleanField (not a text label as the
     old TEXT column implied), and ``exchange_rate`` is actually a ForeignKey
     to the ExchangeRate lookup table (the PK, not the rate value) → BIGINT.
@@ -2040,8 +2044,8 @@ def _write_connect_invoices(
         CREATE TABLE {schema}.raw_invoices (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             opportunity_id BIGINT,
-            amount NUMERIC(14, 2),
-            amount_usd NUMERIC(14, 2),
+            amount NUMERIC,
+            amount_usd NUMERIC,
             date DATE,
             invoice_number TEXT,
             service_delivery BOOLEAN,

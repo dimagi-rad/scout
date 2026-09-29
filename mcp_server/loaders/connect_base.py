@@ -182,9 +182,12 @@ class ConnectBaseLoader:
         supports the resumable-materialization path in issue #187.
 
         Each yielded ``page`` is the ``results`` list from one response
-        (bounded server-side, default ~1000 records). ``total_count`` is the
-        ``count`` field from the first response only; subsequent pages yield
-        ``None`` to avoid re-reading it. Empty result lists are yielded as
+        (bounded server-side, default ~1000 records). ``total_count`` is
+        ``None`` in practice: Connect's ``IdKeysetPagination`` returns only
+        ``next`` and ``results``, so Connect progress is indeterminate (visits
+        take a total from discovery's ``visit_count`` instead; #263, 12#7). A
+        first-page ``count`` is still honoured should Connect add one; later
+        pages always yield ``None``. Empty result lists are yielded as
         ``[]`` so callers can rely on the loop terminating naturally.
 
         Raises:
