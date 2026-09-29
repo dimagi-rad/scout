@@ -111,8 +111,8 @@ async def arecord_load_outcomes(
 ) -> list:
     """Persist what this load did with each source and return it for the run result.
 
-    A source that was only published as already loaded keeps its earlier record:
-    nothing checked its credential, so "reused" would clear a standing skip. A
+    A source that was only published as already loaded keeps a standing skip:
+    nothing checked its credential, so "reused" must not clear it. A
     source the load never reached (it was cancelled first) is recorded as skipped,
     unless ``only_listed`` says the results cover only some sources on purpose.
     Never raises: the load already happened, and its summary must still return.
@@ -141,7 +141,8 @@ async def arecord_load_outcomes(
             only_published = entry is not None and (
                 (entry.get("result") or {}).get("status") == "already_loaded"
             )
-            if not only_published:
+            stored = wt.last_load if isinstance(wt.last_load, dict) else {}
+            if not (only_published and stored.get("refresh") == SKIPPED):
                 await WorkspaceTenant.objects.filter(id=wt.id).aupdate(last_load=outcome)
             last = fetched.get(tenant_id)
             source = {

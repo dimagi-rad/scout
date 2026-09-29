@@ -397,3 +397,27 @@ async def test_a_denial_about_the_requester_keeps_the_last_real_load(workspace, 
     (source,) = await aworkspace_source_freshness(workspace.id)
     assert source["last_load"] == REFRESHED
     assert source["not_refreshed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_publishing_an_already_loaded_source_does_not_claim_a_refresh(workspace, tenant):
+    await WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).aupdate(
+        last_load={"refresh": REFRESHED, "at": timezone.now().isoformat()}
+    )
+
+    await arecord_load_outcomes(
+        workspace.id,
+        [
+            {
+                "tenant": tenant.external_id,
+                "tenant_id": str(tenant.id),
+                "provider": tenant.provider,
+                "success": True,
+                "result": {"status": "already_loaded"},
+            }
+        ],
+    )
+
+    (source,) = await aworkspace_source_freshness(workspace.id)
+    assert source["last_load"] == REUSED
