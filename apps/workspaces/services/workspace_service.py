@@ -183,7 +183,9 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
 
     Deletes the WorkspaceTenant record. If the workspace remains multi-tenant
     (>=2 tenants left), marks any existing WorkspaceViewSchema as PROVISIONING
-    and dispatches a rebuild. If the workspace drops to single-tenant,
+    and dispatches a rebuild, unless no remaining source serves anything: then
+    the view schema is recorded FAILED and nothing is queued, as a rebuild could
+    only fail. If the workspace drops to single-tenant,
     routing moves to the tenant schema and any live, provisioning or failed view schema
     becomes an orphan — mark it TEARDOWN and dispatch teardown so the physical
     ``ws_<hash>`` schema is dropped.

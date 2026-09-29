@@ -382,6 +382,31 @@ def test_adding_a_source_when_nothing_is_served_queues_no_rebuild(
     }
 
 
+@pytest.mark.django_db
+def test_removing_a_source_when_nothing_is_served_creates_the_failed_row(
+    workspace, tenant, tenant2, tenant_membership2, tenant3, tenant_membership3
+):
+    """The dependent-rebuild fan-out only reaches workspaces with a view row, so the
+    skipped rebuild must still leave one for a later load to rebuild."""
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
+
+    with patch(
+        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+    ) as mock_rebuild:
+        remove_workspace_tenant(workspace, wt3)
+
+    mock_rebuild.assert_not_called()
+    vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+    assert vs.state == SchemaState.FAILED
+    assert vs.schema_name.startswith("ws_")
+    assert "has no active schema for any tenant" in vs.last_error
+    assert vs.tenant_coverage == {
+        "included_tenants": [],
+        "excluded_tenants": [_entry(tenant), _entry(tenant2)],
+    }
+
+
 @pytest.mark.parametrize("retired", [SchemaState.TEARDOWN, SchemaState.EXPIRED])
 @pytest.mark.django_db
 def test_adding_a_source_when_nothing_is_served_leaves_retired_views_retired(

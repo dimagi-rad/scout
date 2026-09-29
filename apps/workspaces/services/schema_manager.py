@@ -153,29 +153,35 @@ def fail_view_schema_if_unbuildable(workspace) -> bool:
     """Record what a rebuild with no served source would; True when it did.
 
     For callers deciding whether to queue a rebuild, inside their transaction.
-    The rows are locked before the check, as a build publishing ACTIVE holds that
+    The row is locked before the check, as a build publishing ACTIVE holds that
     lock, so a build that just succeeded is never overwritten with FAILED. Writes
-    the build's own FAILED state, ``last_error`` and coverage, so the views stop
-    claiming sources they cannot read; retired rows keep their lifecycle state
-    (see SchemaManager._save_build_failure). A source that loads later rebuilds
-    FAILED rows through the dependent-rebuild fan-out.
+    the build's own FAILED state, ``last_error`` and coverage, creating the row
+    as the build would: the dependent-rebuild fan-out only reaches workspaces
+    with a row, and it is what rebuilds these views once any source loads.
+    A retired row keeps its lifecycle state (see SchemaManager._save_build_failure).
     """
-    rows = WorkspaceViewSchema.objects.filter(workspace=workspace)
-    list(rows.select_for_update())
+    existing = WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace).first()
     if view_schema_buildable(workspace.id):
         return False
     tenants = sorted(
         workspace.tenants.all(),
         key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
     )
-    rows.exclude(state__in=RETIRED_VIEW_STATES).update(
-        state=SchemaState.FAILED,
-        last_error=str(NoActiveTenantSchema(workspace.id))[:500],
-        tenant_coverage={
+    failure = {
+        "state": SchemaState.FAILED,
+        "last_error": str(NoActiveTenantSchema(workspace.id))[:500],
+        "tenant_coverage": {
             "included_tenants": [],
             "excluded_tenants": [coverage_entry(t) for t in tenants],
         },
-    )
+    }
+    if existing is None:
+        WorkspaceViewSchema.objects.get_or_create(
+            workspace=workspace,
+            defaults={"schema_name": SchemaManager()._view_schema_name(workspace.id), **failure},
+        )
+    elif existing.state not in RETIRED_VIEW_STATES:
+        WorkspaceViewSchema.objects.filter(pk=existing.pk).update(**failure)
     return True
 
 
