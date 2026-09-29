@@ -1306,12 +1306,10 @@ def _resume_records(result: dict) -> list[dict]:
 async def _defer_resume_for_job(job_id: int, preflight_failures: list[dict] | None = None) -> None:
     """Find the ThreadJob bound to ``job_id`` and defer the resume task.
 
-    MCP commits the ThreadJob row *after* defer_async returns the job id, so under
-    load the worker may finish before the row is visible — hedge with a bounded
-    backoff (~3.75s). If still not visible, the janitor catches up eventually.
-
-    TODO: cleaner fix is for MCP to write a placeholder ThreadJob before
-    defer_async, then patch in procrastinate_job_id (needs a nullable migration).
+    Chat dispatches commit the job and its ThreadJob together
+    (``adispatch_thread_materialization``, #365), so the row is visible before any
+    worker can start. The bounded backoff (~3.75s) only covers jobs queued by an
+    older deploy that committed them separately; after that, the janitor catches up.
     """
     try:
         tj = None

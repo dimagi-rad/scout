@@ -85,7 +85,7 @@ from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import coverage_complete
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
-from apps.workspaces.tasks import materialize_workspace
+from apps.workspaces.services.thread_job_dispatch import adispatch_thread_materialization
 from config.procrastinate import app as procrastinate_app
 from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
@@ -1639,35 +1639,16 @@ async def run_materialization(
             logger.exception("Could not capture load intent for workspace %s", workspace_id)
             load_intent = None
         try:
-            job = await materialize_workspace.defer_async(
-                workspace_id=str(workspace_id),
-                user_id=str(user_id) if user_id else "",
+            tj = await adispatch_thread_materialization(
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                workspace_id=workspace_id,
+                user_id=user_id,
                 load_intent=load_intent,
             )
         except Exception:
             logger.exception("Failed to dispatch materialize_workspace task")
             tc["result"] = error_response(INTERNAL_ERROR, "Failed to dispatch materialization task")
-            return tc["result"]
-        job_id = getattr(job, "id", job) if not isinstance(job, int) else job
-
-        # Atomicity note: defer_async and ThreadJob.acreate are not in a single
-        # transaction. If acreate fails after the worker has already picked up
-        # the job, abort=True is best-effort (procrastinate only honors it at
-        # cooperative await points). The janitor task (expire_stale_thread_jobs)
-        # cleans up any orphaned runs.
-        try:
-            tj = await ThreadJob.objects.acreate(
-                thread_id=thread_id,
-                job_type=ThreadJob.JobType.MATERIALIZATION,
-                procrastinate_job_id=job_id,
-                tool_call_id=tool_call_id,
-                state=ThreadJob.State.PENDING,
-            )
-        except Exception:
-            logger.exception("Failed to create ThreadJob; rolling back dispatch")
-            with contextlib.suppress(Exception):
-                await procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
-            tc["result"] = error_response(INTERNAL_ERROR, "Failed to track job")
             return tc["result"]
 
         tc["result"] = success_response(

@@ -1,6 +1,5 @@
 """Async API views for materialization lifecycle (cancel, retry)."""
 
-import contextlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -16,6 +15,7 @@ from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     acapture_workspace_load_intent,
 )
+from apps.workspaces.services.thread_job_dispatch import adispatch_thread_materialization
 from apps.workspaces.tasks import materialize_workspace
 from apps.workspaces.workspace_resolver import aresolve_workspace
 from config.procrastinate import app
@@ -203,6 +203,20 @@ async def materialization_retry_view(request, workspace_id):
         # Not fatal: without it the worker captures intent when the job starts.
         logger.exception("materialization_retry_view: could not capture load intent")
         load_intent = None
+    if thread_id:
+        try:
+            tj = await adispatch_thread_materialization(
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                workspace_id=workspace.id,
+                user_id=user.id,
+                load_intent=load_intent,
+            )
+        except Exception:
+            logger.exception("materialization_retry_view: failed to dispatch")
+            return JsonResponse({"error": "Failed to dispatch materialization"}, status=500)
+        return JsonResponse({"status": "started", "thread_job_id": str(tj.id)})
+
     try:
         job = await materialize_workspace.defer_async(
             workspace_id=str(workspace.id),
@@ -213,23 +227,4 @@ async def materialization_retry_view(request, workspace_id):
         logger.exception("materialization_retry_view: failed to dispatch")
         return JsonResponse({"error": "Failed to dispatch materialization"}, status=500)
     job_id = getattr(job, "id", job) if not isinstance(job, int) else job
-
-    if not thread_id:
-        return JsonResponse({"status": "started", "procrastinate_job_id": job_id})
-
-    try:
-        tj = await ThreadJob.objects.acreate(
-            thread_id=thread_id,
-            job_type=ThreadJob.JobType.MATERIALIZATION,
-            procrastinate_job_id=job_id,
-            tool_call_id=tool_call_id,
-            state=ThreadJob.State.PENDING,
-        )
-    except Exception:
-        logger.exception("materialization_retry_view: failed to create ThreadJob")
-        # Best-effort: cancel the dispatched job so we don't leak background work.
-        with contextlib.suppress(Exception):
-            await app.job_manager.cancel_job_by_id_async(job_id, abort=True)
-        return JsonResponse({"error": "Failed to track retry job"}, status=500)
-
-    return JsonResponse({"status": "started", "thread_job_id": str(tj.id)})
+    return JsonResponse({"status": "started", "procrastinate_job_id": job_id})

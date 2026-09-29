@@ -113,7 +113,7 @@ async def test_run_materialization_denies_read_before_dispatch():
     )
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
-    with patch("mcp_server.server.materialize_workspace.defer_async", new=AsyncMock()) as defer:
+    with patch("mcp_server.server.adispatch_thread_materialization", new=AsyncMock()) as defer:
         result = await run_materialization(
             workspace_id=str(ws.id),
             user_id=str(user.id),
