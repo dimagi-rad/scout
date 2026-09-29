@@ -290,9 +290,9 @@ Instructions for creating visualizations. Read-only members get a variant that o
 - Runtime date controls (`date_filter`, `period_selector`) for story artifacts
 - What to do when an artifact needs a semantic model change
 
-### 3. Project system prompt
+### 3. Workspace instructions
 
-Custom instructions from the project configuration. Use for:
+The workspace's `system_prompt`, under a `## Workspace Instructions` heading. Use for:
 
 - Domain-specific terminology
 - Default assumptions (e.g., "amounts are in cents")
@@ -349,42 +349,94 @@ Order transactions from all channels.
   - *Confidence: 90% (applied 15 times)*
 ```
 
-### 5. Data dictionary
+### 5. Dataset discovery and query configuration
 
-Schema information with two modes:
-
-**Small schemas (≤15 tables)**: Full inline detail with columns, types, and constraints.
-
-**Large schemas (>15 tables)**: Table listing only. Agent uses `describe_table` tool for details.
-
-### 6. Query configuration
+Only for workspaces with at least one data source (tenant). The
+`## Workspace And Dataset Discovery` section maps intents to tools: dataset
+discovery (`list_workspaces`, `list_datasets`), dataset details
+(`describe_dataset`), analysis (`semantic_query`), the raw SQL fallback
+(`list_tables`, `describe_table`, `query`), and dataset edits through the
+Semantic Canvas. It ends with the query limits:
 
 ```markdown
-## Query Configuration
+## Semantic Query Configuration
 
 - Maximum rows per query: 500
 - Query timeout: 30 seconds
-- Schema: public
+
+When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 ```
+
+This text is fixed in the prompt. It carries no schema name, because queries
+run against the workspace's own tenant or view schema, which the tools resolve
+from state. The limits are enforced elsewhere. `semantic_query` caps its limit
+at 500 rows, and Cube's database driver sets a 30-second `statement_timeout`
+(`cube_config/cube.js`). The MCP server applies a 500-row cap and a 30-second
+`statement_timeout` to raw SQL.
+
+### 6. Semantic Canvas
+
+Interactive runs only. In a chat thread, members who can write get
+instructions for delegating dataset edits to `canvas_manager`. Other
+interactive runs, including all read-only members, get a variant that allows
+`canvas_read` and explains that saving changes needs a read-write role.
+
+### 7. Data availability
+
+Sections 1–6 form the stable, cached prefix. For workspaces with a data
+source, a `## Data Availability` section follows it, outside the cache, because
+it changes whenever data is materialized. It
+holds the semantic catalog for the workspace's active datasets. While a refresh
+runs outside the serving data, it holds the catalog with a note that results
+don't include the refresh yet. During a first load or an unsafe refresh, or when
+no catalog is available, it holds guidance on what to do instead, depending on
+the run mode and the member's role.
+Workspaces with more than one tenant also get a warning when sources are
+excluded from the active view, or when its coverage is unknown.
 
 ## Response processing
 
 ### Stream translation
 
-The agent's LangGraph output is translated to Vercel AI SDK v6 format for the frontend:
+`langgraph_to_ui_stream` (`apps/chat/stream.py`) translates the agent's
+LangGraph events into the Vercel AI SDK v6 UI message stream:
 
 | LangGraph Event | UI Stream Chunk |
 |-----------------|-----------------|
 | Agent starts | `{"type":"start"}`, `{"type":"start-step"}` |
-| Text generation | `{"type":"text-delta","delta":"..."}` |
-| Tool called | `{"type":"tool-input-available","toolName":"..."}` |
-| Tool result | `{"type":"tool-output-available","output":"..."}` |
-| Artifact created | `{"type":"data-artifact","id":"...","data":{...}}` |
-| Agent finishes | `{"type":"finish-step"}`, `{"type":"finish"}` |
+| Text generation | `text-start`, `{"type":"text-delta","id":"...","delta":"..."}`, `text-end` |
+| Extended thinking | `reasoning-start`, `reasoning-delta`, `reasoning-end` |
+| Tool called | `{"type":"tool-input-available","toolCallId":"...","toolName":"...","input":{...}}` |
+| Tool result | `{"type":"tool-output-available","toolCallId":"...","output":"..."}` |
+| Subagent activity | `data-subagent-*` parts (status, text, reasoning, tool input/output, error) tagged with the parent `toolCallId` |
+| Escalation | The escalation message for the run mode, streamed as text |
+| Transient Anthropic overload | `{"type":"data-chat-status","data":{"kind":"retryable-error",...},"transient":true}` |
+| Other failure | An apology text part, then `{"type":"error","errorText":"... Ref: <ref>"}` |
+| Agent finishes | `{"type":"finish-step"}`, `{"type":"finish","finishReason":"stop"}` |
 
-Artifact detection looks for:
-- UUID pattern in tool output
-- Keywords: "artifact_id", "artifact created", "chart saved", "visualization created"
+Tool inputs are redacted of the injected parameters, and tool outputs over
+100,000 characters are truncated with a marker. `artifact_manager` and
+`canvas_manager` activity is streamed live as `data-subagent-*` parts. Events
+that arrive before their parent tool call ID is known are held back and sent
+just before that tool's output.
+
+There is no separate artifact event. The frontend finds artifacts in tool
+output (`frontend/src/components/ChatMessage/ChatMessage.tsx`):
+
+- An artifact ID is a string `artifact_id` or `artifact.id` in the tool
+  output, parsed as JSON.
+- The subagent cards (`artifact_manager`, `canvas_manager`) show an
+  open-artifact button when their output carries one.
+- Any other tool part whose output carries one renders as an open-artifact
+  button in place of the tool card.
+
+Thread-to-artifact links are stored server-side in `ThreadArtifact`.
+Artifact tools link an artifact when they create, update or inspect it
+(`apps/agents/tools/artifact_graph_tool.py`). When a thread's artifacts are
+listed, `backfill_thread_artifact_links` (`apps/chat/artifact_links.py`) also
+links artifacts by conversation ID, and by `artifact_id`, `artifact.id`,
+`previous_artifact_id` and `previous_version_id` keys found anywhere in saved
+messages. This covers threads from before tool-side linking.
 
 ## Conversation persistence
 
@@ -404,17 +456,17 @@ result = graph.invoke(state, config=config)
 
 ## Configuration
 
-### Project settings that affect the agent
+### Settings that affect the agent
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `llm_model` | `claude-sonnet-4-5-20250929` | Model used for generation |
-| `max_rows_per_query` | 500 | LIMIT injected/capped |
-| `max_query_timeout_seconds` | 30 | PostgreSQL statement_timeout |
-| `system_prompt` | empty | Project-specific instructions |
-| `allowed_tables` | [] (all) | Whitelist for table access |
-| `excluded_tables` | [] (none) | Blacklist for table access |
-| `db_schema` | public | Schema scope for queries |
+| `DEFAULT_LLM_MODEL` (env) | `claude-opus-4-8` | Model for the agent and its subagents |
+| Workspace `system_prompt` | empty | Workspace instructions in the system prompt |
+| Workspace member role | — | Tools and prompt variants (see [Roles and run modes](#roles-and-run-modes)) |
+
+Row limits and query timeouts aren't configurable per workspace. They're fixed
+in code (see [Dataset discovery and query configuration](#5-dataset-discovery-and-query-configuration)).
+Queries run against the workspace's tenant or view schema, not a configured schema.
 
 ### Environment variables
 
