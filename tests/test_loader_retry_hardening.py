@@ -11,14 +11,17 @@ import io
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from urllib3.connectionpool import HTTPSConnectionPool
 from urllib3.response import HTTPResponse
 
+from apps.common.error_codes import ErrorCode, code_of
+from apps.common.errors import ExpectedUpstreamError
 from mcp_server.loaders._http import RETRY_TOTAL
-from mcp_server.loaders.commcare_base import CommCareExportError
+from mcp_server.loaders.commcare_base import CommCareExportError, CommCareExportUnavailableError
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
-from mcp_server.loaders.ocs_base import OCSExportError
+from mcp_server.loaders.ocs_base import OCSExportError, OCSExportUnavailableError
 from mcp_server.loaders.ocs_sessions import OCSSessionLoader
 
 CRED = {"type": "api_key", "value": "u:k"}
@@ -64,6 +67,29 @@ def _no_backoff(loader):
     return loader
 
 
+def _reset_connection(self, conn, method, url, **kwargs):
+    raise ConnectionResetError("reset")
+
+
+def _reset_connections():
+    return patch.multiple(
+        HTTPSConnectionPool,
+        _make_request=_reset_connection,
+        _get_conn=lambda self, timeout=None: MagicMock(),
+        _put_conn=lambda self, conn: None,
+    )
+
+
+def _ocs_loader():
+    loader = OCSSessionLoader(
+        experiment_id="e1", credential={"type": "oauth", "value": "t"}, base_url="https://o.ex"
+    )
+    adapter = loader._session.get_adapter("https://o.ex/")
+    adapter.max_retries.backoff_factor = 0
+    adapter.max_retries.backoff_jitter = 0
+    return loader
+
+
 class TestCommCareRetry:
     def test_retries_5xx_then_succeeds(self):
         loader = _no_backoff(CommCareCaseLoader(domain="d", credential=CRED))
@@ -86,9 +112,39 @@ class TestCommCareRetry:
     def test_raises_export_error_after_exhausting_retries(self):
         loader = _no_backoff(CommCareCaseLoader(domain="d", credential=CRED))
         ctx, calls = _drive_with_statuses([(503, b"", {})])
-        with ctx, pytest.raises(CommCareExportError):
+        with ctx, pytest.raises(CommCareExportUnavailableError) as exc:
             loader.load()
+        assert isinstance(exc.value, CommCareExportError)
+        assert isinstance(exc.value, ExpectedUpstreamError)
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
         assert len(calls) == RETRY_TOTAL + 1
+
+    def test_404_is_not_retried_or_reclassified(self):
+        loader = _no_backoff(CommCareCaseLoader(domain="d", credential=CRED))
+        ctx, calls = _drive_with_statuses([(404, b"", {})])
+        with ctx, pytest.raises(CommCareExportError) as exc:
+            loader.load()
+        assert not isinstance(exc.value, ExpectedUpstreamError)
+        assert len(calls) == 1
+
+    def test_persistent_connection_error_is_expected(self):
+        loader = _no_backoff(CommCareCaseLoader(domain="d", credential=CRED))
+        with _reset_connections(), pytest.raises(ExpectedUpstreamError) as exc:
+            loader.load()
+        assert isinstance(exc.value, CommCareExportError)
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
+
+    @pytest.mark.parametrize(
+        "error", [requests.exceptions.SSLError, requests.exceptions.ProxyError]
+    )
+    def test_tls_and_proxy_failures_stay_reportable(self, error):
+        loader = CommCareCaseLoader(domain="d", credential=CRED)
+        with (
+            patch.object(loader._session, "get", side_effect=error("broken")),
+            pytest.raises(error) as exc,
+        ):
+            loader.load()
+        assert not isinstance(exc.value, ExpectedUpstreamError)
 
 
 class TestCommCareErrorShape:
@@ -155,3 +211,59 @@ class TestOCSErrorShape:
         with patch.object(loader._session, "get", return_value=resp):
             with pytest.raises(OCSExportError):
                 list(loader.load_pages())
+
+
+class TestOCSRetry:
+    def test_retries_502_then_succeeds(self):
+        loader = _ocs_loader()
+        ctx, calls = _drive_with_statuses(
+            [
+                (502, b"", {}),
+                (
+                    200,
+                    b'{"results": [{"id": "s1"}], "next": null}',
+                    {"Content-Type": "application/json"},
+                ),
+            ]
+        )
+        with ctx:
+            rows = loader.load()
+        assert len(rows) == 1
+        assert len(calls) == 2
+
+    def test_repeated_502_raises_unavailable_after_all_attempts(self):
+        loader = _ocs_loader()
+        ctx, calls = _drive_with_statuses([(502, b"", {})])
+        with ctx, pytest.raises(OCSExportUnavailableError) as exc:
+            loader.load()
+        assert isinstance(exc.value, OCSExportError)
+        assert isinstance(exc.value, ExpectedUpstreamError)
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
+        assert len(calls) == RETRY_TOTAL + 1
+
+    def test_404_is_not_retried_or_reclassified(self):
+        loader = _ocs_loader()
+        ctx, calls = _drive_with_statuses([(404, b"", {})])
+        with ctx, pytest.raises(OCSExportError) as exc:
+            loader.load()
+        assert not isinstance(exc.value, ExpectedUpstreamError)
+        assert len(calls) == 1
+
+    def test_persistent_connection_error_is_expected(self):
+        loader = _ocs_loader()
+        with _reset_connections(), pytest.raises(ExpectedUpstreamError) as exc:
+            loader.load()
+        assert isinstance(exc.value, OCSExportError)
+        assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
+
+    @pytest.mark.parametrize(
+        "error", [requests.exceptions.SSLError, requests.exceptions.ProxyError]
+    )
+    def test_tls_and_proxy_failures_stay_reportable(self, error):
+        loader = _ocs_loader()
+        with (
+            patch.object(loader._session, "get", side_effect=error("broken")),
+            pytest.raises(error) as exc,
+        ):
+            loader.load()
+        assert not isinstance(exc.value, ExpectedUpstreamError)
