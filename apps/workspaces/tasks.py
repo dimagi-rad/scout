@@ -3831,7 +3831,6 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             "messages": [HumanMessage(content=body)],
             "workspace_id": str(workspace.id),
             "user_id": str(user.id),
-            "user_role": "analyst",
             "thread_id": str(tj.thread.id),
         }
         config = {

@@ -231,7 +231,6 @@ def create_canvas_manager_tool(
             "messages": [HumanMessage(content=prompt)],
             "workspace_id": str(workspace.id),
             "user_id": str(user.id) if user else "",
-            "user_role": "analyst",
             "thread_id": conversation_id or "",
         }
         config = {

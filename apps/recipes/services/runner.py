@@ -201,7 +201,6 @@ class RecipeRunner:
                 "messages": [HumanMessage(content=prompt)],
                 "workspace_id": str(self.recipe.workspace_id),
                 "user_id": str(self.user.id),
-                "user_role": "analyst",
                 "thread_id": self._thread_id,
             }
 

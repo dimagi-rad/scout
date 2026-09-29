@@ -33,13 +33,11 @@ The agent maintains state across conversation turns:
 | Field | Type | Description |
 |-------|------|-------------|
 | `messages` | list | Conversation history (auto-deduplicated by message ID) |
-| `project_id` | string | Scopes all data access to this project |
-| `project_name` | string | For display in responses |
-| `user_id` | string | For audit logging |
-| `user_role` | string | Permission level (viewer, analyst, admin) |
-| `needs_correction` | bool | Flag set when a semantic query fails |
-| `retry_count` | int | Current retry attempt (max 3) |
-| `correction_context` | dict | Error details for diagnosis |
+| `workspace_id` | string | Injected into every MCP tool call to scope data access to this workspace |
+| `user_id` | string | The user the turn runs for |
+| `thread_id` | string | Links background jobs started from this conversation back to it |
+
+The state carries no role. Tools that write re-check the user's workspace role each time they run.
 
 Message history is automatically pruned to keep the last 20 messages plus system messages. Orphaned tool messages (those whose parent AI message was pruned) are removed.
 
