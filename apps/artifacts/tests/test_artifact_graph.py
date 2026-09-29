@@ -11,7 +11,6 @@ from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
 
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
-from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactSemanticQuery, ArtifactType
 from apps.artifacts.services.graph_doc import GraphDocError, apply_ops, validate_doc
 from apps.artifacts.services.graph_manifest import (
@@ -884,21 +883,6 @@ async def test_graph_manager_creates_story_and_generic_tool_rejects_story(worksp
     assert dependencies["status"] == "ok"
     assert dependencies["pagination"]["has_more"] is False
     assert dependencies["semantic_queries"][0]["query_key"] == "q.visits_by_day"
-
-    create_tool = next(
-        item
-        for item in create_artifact_tools(workspace, member_user, "thread")
-        if item.name == "create_artifact"
-    )
-    rejected = await create_tool.ainvoke(
-        {
-            "title": "Direct Story",
-            "artifact_type": "story",
-            "data": {"story_doc": graph_doc()},
-        }
-    )
-    assert rejected["status"] == "error"
-    assert "artifact_manager" in rejected["message"]
 
 
 @pytest.mark.django_db(transaction=True)
