@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.chat.models import Thread
+from apps.common.http import string_field
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
 from apps.users.services.tenant_resolution import (
@@ -693,7 +694,10 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        email = (request.data.get("email") or "").strip().lower()
+        email, err = string_field(request.data, "email")
+        if err:
+            return err
+        email = email.strip().lower()
         if not email or "@" not in email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1011,13 +1015,15 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        tenant_id = request.data.get("tenant_id")
+        tenant_id, err = string_field(request.data, "tenant_id")
+        if err:
+            return err
         if not tenant_id:
             return Response({"error": "tenant_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             tenant = Tenant.objects.get(id=tenant_id)
-        except Tenant.DoesNotExist:
+        except (Tenant.DoesNotExist, ValidationError):
             return Response(
                 {"error": "Tenant not found or not accessible."},
                 status=status.HTTP_400_BAD_REQUEST,
