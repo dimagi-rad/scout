@@ -4,6 +4,7 @@ Tests for the tenant-based MCP server tools (list_tables, describe_table, get_me
 Tests verify the full chain from tool handler through to query execution.
 """
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,7 +27,7 @@ from apps.workspaces.models import (
 )
 from mcp_server.context import QueryContext, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
-from mcp_server.server import get_schema_status
+from mcp_server.server import cancel_materialization, get_schema_status
 from mcp_server.services.pool import close_all_pools
 from mcp_server.services.query import execute_query
 from tests.managed_query_fixture import managed_query_context
@@ -995,6 +996,7 @@ class TestCancelMaterialization:
             ),
         ):
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
+            mock_cls.ACTIVE_STATES = MaterializationRun.ACTIVE_STATES
             mock_cls.RunState.STARTED = "started"
             mock_cls.RunState.DISCOVERING = "discovering"
             mock_cls.RunState.LOADING = "loading"
@@ -1051,6 +1053,7 @@ class TestCancelMaterialization:
             ),
         ):
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
+            mock_cls.ACTIVE_STATES = MaterializationRun.ACTIVE_STATES
             mock_cls.RunState.STARTED = "started"
             mock_cls.RunState.DISCOVERING = "discovering"
             mock_cls.RunState.LOADING = "loading"
@@ -1365,3 +1368,30 @@ async def test_schema_status_reports_no_load_when_every_run_has_finished(user):
 
     assert result["success"] is True
     assert result["data"]["load_in_progress"] is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("state", sorted(MaterializationRun.RunState.values))
+async def test_cancel_accepts_exactly_the_active_run_states(state):
+    """Cancellable means MaterializationRun.ACTIVE_STATES, not a local copy of it (#251)."""
+    run = MagicMock(state=state, result={}, procrastinate_job_id=None)
+    run.asave = AsyncMock()
+    with (
+        patch("mcp_server.server.MaterializationRun.objects") as objects,
+        patch(
+            "mcp_server.server._authorize_materialization_write",
+            new=AsyncMock(return_value=object()),
+        ),
+        patch(
+            "mcp_server.server._materialization_write_access",
+            new=AsyncMock(return_value=WorkspaceAccess(workspace=object())),
+        ),
+        patch("mcp_server.server._run_belongs_to_workspace", new=AsyncMock(return_value=True)),
+        patch("mcp_server.server._run_started_by", new=AsyncMock(return_value=True)),
+    ):
+        objects.select_related.return_value.aget = AsyncMock(return_value=run)
+        result = await cancel_materialization(
+            run_id=str(uuid.uuid4()), workspace_id="ws-1", user_id="authorized-user"
+        )
+
+    assert result["success"] is (state in MaterializationRun.ACTIVE_STATES)
