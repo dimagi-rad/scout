@@ -121,8 +121,9 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
     }
   }
 
-  // A 409 means the invite was accepted or revoked elsewhere; the list is stale.
-  function reloadIfInviteGone(err: unknown) {
+  // A 409 means the invite was accepted or revoked elsewhere, or the invitee already
+  // joined; either way the list is stale.
+  function reloadOnConflict(err: unknown) {
     if (err instanceof ApiError && err.status === 409) {
       setConfirmRemoveId(null)
       void load()
@@ -138,7 +139,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       )
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to update invite role")
-      reloadIfInviteGone(err)
+      reloadOnConflict(err)
     } finally {
       setUpdatingId(null)
     }
@@ -152,7 +153,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       setConfirmRemoveId(null)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to revoke invite")
-      reloadIfInviteGone(err)
+      reloadOnConflict(err)
     } finally {
       setRemovingId(null)
     }
@@ -191,6 +192,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       setTimeout(() => addTriggerRef.current?.focus(), 0)
     } catch (err) {
       setAddError(err instanceof ApiError ? err.message : "Failed to add member")
+      reloadOnConflict(err)
     } finally {
       setAddSubmitting(false)
     }
