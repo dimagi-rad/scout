@@ -9,10 +9,12 @@ remains a separate decision in ``apps.workspaces.access``.
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from uuid import UUID
 
 from allauth.socialaccount.models import SocialToken
 
@@ -35,6 +37,11 @@ from apps.workspaces.models import WorkspaceMembership, WorkspaceTenant
 
 LOCAL_CREDENTIAL_READINESS = "local_credential_readiness"
 _LOGGED_CONNECTION_ID_LIMIT = 20
+# The access gate evaluates readiness several times per request, so an unchanged
+# failure set (e.g. a rotated DB_CREDENTIAL_KEY) is re-reported at most this often
+# per process rather than on every check.
+_DECRYPT_FAILURE_REPORT_INTERVAL_SECONDS = 300
+_decrypt_failure_last_reported: dict[frozenset, float] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +206,8 @@ class _ApiKeyDecryptCache:
     """
 
     def __init__(self):
-        self._usable: dict[int, bool] = {}
-        self._failures: dict[int, tuple[str, str]] = {}
+        self._usable: dict[UUID, bool] = {}
+        self._failures: dict[UUID, tuple[str, str]] = {}
 
     def usable(self, connection) -> bool | None:
         """True if the key decrypts to a value, False if empty, None on decrypt failure."""
@@ -216,17 +223,27 @@ class _ApiKeyDecryptCache:
         return self._usable[connection.pk]
 
     def report_failures(self) -> None:
-        # One aggregated event per evaluation: a rotated DB_CREDENTIAL_KEY fails
-        # every API-key connection at once. No exc_info, so Sentry never captures
-        # frame locals that hold the ciphertext.
+        # One aggregated event: a rotated DB_CREDENTIAL_KEY fails every API-key
+        # connection at once. No exc_info, so no traceback frames reach Sentry.
         if not self._failures:
             return
-        connection_ids = sorted(self._failures)
+        fingerprint = frozenset(self._failures.items())
+        now = time.monotonic()
+        last = _decrypt_failure_last_reported.get(fingerprint)
+        if last is not None and now - last < _DECRYPT_FAILURE_REPORT_INTERVAL_SECONDS:
+            return
+        if len(_decrypt_failure_last_reported) >= 256:
+            _decrypt_failure_last_reported.clear()
+        _decrypt_failure_last_reported[fingerprint] = now
+        connection_ids = [str(pk) for pk in sorted(self._failures)]
+        shown = connection_ids[:_LOGGED_CONNECTION_ID_LIMIT]
+        if len(connection_ids) > len(shown):
+            shown.append("...")
         logger.error(
             "API-key credential decrypt failed for %d connection(s); check "
             "DB_CREDENTIAL_KEY. connection_ids=%s providers=%s errors=%s",
             len(connection_ids),
-            connection_ids[:_LOGGED_CONNECTION_ID_LIMIT],
+            shown,
             sorted({provider for provider, _error in self._failures.values()}),
             sorted({error for _provider, error in self._failures.values()}),
         )
@@ -369,24 +386,26 @@ def _evaluate_tenant_readiness(
 
     decrypt_cache = _ApiKeyDecryptCache()
     readiness = []
-    for user_id, tenant in pairs:
-        membership = memberships_by_user_tenant.get((user_id, tenant.pk))
-        gap = (
-            _gap(CredentialGapCode.MISSING_LIVE_MEMBERSHIP, tenant)
-            if membership is None
-            else _membership_gap(
-                membership, tokens_by_account, bindings, connection_teams, decrypt_cache
+    try:
+        for user_id, tenant in pairs:
+            membership = memberships_by_user_tenant.get((user_id, tenant.pk))
+            gap = (
+                _gap(CredentialGapCode.MISSING_LIVE_MEMBERSHIP, tenant)
+                if membership is None
+                else _membership_gap(
+                    membership, tokens_by_account, bindings, connection_teams, decrypt_cache
+                )
             )
-        )
-        readiness.append(
-            TenantCredentialReadiness(
-                user_id=user_id,
-                tenant_id=str(tenant.pk),
-                usable=gap is None,
-                gap=gap,
+            readiness.append(
+                TenantCredentialReadiness(
+                    user_id=user_id,
+                    tenant_id=str(tenant.pk),
+                    usable=gap is None,
+                    gap=gap,
+                )
             )
-        )
-    decrypt_cache.report_failures()
+    finally:
+        decrypt_cache.report_failures()
     return tuple(readiness)
 
 

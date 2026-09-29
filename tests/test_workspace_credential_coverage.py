@@ -31,6 +31,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services import credential_coverage
 from apps.workspaces.services.credential_coverage import (
     aget_tenant_credential_readiness,
     aget_workspace_credential_coverage,
@@ -39,6 +40,13 @@ from apps.workspaces.services.credential_coverage import (
 )
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _reset_decrypt_failure_throttle():
+    credential_coverage._decrypt_failure_last_reported.clear()
+    yield
+    credential_coverage._decrypt_failure_last_reported.clear()
 
 
 def _workspace(name="Coverage"):
@@ -721,7 +729,7 @@ def test_rotated_key_logs_one_error_with_safe_fields_only(user, settings, caplog
     assert record.levelno == logging.ERROR
     assert record.exc_info is None
     message = record.getMessage()
-    assert str(sorted([conn.pk, other_conn.pk])) in message
+    assert str(sorted([str(conn.pk), str(other_conn.pk)])) in message
     assert "['commcare', 'ocs']" in message
     assert "InvalidToken" in message
     for secret in (
@@ -733,6 +741,19 @@ def test_rotated_key_logs_one_error_with_safe_fields_only(user, settings, caplog
         settings.DB_CREDENTIAL_KEY,
     ):
         assert secret not in message
+
+
+def test_unchanged_decrypt_failures_are_not_rereported_every_evaluation(user, settings, caplog):
+    workspace = _workspace()
+    _member(workspace, user)
+    _shared_api_connection(user, workspace, tenants=2)
+    settings.DB_CREDENTIAL_KEY = Fernet.generate_key().decode()
+
+    with caplog.at_level(logging.ERROR, logger="apps.workspaces.services.credential_coverage"):
+        for _ in range(3):
+            assert _only_report(workspace, user).covered is False
+
+    assert len([r for r in caplog.records if r.name.endswith("credential_coverage")]) == 1
 
 
 def test_readable_api_keys_log_nothing(user, caplog):
