@@ -8,6 +8,12 @@ explicit scope (``WorkspaceAccessCacheMiddleware`` opens one per HTTP request)
 and only for ``MAX_AGE_SECONDS``, so a long turn still re-checks and a background
 worker, which opens no scope, always resolves afresh. Within a scope, repeat
 calls return the same ``WorkspaceAccess`` and model instances, not fresh rows.
+
+Only credential readiness is really served from here: ``access`` re-reads the
+membership row on every cached grant, so a removal or demotion made by another
+request or process lands on the next check. What readiness cannot see from
+outside the request (a provider revoking access mid-turn) is dropped with
+``invalidate``.
 """
 
 from __future__ import annotations
@@ -15,8 +21,8 @@ from __future__ import annotations
 import time
 from contextvars import ContextVar
 
-# Short enough that a revocation or role change mid-turn still lands on the next
-# tool call a few seconds later; long enough to absorb a turn's burst of checks.
+# Short enough that an upstream revocation noticed by another process still lands
+# on a tool call a few seconds later; long enough to absorb a turn's burst of checks.
 MAX_AGE_SECONDS = 10.0
 
 
@@ -78,3 +84,17 @@ def store(user, workspace_id, options, result) -> None:
     key = _key(user, workspace_id, options)
     if scope is not None and key is not None:
         scope[key] = (time.monotonic(), result)
+
+
+def invalidate(*, user_id=None, workspace_id=None) -> None:
+    """Drop the active scope's entries for ``user_id`` and/or ``workspace_id``."""
+    scope = _active()
+    if scope is None:
+        return
+    workspace_id = None if workspace_id is None else str(workspace_id)
+    for key in list(scope):
+        entry_user, entry_workspace, _options = key
+        if (user_id is None or entry_user == user_id) and (
+            workspace_id is None or entry_workspace == workspace_id
+        ):
+            scope.pop(key, None)

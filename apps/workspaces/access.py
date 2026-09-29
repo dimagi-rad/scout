@@ -423,6 +423,16 @@ def resolve_workspace_access_ex(
     # call so an exempt grant can never be served to a data path.
     options = (minimum_role, verification)
     result = access_cache.lookup(user, workspace_id, options)
+    if result is not None and result.granted:
+        result = _with_live_role(
+            result,
+            WorkspaceMembership.objects.filter(pk=result.membership.pk)
+            .values_list("role", flat=True)
+            .first(),
+            user,
+            workspace_id,
+            minimum_role,
+        )
     if result is None:
         result = _resolve_with_freshness(
             user, workspace_id, minimum_role=minimum_role, verification=verification
@@ -434,6 +444,25 @@ def resolve_workspace_access_ex(
     return _resolve_local_access_ex(
         user, workspace_id, minimum_role=minimum_role, require_coverage=False
     )
+
+
+def _with_live_role(cached, role, user, workspace_id, minimum_role):
+    """A cached grant checked against the membership row as it is now (A6).
+
+    Readiness is what the cache saves; the membership lookup is one indexed row,
+    so it is never cached. That makes a removal or demotion by another request or
+    process land on the next check, for reads and writes alike, where a
+    per-process invalidation could only catch changes made in this one. ``None``
+    means resolve afresh.
+    """
+    if role is None:
+        access_cache.invalidate(user_id=user.pk, workspace_id=workspace_id)
+        return None
+    # Shared with every holder of this decision in the request, so they all see it.
+    cached.membership.role = role
+    if not role_satisfies(role, minimum_role):
+        return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
+    return cached
 
 
 def _resolve_with_freshness(
@@ -471,6 +500,16 @@ async def aresolve_workspace_access_ex(
     """
     options = (minimum_role, verification)
     cached = access_cache.lookup(user, workspace_id, options)
+    if cached is not None and cached.granted:
+        cached = _with_live_role(
+            cached,
+            await WorkspaceMembership.objects.filter(pk=cached.membership.pk)
+            .values_list("role", flat=True)
+            .afirst(),
+            user,
+            workspace_id,
+            minimum_role,
+        )
     if cached is None:
         cached = await _aresolve_workspace_access_ex(
             user, workspace_id, minimum_role=minimum_role, verification=verification

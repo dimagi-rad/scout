@@ -2,9 +2,9 @@
 
 A chat turn resolves the same (user, workspace) for the graph and again at each
 local tool's sink; with the all-of gate every resolution costs several queries.
-These pin that repeats inside a request scope cost none, that nothing is cached
-outside one (workers, direct calls), that entries expire, and that a request's
-scope ends with it (including a streamed response's body).
+These pin that repeats inside a request scope cost only a live membership read,
+that nothing is cached outside one (workers, direct calls), that entries expire,
+and that a request's scope ends with it (including a streamed response's body).
 """
 
 import pytest
@@ -14,13 +14,19 @@ from django.http import HttpResponse, StreamingHttpResponse
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext
 
-from apps.users.models import Tenant
+from apps.common.error_codes import ErrorCode
+from apps.users.models import Tenant, TenantMembership
+from apps.users.services.upstream_denial import record_validated_upstream_denial
 from apps.workspaces import access as access_module
 from apps.workspaces import access_cache
 from apps.workspaces.access import (
+    NOT_MEMBER,
+    TENANT_ACCESS_LOST,
     WorkspaceAccess,
     aresolve_workspace_access_ex,
+    aworkspace_write_allowed,
     resolve_workspace_access_ex,
+    workspace_write_allowed,
 )
 from apps.workspaces.models import (
     Workspace,
@@ -44,12 +50,12 @@ def scope():
 
 
 @pytest.mark.django_db
-def test_repeat_resolution_in_a_scope_costs_no_queries(
+def test_repeat_resolution_in_a_scope_rereads_only_the_membership(
     scope, user, workspace, django_assert_num_queries
 ):
     first = resolve_workspace_access_ex(user, workspace.id)
 
-    with django_assert_num_queries(0):
+    with django_assert_num_queries(1):
         again = resolve_workspace_access_ex(user, workspace.id)
 
     assert first.granted
@@ -160,7 +166,7 @@ def test_middleware_caches_within_a_request_and_closes_after(
 
     def view(_request):
         resolve_workspace_access_ex(user, workspace.id)
-        with django_assert_num_queries(0):
+        with django_assert_num_queries(1):
             resolve_workspace_access_ex(user, workspace.id)
         scopes.append(access_cache._scope.get())
         return HttpResponse("ok")
@@ -256,3 +262,61 @@ async def test_sync_streamed_bodies_are_left_untouched():
 
     assert scopes[0].closed
     assert list(response.streaming_content) == [b"file"]
+
+
+@pytest.mark.django_db
+def test_a_removed_member_loses_a_cached_grant(scope, user, workspace):
+    """A6: removal lands on the very next check, not up to MAX_AGE_SECONDS later,
+    even though the removal happened outside this request's scope."""
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+
+    WorkspaceMembership.objects.filter(workspace=workspace, user=user).delete()
+
+    assert resolve_workspace_access_ex(user, workspace.id).denied_reason == NOT_MEMBER
+
+
+@pytest.mark.django_db
+def test_a_demoted_member_loses_a_cached_write_grant(scope, user, workspace):
+    assert workspace_write_allowed(user, workspace.id)
+    read_grant = resolve_workspace_access_ex(user, workspace.id)
+
+    WorkspaceMembership.objects.filter(workspace=workspace, user=user).update(
+        role=WorkspaceRole.READ
+    )
+
+    assert not workspace_write_allowed(user, workspace.id)
+    again = resolve_workspace_access_ex(user, workspace.id)
+    assert again.granted
+    # Views branch on membership.role (MANAGE-only actions), so it must be live too.
+    assert read_grant.membership.role == again.membership.role == WorkspaceRole.READ
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_async_cached_write_grant_rechecks_the_role(user, workspace):
+    opened, token = access_cache.open_scope()
+    try:
+        assert await aworkspace_write_allowed(user, workspace.id)
+        await WorkspaceMembership.objects.filter(workspace=workspace, user=user).aupdate(
+            role=WorkspaceRole.READ
+        )
+        allowed = await aworkspace_write_allowed(user, workspace.id)
+    finally:
+        access_cache.close_scope(opened)
+        access_cache.detach_scope(token)
+
+    assert not allowed
+
+
+@pytest.mark.django_db
+def test_an_upstream_denial_drops_the_users_cached_decisions(scope, user, workspace, tenant):
+    """A6: a tool call that sees the provider revoke access must not leave the rest
+    of the turn running on the grant cached before it."""
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    connection = TenantMembership.objects.get(user=user, tenant=tenant).connection
+
+    record_validated_upstream_denial(
+        connection, code=ErrorCode.AUTH_ACCESS_DENIED, tenant_id=tenant.id
+    )
+
+    assert resolve_workspace_access_ex(user, workspace.id).denied_reason == TENANT_ACCESS_LOST

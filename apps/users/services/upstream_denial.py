@@ -16,6 +16,7 @@ from apps.users.services.oauth_scope import (
     memberships_on_provider,
     provider_accounts,
 )
+from apps.workspaces import access_cache
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,8 @@ def record_validated_upstream_denial(connection, *, code, tenant_id=None, now=No
         connection.upstream_denial_code = code
     connection.upstream_denied_at = now
     connection.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
+    # The turn that saw the denial must not keep running on a grant cached before it.
+    access_cache.invalidate(user_id=connection.user_id)
     return memberships.update(archived_at=now)
 
 
