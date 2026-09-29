@@ -22,7 +22,13 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from apps.agents.graph.state import AgentState, all_tool_calls, prune_messages
+from apps.agents.graph.state import (
+    AgentState,
+    all_tool_calls,
+    prune_messages,
+    reject_truncated_tool_calls,
+    truncated_tool_calls,
+)
 from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
 from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
@@ -918,13 +924,17 @@ async def build_agent_graph(
         response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
         return {"messages": [response]}
 
-    def should_continue(state: AgentState) -> Literal["tools", "model_stopped", "__end__"]:
+    def should_continue(
+        state: AgentState,
+    ) -> Literal["tools", "truncated_tool_calls", "model_stopped", "__end__"]:
         """Route to tools on tool calls, to model_stopped on an unanswered turn, else end."""
         messages = state.get("messages", [])
         if not messages:
             return END
 
         last_message = messages[-1]
+        if truncated_tool_calls(last_message):
+            return "truncated_tool_calls"
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
         if _unfinished_turn_reason(last_message) is not None:
@@ -991,6 +1001,7 @@ async def build_agent_graph(
     graph.add_node("tools", tool_node)
     graph.add_node("escalate", escalation_node)
     graph.add_node("model_stopped", model_stopped_node)
+    graph.add_node("truncated_tool_calls", reject_truncated_tool_calls)
 
     graph.set_entry_point("agent")
 
@@ -999,6 +1010,7 @@ async def build_agent_graph(
         should_continue,
         {
             "tools": "tools",
+            "truncated_tool_calls": "truncated_tool_calls",
             "model_stopped": "model_stopped",
             END: END,
         },
@@ -1015,6 +1027,7 @@ async def build_agent_graph(
     )
     graph.add_edge("escalate", END)
     graph.add_edge("model_stopped", END)
+    graph.add_edge("truncated_tool_calls", "agent")
 
     compiled = graph.compile(checkpointer=checkpointer)
 

@@ -23,7 +23,11 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field, ValidationError
 
-from apps.agents.graph.state import AgentState
+from apps.agents.graph.state import (
+    AgentState,
+    reject_truncated_tool_calls,
+    truncated_tool_calls,
+)
 from apps.agents.llm_request import SUBAGENT_EFFORT, chat_model_kwargs
 from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
@@ -466,11 +470,13 @@ def _build_artifact_manager_graph(
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
-    def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
+    def should_continue(state: AgentState) -> Literal["tools", "truncated_tool_calls", "__end__"]:
         messages = state.get("messages", [])
         if not messages:
             return END
         last_message = messages[-1]
+        if truncated_tool_calls(last_message):
+            return "truncated_tool_calls"
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
         return END
@@ -478,9 +484,15 @@ def _build_artifact_manager_graph(
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
+    graph.add_node("truncated_tool_calls", reject_truncated_tool_calls)
     graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", "truncated_tool_calls": "truncated_tool_calls", END: END},
+    )
     graph.add_edge("tools", "agent")
+    graph.add_edge("truncated_tool_calls", "agent")
     return graph.compile()
 
 

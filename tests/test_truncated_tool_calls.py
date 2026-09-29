@@ -1,0 +1,99 @@
+"""A tool call cut off by max_tokens is answered with an error, never run.
+
+langchain parses partial tool JSON leniently, so the cut-off call arrives in
+``tool_calls`` with plausible but truncated args.
+"""
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
+
+from apps.agents.graph.base import build_agent_graph
+from apps.agents.graph.state import TRUNCATED_TOOL_CALL_MESSAGE
+from apps.agents.tools.artifact_manager_agent import _build_artifact_manager_graph
+from apps.agents.tools.canvas_manager_agent import _build_canvas_manager_graph
+
+TRUNCATED = AIMessage(
+    content=[
+        {"type": "thinking", "thinking": "", "signature": "sig"},
+        {"type": "tool_use", "id": "call-1", "name": "write", "input": {"sql": "SELECT"}},
+    ],
+    tool_calls=[{"id": "call-1", "name": "write", "args": {"sql": "SELECT"}}],
+    response_metadata={"stop_reason": "max_tokens"},
+)
+ANSWER = AIMessage(content="Done.", response_metadata={"stop_reason": "end_turn"})
+
+
+def _write_tool(calls: list):
+    @tool
+    def write(sql: str) -> str:
+        """Write something."""
+        calls.append(sql)
+        return "written"
+
+    return write
+
+
+def _fake_llm(*responses):
+    bound = MagicMock()
+    bound.ainvoke = AsyncMock(side_effect=list(responses))
+    llm = MagicMock()
+    llm.bind_tools.return_value = bound
+    return llm
+
+
+def _assert_rejected_then_answered(messages, calls):
+    assert calls == []
+    rejection = next(m for m in messages if isinstance(m, ToolMessage))
+    assert rejection.tool_call_id == "call-1"
+    assert rejection.status == "error"
+    assert rejection.content == TRUNCATED_TOOL_CALL_MESSAGE
+    assert messages[-1].content == "Done."
+
+
+@pytest.mark.asyncio
+async def test_main_agent_does_not_run_truncated_tool_call():
+    calls: list = []
+    with (
+        patch("apps.agents.graph.base.ChatAnthropic", return_value=_fake_llm(TRUNCATED, ANSWER)),
+        patch("apps.agents.graph.base._build_tools", return_value=[_write_tool(calls)]),
+        patch(
+            "apps.agents.graph.base._build_system_prompt",
+            new=AsyncMock(return_value=("prompt", "")),
+        ),
+    ):
+        graph = await build_agent_graph(
+            SimpleNamespace(id="ws-1"), MagicMock(is_authenticated=False)
+        )
+        result = await graph.ainvoke({"messages": [HumanMessage(content="hi")]})
+    _assert_rejected_then_answered(result["messages"], calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prefix", "tools_factory", "builder"),
+    [
+        (
+            "apps.agents.tools.canvas_manager_agent",
+            "create_canvas_tools",
+            _build_canvas_manager_graph,
+        ),
+        (
+            "apps.agents.tools.artifact_manager_agent",
+            "create_artifact_graph_tools",
+            _build_artifact_manager_graph,
+        ),
+    ],
+)
+async def test_subagent_does_not_run_truncated_tool_call(prefix, tools_factory, builder):
+    calls: list = []
+    with (
+        patch(f"{prefix}.ChatAnthropic", return_value=_fake_llm(TRUNCATED, ANSWER)),
+        patch(f"{prefix}.{tools_factory}", return_value=[_write_tool(calls)]),
+    ):
+        graph = builder(SimpleNamespace(id="ws-1"), None, [], None)
+        result = await graph.ainvoke({"messages": [HumanMessage(content="hi")]})
+    _assert_rejected_then_answered(result["messages"], calls)

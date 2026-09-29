@@ -7,7 +7,7 @@ graph. All fields are JSON-serializable for Postgres checkpoint persistence.
 
 from typing import Annotated
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
@@ -48,11 +48,49 @@ def prune_messages(
 def all_tool_calls(message: AIMessage) -> list[dict]:
     """Every tool call the message's ``tool_use`` blocks carry, parsed or not.
 
-    A turn cut off by ``max_tokens`` mid-``tool_use`` lands in
+    A ``tool_use`` whose partial JSON can't be parsed lands in
     ``invalid_tool_calls``, yet langchain-anthropic still replays its block, so
     it needs a ``tool_result`` like any other call or the thread 400s for good.
     """
     return [*(message.tool_calls or []), *(message.invalid_tool_calls or [])]
+
+
+TRUNCATED_TOOL_CALL_MESSAGE = (
+    "Not run: your reply hit the output token limit before this tool call's "
+    "arguments were complete. Retry with a smaller input, for example by splitting "
+    "the change into several calls."
+)
+
+
+def truncated_tool_calls(message: BaseMessage) -> list[dict]:
+    """Tool calls from a turn cut off by ``max_tokens``.
+
+    langchain parses partial tool JSON leniently, so a call cut mid-argument
+    still arrives in ``tool_calls`` with plausible but truncated args (a SQL
+    string ending at ``SELECT``, half an artifact). Running it would act on
+    input the model never finished writing.
+    """
+    if not isinstance(message, AIMessage):
+        return []
+    if message.response_metadata.get("stop_reason") != "max_tokens":
+        return []
+    return all_tool_calls(message)
+
+
+def reject_truncated_tool_calls(state: "AgentState") -> dict:
+    """Graph node: answer each truncated call with an error so the model retries."""
+    return {
+        "messages": [
+            ToolMessage(
+                content=TRUNCATED_TOOL_CALL_MESSAGE,
+                tool_call_id=tc["id"],
+                name=tc.get("name") or "unknown",
+                status="error",
+            )
+            for tc in truncated_tool_calls(state["messages"][-1])
+            if tc.get("id")
+        ]
+    }
 
 
 class AgentState(TypedDict):
