@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers import TenantDescriptor
@@ -214,6 +215,28 @@ class TestTenantConnectionEndpoints:
         # The chatbot it credentials is grouped under it
         assert len(items[0]["chatbots"]) == 1
         assert items[0]["chatbots"][0]["tenant_id"] == "d1"
+
+    def test_get_lists_chatbots_by_name_case_insensitively(self, client, db, user):
+        conn = TenantConnection.objects.create(
+            user=user, provider="commcare", credential_type=TenantConnection.OAUTH
+        )
+        for external_id, name, selected in [
+            ("a", "alpha", timezone.now()),
+            ("c", "Charlie", None),
+            ("b", "bravo", None),
+        ]:
+            tenant = Tenant.objects.create(
+                provider="commcare", external_id=external_id, canonical_name=name
+            )
+            TenantMembership.objects.create(
+                user=user, tenant=tenant, connection=conn, last_selected_at=selected
+            )
+
+        client.force_login(user)
+        resp = client.get("/api/auth/connections/")
+
+        assert resp.status_code == 200
+        assert [c["tenant_id"] for c in resp.json()[0]["chatbots"]] == ["a", "b", "c"]
 
     def test_delete_removes_connection_and_archives_membership(self, client, db, user):
         """DELETE removes the connection and archives its membership (data retained)."""
