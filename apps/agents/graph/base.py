@@ -51,6 +51,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_load_pending
 from apps.workspaces.services.query_state import serving_writer_in_flight
 from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
 from mcp_server.pipeline_registry import get_registry
@@ -315,7 +316,11 @@ async def _semantic_catalog_context(workspace) -> str:
 
 
 async def _fetch_semantic_model_context(
-    workspace, interactive: bool = True, write_capable: bool = False
+    workspace,
+    interactive: bool = True,
+    write_capable: bool = False,
+    *,
+    conversation_id: str | None = None,
 ) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
@@ -349,11 +354,7 @@ async def _fetch_semantic_model_context(
                         "Do not promise an automatic follow-up based on this status.\n\n"
                         f"{ready_context}"
                     )
-        if not write_capable:
-            return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        if not interactive:
-            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
+        return await _load_in_progress_guidance(interactive, write_capable, conversation_id)
 
     try:
         return await _semantic_catalog_context(workspace)
@@ -365,13 +366,28 @@ async def _fetch_semantic_model_context(
             guidance = _pipeline_unresolved_guidance(
                 unresolved, loaded=load_state == _LOADED, write_capable=write_capable
             )
+        elif await aworkspace_load_pending(workspace.id):
+            # Queued but not yet started, so no run above says so (#408).
+            guidance = await _load_in_progress_guidance(interactive, write_capable, conversation_id)
         else:
             guidance = _load_state_guidance(
                 load_state, interactive=interactive, write_capable=write_capable
             )
-            if unresolved:
-                guidance = f"{guidance}\n\n{_partial_pipeline_note(unresolved)}"
+        if not every and unresolved:
+            guidance = f"{guidance}\n\n{_partial_pipeline_note(unresolved)}"
         return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}" if multi else guidance
+
+
+async def _load_in_progress_guidance(
+    interactive: bool, write_capable: bool, conversation_id: str | None
+) -> str:
+    if not write_capable:
+        return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
+    if not interactive:
+        return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+    if conversation_id and await athread_awaits_load(conversation_id):
+        return _LOAD_STARTED_FOR_THIS_CHAT_GUIDANCE
+    return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
 
 
 _NOT_LOADED, _LOADED = "not_loaded", "loaded"
@@ -461,9 +477,10 @@ def _partial_pipeline_note(providers: list[str]) -> str:
 # No `pipeline=` arg: run_materialization's LLM-facing schema is empty (all params
 # injected server-side); naming an argument it can't accept confused the agent (02#6).
 _INTERACTIVE_MATERIALIZE_GUIDANCE = (
-    "No data has been loaded yet. Call `run_materialization` to start "
-    "loading. This tool returns IMMEDIATELY with `status: started` — do "
-    "NOT call other data tools in the same turn. Acknowledge to the user "
+    "No data has been loaded yet. Call `run_materialization` yourself to start "
+    "loading; do not ask the user to start it. This tool returns IMMEDIATELY "
+    "with `status: started` — do NOT call other data tools in the same turn. "
+    "Acknowledge to the user "
     "in ONE sentence and end your turn. The system will resume the "
     "conversation automatically when materialization completes."
 )
@@ -475,7 +492,18 @@ _LOADED_REBUILD_GUIDANCE = (
 )
 
 
-# Only the thread that dispatched a load has a completion callback.
+# The chat a load is bound to (the one that started it, or the first chat in an
+# unloaded workspace, #408) is resumed when it finishes.
+_LOAD_STARTED_FOR_THIS_CHAT_GUIDANCE = (
+    "This workspace's data is loading in the background; the load was started "
+    "for this conversation. Do NOT call `run_materialization` or other data "
+    "tools, and do NOT ask the user to start a load. Tell the user in one "
+    "sentence that their data is loading and that you will continue with their "
+    "request when it finishes, then end your turn. The system resumes this "
+    "conversation automatically when loading completes."
+)
+
+# Any other chat gets no completion callback for someone else's load.
 _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
     "A materialization is already in progress in the background. Do NOT "
     "trigger another one and do NOT call other data tools. Briefly tell "
@@ -823,6 +851,7 @@ async def build_agent_graph(
         interactive=interactive,
         canvas_write=canvas_write,
         write_capable=write_capable,
+        conversation_id=conversation_id,
     )
     volatile_prompt += agent_date_context()
     logger.debug(
@@ -1052,6 +1081,7 @@ async def _build_system_prompt(
     interactive: bool = True,
     canvas_write: bool = False,
     write_capable: bool = False,
+    conversation_id: str | None = None,
 ) -> tuple[str, str]:
     """Assemble the workspace system prompt as a (stable, volatile) split.
 
@@ -1071,7 +1101,7 @@ async def _build_system_prompt(
     volatile = ""
     if has_tenants:
         semantic_context = await _fetch_semantic_model_context(
-            workspace, interactive, write_capable
+            workspace, interactive, write_capable, conversation_id=conversation_id
         )
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
         if await workspace.tenants.acount() > 1:
