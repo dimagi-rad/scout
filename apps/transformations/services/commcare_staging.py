@@ -185,7 +185,7 @@ class StagedColumn:
         return f'    {_typed_expression(self.source, self.question.get("type"))} AS "{self.alias}"'
 
 
-def exceeds_column_budget(fixed_count: int, field_count: int) -> bool:
+def exceeds_table_column_limit(fixed_count: int, field_count: int) -> bool:
     return fixed_count + field_count > POSTGRES_MAX_TABLE_COLUMNS
 
 
@@ -201,7 +201,7 @@ def fold_to_column_budget(columns: list[StagedColumn], *, fixed_count: int) -> l
     without the cap. Repeated sources fold first (their data is already a
     column), then labels and containers, then the latest fields in form order.
     """
-    if not exceeds_column_budget(fixed_count, len(columns)):
+    if not exceeds_table_column_limit(fixed_count, len(columns)):
         return columns
     budget = MAX_STAGING_COLUMNS - fixed_count
     seen_sources: set[str] = set()
@@ -223,13 +223,14 @@ def warn_folded(tenant, model: str, *, total: int, kept: int, raw_column: str) -
     if kept < total:
         logger.warning(
             "Staging model %s for tenant %s folded %d of %d fields into %s to stay under "
-            "PostgreSQL's %d-column table limit",
+            "PostgreSQL's %d-column table limit (a folded model keeps %d columns)",
             model,
             tenant.external_id,
             total - kept,
             total,
             raw_column,
             POSTGRES_MAX_TABLE_COLUMNS,
+            MAX_STAGING_COLUMNS,
         )
 
 
@@ -247,7 +248,7 @@ def repeat_child_columns(
     """
     staged_questions = [q for q in child_questions if _question_path(q)]
     fixed_count = len(seen_aliases)
-    folding = exceeds_column_budget(fixed_count, len(staged_questions))
+    folding = exceeds_table_column_limit(fixed_count, len(staged_questions))
     if folding:
         seen_aliases[REPEAT_ELEMENT_COLUMN] = 1
         fixed_count += 1
@@ -368,7 +369,7 @@ def _generate_case_type_asset(
     # Seed with core column names so custom properties that collide get a suffix.
     seen_aliases: dict[str, int] = {(alias or expr): 1 for expr, alias in _CASE_CORE_COLUMNS}
     fixed_count = len(_CASE_CORE_COLUMNS)
-    folding = exceeds_column_budget(fixed_count, len(properties))
+    folding = exceeds_table_column_limit(fixed_count, len(properties))
     if folding:
         seen_aliases[CASE_PROPERTIES_COLUMN] = 1
         fixed_count += 1
