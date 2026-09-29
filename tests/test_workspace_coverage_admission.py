@@ -459,12 +459,12 @@ class TestDirectAdd:
         assert conn.upstream_denied_at is None
 
     @pytest.mark.parametrize(
-        "expires_in",
-        [timedelta(minutes=-1), timedelta(minutes=2), None],
+        ("expires_in", "rediscovered"),
+        [(timedelta(minutes=-1), False), (timedelta(minutes=2), True), (None, True)],
         ids=["expired", "inside-refresh-buffer", "unknown-expiry"],
     )
     def test_an_expired_target_token_that_cannot_be_renewed_asks_them_to_sign_in(
-        self, client, user, httpx_mock, t1, expires_in
+        self, client, user, httpx_mock, t1, expires_in, rediscovered
     ):
         """With no refresh grant, a token admission counts as expired unlocks nothing
         until the target signs in again, even while it still lists their domains; the
@@ -489,6 +489,7 @@ class TestDirectAdd:
         conn.refresh_from_db()
         assert conn.oauth_refresh_failure_fingerprint == ""
         assert conn.upstream_denied_at is None
+        assert TenantMembership.objects.filter(user=target, tenant=t1).exists() is rediscovered
 
     @pytest.mark.parametrize(
         ("refresh", "renewal", "result"),

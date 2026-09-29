@@ -184,7 +184,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
         const awaiting =
           res.result === "invite_awaiting_access"
             ? res.needs_sign_in
-              ? "Scout couldn't check their access with their saved sign-in; it unlocks once they sign in to Scout again and have access to this workspace's data source."
+              ? "Their saved sign-in has expired or can't be used; it unlocks once they sign in to Scout again and have access to this workspace's data source."
               : res.recheck_complete
                 ? "They need access to this workspace's data source; it unlocks automatically once they have it."
                 : "Scout couldn't finish checking their access upstream, so adding them again may help; otherwise it unlocks automatically once they have access."

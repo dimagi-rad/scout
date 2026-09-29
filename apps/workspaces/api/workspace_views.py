@@ -108,7 +108,8 @@ class Rediscovery:
     # The check couldn't settle coverage: a provider error, a timeout, or a refusal
     # that proves nothing (Connect's export-list 403). Retrying may help.
     failed: bool = False
-    # Upstream refused a stored sign-in (401); only the user signing in again settles it.
+    # A stored sign-in upstream refused (401), or one that can't be renewed and that
+    # admission counts as expired: only the user signing in again settles it.
     needs_sign_in: bool = False
 
 
