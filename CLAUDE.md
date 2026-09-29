@@ -76,9 +76,9 @@ processes; fix those errors before restarting. Warnings do not stop startup.
 |-----|---------|
 | users | Custom User model, session auth, OAuth (Google/GitHub/CommCare) |
 | workspaces | Workspaces, DB connections (encrypted), memberships |
-| knowledge | KnowledgeEntry, TableKnowledge, AgentLearning |
-| agents | LangGraph agent graph, MCP client, tools, prompts, memory (checkpointer) |
-| chat | Streaming chat threads with LangGraph agent |
+| knowledge | Table/column knowledge, freeform knowledge entries, agent learnings |
+| agents | LangGraph agent graph, MCP client, tools, prompts |
+| chat | Streaming chat threads with LangGraph agent, Postgres checkpointer |
 | artifacts | Generated dashboards/charts with sandboxed React rendering |
 | recipes | Replayable analysis workflows with templated prompts |
 
@@ -96,7 +96,7 @@ The codebase is async-first. New views should be `async def` using native Django
 - **Views**: Raw `async def` views for streaming/chat/tenant endpoints; DRF `APIView` stays sync (DRF doesn't support async streaming)
 - **ORM**: Use async methods (`.aget()`, `.afirst()`, `.afilter()`, `.acreate()`, `.aupdate_or_create()`, `async for`) — never call sync ORM from async views
 - **Auth**: Use `await request.auser()` (Django 5 native), not `sync_to_async(get_user)`
-- **DB connections**: `AsyncConnectionPool` (psycopg_pool) for LangGraph checkpointer; `psycopg.AsyncConnection.connect()` for direct queries in MCP server
+- **DB connections**: `AsyncConnectionPool` (psycopg_pool) for the LangGraph checkpointer and for MCP server queries (`mcp_server/services/pool.py`)
 - **`sync_to_async`**: Only for wrapping external API calls (OAuth token refresh, CommCare API) and inherently sync operations (dbt). Do not use for ORM calls. Exception: a transactional write block (`with transaction.atomic(): ...`) may be wrapped in `@sync_to_async` because Django 5 does not yet expose async-native transactions; prefer this over individual async ORM calls when atomicity across multiple writes is required. (enforced by tests/test_async_conventions.py)
 
 ## Environment variables
