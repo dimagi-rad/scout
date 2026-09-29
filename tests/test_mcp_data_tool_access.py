@@ -211,3 +211,18 @@ async def test_list_workspaces_reports_an_unverifiable_workspace_separately(
     assert result["data"]["inaccessible_workspace_ids"] == []
     assert result["data"]["unverified_workspace_ids"] == [str(workspace.id)]
     assert upstream_provider.requests == []
+
+
+async def test_materialization_status_stays_reachable_during_a_verification_outage(
+    workspace, user, tenant, upstream_provider
+):
+    run = await _status_run(tenant)
+    await amake_proof_stale(user, tenant)
+    upstream_provider.failure = 503
+
+    result = await server.get_materialization_status(
+        str(run.id), workspace_id=str(workspace.id), user_id=str(user.id)
+    )
+
+    assert result["success"] is True
+    assert upstream_provider.requests == []

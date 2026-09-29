@@ -123,19 +123,25 @@ class _WorkspaceAccessDenied(Exception):
     """The acting user may not read the workspace; ``str()`` is the reason to relay."""
 
 
-async def _authorize_read(workspace_id: str, user_id: str) -> None:
+async def _authorize_read(
+    workspace_id: str,
+    user_id: str,
+    *,
+    verification: VerificationBudget | None = VerificationBudget.INTERACTIVE,
+) -> None:
     """Re-check the acting user's workspace access before a data read.
 
     The agent injects both ids server-side after the chat view's own check, but a
     turn — or a resumed one in the worker — can outlive that decision, so each
     read goes back through the central authorizer. An empty ``user_id`` is the
-    non-interactive path, which has no user to check.
+    non-interactive path, which has no user to check. ``verification=None`` keeps
+    the membership and coverage check but skips the upstream freshness recheck.
     """
     if not user_id:
         return
     user = await User.objects.filter(id=user_id).afirst()
     access = (
-        await aresolve_workspace_access_ex(user, workspace_id)
+        await aresolve_workspace_access_ex(user, workspace_id, verification=verification)
         if user is not None
         else WorkspaceAccess(denied_reason=NOT_MEMBER)
     )
@@ -1183,7 +1189,9 @@ async def get_materialization_status(
     ) as tc:
         if workspace_id:
             try:
-                await _authorize_read(workspace_id, user_id)
+                # Progress polling stays reachable through a verification outage, like
+                # cancel_materialization: WORKSPACE_ACCESS_DENIED would end the turn mid-load.
+                await _authorize_read(workspace_id, user_id, verification=None)
             except _WorkspaceAccessDenied as e:
                 tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
                 return tc["result"]
