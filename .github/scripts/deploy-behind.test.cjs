@@ -148,7 +148,8 @@ test('being behind opens the deploy-failure issue with a re-run instruction', as
   const [, created] = github.calls.at(-1);
   assert.equal(created.title, TITLE);
   assert.deepEqual(created.labels, [LABEL]);
-  assert.match(created.body, /Production is behind main: main is at `hhhhhhhhhhhh` \(by @merger\), production runs `llllllllllll`/);
+  assert.match(created.body, /Production is behind main: main is at `hhhhhhhhhhhh`, production runs `llllllllllll`/);
+  assert.match(created.body, /\ncc @merger\n/);
   assert.match(created.body, /ahead for 90 minutes/);
   assert.ok(created.body.includes('ended `cancelled`: https://github.com/o/r/actions/runs/12'), created.body);
   assert.match(created.body, /Re-run the latest deploy/);
@@ -235,9 +236,9 @@ test('without a GitHub author the head run\'s actor is mentioned, else nobody', 
   runs[0] = { ...runs[0], actor: { login: 'dispatcher' } };
   const github = fakeGithub({ runs, deployed: strandedDeploys, author: null });
   await check(github);
-  assert.match(github.calls.at(-1)[1].body, /`hhhhhhhhhhhh` \(by @dispatcher\), production/);
+  assert.match(github.calls.at(-1)[1].body, /\ncc @dispatcher\n/);
 
   const nobody = fakeGithub({ runs: strandedRuns(), deployed: strandedDeploys, author: null });
   await check(nobody);
-  assert.match(nobody.calls.at(-1)[1].body, /`hhhhhhhhhhhh`, production/);
+  assert.doesNotMatch(nobody.calls.at(-1)[1].body, /cc @/);
 });

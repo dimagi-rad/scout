@@ -37,7 +37,7 @@ async function ensureLabel({ github, context }) {
 
 // deploy.yml's report and the behind-main watch (deploy-behind.cjs) both write
 // here; one path keeps them from splitting reports across two issues.
-async function fileOrComment({ github, context, existing, comment, body }) {
+async function fileOrComment({ github, context, existing, body, comment = body }) {
   if (existing) {
     await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body: comment });
     return { number: existing.number, opened: false };

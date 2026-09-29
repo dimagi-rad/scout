@@ -47,9 +47,9 @@ async function assessDeployLag({ github, context, core, workflowId, jobName, now
   if (minutes < thresholdMinutes) state = 'waiting';
   // deploy.yml's own `report` job already filed a failed test or deploy stage.
   else if (latest && latest.conclusion === 'failure') state = 'reported';
-  // A schedule has no pusher to mention; the head commit's author is the nearest.
-  const author = branch.commit.author?.login || latest?.actor?.login || null;
-  return { state, head, live, latest, minutes, author };
+  // A schedule has no pusher to mention: page main's author, else whoever ran its deploy.
+  const notify = branch.commit.author?.login || latest?.actor?.login || null;
+  return { state, head, live, latest, minutes, notify };
 }
 
 function describeLag({ context, env, workflowId, lag }) {
@@ -65,9 +65,10 @@ function describeLag({ context, env, workflowId, lag }) {
   }
   return [
     marker(lag.head),
-    `Production is behind main: main is at \`${lag.head.slice(0, 12)}\`${lag.author ? ` (by @${lag.author})` : ''}, production runs ${liveText}.`,
+    `Production is behind main: main is at \`${lag.head.slice(0, 12)}\`, production runs ${liveText}.`,
     `Main has been ahead for ${lag.minutes} minutes and no production deploy is queued or running.`,
     latestText,
+    ...(lag.notify ? [`cc @${lag.notify}`] : []),
     '',
     `Re-run the latest deploy: run the production deploy workflow on \`main\` from ${repoUrl}/actions/workflows/${workflowId}.`,
     'Re-running an older run ships only that run\'s commit.',
@@ -101,7 +102,7 @@ async function checkDeployLag({
     core.warning(`Production is behind main; already reported on #${existing.number}.`);
     return lag;
   }
-  const issue = await fileOrComment({ github, context, existing, comment: body, body });
+  const issue = await fileOrComment({ github, context, existing, body });
   core.warning(`Production is behind main; ${issue.opened ? 'opened' : 'updated'} #${issue.number}.`);
   return lag;
 }
