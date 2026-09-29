@@ -131,6 +131,7 @@ class TestCommCareRetry:
         loader = _no_backoff(CommCareCaseLoader(domain="d", credential=CRED))
         with _reset_connections(), pytest.raises(ExpectedUpstreamError) as exc:
             loader.load()
+        assert isinstance(exc.value, CommCareExportError)
         assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
 
     @pytest.mark.parametrize(
@@ -252,6 +253,7 @@ class TestOCSRetry:
         loader = _ocs_loader()
         with _reset_connections(), pytest.raises(ExpectedUpstreamError) as exc:
             loader.load()
+        assert isinstance(exc.value, OCSExportError)
         assert code_of(exc.value) == ErrorCode.UPSTREAM_UNAVAILABLE
 
     @pytest.mark.parametrize(

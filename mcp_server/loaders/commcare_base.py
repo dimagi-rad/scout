@@ -107,7 +107,7 @@ class CommCareBaseLoader:
             raise
         except (requests.ConnectionError, requests.Timeout) as e:
             # The session adapter already retried, so this is the exhausted case.
-            raise CommCareUnavailableError(
+            raise CommCareExportUnavailableError(
                 f"CommCare HQ could not be reached for domain {self.domain}: {type(e).__name__}"
             ) from e
         self._response_url = resp.url if isinstance(resp.url, str) else url

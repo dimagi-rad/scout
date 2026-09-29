@@ -100,7 +100,7 @@ class OCSBaseLoader:
             raise
         except (requests.ConnectionError, requests.Timeout) as e:
             # The session adapter already retried, so this is the exhausted case.
-            raise OCSUnavailableError(
+            raise OCSExportUnavailableError(
                 f"Open Chat Studio could not be reached for experiment "
                 f"{self.experiment_id}: {type(e).__name__}"
             ) from e
