@@ -1,11 +1,13 @@
 import threading
 from copy import deepcopy
+from io import StringIO
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
+from django.core.management import call_command
 from django.db import connection
 from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
@@ -1379,6 +1381,91 @@ def test_recovery_post_persists_the_missing_manifest(workspace, member_user):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_recovery_post_survives_a_delete_racing_the_backfill(workspace, member_user):
+    artifact = _manifest_less_story(workspace, member_user)
+    client = Client()
+    client.force_login(member_user)
+
+    def delete_then_backfill(resolved):
+        Artifact.objects.get(pk=resolved.pk).soft_delete(member_user)
+        backfill_missing_semantic_query_manifest(resolved)
+
+    with (
+        patch(
+            "apps.artifacts.views.backfill_missing_semantic_query_manifest",
+            new=delete_then_backfill,
+        ),
+        patch(
+            "apps.artifacts.views._current_artifact_data_state",
+            new=AsyncMock(return_value={"status": "ready", "queryable": True}),
+        ),
+    ):
+        response = client.post(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/recovery/")
+
+    assert response.status_code == 200, response.content
+    assert not ArtifactSemanticQuery.objects.filter(artifact=artifact).exists()
+
+
+@pytest.mark.django_db
+def test_backfill_builds_from_the_locked_row_and_reports_whether_it_wrote(workspace, member_user):
+    artifact = _manifest_less_story(workspace, member_user)
+    stale = Artifact.objects.get(pk=artifact.pk)
+    stale.data = {}
+
+    assert backfill_missing_semantic_query_manifest(stale) is True
+    assert [q["name"] for q in stale.semantic_queries] == ["q.visits_by_day"]
+    assert backfill_missing_semantic_query_manifest(stale) is False
+
+    deleted = _manifest_less_story(workspace, member_user)
+    Artifact.objects.get(pk=deleted.pk).soft_delete(member_user)
+    assert backfill_missing_semantic_query_manifest(deleted) is False
+
+
+@pytest.mark.django_db
+def test_backfill_command_dry_run_writes_nothing(workspace, member_user):
+    artifact = _manifest_less_story(workspace, member_user)
+    out = StringIO()
+
+    call_command("backfill_story_manifests", stdout=out)
+
+    assert f"Would backfill story {artifact.pk}" in out.getvalue()
+    artifact.refresh_from_db()
+    assert artifact.semantic_queries == []
+    assert artifact.semantic_query_manifest == {}
+    assert not ArtifactSemanticQuery.objects.filter(artifact=artifact).exists()
+
+
+@pytest.mark.django_db
+def test_backfill_command_apply_persists_legacy_manifests_once(workspace, member_user):
+    legacy = _manifest_less_story(workspace, member_user)
+    deleted = _manifest_less_story(workspace, member_user)
+    deleted.soft_delete(member_user)
+    react = Artifact.objects.create(
+        workspace=workspace, created_by=member_user, title="Chart", artifact_type=ArtifactType.REACT
+    )
+
+    applied = StringIO()
+    call_command("backfill_story_manifests", "--apply", stdout=applied)
+
+    assert "Backfilled 1 stories (1 now show live data)" in applied.getvalue()
+    legacy.refresh_from_db()
+    assert [q["name"] for q in legacy.semantic_queries] == ["q.visits_by_day"]
+    assert list(
+        ArtifactSemanticQuery.objects.filter(artifact=legacy).values_list("query_key", flat=True)
+    ) == ["q.visits_by_day"]
+    for untouched in (deleted, react):
+        stored = Artifact.all_objects.get(pk=untouched.pk)
+        assert (stored.semantic_queries, stored.semantic_query_manifest) == ([], {})
+
+    rerun = StringIO()
+    call_command("backfill_story_manifests", "--apply", stdout=rerun)
+    assert (
+        "Backfilled 0 stories (0 now show live data), 0 already done or deleted, 0 failed."
+        in rerun.getvalue()
+    )
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("persist", "expected_inserts"),
     [
@@ -1424,6 +1511,8 @@ def test_concurrent_manifest_persistence_does_not_collide(
         for thread in threads:
             thread.join(timeout=15)
 
+    # A hung writer would otherwise surface as a misleading insert-count failure.
+    assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert len(inserts) == expected_inserts
     assert list(
