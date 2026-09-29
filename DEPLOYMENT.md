@@ -365,7 +365,10 @@ Run only one deployment on the shared host at a time, including manual commands.
 The current production and staging workflows share the `scout-deploy-host`
 concurrency group with `cancel-in-progress: false` and `queue: max`. This
 serializes both destinations without replacing the other destination's pending
-run; GitHub supports up to 100 pending runs. Manual shell commands and workflows
+run; GitHub supports up to 100 pending runs. A production run whose commit is
+already included in a newer queued production run skips its tests and deploy, so
+a burst of merges deploys once instead of once per commit (a staging run never
+counts as newer). Manual shell commands and workflows
 dispatched from older branch revisions are outside this updated group: check
 both destinations before starting those, and do not overlap them with Actions.
 See [GitHub's concurrency queue contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
