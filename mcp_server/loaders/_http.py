@@ -47,10 +47,10 @@ class BoundedRetry(Retry):
 def build_retry() -> Retry:
     """Return the shared bounded retry policy for loader sessions.
 
-    ``backoff_factor=2.0`` yields 0s/2s/4s waits between the 4 total attempts
-    on the exponential path. urllib3 adds up to 0.5s of jitter to the 2s and 4s
-    waits only (the first retry is always immediate), so concurrent loads drift
-    apart on later retries. A server ``Retry-After`` is honoured but capped at
+    ``backoff_factor=2.0`` yields 0s/4s/8s waits between the 4 total attempts
+    on the exponential path (urllib3 2.x: ``factor * 2**(n-1)``, with the first
+    retry always immediate). urllib3 adds up to 0.5s of jitter to the 4s and 8s
+    waits only, so concurrent loads drift apart on later retries. A server ``Retry-After`` is honoured but capped at
     ``MAX_RETRY_AFTER_SECONDS``. ``raise_on_status=False`` lets callers inspect
     the final response (status, headers) and raise a typed export error rather
     than propagating a raw ``requests.HTTPError``.
