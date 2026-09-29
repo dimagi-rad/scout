@@ -24,6 +24,7 @@ from apps.transformations.services.connect_staging import (
 )
 from apps.transformations.services.repeat_identity import RepeatSource, repeat_source
 from apps.users.models import Tenant
+from mcp_server.services.metadata import _build_jsonb_annotations
 
 POSTGRES_TARGET_LIST_LIMIT = 1664
 WIDE = 2100
@@ -345,3 +346,21 @@ def test_folding_logs_a_warning_with_the_folded_count(connect_tenant, caplog):
     kept = MAX_STAGING_COLUMNS - len(VISIT_BASE)
     assert f"folded {WIDE - kept} of {WIDE} fields into form_json" in folded[0].getMessage()
     assert "stg_visits" in folded[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("stg_visits", "form_json"),
+        ("stg_form_wide", "form_data"),
+        ("stg_case_patient", "properties"),
+        ("stg_visits__repeat_items", "repeat_data"),
+        ("ws_prefix__stg_visits", "form_json"),
+    ],
+)
+def test_agent_is_told_folded_fields_live_in_the_raw_json_column(table, column):
+    assert "#>>" in _build_jsonb_annotations(table, None)[column]
+
+
+def test_raw_table_annotations_are_unchanged():
+    assert _build_jsonb_annotations("raw_visits", None) == {}
