@@ -2,8 +2,12 @@
 where connections are opened, and leaves stubbed and local traffic alone."""
 
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import httpx
 import pytest
@@ -13,6 +17,8 @@ from tests.network_guard import OutboundNetworkBlocked, _service_hosts, guard
 
 # A reserved TLD guarantees nothing real is reached if the guard ever regresses.
 BLOCKED_URL = "https://guard-check.invalid/oauth/token/"
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -136,3 +142,56 @@ def test_allows_loopback_hosts():
     assert guard.is_allowed(b"::1")
     assert not guard.is_allowed("127.example.com")
     assert not guard.is_allowed("www.commcarehq.org")
+
+
+def test_session_fixture_teardown_after_the_run_stops_is_reported(tmp_path):
+    # pytest.exit() (like Ctrl-C) skips the test's teardown, so pytest's own
+    # pytest_sessionfinish tears the session fixture down; the guard's sweep has
+    # to run after it. A subprocess, because the guard is a process-wide singleton.
+    (tmp_path / "test_leak.py").write_text(
+        textwrap.dedent(
+            f"""
+            import httpx
+            import pytest
+
+            @pytest.fixture(scope="session")
+            def leaky():
+                yield
+                try:
+                    httpx.get("{BLOCKED_URL}")
+                except Exception:
+                    pass
+
+            def test_stops_the_run(leaky):
+                pytest.exit("stopping early", returncode=0)
+            """
+        )
+    )
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "tests.network_guard",
+            "-p",
+            "no:django",
+            "-p",
+            "no:cacheprovider",
+            "-o",
+            "addopts=",
+            "--rootdir",
+            str(tmp_path),
+            str(tmp_path),
+        ],
+        cwd=tmp_path,
+        env={"PATH": "", "PYTHONPATH": str(REPO_ROOT)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert "recorded after the last test" in output, output
+    assert "guard-check.invalid" in output, output
+    assert result.returncode == pytest.ExitCode.TESTS_FAILED, output
