@@ -72,16 +72,42 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 # rebuild dequeued second would wait out the load (or the lock
                 # timeout) before coverage names the missing source.
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
-                intent = capture_load_intent([tenant.id], INTENT_RECONCILE_MISSING)
-                materialize_workspace.defer(
-                    workspace_id=str(workspace.id),
-                    user_id=str(actor_id),
-                    load_intent=intent,
-                    only_unserved=True,
-                    notify_thread=False,
-                )
+                _defer_unserved_load(workspace.id, [tenant.id], actor_id)
 
     return wt, created
+
+
+def load_new_workspace(workspace, *, actor_id) -> None:
+    """Load a newly created workspace's sources as its creator once the create commits.
+
+    Creation admits only a creator who covers every source, so their credentials
+    reach all of them. Sources another workspace already serves are published,
+    not re-fetched (``only_unserved``), and the reconcile intent joins any load of
+    them already in flight, so this is cheap when everything is loaded. It is
+    still queued then, because the new workspace's own views and Cube schema only
+    come from this run (#353).
+    """
+    tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
+    if not tenant_ids:
+        return
+    workspace_id = workspace.id
+    # robust: the workspace exists either way, so a queue outage must not turn a
+    # committed create into a 500; the first chat starts the load instead.
+    transaction.on_commit(
+        lambda: _defer_unserved_load(workspace_id, tenant_ids, actor_id), robust=True
+    )
+
+
+def _defer_unserved_load(workspace_id, tenant_ids, actor_id) -> None:
+    """Load, as ``actor_id``, whichever of the workspace's sources serve nothing."""
+    intent = capture_load_intent(tenant_ids, INTENT_RECONCILE_MISSING)
+    materialize_workspace.defer(
+        workspace_id=str(workspace_id),
+        user_id=str(actor_id),
+        load_intent=intent,
+        only_unserved=True,
+        notify_thread=False,
+    )
 
 
 def _record_pending_source(workspace, tenant) -> None:
