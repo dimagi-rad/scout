@@ -551,10 +551,13 @@ export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; is
     }
   }
 
-  const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
-  const available = userTenants
-    .filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
-    .sort(compareUserTenantsByName)
+  // Memoized so providerFilterGroups' memo can hit; otherwise every keystroke re-sorts.
+  const available = useMemo(() => {
+    const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
+    return userTenants
+      .filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
+      .sort(compareUserTenantsByName)
+  }, [tenants, userTenants])
 
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
