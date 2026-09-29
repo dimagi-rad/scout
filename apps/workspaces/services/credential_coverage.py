@@ -318,13 +318,18 @@ def _oauth_gap(membership, connection, tokens, bindings):
     )
     if refresh_failed:
         return _gap(CredentialGapCode.OAUTH_REFRESH_FAILED, membership.tenant, membership)
-    health = token_health(token, connection.provider)
-    can_refresh = bool(get_token_url(connection.provider) and token.token_secret and token.app)
-    if health != "connected" or (
-        not can_refresh and token_needs_refresh(token.expires_at, can_refresh=False)
-    ):
+    if oauth_token_counts_as_expired(token, connection.provider):
         return _gap(CredentialGapCode.OAUTH_CREDENTIAL_EXPIRED, membership.tenant, membership)
     return None
+
+
+def oauth_token_counts_as_expired(token, provider) -> bool:
+    """Whether admission treats *token* as expired: only its holder signing in again
+    clears this, since a token that can't be renewed is refused this close to expiry."""
+    can_refresh = bool(get_token_url(provider) and token.token_secret and token.app)
+    return token_health(token, provider) != "connected" or (
+        not can_refresh and token_needs_refresh(token.expires_at, can_refresh=False)
+    )
 
 
 def _membership_gap(membership, tokens, bindings, connection_teams, decrypt_cache):

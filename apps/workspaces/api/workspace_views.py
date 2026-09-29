@@ -58,7 +58,10 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
     default_invite_expiry,
 )
-from apps.workspaces.services.credential_coverage import CoverageRecovery
+from apps.workspaces.services.credential_coverage import (
+    CoverageRecovery,
+    oauth_token_counts_as_expired,
+)
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     notify_member_added,
@@ -141,7 +144,8 @@ async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple]
     renewed is used as it stands while unexpired. When one leaves nothing to use,
     ``outcome`` says why: ``failed`` for a transient failure or the ``deadline``
     (event-loop time) passing before a renewal starts, ``needs_sign_in`` when the
-    token is expired and cannot be renewed, or the provider refused to renew it.
+    provider refused to renew it. A token that cannot be renewed and that admission
+    counts as expired sets ``needs_sign_in`` even while it is still used.
     """
     token_url = get_token_url(provider)
     now = timezone.now()
@@ -152,7 +156,8 @@ async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple]
         if not can_refresh or not token_needs_refresh(token.expires_at):
             if stored:
                 pairs.append(stored)
-            else:
+            # Still used while it lists anything, but admission will refuse it anyway.
+            if not stored or oauth_token_counts_as_expired(token, provider):
                 needs_sign_in = True
             continue
         if asyncio.get_running_loop().time() >= deadline:

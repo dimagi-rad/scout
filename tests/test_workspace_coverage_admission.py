@@ -458,16 +458,26 @@ class TestDirectAdd:
         assert conn.oauth_refresh_failure_fingerprint == ""
         assert conn.upstream_denied_at is None
 
+    @pytest.mark.parametrize(
+        "expires_in",
+        [timedelta(minutes=-1), timedelta(minutes=2), None],
+        ids=["expired", "inside-refresh-buffer", "unknown-expiry"],
+    )
     def test_an_expired_target_token_that_cannot_be_renewed_asks_them_to_sign_in(
-        self, client, user, t1
+        self, client, user, httpx_mock, t1, expires_in
     ):
-        """With no refresh grant, nothing unlocks until the target signs in again; the
+        """With no refresh grant, a token admission counts as expired unlocks nothing
+        until the target signs in again, even while it still lists their domains; the
         manager must not be told access arrives on its own."""
         ws = _workspace(user, t1)
         target = User.objects.create_user(email="late@example.com", password="pass")
         conn = _oauth_identity(
-            target, token="tok-old", refresh="", expires_at=timezone.now() - timedelta(minutes=1)
+            target,
+            token="tok-old",
+            refresh="",
+            expires_at=timezone.now() + expires_in if expires_in else None,
         )
+        httpx_mock.add_response(url=COMMCARE_DOMAIN_API, json=_domains(t1), is_optional=True)
         client.force_login(user)
 
         resp = self._add(client, ws, target.email)
