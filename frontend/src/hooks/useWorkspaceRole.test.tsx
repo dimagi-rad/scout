@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it } from "vitest"
 import { ApiError } from "@/api/client"
 import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
-import { READ_ONLY_DENIAL, useWorkspaceRole, writeErrorMessage } from "./useWorkspaceRole"
+import {
+  actionFailure,
+  READ_ONLY_DENIAL,
+  useWorkspaceRole,
+  writeErrorMessage,
+} from "./useWorkspaceRole"
 
 function workspace(id: string, role: TenantMembership["role"]) {
   return { id, role } as TenantMembership
@@ -89,5 +94,18 @@ describe("writeErrorMessage", () => {
   it("keeps the fallback for non-permission failures", () => {
     expect(writeErrorMessage(new ApiError(500, "boom"), "Try again.", false)).toBe("Try again.")
     expect(writeErrorMessage(new Error("offline"), "Try again.", false)).toBe("Try again.")
+  })
+})
+
+describe("actionFailure", () => {
+  it.each([
+    ["a retryable structured 403", new ApiError(403, "Retry shortly.", { error: "Retry shortly.", retryable: true }), true],
+    ["a final structured 403", new ApiError(403, "Reconnect.", { error: "Reconnect.", retryable: false }), false],
+    ["a structured 403 without the flag", new ApiError(403, "Denied.", { error: "Denied." }), false],
+    ["a non-JSON 403", new ApiError(403, "Forbidden", undefined), true],
+    ["a 500", new ApiError(500, "Failed to dispatch", { error: "Failed to dispatch" }), true],
+    ["a network error", new TypeError("Failed to fetch"), true],
+  ])("treats %s as retryable: %s", (_label, error, retryable) => {
+    expect(actionFailure(error, "fallback", true).retryable).toBe(retryable)
   })
 })

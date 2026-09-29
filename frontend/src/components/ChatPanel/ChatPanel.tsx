@@ -342,6 +342,7 @@ export function ChatPanel() {
           && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
           && activeDomainId && (
             <MaterializationProgressBanner
+              key={activeMaterializationJob.thread_job_id}
               job={activeMaterializationJob}
               workspaceId={activeDomainId}
             />

@@ -1,7 +1,7 @@
-import { useState } from "react"
 import { AlertTriangle, RotateCw, XCircle } from "lucide-react"
 import { jobsApi, type RecentTermination } from "@/api/jobs"
-import { actionFailure, useWorkspaceRole, type ActionFailure } from "@/hooks/useWorkspaceRole"
+import { useRetryableAction } from "@/hooks/useRetryableAction"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 
 const RETRY_FAILED = "Retry failed — try again"
 
@@ -27,29 +27,23 @@ export function MaterializationFailure({
   threadId,
   onRetryDispatched,
 }: Props) {
-  const [retryState, setRetryState] = useState<"idle" | "pending" | "error">("idle")
-  const [retryError, setRetryError] = useState<ActionFailure | null>(null)
   const isCancelled = termination.state === "cancelled"
   const { canWrite } = useWorkspaceRole(workspaceId)
+  const retry = useRetryableAction(RETRY_FAILED, canWrite)
 
   const handleRetry = async () => {
-    if (retryState === "pending") return
-    setRetryState("pending")
-    setRetryError(null)
-    try {
-      await jobsApi.retryMaterialization(workspaceId, {
+    if (retry.blocked) return
+    const ok = await retry.run(() =>
+      jobsApi.retryMaterialization(workspaceId, {
         thread_id: threadId,
         tool_call_id: termination.tool_call_id,
-      })
-      onRetryDispatched?.()
-      // Leave button disabled briefly; the next poll cycle will swap this
-      // card out for the progress card.
-      setTimeout(() => setRetryState("idle"), 1500)
-    } catch (error) {
-      setRetryError(actionFailure(error, RETRY_FAILED, canWrite))
-      setRetryState("error")
-      setTimeout(() => setRetryState("idle"), 3000)
-    }
+      }),
+    )
+    if (!ok) return
+    onRetryDispatched?.()
+    // Leave button disabled briefly; the next poll cycle will swap this
+    // card out for the progress card.
+    retry.settle(1500)
   }
 
   const Icon = isCancelled ? XCircle : AlertTriangle
@@ -79,42 +73,38 @@ export function MaterializationFailure({
               {termination.error_summary}
             </div>
           )}
-          {retryError && (
+          {retry.failure && (
             <div
               className="text-red-600 dark:text-red-400 mt-1 whitespace-pre-wrap break-words"
               role="alert"
               data-testid="materialization-retry-error"
             >
-              {retryError.message}
+              {retry.failure.message}
             </div>
           )}
         </div>
-        {termination.retry_available && canWrite && (retryError?.retryable ?? true) && (
+        {termination.retry_available && canWrite && (
           <button
             type="button"
             onClick={handleRetry}
-            disabled={retryState === "pending"}
+            disabled={retry.blocked}
             className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors shrink-0 ${
-              retryState === "error"
+              retry.state === "error"
                 ? "text-red-500 border border-red-500/40"
-                : retryState === "pending"
+                : retry.state === "pending"
                   ? "text-muted-foreground border border-border"
                   : "text-red-600 hover:bg-red-500/10 border border-red-500/30"
             }`}
             data-testid="materialization-retry-btn"
-            title={
-              retryState === "error"
-                ? RETRY_FAILED
-                : "Retry materialization"
-            }
+            title={retry.failure?.message ?? "Retry materialization"}
           >
             <RotateCw
-              className={`w-3 h-3 ${retryState === "pending" ? "animate-spin" : ""}`}
+              className={`w-3 h-3 ${retry.state === "pending" ? "animate-spin" : ""}`}
             />
             <span>
-              {retryState === "pending"
+              {retry.state === "pending"
                 ? "Retrying..."
-                : retryState === "error"
+                : retry.state === "error"
                   ? "Retry failed"
                   : "Retry"}
             </span>

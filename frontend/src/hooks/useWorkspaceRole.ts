@@ -63,6 +63,9 @@ export interface ActionFailure {
  * makes sense. A structured 403 is final unless access_denied_body marks it
  * `retryable` (an upstream verification outage); anything else — a 5xx, a
  * dropped connection, a non-JSON 403 like a CSRF failure — may clear on its own.
+ * Only access_denied_body's freshness branch sets `retryable`, so a new denial
+ * reason elsewhere reads as final. Not uiSlice's RECHECKABLE_REASONS: that asks
+ * whether an explicit access recheck can help, not whether resending can.
  */
 export function actionFailure(
   error: unknown,

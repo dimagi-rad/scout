@@ -1,34 +1,13 @@
-import { fireEvent, render, screen } from "@testing-library/react"
+import { act, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { api, ApiError } from "@/api/client"
-import { jobsApi, type ActiveJob, type RecentTermination } from "@/api/jobs"
+import { jobsApi } from "@/api/jobs"
 import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
 import { MaterializationFailure } from "./MaterializationFailure"
 import { MaterializationProgressBanner } from "./MaterializationProgressBanner"
-
-const WORKSPACE_ID = "ws-1"
-
-const termination: RecentTermination = {
-  thread_job_id: "job-1",
-  thread_id: "thread-1",
-  tool_call_id: "call-1",
-  state: "failed",
-  completed_at: "2026-09-23T10:05:00Z",
-  error_summary: "Upstream timed out",
-  retry_available: true,
-}
-
-const job: ActiveJob = {
-  thread_job_id: "job-1",
-  thread_id: "thread-1",
-  tool_call_id: "call-1",
-  job_type: "materialization",
-  state: "running",
-  progress: null,
-  created_at: "2026-09-23T10:00:00Z",
-}
+import { job, termination, WORKSPACE_ID } from "./testFixtures"
 
 const VERIFICATION_MESSAGE =
   "We couldn't verify your access to this workspace right now. Please retry shortly."
@@ -61,11 +40,12 @@ function renderFailure() {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.useRealTimers()
   useAppStore.setState({ domains: [] })
 })
 
 describe("MaterializationFailure retry errors", () => {
-  it("shows a retryable denial's message and keeps Retry offered", async () => {
+  it("shows a retryable denial's message and re-arms Retry", async () => {
     vi.spyOn(jobsApi, "retryMaterialization").mockRejectedValue(verificationDenial)
     renderFailure()
 
@@ -74,10 +54,22 @@ describe("MaterializationFailure retry errors", () => {
     expect(await screen.findByTestId("materialization-retry-error")).toHaveTextContent(
       VERIFICATION_MESSAGE,
     )
-    expect(screen.getByTestId("materialization-retry-btn")).toBeInTheDocument()
+    expect(screen.getByTestId("materialization-retry-btn")).toBeEnabled()
   })
 
-  it("shows a non-retryable denial's message and withdraws Retry", async () => {
+  it("clears a retryable failure once it has been shown", async () => {
+    vi.useFakeTimers()
+    vi.spyOn(jobsApi, "retryMaterialization").mockRejectedValue(verificationDenial)
+    renderFailure()
+
+    await act(async () => fireEvent.click(screen.getByTestId("materialization-retry-btn")))
+    expect(screen.getByTestId("materialization-retry-error")).toBeInTheDocument()
+
+    act(() => vi.advanceTimersByTime(10_000))
+    expect(screen.queryByTestId("materialization-retry-error")).not.toBeInTheDocument()
+  })
+
+  it("shows a final denial's message and disables Retry until the user comes back", async () => {
     vi.spyOn(jobsApi, "retryMaterialization").mockRejectedValue(coverageDenial)
     renderFailure()
 
@@ -86,7 +78,14 @@ describe("MaterializationFailure retry errors", () => {
     expect(await screen.findByTestId("materialization-retry-error")).toHaveTextContent(
       COVERAGE_MESSAGE,
     )
-    expect(screen.queryByTestId("materialization-retry-btn")).not.toBeInTheDocument()
+    expect(screen.getByTestId("materialization-retry-btn")).toBeDisabled()
+
+    // e.g. after connecting the missing source in another tab
+    act(() => {
+      window.dispatchEvent(new Event("focus"))
+    })
+    expect(screen.getByTestId("materialization-retry-btn")).toBeEnabled()
+    expect(screen.queryByTestId("materialization-retry-error")).not.toBeInTheDocument()
   })
 
   it("keeps Retry offered after a non-JSON 403 such as a CSRF failure", async () => {
@@ -100,7 +99,7 @@ describe("MaterializationFailure retry errors", () => {
     expect(await screen.findByTestId("materialization-retry-error")).toHaveTextContent(
       "Retry failed — try again",
     )
-    expect(screen.getByTestId("materialization-retry-btn")).toBeInTheDocument()
+    expect(screen.getByTestId("materialization-retry-btn")).toBeEnabled()
   })
 
   it("falls back to the generic text for a non-JSON 500", async () => {
@@ -112,24 +111,12 @@ describe("MaterializationFailure retry errors", () => {
     expect(await screen.findByTestId("materialization-retry-error")).toHaveTextContent(
       "Retry failed — try again",
     )
-    expect(screen.getByTestId("materialization-retry-btn")).toBeInTheDocument()
+    expect(screen.getByTestId("materialization-retry-btn")).toBeEnabled()
   })
 })
 
 describe("MaterializationProgressBanner cancel errors", () => {
-  it("shows a retryable denial's message and keeps Stop offered", async () => {
-    vi.spyOn(api, "post").mockRejectedValue(verificationDenial)
-    render(<MaterializationProgressBanner job={job} workspaceId={WORKSPACE_ID} />)
-
-    fireEvent.click(screen.getByTestId("materialization-banner-stop-btn"))
-
-    expect(await screen.findByTestId("materialization-banner-cancel-error")).toHaveTextContent(
-      VERIFICATION_MESSAGE,
-    )
-    expect(screen.getByTestId("materialization-banner-stop-btn")).toBeInTheDocument()
-  })
-
-  it("shows a non-retryable denial's message and withdraws Stop", async () => {
+  it("shows a final denial's message and disables Stop", async () => {
     vi.spyOn(api, "post").mockRejectedValue(coverageDenial)
     render(<MaterializationProgressBanner job={job} workspaceId={WORKSPACE_ID} />)
 
@@ -138,6 +125,18 @@ describe("MaterializationProgressBanner cancel errors", () => {
     expect(await screen.findByTestId("materialization-banner-cancel-error")).toHaveTextContent(
       COVERAGE_MESSAGE,
     )
-    expect(screen.queryByTestId("materialization-banner-stop-btn")).not.toBeInTheDocument()
+    expect(screen.getByTestId("materialization-banner-stop-btn")).toBeDisabled()
+  })
+
+  it("falls back to the generic text for a non-JSON 500 and keeps Stop", async () => {
+    vi.spyOn(api, "post").mockRejectedValue(htmlServerError)
+    render(<MaterializationProgressBanner job={job} workspaceId={WORKSPACE_ID} />)
+
+    fireEvent.click(screen.getByTestId("materialization-banner-stop-btn"))
+
+    expect(await screen.findByTestId("materialization-banner-cancel-error")).toHaveTextContent(
+      "Cancel failed — try again",
+    )
+    expect(screen.getByTestId("materialization-banner-stop-btn")).toBeEnabled()
   })
 })
