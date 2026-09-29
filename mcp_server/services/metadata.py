@@ -141,7 +141,7 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
     Builds ``connection_params`` from ``MANAGED_DATABASE_URL`` the same way
     ``load_tenant_context``/``load_workspace_context`` do. Constructing the
     QueryContext with an empty ``connection_params={}`` would make the
-    underlying ``psycopg.AsyncConnection.connect`` fall back to libpq env-var
+    shared pool's empty conninfo fall back to libpq env-var
     defaults (unset in the MCP container), so the query would raise and every
     healthy run would surface zero source tables.
     """
