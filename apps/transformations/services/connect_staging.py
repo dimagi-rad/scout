@@ -92,6 +92,13 @@ def visit_column_map(
     return [(column.question, column.alias) for column in columns]
 
 
+def folded_visit_aliases(form_definitions: dict) -> set[str]:
+    """Aliases the fields folded into ``form_json`` would have had as columns."""
+    columns = _visit_columns(form_definitions)
+    kept = fold_to_column_budget(columns, fixed_count=len(_VISIT_BASE_COLUMNS))
+    return {column.alias for column in columns} - {column.alias for column in kept}
+
+
 def _generate_stg_visits(
     tenant, form_definitions: dict, fallbacks: _NameFallbacks | None = None
 ) -> TransformationAsset:
