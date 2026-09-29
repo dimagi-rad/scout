@@ -3,7 +3,8 @@
 Two multi-tenant workspaces share tenant S. Workspace A reloads S into a
 candidate. While that load runs, both workspaces still read v1; after A's load
 publishes, A reads v2 immediately and B reads v1 until its own rebuild, and the
-old schema is only retired once nothing reads it. Only the provider fetch
+old schema is only retired once nothing reads it. A retirement whose drop fails
+and reverts puts the siblings it moved back onto the schema. Only the provider fetch
 (which writes the sentinel into the candidate) and the Cube build are stubbed.
 """
 
@@ -186,3 +187,48 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
     await workspaces_tasks.teardown_schema(schema_id=str(old_shared.id), attempt=1)
     await old_shared.arefresh_from_db()
     assert old_shared.state == SchemaState.EXPIRED
+
+
+async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_schema(owned_names):
+    _, tenants, workspaces = await sync_to_async(_setup)(owned_names)
+    manager = SchemaManager()
+    shared_view = view_name(manager._view_prefix(tenants["s"]), "raw_cases")
+    view_schemas = {key: manager._view_schema_name(ws.id) for key, ws in workspaces.items()}
+    shared = await TenantSchema.objects.aget(tenant=tenants["s"], state=SchemaState.ACTIVE)
+    shared.state = SchemaState.TEARDOWN
+    await shared.asave(update_fields=["state"])
+    cube = patch(
+        "apps.workspaces.tasks.build_and_promote_cube_schema",
+        return_value=MagicMock(id="cube", content_hash="hash"),
+    )
+
+    # TTL expiry: the first attempt finds both siblings reading S and moves them off it.
+    with (
+        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch.object(workspaces_tasks.rebuild_workspace_view_schema, "defer_async", AsyncMock()),
+    ):
+        retry.return_value.defer_async = AsyncMock(return_value=1)
+        await workspaces_tasks.teardown_schema(schema_id=str(shared.id))
+    with cube:
+        for ws in workspaces.values():
+            await workspaces_tasks.rebuild_workspace_view_schema.func(str(ws.id))
+    with pytest.raises(psycopg.errors.UndefinedTable):
+        await sync_to_async(_read)(view_schemas["A"], shared_view)
+
+    deferred = AsyncMock()
+    with (
+        patch.object(SchemaManager, "retire_tenant_schema", side_effect=RuntimeError("boom")),
+        patch.object(workspaces_tasks.rebuild_workspace_view_schema, "defer_async", deferred),
+        pytest.raises(RuntimeError),
+    ):
+        await workspaces_tasks.teardown_schema(schema_id=str(shared.id), attempt=1)
+    await shared.arefresh_from_db()
+    assert shared.state == SchemaState.ACTIVE
+
+    rebuilt = sorted(call.kwargs["workspace_id"] for call in deferred.await_args_list)
+    assert rebuilt == sorted(str(ws.id) for ws in workspaces.values())
+    with cube:
+        for workspace_id in rebuilt:
+            await workspaces_tasks.rebuild_workspace_view_schema.func(workspace_id)
+    for view_schema in view_schemas.values():
+        assert await sync_to_async(_read)(view_schema, shared_view) == ["s1"]

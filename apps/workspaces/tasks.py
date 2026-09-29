@@ -2466,11 +2466,29 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
         )
         await _retry_retirement(schema, [], attempt, str(exc.__cause__ or exc))
         return
+    except Exception:
+        if schema.state == SchemaState.ACTIVE:
+            # The failed drop reverted the row to ACTIVE, but siblings rebuilt
+            # while it was TEARDOWN left this tenant out of their views. Enqueued
+            # here because T has been released by now.
+            await _rebuild_reverted_dependents(schema)
+        raise
     if retired:
         # Dependent view schemas that still list this tenant in their coverage
         # are reconciled after T is released: rebuilt against a surviving
         # ACTIVE schema, or failed truthfully when pure TTL expiry left no data.
         await _reconcile_dependent_view_schemas_after_teardown(schema)
+
+
+async def _rebuild_reverted_dependents(schema) -> None:
+    try:
+        await _rebuild_dependent_view_schemas([schema.tenant_id])
+    except Exception:
+        # Must not mask the retirement failure the caller is about to re-raise.
+        logger.exception(
+            "teardown_schema: failed to queue dependent rebuilds after reverting schema %s",
+            schema.id,
+        )
 
 
 class _RetirementNotStarted(Exception):
