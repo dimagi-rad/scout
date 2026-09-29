@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import contextmanager
 
 import psycopg.sql
 import pytest
@@ -21,6 +22,7 @@ from apps.transformations.models import (
 )
 from apps.transformations.services.commcare_staging import (
     MAX_STAGING_COLUMNS,
+    POSTGRES_MAX_TABLE_COLUMNS,
     upsert_system_assets,
 )
 from apps.transformations.services.connect_staging import upsert_connect_assets
@@ -125,10 +127,8 @@ CASES = {
 }
 
 
-@pytest.mark.parametrize("provider", CASES)
-def test_wide_staging_models_build_and_keep_folded_fields(provider, monkeypatch):
-    monkeypatch.setenv("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
-    setup, upsert, models = CASES[provider]
+@contextmanager
+def _built(provider, setup, upsert):
     tenant = Tenant.objects.create(
         provider=provider,
         external_id=f"wide-dbt-{uuid.uuid4().hex[:12]}",
@@ -148,28 +148,67 @@ def test_wide_staging_models_build_and_keep_folded_fields(provider, monkeypatch)
         assert run.status == TransformationRunStatus.COMPLETED, run.error_message
         assert not run.asset_runs.exclude(status=AssetRunStatus.SUCCESS).exists()
         assert run.asset_runs.count() == TransformationAsset.objects.filter(tenant=tenant).count()
-        with conn.cursor() as cursor:
-            for model, kept, raw, folded_path in models:
-                cursor.execute(
-                    "SELECT count(*) FROM information_schema.columns "
-                    "WHERE table_schema = %s AND table_name = %s",
-                    (name, model),
-                )
-                assert cursor.fetchone()[0] <= MAX_STAGING_COLUMNS
-                cursor.execute(
-                    psycopg.sql.SQL("SELECT {}, {} #>> %s FROM {}").format(
-                        psycopg.sql.Identifier(kept),
-                        psycopg.sql.Identifier(raw),
-                        psycopg.sql.Identifier(name, model),
-                    ),
-                    (folded_path,),
-                )
-                rows = cursor.fetchall()
-                assert rows
-                assert all(row == ("first", "last") for row in rows)
+        yield conn, name
     finally:
         try:
             if schema is not None:
                 manager.teardown(schema)
         finally:
             conn.close()
+
+
+def _column_count(cursor, schema, model):
+    cursor.execute(
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = %s",
+        (schema, model),
+    )
+    return cursor.fetchone()[0]
+
+
+@pytest.mark.parametrize("provider", CASES)
+def test_wide_staging_models_build_and_keep_folded_fields(provider, monkeypatch):
+    monkeypatch.setenv("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
+    setup, upsert, models = CASES[provider]
+    with _built(provider, setup, upsert) as (conn, name), conn.cursor() as cursor:
+        for model, kept, raw, folded_path in models:
+            assert _column_count(cursor, name, model) <= MAX_STAGING_COLUMNS
+            cursor.execute(
+                psycopg.sql.SQL("SELECT {}, {} #>> %s FROM {}").format(
+                    psycopg.sql.Identifier(kept),
+                    psycopg.sql.Identifier(raw),
+                    psycopg.sql.Identifier(name, model),
+                ),
+                (folded_path,),
+            )
+            rows = cursor.fetchall()
+            assert rows
+            assert all(row == ("first", "last") for row in rows)
+
+
+def test_model_at_the_table_limit_builds_unfolded(monkeypatch):
+    # "Nothing that builds today loses a column" rests on CREATE TABLE AS
+    # accepting exactly 1600 columns through dbt's table materialization.
+    monkeypatch.setenv("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
+    count = POSTGRES_MAX_TABLE_COLUMNS - 7
+    last = f"q{count - 1:04d}"
+
+    def setup(conn, schema):
+        metadata = _connect_setup(conn, schema)
+        questions = metadata["form_definitions"]["visit"]["questions"]
+        metadata["form_definitions"]["visit"]["questions"] = [
+            q for q in questions if not q.get("repeat") and q["value"] <= f"/data/{last}"
+        ]
+        return metadata
+
+    with (
+        _built("commcare_connect", setup, upsert_connect_assets) as (conn, name),
+        conn.cursor() as cursor,
+    ):
+        assert _column_count(cursor, name, "stg_visits") == POSTGRES_MAX_TABLE_COLUMNS
+        cursor.execute(
+            psycopg.sql.SQL("SELECT q0000, {} FROM {}").format(
+                psycopg.sql.Identifier(last), psycopg.sql.Identifier(name, "stg_visits")
+            )
+        )
+        assert cursor.fetchall() == [("first", "v")]
