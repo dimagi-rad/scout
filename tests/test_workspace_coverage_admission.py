@@ -307,7 +307,8 @@ class TestSourceAdd:
         assert resp.status_code == 202
         refresh.assert_not_called()
 
-    def test_first_source_of_a_zero_tenant_workspace_is_checked_too(self, client, user, t1):
+    def test_a_zero_tenant_workspace_cannot_gain_a_source(self, client, user, t1):
+        """It is denied outright (#381); deleting it is the only way out."""
         ws = _workspace(user)
         _member(ws, "brian@example.com")
         grant_tenant_access(user, t1)
@@ -316,7 +317,7 @@ class TestSourceAdd:
         with patch(REFRESH, side_effect=_no_refresh):
             resp = self._post(client, ws, t1)
 
-        assert resp.status_code == 409
+        assert resp.status_code == 403
         assert not ws.workspace_tenants.exists()
 
     def test_requester_without_a_usable_credential_is_refused(self, client, user, t1, t2):
@@ -587,15 +588,16 @@ class TestDirectAdd:
         assert resp.status_code == 409
         assert not WorkspaceInvite.objects.filter(workspace=ws, email=member.email).exists()
 
-    def test_zero_tenant_workspace_admits_directly(self, client, user):
+    def test_zero_tenant_workspace_admits_no_one(self, client, user):
+        """It is denied outright (#381), so nobody can be added to it."""
         ws = _workspace(user)
         target = User.objects.create_user(email="empty@example.com", password="pass")
         client.force_login(user)
 
         resp = self._add(client, ws, target.email)
 
-        assert resp.status_code == 201
-        assert resp.json()["result"] == "member"
+        assert resp.status_code == 403
+        assert not ws.memberships.filter(user=target).exists()
 
 
 @pytest.mark.django_db

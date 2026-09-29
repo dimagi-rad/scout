@@ -757,16 +757,15 @@ async def test_cancel_endpoint_requires_workspace_membership(workspace, other_us
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_materialize_workspace_defers_resume_on_no_memberships_early_return(
+async def test_materialize_workspace_defers_resume_on_an_early_return(
     workspace,
     user,
     context_with_job_id,
 ):
-    """Finding #4: the early-return path (no memberships) must still defer
-    the resume task. Otherwise the user is left with a phantom spinner —
-    the chat layer is waiting on a chained resume that never fires."""
-    # Workspace exists, but the workspace has no tenants → no memberships.
-    # Build a fresh workspace with no tenants/memberships.
+    """Finding #4: an early-return path must still defer the resume task.
+    Otherwise the user is left with a phantom spinner — the chat layer is
+    waiting on a chained resume that never fires."""
+    # A workspace with no sources is refused at the access check (#381).
     bare_ws = await Workspace.objects.acreate(
         name="bare-no-memberships",
         created_by=user,
@@ -792,15 +791,9 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
             user_id=str(user.id),
         )
 
-    # Early-return error envelope returned to the worker. all_succeeded is now
-    # explicit rather than absent — callers read it, and a run that loaded nothing
-    # is not a success (#364). This workspace has no tenants, so none to name.
-    assert result == {
-        "error": "No tenant memberships found",
-        "tenants": [],
-        "all_succeeded": False,
-        "guidance": [],
-    }
+    assert result["status"] == "denied"
+    assert result["tenants"] == []
+    assert result["all_succeeded"] is False
     # But the resume task IS still deferred (in the finally block).
     resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
 

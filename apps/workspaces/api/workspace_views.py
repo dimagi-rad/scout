@@ -613,7 +613,8 @@ class WorkspaceListView(APIView):
                     "is_auto_created": m.workspace.is_auto_created,
                     "role": m.role,
                     "tenants": tenants,
-                    "has_access": not missing,
+                    # No sources is denied by the gate (#381) without naming any missing.
+                    "has_access": bool(workspace_tenants) and not missing,
                     "missing_tenants": missing_tenants_payload(missing),
                     "member_count": m.member_count,
                     "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),

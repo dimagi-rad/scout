@@ -19,6 +19,7 @@ from apps.users.services.access_verification import PROOF_MAX_AGE, proofs_are_fr
 from apps.workspaces import access as access_module
 from apps.workspaces.access import (
     INSUFFICIENT_ROLE,
+    NO_SOURCES,
     NOT_MEMBER,
     TENANT_ACCESS_LOST,
     aresolve_workspace_access_ex,
@@ -253,11 +254,11 @@ def test_every_live_workspace_tenant_must_be_fresh(user, workspace, tenant, upst
 
 
 @pytest.mark.django_db(transaction=True)
-def test_empty_workspace_needs_only_membership(user, upstream_provider):
+def test_empty_workspace_is_denied_without_an_upstream_call(user, upstream_provider):
     empty = Workspace.objects.create(name="Empty", created_by=user)
     WorkspaceMembership.objects.create(workspace=empty, user=user, role=WorkspaceRole.MANAGE)
 
-    assert resolve_workspace_access_ex(user, empty.id).granted
+    assert resolve_workspace_access_ex(user, empty.id).denied_reason == NO_SOURCES
     assert upstream_provider.requests == []
 
 

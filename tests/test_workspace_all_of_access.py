@@ -18,6 +18,7 @@ from django.utils import timezone
 
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import (
+    NO_SOURCES,
     TENANT_ACCESS_LOST,
     access_denied_body,
     aresolve_workspace_access_ex,
@@ -121,11 +122,12 @@ def _async_fixture(user):
 
 
 @pytest.mark.django_db
-def test_zero_tenant_workspace_needs_only_membership(user):
+def test_zero_tenant_workspace_is_denied(user):
+    """Nothing defines who may read a workspace with no sources (#381)."""
     ws = _workspace(user)
     _join(ws, user)
 
-    assert resolve_workspace_access_ex(user, ws.id).granted
+    assert resolve_workspace_access_ex(user, ws.id).denied_reason == NO_SOURCES
 
 
 @pytest.mark.django_db
