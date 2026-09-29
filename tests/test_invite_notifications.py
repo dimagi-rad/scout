@@ -411,3 +411,65 @@ class TestRoleChangeEmail:
         invite_notifications.notify_role_changed(membership, user)
 
         mock_task.defer.assert_not_called()
+
+
+class TestMemberRemovedEmail:
+    """#382: a member a manager removes is told (their threads go with them)."""
+
+    def _delete(self, client, workspace, membership):
+        return client.delete(f"/api/workspaces/{workspace.id}/members/{membership.id}/")
+
+    def test_removal_emails_the_removed_member(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, target)
+
+        assert resp.status_code == 204
+        emails = _deferred_emails(mock_task)
+        assert [e["recipient_list"] for e in emails] == [["reader@example.com"]]
+        assert workspace.name in emails[0]["subject"]
+        assert emails[0]["message"].startswith("Test User removed you")
+
+    def test_email_waits_for_commit(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            self._delete(client, workspace, target)
+
+        mock_task.defer.assert_not_called()
+        assert len(callbacks) == 1
+
+    def test_leaving_sends_nothing(
+        self, client, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        own = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(read_user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, own)
+
+        assert resp.status_code == 204
+        mock_task.defer.assert_not_called()
+
+    def test_refused_removal_sends_nothing(
+        self, client, workspace, read_user, write_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=write_user)
+        client.force_login(read_user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, target)
+
+        assert resp.status_code == 403
+        mock_task.defer.assert_not_called()

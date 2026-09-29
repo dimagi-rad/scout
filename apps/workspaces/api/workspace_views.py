@@ -65,6 +65,7 @@ from apps.workspaces.services.credential_coverage import (
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     notify_member_added,
+    notify_member_removed,
     notify_role_changed,
     send_pending_invite_email,
 )
@@ -1049,9 +1050,14 @@ class WorkspaceMemberDetailView(APIView):
             )
 
         # Delete the member's threads in this workspace
-        Thread.objects.filter(workspace=workspace, user=target.user).delete()
+        removed_user = target.user
+        Thread.objects.filter(workspace=workspace, user=removed_user).delete()
 
         target.delete()
+        if not is_self:
+            transaction.on_commit(
+                lambda: notify_member_removed(workspace, removed_user, request.user)
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

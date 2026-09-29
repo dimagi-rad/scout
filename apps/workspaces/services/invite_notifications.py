@@ -163,3 +163,18 @@ def notify_role_changed(membership, changed_by):
         ),
         [user.email],
     )
+
+
+def notify_member_removed(workspace, user, removed_by):
+    """Tell a user a manager removed them from a workspace (#382). Removal also
+    deletes their conversations there, so the notice says so."""
+    if not user.email:
+        return
+    _dispatch(
+        f"You've been removed from '{workspace.name}' on Scout",
+        (
+            f"{_user_label(removed_by)} removed you from the '{workspace.name}' workspace "
+            f"on Scout. Your conversations in it have been deleted.\n"
+        ),
+        [user.email],
+    )
