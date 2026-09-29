@@ -29,9 +29,23 @@ multi-process production deployments, configure a shared Redis cache through
 > **Known limitation:** the API container reaches MCP at `http://mcp-server:8100/mcp`,
 > but `mcp-server` is not one of the hostnames the MCP server's DNS-rebinding
 > protection accepts (see [Manual deployment](manual.md#mcp-server)). The MCP server
-> rejects those requests, so agent tool calls fail in this stack. For working chat,
-> use the host-based Honcho setup from the
-> [installation guide](../getting-started/installation.md), which reaches MCP on `localhost`.
+> rejects those requests, so agent tool calls fail in this stack. One way around it
+> is to give the MCP service an accepted name by merging this into
+> `docker-compose.override.yml`:
+>
+> ```yaml
+> services:
+>   mcp-server:
+>     networks:
+>       default:
+>         aliases: [scout-mcp-web]
+>   api:
+>     environment:
+>       - MCP_SERVER_URL=http://scout-mcp-web:8100/mcp
+> ```
+>
+> The host-based Honcho setup from the
+> [installation guide](../getting-started/installation.md) is unaffected; it reaches MCP on `localhost`.
 
 ## Configuration
 

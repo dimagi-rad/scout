@@ -24,7 +24,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated list of allowed host headers. |
-| `DEPLOY_ENVIRONMENT` | `production` for the production settings, otherwise `development` | Environment label used by Sentry, Task Badger and the CommCare Connect host. Set `staging` for a staging deployment that uses the production settings. |
+| `DEPLOY_ENVIRONMENT` | `production` for the production or connectlabs settings, otherwise `development` | Environment label used by Sentry, Task Badger and the CommCare Connect host. Set `staging` for a staging deployment that uses the production settings. |
 | `SCOUT_BASE_URL` | `http://localhost:5173` | Public URL of the Scout frontend, used for links in emails sent from the background worker. |
 
 ### Security

@@ -126,8 +126,8 @@ docker compose up --build
 
 This starts five services: backend API (port 8000), frontend (port 3000), MCP
 server (port 8100 with the local override), PostgreSQL, and Cube (ports 4000 and
-4010). It does not start a background worker, and the API can't reach the MCP
-server in this stack, so agent tool calls fail; see the
+4010). It does not start a background worker, and the MCP server rejects the
+API's requests on its `Host` check in this stack, so agent tool calls fail; see the
 [Docker setup guide](../deployment/docker.md) for both. Use Honcho for working chat.
 
 ## Verify the installation
