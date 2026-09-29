@@ -395,10 +395,16 @@ function buildNode(
     props[name] = resolveProp(value)
   }
   if (node.type === "YAxis" && props.type === "category" && props.width === undefined) {
-    const labels = state.rows.map((row) => String(row[String(props.dataKey)] ?? ""))
+    const tickFormatter = typeof props.tickFormatter === "function"
+      ? (props.tickFormatter as (value: unknown, index: number) => string)
+      : undefined
+    const labels = state.rows.map((row, index) => {
+      const value = row[String(props.dataKey)] ?? ""
+      return tickFormatter ? String(tickFormatter(value, index)) : String(value)
+    })
     const width = categoryAxisWidth(labels)
     props.width = width
-    props.tick ??= createCategoryTick(width)
+    props.tick = createCategoryTick(width, tickFormatter)
   }
   const defaulted = applyDefaults(node.type, props, seriesIndex, state.palette)
   if (DATA_INJECT_TYPES.has(node.type)) {
@@ -609,15 +615,22 @@ export function truncateCategoryLabel(label: string, axisWidth: number): string 
   return label.length > maxChars ? `${label.slice(0, Math.max(1, maxChars - 1))}\u2026` : label
 }
 
-function createCategoryTick(axisWidth: number) {
-  return function CategoryTick(props: { x?: number; y?: number; payload?: { value?: unknown } }) {
-    const full = String(props.payload?.value ?? "")
+function createCategoryTick(axisWidth: number, tickFormatter?: (value: unknown, index: number) => string) {
+  return function CategoryTick(props: {
+    x?: number
+    y?: number
+    index?: number
+    textAnchor?: "inherit" | "end" | "middle" | "start"
+    payload?: { value?: unknown }
+  }) {
+    const value = props.payload?.value ?? ""
+    const full = tickFormatter ? String(tickFormatter(value, props.index ?? 0)) : String(value)
     return (
       <text
         x={props.x}
         y={props.y}
         dy={4}
-        textAnchor="end"
+        textAnchor={props.textAnchor ?? "end"}
         fontSize={CATEGORY_TICK_FONT_SIZE}
         fill="var(--muted-foreground)"
         data-testid="category-axis-tick"

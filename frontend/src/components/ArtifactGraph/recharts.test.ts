@@ -199,4 +199,17 @@ describe("horizontal bar category axis", () => {
     expect(truncated.endsWith("\u2026")).toBe(true)
     expect(truncated.length).toBeLessThan(long.length)
   })
+
+  it("applies an author tickFormatter to category labels", () => {
+    const rendered = buildRechartsTree({
+      type: "BarChart",
+      props: { layout: "vertical" },
+      children: [{ type: "YAxis", props: { type: "category", dataKey: "name", tickFormatter: (v: unknown) => `<${String(v)}>` } }],
+    }, [{ name: "Clinic" }])
+    const axis = React.Children.toArray((rendered.props as { children: React.ReactNode }).children)[0] as React.ReactElement<{
+      tick: (props: { payload: { value: string } }) => React.ReactElement<{ children: React.ReactNode[] }>
+    }>
+    const tick = axis.props.tick({ payload: { value: "Clinic" } })
+    expect(tick.props.children).toContain("<Clinic>")
+  })
 })
