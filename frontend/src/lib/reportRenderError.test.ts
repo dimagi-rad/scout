@@ -46,6 +46,16 @@ describe("reportRenderError", () => {
     expect(Sentry.captureException).toHaveBeenCalledTimes(21)
   })
 
+  it("reports the same error again when it recurs at a different stage", () => {
+    const crash = { source: "sandbox" as const, name: "TypeError", message: "boom", artifactId: "a" }
+    reportRenderError({ ...crash, stage: "React Render Error" })
+    reportRenderError({ ...crash, stage: "Uncaught Error" })
+
+    expect(Sentry.captureException).toHaveBeenCalledTimes(2)
+    expect(scope.setTag).toHaveBeenCalledWith("render_error_stage", "React Render Error")
+    expect(scope.setTag).toHaveBeenCalledWith("render_error_stage", "Uncaught Error")
+  })
+
   it("drops console breadcrumbs, which hold raw error text", () => {
     expect(dropConsoleBreadcrumb({ category: "console", message: 'bad "Alice"' })).toBeNull()
     const navigation = { category: "navigation", message: "/artifacts/artifact-one" }

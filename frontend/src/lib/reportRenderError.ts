@@ -63,8 +63,14 @@ export function dropConsoleBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null
  */
 export function reportRenderError(report: RenderErrorReport): void {
   // Keyed on the raw text so crashes that redact to the same message stay distinct.
-  const key = [report.source, report.artifactId, report.artifactVersion, report.name, report.message]
-    .join("|")
+  const key = [
+    report.source,
+    report.artifactId,
+    report.artifactVersion,
+    report.stage,
+    report.name,
+    report.message,
+  ].join("|")
   const count = reportCounts.get(report.source) ?? 0
   if (reported.has(key) || count >= MAX_REPORTS_PER_SOURCE) return
   reported.add(key)
