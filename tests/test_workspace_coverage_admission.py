@@ -372,7 +372,9 @@ class TestInviteResolution:
         assert WorkspaceInvite.objects.get(pk=stale.pk).status == WorkspaceInviteStatus.REVOKED
         assert not WorkspaceMembership.objects.filter(workspace=ws, user=invitee).exists()
 
-    def test_login_does_not_revive_an_invite_revoked_mid_login(self, user, t1, t2, monkeypatch):
+    def test_login_does_not_revive_an_invite_revoked_mid_login(
+        self, user, t1, t2, monkeypatch, mocker
+    ):
         """#561 G4: an uncovered invitee's invite moves to awaiting access only if live."""
         ws = _workspace(user, t1, t2)
         invitee = User.objects.create_user(email="inv@example.com", password="pass")
@@ -385,10 +387,12 @@ class TestInviteResolution:
             return accept(stale, who)
 
         monkeypatch.setattr(signals, "accept_invite_if_covered", revoke_then_accept)
+        notify = mocker.patch.object(signals, "notify_awaiting_access")
 
         resolve_pending_invites_on_login(invitee)
 
         assert WorkspaceInvite.objects.get(pk=invite.pk).status == WorkspaceInviteStatus.REVOKED
+        notify.assert_not_called()
 
     def test_login_does_not_expire_an_invite_revoked_mid_login(self, user, t1, monkeypatch):
         """#561 G4: a revoke between the login loop's read and its expiry write stands."""
