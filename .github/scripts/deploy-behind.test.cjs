@@ -146,9 +146,9 @@ test('being behind opens the deploy-failure issue with a re-run instruction', as
   assert.deepEqual(created.labels, [LABEL]);
   assert.match(created.body, /Production is behind main: main is at `hhhhhhhhhhhh`, production runs `llllllllllll`/);
   assert.match(created.body, /ahead for 90 minutes/);
-  assert.match(created.body, /ended `cancelled`: https:\/\/github.com\/o\/r\/actions\/runs\/12/);
+  assert.ok(created.body.includes('ended `cancelled`: https://github.com/o/r/actions/runs/12'), created.body);
   assert.match(created.body, /Re-run the latest deploy/);
-  assert.match(created.body, /https:\/\/github.com\/o\/r\/actions\/workflows\/deploy.yml/);
+  assert.ok(created.body.includes('https://github.com/o/r/actions/workflows/deploy.yml'), created.body);
   assert.match(core.out.warnings[0], /opened #7/);
 });
 
@@ -187,3 +187,29 @@ for (const [label, runs] of [
     assert.deepEqual(names(github).filter((n) => !['branch', 'runs', 'jobs'].includes(n)), []);
   });
 }
+
+test('a run parked outside the queue does not hold the alert back', async () => {
+  const github = fakeGithub({
+    runs: [run(13, 113, HEAD, 'action_required'), ...strandedRuns()], deployed: strandedDeploys,
+  });
+  assert.equal((await assess(github)).state, 'behind');
+});
+
+test('a head run that failed was already reported by deploy.yml', async () => {
+  const runs = [
+    run(12, 112, HEAD, 'completed', { conclusion: 'failure', created_at: minutesAgo(90) }),
+    run(10, 110, LIVE, 'completed'),
+  ];
+  const github = fakeGithub({ runs, deployed: { 12: 'failure' }, issues: [{ number: 5 }] });
+  const lag = await check(github);
+  assert.equal(lag.state, 'reported');
+  assert.equal(lag.latest.id, 12);
+  assert.deepEqual(names(github).filter((n) => !['branch', 'runs', 'jobs'].includes(n)), []);
+});
+
+test('no recent deploy says the live commit is unknown, not that a guard is off', async () => {
+  const core = fakeCore();
+  const github = fakeGithub({ runs: strandedRuns(), deployed: { ...strandedDeploys, 10: 'failure' } });
+  await assessDeployLag({ github, context, core, workflowId, jobName, now: NOW, thresholdMinutes: 45 });
+  assert.match(core.out.warnings[0], /the commit production runs is unknown\.$/);
+});

@@ -31,7 +31,9 @@ async function findSupersedingRun({ github, context, runs }) {
 // The newest run whose deploy job succeeded is what production runs now. Run
 // numbers, not timestamps: re-running one job of an old run bumps its updated_at,
 // and the concurrency group already makes deploys land in run-number order.
-async function findLiveRun({ github, context, core, runs, jobName }) {
+async function findLiveRun({
+  github, context, core, runs, jobName, consequence = 'the rollback guard is inactive for this run',
+}) {
   const finished = runs
     // Any conclusion: a run can deploy and still end failed, cancelled or timed out.
     .filter((run) => run.id !== context.runId && run.status === 'completed')
@@ -43,7 +45,7 @@ async function findLiveRun({ github, context, core, runs, jobName }) {
     if (data.jobs.some((job) => job.name === jobName && job.conclusion === 'success')) return run;
   }
   if (finished.length) {
-    core.warning(`No successful '${jobName}' job in the last ${Math.min(finished.length, MAX_JOB_LOOKUPS)} finished runs; the rollback guard is inactive for this run.`);
+    core.warning(`No successful '${jobName}' job in the last ${Math.min(finished.length, MAX_JOB_LOOKUPS)} finished runs; ${consequence}.`);
   }
   return null;
 }
@@ -85,4 +87,4 @@ async function checkSuperseded({ github, context, core, workflowId, jobName }) {
   return reason;
 }
 
-module.exports = { findLiveRun, findReasonToSkip, checkSuperseded };
+module.exports = { WAITING, findLiveRun, findReasonToSkip, checkSuperseded };

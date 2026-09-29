@@ -5,7 +5,7 @@
 // This only alerts. It never dispatches a deploy: a run is usually cancelled on
 // purpose (host trouble, a held migration), and an unattended redeploy drains
 // workers on a host shared with staging.
-const { findLiveRun } = require('./deploy-supersede.cjs');
+const { WAITING, findLiveRun } = require('./deploy-supersede.cjs');
 const { LABEL, TITLE, findOpenIssue, ensureLabel } = require('./deploy-failure-issue.cjs');
 
 const THRESHOLD_MINUTES = 45;
@@ -27,22 +27,29 @@ async function assessDeployLag({ github, context, core, workflowId, jobName, now
   });
   const runs = data.workflow_runs;
 
-  const active = runs.find((run) => run.status !== 'completed');
+  // Explicit states, as in deploy-supersede.cjs: a run parked in e.g.
+  // `action_required` never deploys and must not silence the alert.
+  const active = runs.find((run) => WAITING.has(run.status) || run.status === 'in_progress');
   if (active) return { state: 'deploying', head, run: active };
 
-  const live = await findLiveRun({ github, context, core, runs, jobName });
+  const live = await findLiveRun({
+    github, context, core, runs, jobName, consequence: 'the commit production runs is unknown',
+  });
   if (live && live.head_sha === head) return { state: 'current', head, live };
 
   const headRuns = runs
     .filter((run) => run.head_sha === head)
     .sort((a, b) => b.run_number - a.run_number);
+  const latest = headRuns[0] || null;
+  // deploy.yml's own `report` job already filed a failed test or deploy stage.
+  if (latest && latest.conclusion === 'failure') return { state: 'reported', head, live, latest };
   const since = behindSince({ headRuns, commitDate: branch.commit.commit.committer.date });
   const minutes = Math.floor((now - since) / 60000);
   const state = minutes >= thresholdMinutes ? 'behind' : 'waiting';
-  return { state, head, live, latest: headRuns[0] || null, minutes };
+  return { state, head, live, latest, minutes };
 }
 
-function describeLag({ context, env, lag }) {
+function describeLag({ context, env, workflowId, lag }) {
   const repoUrl = `${env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}`;
   const liveText = lag.live
     ? `\`${lag.live.head_sha.slice(0, 12)}\` (${lag.live.html_url})`
@@ -56,8 +63,8 @@ function describeLag({ context, env, lag }) {
     `Main has been ahead for ${lag.minutes} minutes and no production deploy is queued or running.`,
     latestText,
     '',
-    `Re-run the latest deploy: run "Deploy Scout (Production)" on \`main\` from ${repoUrl}/actions/workflows/deploy.yml.`,
-    'This usually means a newer run that older runs skipped for was cancelled, or failed before deploying.',
+    `Re-run the latest deploy: run the production deploy workflow on \`main\` from ${repoUrl}/actions/workflows/${workflowId}.`,
+    'Re-running an older run ships only that run\'s commit.',
   ].join('\n');
 }
 
@@ -78,7 +85,7 @@ async function checkDeployLag({
     core.info(`Production deploy state: ${lag.state} (main at ${lag.head.slice(0, 12)}).`);
     return lag;
   }
-  const body = describeLag({ context, env, lag });
+  const body = describeLag({ context, env, workflowId, lag });
   const existing = await findOpenIssue({ github, context });
   if (existing) {
     if (await alreadyReported({ github, context, issue: existing, head: lag.head })) {
