@@ -4,6 +4,9 @@ Comprehensive tests for Phase 3 (Frontend & Artifacts) of the Scout data agent p
 Tests artifact models, views, access control and versioning.
 """
 
+import json
+import shutil
+import subprocess
 import uuid
 
 import pytest
@@ -385,6 +388,41 @@ class TestArtifactSandboxView:
         assert "window.addEventListener('error'" in content
         assert "window.addEventListener('unhandledrejection'" in content
         assert "error: { title, message, details, name }" in content
+
+    def test_sandbox_reports_non_error_rejections_without_their_value(self):
+        """`Promise.reject("query timed out")` must reach Sentry, but a rejected row must not.
+
+        Runs the real listener from the template under node with a stubbed window.
+        """
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        start = SANDBOX_HTML_TEMPLATE.index("window.addEventListener('unhandledrejection'")
+        end = SANDBOX_HTML_TEMPLATE.index("\n        });", start) + len("\n        });")
+        harness = (
+            "const handlers = {}; const calls = [];\n"
+            "const window = { addEventListener: (type, fn) => { handlers[type] = fn } };\n"
+            "const ArtifactRenderer = { notifyParentOfError: (...args) => calls.push(args) };\n"
+            f"{SANDBOX_HTML_TEMPLATE[start:end]}\n"
+            "const reasons = ['query timed out', { rows: [{ patient: 'Alice' }] }, 42, null,"
+            " new TypeError('bad')];\n"
+            "for (const reason of reasons) handlers.unhandledrejection({ reason });\n"
+            "const stackless = calls.map(([t, m, s, n]) => [t, m, s && 'stack', n]);\n"
+            "console.log(JSON.stringify(stackless));\n"
+        )
+
+        result = subprocess.run(  # noqa: S603 - node from PATH runs a fixed harness
+            [node, "-e", harness], capture_output=True, text=True, check=True, timeout=30
+        )
+
+        calls = json.loads(result.stdout)
+        assert calls == [
+            ["Unhandled Rejection", "query timed out", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "Non-Error rejection (object)", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "Non-Error rejection (number)", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "Non-Error rejection (null)", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "bad", "stack", "TypeError"],
+        ]
 
     def test_sandbox_never_fetches_live_data_itself(
         self, authenticated_client, artifact, workspace

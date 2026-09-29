@@ -640,8 +640,18 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
         });
         window.addEventListener('unhandledrejection', (event) => {
             const reason = event.reason;
-            if (!(reason instanceof Error)) return;
-            ArtifactRenderer.notifyParentOfError('Unhandled Rejection', reason.message, reason.stack, reason.name);
+            if (reason instanceof Error) {
+                ArtifactRenderer.notifyParentOfError(
+                    'Unhandled Rejection', reason.message, reason.stack, reason.name);
+                return;
+            }
+            // A string is a thrown message, like an Error's. Any other value may
+            // be a row or result the artifact loaded, so only its type is sent.
+            const message = typeof reason === 'string'
+                ? reason
+                : `Non-Error rejection (${reason === null ? 'null' : typeof reason})`;
+            ArtifactRenderer.notifyParentOfError(
+                'Unhandled Rejection', message, null, 'UnhandledRejection');
         });
 
         // Initialize when DOM is ready
