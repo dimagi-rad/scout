@@ -539,12 +539,6 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     return result
 
 
-def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
-    """Return ``(workspace, WorkspaceMembership)`` if the user has access, else ``(None, None)``."""
-    result = resolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
-    return result.workspace, result.membership
-
-
 async def aresolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
     """Async: return ``(workspace, WorkspaceMembership)`` on access, else ``(None, None)``."""
     result = await aresolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
