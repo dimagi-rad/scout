@@ -40,22 +40,22 @@ from apps.users.token_encryption import (
     is_encrypted,
 )
 
+TOKEN_TABLE = SocialToken._meta.db_table
+
 
 def _store_raw(token_pk, **columns):
     """Write column values straight to the table, bypassing the ORM field."""
     assignments = ", ".join(f"{name} = %s" for name in columns)
     with db_connection.cursor() as cursor:
         cursor.execute(
-            f"UPDATE socialaccount_socialtoken SET {assignments} WHERE id = %s",
+            f"UPDATE {TOKEN_TABLE} SET {assignments} WHERE id = %s",
             [*columns.values(), token_pk],
         )
 
 
 def _raw(token_pk):
     with db_connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT token, token_secret FROM socialaccount_socialtoken WHERE id = %s", [token_pk]
-        )
+        cursor.execute(f"SELECT token, token_secret FROM {TOKEN_TABLE} WHERE id = %s", [token_pk])
         return cursor.fetchone()
 
 

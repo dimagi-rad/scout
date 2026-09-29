@@ -27,11 +27,12 @@ def historical_apps():
     return executor.loader.project_state([TARGET]).apps
 
 
+TOKEN_TABLE = SocialToken._meta.db_table
+
+
 def _raw(token_pk):
     with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT token, token_secret FROM socialaccount_socialtoken WHERE id = %s", [token_pk]
-        )
+        cursor.execute(f"SELECT token, token_secret FROM {TOKEN_TABLE} WHERE id = %s", [token_pk])
         return cursor.fetchone()
 
 
@@ -40,7 +41,7 @@ def _seed(user, uid, access, refresh):
     token = SocialToken.objects.create(account=account)
     with connection.cursor() as cursor:
         cursor.execute(
-            "UPDATE socialaccount_socialtoken SET token = %s, token_secret = %s WHERE id = %s",
+            f"UPDATE {TOKEN_TABLE} SET token = %s, token_secret = %s WHERE id = %s",
             [access, refresh, token.pk],
         )
     return token.pk
@@ -126,9 +127,12 @@ def test_reverse_restores_plaintext(historical_apps, mixed_rows):
 @pytest.mark.django_db
 def test_reverse_refuses_to_blank_undecryptable_rows(historical_apps, mixed_rows):
     migration.encrypt_tokens(historical_apps, None)
+    before = {pk: _raw(pk) for pk in mixed_rows.values()}
 
     with (
         override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()),
         pytest.raises(InvalidToken),
     ):
         migration.decrypt_tokens(historical_apps, None)
+
+    assert {pk: _raw(pk) for pk in mixed_rows.values()} == before

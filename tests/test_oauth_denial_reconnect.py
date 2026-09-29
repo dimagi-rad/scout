@@ -65,7 +65,7 @@ def test_existing_oauth_login_restores_after_new_token_is_stored(user, httpx_moc
     stored = SocialToken.objects.get(account=account)
     assert stored.token == "new"
     with db_connection.cursor() as cursor:
-        cursor.execute("SELECT token FROM socialaccount_socialtoken WHERE id = %s", [stored.pk])
+        cursor.execute(f"SELECT token FROM {SocialToken._meta.db_table} WHERE id = %s", [stored.pk])
         (stored_column,) = cursor.fetchone()
     assert stored_column.startswith(CIPHERTEXT_PREFIX)
     assert decrypt_token_value(stored_column) == "new"

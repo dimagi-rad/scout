@@ -3,6 +3,10 @@
 Historical models carry allauth's plain ``TextField``, so values read here are
 raw column contents and nothing is encrypted twice. Rows already carrying the
 ciphertext prefix are skipped, which makes both directions idempotent.
+
+Each batch commits on its own (``atomic = False``) so a batch's row locks are
+not held for the whole table rewrite; an interrupted run leaves a mixed table,
+which readers handle and a re-run finishes.
 """
 
 from django.db import migrations
@@ -59,6 +63,8 @@ def decrypt_tokens(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    atomic = False
+
     dependencies = [
         ("users", "0016_verification_attempt_tenant_scope"),
         ("socialaccount", "0006_alter_socialaccount_extra_data"),
