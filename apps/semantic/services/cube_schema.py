@@ -175,7 +175,13 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
             filename=filename,
             status=CubeSchema.Status.ACTIVE,
         ).exists()
-        if not serving_identical:
+        if serving_identical:
+            logger.warning(
+                "Revalidation of the serving Cube schema failed for workspace %s: %s",
+                workspace.id,
+                validation_diagnostics,
+            )
+        else:
             CubeSchema.objects.update_or_create(
                 workspace=workspace,
                 semantic_model=model,
