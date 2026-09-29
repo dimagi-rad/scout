@@ -17,10 +17,7 @@ from rest_framework.views import APIView
 
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
-from apps.users.services.credential_resolver import (
-    aiter_fresh_access_tokens,
-    aiter_social_tokens,
-)
+from apps.users.services.credential_resolver import aiter_social_tokens
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -102,12 +99,14 @@ async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
     ]
 
 
-async def _arefresh_target_for_workspace(target, providers, *, renew_tokens=True) -> bool:
+async def _arefresh_target_for_workspace(target, providers) -> bool:
     """Best-effort, bounded server-side refresh of *target*'s memberships for the
-    workspace's tenant providers, using the target's OWN (refresh-aware) token.
+    workspace's tenant providers, using the target's OWN tokens as they stand.
 
     This is what lets a manager add someone who was granted access upstream after
     the target's last Scout login — without the target manually reconnecting.
+    Tokens are never renewed here (see ``_aunexpired_access_tokens``), so a target
+    whose only token has expired is not picked up until they sign in again.
     Returns True if the target had a usable token for at least one provider (used
     to distinguish "no access upstream" from "needs to reconnect" in the error).
 
@@ -121,12 +120,7 @@ async def _arefresh_target_for_workspace(target, providers, *, renew_tokens=True
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
-        tokens = (
-            await aiter_fresh_access_tokens(target, provider)
-            if renew_tokens
-            else await _aunexpired_access_tokens(target, provider)
-        )
-        for account, token in tokens:
+        for account, token in await _aunexpired_access_tokens(target, provider):
             tried = True
             try:
                 await asyncio.wait_for(
@@ -167,7 +161,7 @@ async def _arefresh_members_for_provider(users, provider) -> bool:
 
     async def refresh(user):
         async with gate:
-            await _arefresh_target_for_workspace(user, [provider], renew_tokens=False)
+            await _arefresh_target_for_workspace(user, [provider])
 
     tasks = [asyncio.ensure_future(refresh(user)) for user in users]
     try:
@@ -738,9 +732,9 @@ class WorkspaceMemberListView(APIView):
         if gaps:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
-            # using their own token, then re-check — no manual reconnect needed.
+            # using their own unexpired token, then re-check.
             providers = sorted({t.provider for t in gaps})
-            async_to_sync(_arefresh_target_for_workspace)(target, providers, renew_tokens=False)
+            async_to_sync(_arefresh_target_for_workspace)(target, providers)
 
         # Every member must cover every source (#381), so a target still missing
         # one after the refresh gets an invite that awaits it rather than a hard

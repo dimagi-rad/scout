@@ -176,7 +176,7 @@ class TestSourceAdd:
         assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
         refresh.assert_called_once()
         assert refresh.call_args.args[1] == ["commcare"]
-        assert refresh.call_args.kwargs == {"renew_tokens": False}
+        assert refresh.call_args.kwargs == {}
 
     def test_member_refreshed_into_coverage_lets_the_add_through(self, client, user, t1, t2):
         ws = _workspace(user, t1)
@@ -263,7 +263,7 @@ class TestDirectAdd:
         assert not WorkspaceMembership.objects.filter(workspace=ws, user=target).exists()
         assert refresh.call_args.args[1] == ["commcare"]
         # The target's tokens are used as they are, never renewed on their behalf.
-        assert refresh.call_args.kwargs == {"renew_tokens": False}
+        assert refresh.call_args.kwargs == {}
 
     @pytest.mark.parametrize(
         ("strict", "expected"), [(False, "member"), (True, "invite_awaiting_access")]
