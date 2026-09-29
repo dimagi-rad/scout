@@ -40,6 +40,8 @@ Lists the workspace's data sources. Managers can add a source they can access th
 - **System prompt**: custom instructions added to the agent's system prompt for every conversation in this workspace. Only managers can edit it.
 - **Danger zone**: managers can delete the workspace and all its threads. This cannot be undone. Scout refuses if this is your last workspace covering one of its data sources (create another workspace for that source first), or if the workspace has other members and you have lost access to one of its sources.
 
+A manager who has lost access to one of the workspace's sources cannot rename it or edit the system prompt, and sees the prompt as hidden until they regain access.
+
 ## Roles
 
 Each member has one role per workspace. A user can have different roles in different workspaces.
