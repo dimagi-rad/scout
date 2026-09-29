@@ -59,6 +59,8 @@ describe("WorkspaceAddedNotice (#355)", () => {
     await userEvent.click(screen.getByTestId("workspace-added-notice-open-new"))
 
     expect(navigate).toHaveBeenCalledWith("/workspaces/malaria-study/new/chat")
+    // Selected before navigating, so the chat route never mounts with the old workspace's thread.
+    expect(useAppStore.getState().activeDomainId).toBe("new")
     expect(useAppStore.getState().addedDomainIds).toEqual([])
     expect(screen.getByTestId("workspace-added-notice")).toBeEmptyDOMElement()
   })

@@ -10,6 +10,8 @@ export function WorkspaceAddedNotice() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const addedDomainIds = useAppStore((s) => s.addedDomainIds)
   const dismissAddedDomain = useAppStore((s) => s.domainActions.dismissAddedDomain)
+  const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const newThread = useAppStore((s) => s.uiActions.newThread)
 
   const added = addedDomainIds
     .filter((id) => id !== activeDomainId)
@@ -17,9 +19,10 @@ export function WorkspaceAddedNotice() {
     .filter((d) => d !== undefined)
 
   // Stays mounted while empty: screen readers skip a live region inserted along with its content.
+  // Sits above the full-width OfflineBanner (z-50) rather than over it, so neither hides the other.
   return (
     <div
-      className="fixed bottom-4 right-4 z-40 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
+      className="fixed bottom-16 right-4 z-40 flex max-h-[calc(100vh-6rem)] w-80 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto"
       role="status"
       aria-live="polite"
       data-testid="workspace-added-notice"
@@ -41,7 +44,8 @@ export function WorkspaceAddedNotice() {
               size="sm"
               className="h-auto p-0"
               onClick={() => {
-                dismissAddedDomain(workspace.id)
+                setActiveDomain(workspace.id)
+                newThread()
                 navigate(`${workspacePath(workspace)}/chat`)
               }}
               data-testid={`workspace-added-notice-open-${workspace.id}`}
