@@ -339,4 +339,5 @@ def test_list_display_name_labels_by_source_count(client, user, tenant_count):
         }[tenant_count]
     )
     assert {t["id"] for t in entry["tenants"]} == {str(t.pk) for t in tenants}
-    assert entry["has_access"] == (not tenants)
+    # With sources the user can't use, or none at all (#381), there's no access.
+    assert entry["has_access"] is False
