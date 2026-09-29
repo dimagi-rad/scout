@@ -137,17 +137,22 @@ async def _claim_with_cancellation_cleanup(
 
 async def _load_claim_token(claim):
     token_id, refresh_token, app_id = claim.request.token_snapshot
-    return (
+    token = (
         await SocialToken.objects.filter(
             pk=token_id,
             account_id=int(claim.observation.account_identity),
             app_id=app_id,
-            token=claim.request.credential,
-            token_secret=refresh_token,
         )
         .select_related("app")
         .afirst()
     )
+    if (
+        token is None
+        or token.token != claim.request.credential
+        or token.token_secret != refresh_token
+    ):
+        return None
+    return token
 
 
 async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
