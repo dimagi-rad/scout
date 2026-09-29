@@ -8,7 +8,6 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.semantic.services.catalog import _tenant_metadata_for_schema
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import SchemaState, TenantMetadata, TenantSchema, WorkspaceTenant
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
@@ -37,14 +36,12 @@ def _member(tenant, name, *, archived=False):
 def _every_surface(tenant):
     """Read the tenant's metadata through each surface; return their ``owner`` values.
 
-    The sync service backs the DRF data dictionary, the async one backs MCP
-    ``describe_table``/``get_metadata`` and the async catalog, and
-    ``_tenant_metadata_for_schema`` is the semantic catalog's sync entry point.
+    The sync service backs the DRF data dictionary; the async one backs MCP
+    ``describe_table``/``get_metadata`` and the async catalog.
     """
     reads = [
         get_tenant_metadata(tenant.id),
         async_to_sync(aget_tenant_metadata)(tenant.id),
-        _tenant_metadata_for_schema(SCHEMA_NAME),
     ]
     return [None if md is None else md.metadata["owner"] for md in reads]
 
@@ -57,7 +54,7 @@ def test_every_surface_reads_the_tenants_one_row(md_tenant):
         tenant=md_tenant, metadata={"owner": "tenant"}, discovered_at=timezone.now()
     )
 
-    assert _every_surface(md_tenant) == ["tenant"] * 3
+    assert _every_surface(md_tenant) == ["tenant"] * 2
 
 
 @pytest.mark.django_db
@@ -71,7 +68,7 @@ def test_metadata_outlives_the_member_who_discovered_it(md_tenant):
 
     discoverer.delete()
 
-    assert _every_surface(md_tenant) == ["tenant"] * 3
+    assert _every_surface(md_tenant) == ["tenant"] * 2
 
 
 @pytest.mark.django_db
@@ -82,12 +79,12 @@ def test_revoking_last_membership_hides_but_retains_metadata(md_tenant):
     member.archived_at = timezone.now()
     member.save(update_fields=["archived_at"])
 
-    assert _every_surface(md_tenant) == [None] * 3
+    assert _every_surface(md_tenant) == [None] * 2
     assert TenantMetadata.objects.get(tenant=md_tenant).metadata == {"owner": "tenant"}
 
     member.archived_at = None
     member.save(update_fields=["archived_at"])
-    assert _every_surface(md_tenant) == ["tenant"] * 3
+    assert _every_surface(md_tenant) == ["tenant"] * 2
 
 
 @pytest.mark.django_db
@@ -95,7 +92,7 @@ def test_deleting_last_membership_retains_hidden_storage(md_tenant):
     member = _member(md_tenant, "last")
     TenantMetadata.objects.create(tenant=md_tenant, metadata={"owner": "tenant"})
     member.delete()
-    assert _every_surface(md_tenant) == [None] * 3
+    assert _every_surface(md_tenant) == [None] * 2
     assert TenantMetadata.objects.filter(tenant=md_tenant).exists()
 
 
@@ -149,4 +146,4 @@ def test_workspace_access_via_second_tenant_does_not_expose_revoked_first(
 def test_undiscovered_tenant_reads_as_absent(md_tenant):
     _member(md_tenant, "member")
 
-    assert _every_surface(md_tenant) == [None] * 3
+    assert _every_surface(md_tenant) == [None] * 2
