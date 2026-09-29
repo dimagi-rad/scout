@@ -707,15 +707,17 @@ class RefreshStatusView(APIView):
         )
 
 
-# Every state a source can report, most severe first.
+# Every state a source can report, most severe first. "unavailable" (never
+# loaded, e.g. just added) ranks last: it describes only that source, which
+# tenants[] reports, so it must not mask the state of sources that have data.
 _AGGREGATE_STATE_ORDER = (
     SchemaState.FAILED,
     SchemaState.PROVISIONING,
     SchemaState.MATERIALIZING,
-    "unavailable",
     SchemaState.TEARDOWN,
     SchemaState.EXPIRED,
     SchemaState.ACTIVE,
+    "unavailable",
 )
 
 
