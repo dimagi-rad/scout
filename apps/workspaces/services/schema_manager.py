@@ -152,13 +152,15 @@ def fail_view_schema_if_unbuildable(workspace) -> bool:
     succeeded is never overwritten with FAILED. A retired row keeps its lifecycle
     state (see SchemaManager._save_build_failure).
     """
-    existing = WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace).first()
+    # iterator() bypasses a prefetch cache, which would still hold a source the
+    # caller just removed in this transaction.
     tenants = sorted(
-        workspace.tenants.all(),
+        workspace.tenants.all().iterator(),
         key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
     )
     if len(tenants) < 2:
         return True
+    existing = WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace).first()
     if _served_sources([t.id for t in tenants]).exists():
         return False
     failure = {
