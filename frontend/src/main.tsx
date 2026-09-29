@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 import * as Sentry from "@sentry/react"
 import "./index.css"
 import App from "./App"
+import { dropConsoleBreadcrumb } from "./lib/reportRenderError"
 
 const sentryDsn = import.meta.env.VITE_SENTRY_DSN as string | undefined
 if (sentryDsn) {
@@ -12,6 +13,7 @@ if (sentryDsn) {
       (import.meta.env.VITE_SENTRY_ENVIRONMENT as string | undefined) ?? import.meta.env.MODE,
     release: import.meta.env.VITE_SENTRY_RELEASE as string | undefined,
     tracesSampleRate: Number(import.meta.env.VITE_SENTRY_TRACES_SAMPLE_RATE ?? 0),
+    beforeBreadcrumb: dropConsoleBreadcrumb,
   })
 }
 

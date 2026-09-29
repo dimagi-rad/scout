@@ -436,7 +436,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                             this.showError('Unknown artifact type', `Type "${artifact.type}" is not supported.`);
                     }
                 } catch (error) {
-                    this.showError('Render Error', error.message, error.stack);
+                    this.showError('Render Error', error.message, error.stack, error.name);
                 }
             },
 
@@ -580,6 +580,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         class _ErrorBoundary extends React.Component {
                             constructor(props) { super(props); this.state = { error: null }; }
                             static getDerivedStateFromError(error) { return { error }; }
+                            componentDidCatch(error) {
+                                ArtifactRenderer.notifyParentOfError('React Render Error', error.message, error.stack, error.name);
+                            }
                             render() {
                                 if (this.state.error) {
                                     return React.createElement('div', { className: 'error-state' },
@@ -598,7 +601,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         this.showError('Component Not Found', 'Could not find a valid React component to render. Make sure your code exports a component or defines App, Component, Chart, or Visualization.');
                     }
                 } catch (error) {
-                    this.showError('React Render Error', error.message, error.stack);
+                    this.showError('React Render Error', error.message, error.stack, error.name);
                 }
             },
 
@@ -648,7 +651,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         </article>
                     `;
                 } catch (error) {
-                    this.showError('Markdown Render Error', error.message);
+                    this.showError('Markdown Render Error', error.message, null, error.name);
                 }
             },
 
@@ -668,7 +671,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         this.container.innerHTML = code;
                     }
                 } catch (error) {
-                    this.showError('SVG Render Error', error.message, error.stack);
+                    this.showError('SVG Render Error', error.message, error.stack, error.name);
                 }
             },
 
@@ -739,7 +742,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 }
             },
 
-            showError(title, message, details = null) {
+            showError(title, message, details = null, name = null) {
                 this.container.innerHTML = `
                     <div class="error-state">
                         <svg class="error-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -751,8 +754,12 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         ${details ? `<div class="error-details">${this.escapeHtml(details)}</div>` : ''}
                     </div>
                 `;
+                this.notifyParentOfError(title, message, details, name);
+            },
 
-                // Notify parent of error (if embedded in iframe).
+            // The parent reports these to Sentry, so they carry error text only,
+            // never artifact data.
+            notifyParentOfError(title, message, details = null, name = null) {
                 // targetOrigin is '*' rather than the document origin, for the
                 // same reason as artifact-query-data above: this opaque-origin
                 // sandbox frame has window.location.origin equal to the string
@@ -762,7 +769,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 try {
                     window.parent.postMessage({
                         type: 'artifact-error',
-                        error: { title, message, details }
+                        error: { title, message, details, name }
                     }, '*');
                 } catch (e) { /* ignore if not in iframe */ }
             },
@@ -773,6 +780,19 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 return div.innerHTML;
             }
         };
+
+        // Generated code can also fail outside render (event handlers, timers,
+        // promises), where neither the React boundary nor showError sees it.
+        window.addEventListener('error', (event) => {
+            const error = event.error;
+            ArtifactRenderer.notifyParentOfError(
+                'Uncaught Error', error?.message ?? event.message, error?.stack ?? null, error?.name ?? null);
+        });
+        window.addEventListener('unhandledrejection', (event) => {
+            const reason = event.reason;
+            if (!(reason instanceof Error)) return;
+            ArtifactRenderer.notifyParentOfError('Unhandled Rejection', reason.message, reason.stack, reason.name);
+        });
 
         // Initialize when DOM is ready
         if (document.readyState === 'loading') {
