@@ -3,8 +3,8 @@
 Two multi-tenant workspaces share tenant S. Workspace A reloads S into a
 candidate. While that load runs, both workspaces still read v1; after A's load
 publishes, A reads v2 immediately and B reads v1 until its own rebuild, and the
-old schema is only retired once nothing reads it. A retirement whose drop fails
-and reverts puts the siblings it moved back onto the schema. Only the provider fetch
+old schema is only retired once nothing reads it. When a retirement's drop fails
+and reverts the schema, the siblings it moved off are put back onto it. Only the provider fetch
 (which writes the sentinel into the candidate) and the Cube build are stubbed.
 """
 

@@ -2468,7 +2468,7 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
         return
     except Exception:
         if schema.state == SchemaState.ACTIVE:
-            # The failed drop reverted the row to ACTIVE, but siblings rebuilt
+            # The failed drop reverted the row to ACTIVE, but siblings that rebuilt
             # while it was TEARDOWN left this tenant out of their views. Enqueued
             # here because T has been released by now.
             await _rebuild_reverted_dependents(schema)
@@ -2481,6 +2481,7 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
 
 
 async def _rebuild_reverted_dependents(schema) -> None:
+    """Put a reverted schema's tenant back into its dependents' views."""
     try:
         await _rebuild_dependent_view_schemas([schema.tenant_id])
     except Exception:
