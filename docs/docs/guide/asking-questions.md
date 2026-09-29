@@ -37,14 +37,13 @@ You can ask for specific formats:
 
 ## What the agent knows
 
-The agent has access to:
+In every conversation the agent has:
 
-- **Dataset browser** -- semantic model documentation listing visible datasets, measures, dimensions, and time dimensions.
-- **Knowledge entries** -- markdown documents covering metric definitions, business rules, and other institutional knowledge.
-- **Table knowledge** -- human-written descriptions of what source tables mean, use cases, and data quality notes.
-- **Agent learnings** -- corrections the agent has discovered from previous errors.
+- **The semantic model** -- the workspace's datasets, measures, dimensions, and relationships, which you can browse on the [Datasets](datasets.md) page.
+- **Workspace instructions** -- the workspace's system prompt, set by a manager.
+- **Knowledge** -- the workspace's knowledge entries, table notes, and learnings the agent has saved from earlier corrections. See [Knowledge](../admin/knowledge.md).
 
-The more knowledge you add to a project, the better the agent's answers become.
+The agent prefers semantic queries. When a question needs something the model can't express, such as reading free-text columns, it can fall back to a read-only SQL query and should say that it did.
 
 ## Topics in Open Chat Studio transcripts
 
@@ -70,7 +69,8 @@ model change and the chart:
 
 The actual source table and column names must be discovered in your workspace;
 multi-chatbot workspaces may use prefixed names. Saving a dataset requires a
-read-write or manage workspace role. The Data Model canvas owns this change;
+Read-Write or Manager workspace role. The change is staged on the chat's Canvas
+and saved to the data model (see [Datasets](datasets.md#custom-datasets-and-fields));
 the Artifact Manager uses the saved semantic fields to create and validate the
 chart. A request for a chart alone does not authorize a model change.
 
@@ -82,17 +82,19 @@ topic extraction on every refresh.
 
 ## Slash commands
 
-Type `/` at the start of the chat input to see available slash commands. An autocomplete menu appears as you type -- use arrow keys to navigate and Tab or Enter to select.
+Type `/` at the start of the chat input to see the available slash commands. The menu filters as you type; use the arrow keys to move and Tab or Enter to complete the command. Add any extra instructions after it, then press Enter to send. Scout expands the command into a prompt for the agent.
 
 | Command | Description |
 |---------|-------------|
-| `/save-recipe` | Save the current conversation as a reusable recipe. Optionally add instructions after the command, e.g. `/save-recipe make the date range a variable`. |
+| `/save-recipe` | Save the current conversation as a reusable [recipe](recipes.md). Optionally add instructions, e.g. `/save-recipe make the date range a variable`. |
+| `/refresh-data` | Load the latest data from the workspace's connected accounts. The load runs in the background; the agent reports that it has started, or that a load is already running. |
 
-After selecting a command, press Enter to execute it. The command is translated into a prompt for the agent behind the scenes.
+Both commands need the **Read-Write** or **Manager** workspace role and are hidden from **Read** members.
 
 ## Limitations
 
-- The agent can only run **SELECT** queries. It cannot insert, update, or delete data.
-- Results are limited to a configurable maximum number of rows (default: 500).
-- Queries have a timeout (default: 30 seconds).
-- Some PostgreSQL functions are blocked for security reasons (file access, remote connections, etc.).
+- The agent cannot change your source data. Semantic queries are read-only, and SQL queries must be a single `SELECT` that runs under a read-only database role.
+- SQL queries can only read the workspace's own schemas, not system catalogs, and can only call functions on an allowlist of analytics functions. File access, remote connections, and similar functions are blocked.
+- Semantic queries return 100 rows by default and at most 500. SQL queries return at most 500 rows. The agent is told when results are truncated.
+- Database queries time out after 30 seconds. A semantic query can take up to about a minute before failing, because Cube adds compile and polling time.
+- Each user can send up to 20 chat messages per minute.

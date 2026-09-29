@@ -14,8 +14,19 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.status import serving_excluded_tenant_ids
+from apps.workspaces.services.status import SYNCED_RUN_STATES, serving_excluded_tenant_ids
 from apps.workspaces.services.tenant_coverage import parse_coverage
+
+
+def synced_runs():
+    """Runs whose data counts as the workspace's last sync, newest first.
+
+    ``completed_at`` must be set: Postgres sorts NULLs first under DESC, so one
+    synced run without a timestamp would otherwise shadow every real one.
+    """
+    return MaterializationRun.objects.filter(
+        state__in=SYNCED_RUN_STATES, completed_at__isnull=False
+    ).order_by("-completed_at")
 
 
 async def included_tenant_snapshot_state(workspace, tenant_coverage) -> str:

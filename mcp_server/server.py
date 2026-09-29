@@ -84,7 +84,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     aresolve_pipeline_config,
 )
-from apps.workspaces.services.query_state import workspace_query_surface
+from apps.workspaces.services.query_state import synced_runs, workspace_query_surface
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import coverage_complete
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
@@ -1393,13 +1393,7 @@ async def cancel_materialization(
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
-        in_progress = {
-            MaterializationRun.RunState.STARTED,
-            MaterializationRun.RunState.DISCOVERING,
-            MaterializationRun.RunState.LOADING,
-            MaterializationRun.RunState.TRANSFORMING,
-        }
-        if run.state not in in_progress:
+        if run.state not in MaterializationRun.ACTIVE_STATES:
             tc["result"] = error_response(
                 VALIDATION_ERROR,
                 f"Run '{run_id}' is not in progress (state: {run.state})",
@@ -1818,6 +1812,14 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tc["result"] = not_provisioned
             return tc["result"]
 
+        synced_at = (
+            await synced_runs()
+            .filter(tenant_schema__tenant__workspace_tenants__workspace=workspace)
+            .values_list("completed_at", flat=True)
+            .afirst()
+        )
+        last_materialized_at = synced_at.isoformat() if synced_at else None
+
         if tenant_count == 1:
             tenant = await workspace.tenants.afirst()
             ts = await TenantSchema.objects.filter(
@@ -1841,11 +1843,8 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 .afirst()
             )
 
-            last_materialized_at = None
             tables = []
             if last_run:
-                if last_run.completed_at:
-                    last_materialized_at = last_run.completed_at.isoformat()
                 # Go through the catalog rather than indexing ``result`` here.
                 # The keys this used to read (``tables``, ``table``,
                 # ``rows_loaded``) are the pre-#12 single-table result shape;
@@ -1902,22 +1901,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 return tc["result"]
             tc["result"] = not_provisioned
             return tc["result"]
-
-        tenant_ids = [t.id async for t in workspace.tenants.all()]
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema__tenant_id__in=tenant_ids,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
-        last_materialized_at = None
-        if last_run and last_run.completed_at:
-            last_materialized_at = last_run.completed_at.isoformat()
 
         # Authorized at the top of this tool; do not pay for the check twice.
         ctx = await _resolve_mcp_context(workspace_id, user_id="")
