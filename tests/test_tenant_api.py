@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.test import Client
+from django.utils import timezone
 
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
@@ -85,6 +86,34 @@ class TestTenantListAPI:
         data = response.json()
         assert len(data) == 1
         assert data[0]["tenant_id"] == "dimagi"
+
+    def test_list_orders_by_name_case_insensitively_then_id(self, user):
+        # Recently selected and upper-case names must not jump the queue (#357).
+        selected = _make_membership(user, external_id="a", canonical_name="alpha")
+        selected.last_selected_at = timezone.now()
+        selected.save(update_fields=["last_selected_at"])
+        upper = _make_membership(user, external_id="c", canonical_name="Charlie")
+        lower = _make_membership(user, external_id="b", canonical_name="bravo")
+        twins = sorted(
+            [
+                _make_membership(user, external_id="d1", canonical_name="Delta"),
+                _make_membership(user, external_id="d2", canonical_name="Delta", provider="ocs"),
+            ],
+            key=lambda tm: tm.id,
+        )
+
+        client = Client()
+        client.force_login(user)
+        response = client.get("/api/auth/tenants/")
+
+        assert response.status_code == 200
+        assert [t["id"] for t in response.json()] == [
+            str(selected.id),
+            str(lower.id),
+            str(upper.id),
+            str(twins[0].id),
+            str(twins[1].id),
+        ]
 
     def test_unauthenticated(self):
         client = Client()

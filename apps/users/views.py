@@ -9,6 +9,7 @@ from asgiref.sync import sync_to_async
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models.functions import Lower
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
@@ -133,9 +134,12 @@ async def tenant_list_view(request):
     await _arefresh_all_identities(user)
 
     memberships = []
-    async for tm in TenantMembership.objects.filter(
-        user=user, archived_at__isnull=True
-    ).select_related("tenant"):
+    # Not Meta.ordering: -last_selected_at sorts never-selected (NULL) rows first (#357).
+    async for tm in (
+        TenantMembership.objects.filter(user=user, archived_at__isnull=True)
+        .select_related("tenant")
+        .order_by(Lower("tenant__canonical_name"), "id")
+    ):
         memberships.append(
             {
                 "id": str(tm.id),
