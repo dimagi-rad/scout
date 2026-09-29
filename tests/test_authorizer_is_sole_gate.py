@@ -73,7 +73,7 @@ def test_workspace_access_resolved_only_in_authorizer():
             violations.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
     assert not violations, (
         "Workspace access resolved outside apps/workspaces/access.py. Route these "
-        "through resolve_workspace_access / aresolve_workspace_access, or mark a "
+        "through resolve_workspace_access_ex / aresolve_workspace_access_ex, or mark a "
         "genuine non-auth use with `# authz-exempt`:\n  " + "\n  ".join(violations)
     )
 

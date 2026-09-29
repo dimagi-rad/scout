@@ -92,25 +92,18 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
     return dangling
 
 
-async def _resolve_workspace_and_membership(user, workspace_id):
-    """Resolve workspace access for a user.
+async def _resolve_chat_access(user, workspace_id):
+    """Resolve workspace access plus the tenant flags the chat callers need.
 
     Access (WorkspaceMembership AND coverage of every tenant) is decided by the single
-    authorizer; this only computes the tenant_membership / multi-tenant flags the
-    chat callers need on top of that.
+    authorizer. The full ``WorkspaceAccess`` is returned so a denial can be explained
+    without resolving (and verifying upstream) again.
 
-    Returns (workspace, tenant_membership, is_multi_tenant):
-    - (None, None, False): no access (not a member, or a tenant not covered)
-    - (workspace, None, True): multi-tenant workspace (access already verified)
-    - (workspace, tm, False): single-tenant workspace with the live TenantMembership
+    Returns (access, tenant_membership, is_multi_tenant):
+    - (access, None, False): no access (``access.workspace`` is None), or no tenant
+    - (access, None, True): multi-tenant workspace (access already verified)
+    - (access, tm, False): single-tenant workspace with the live TenantMembership
     """
-    access, tm, is_multi_tenant = await _resolve_chat_access(user, workspace_id)
-    return access.workspace, tm, is_multi_tenant
-
-
-async def _resolve_chat_access(user, workspace_id):
-    """``_resolve_workspace_and_membership`` returning the full ``WorkspaceAccess``,
-    so a denial can be explained without resolving (and verifying upstream) again."""
     access = await aresolve_workspace_access_ex(user, workspace_id)
     workspace = access.workspace
     if workspace is None:

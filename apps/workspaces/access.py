@@ -22,9 +22,9 @@ fitness test (tests/test_authorizer_is_sole_gate.py) fails the build on a bypass
 Denial is not one thing. A user who was never a member (or whose workspace is gone)
 gets a generic denial; a member who lacks one or more tenants gets a distinct,
 actionable one naming each missing source and its remedy — so callers can say
-"connect team Y" instead of a dead, unexplained 403. The
-``(workspace, membership)`` tuple API is preserved; ``*_ex`` variants expose the
-reason, and ``access_denied_body`` builds the response payload from it.
+"connect team Y" instead of a dead, unexplained 403. The ``*_ex`` variants expose
+the reason (the async ``(workspace, membership)`` tuple form drops it), and
+``access_denied_body`` builds the response payload from it.
 
 With ``UPSTREAM_ACCESS_FRESHNESS_ENFORCED`` on, a locally granted decision (the
 coverage check above) must also pass upstream-freshness admission
@@ -537,12 +537,6 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
         }
     await cache.aset(cooldown_key, concluded, RETRY_COOLDOWN_SECONDS)
     return result
-
-
-def resolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
-    """Return ``(workspace, WorkspaceMembership)`` if the user has access, else ``(None, None)``."""
-    result = resolve_workspace_access_ex(user, workspace_id, minimum_role=minimum_role)
-    return result.workspace, result.membership
 
 
 async def aresolve_workspace_access(user, workspace_id, *, minimum_role: str = WorkspaceRole.READ):
