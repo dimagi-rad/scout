@@ -18,13 +18,25 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.chat.models import Thread
-from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
+from apps.common.errors import (
+    CommCareAuthError,
+    ConnectAuthError,
+    OCSAuthError,
+    TokenRefreshError,
+)
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
+)
+from apps.users.services.token_refresh import (
+    INTERACTIVE_DB_DEADLINE,
+    TokenRefreshUnavailable,
+    get_token_url,
+    refresh_oauth_token,
+    token_needs_refresh,
 )
 from apps.workspaces.access import (
     missing_tenants_by_workspace,
@@ -120,14 +132,49 @@ async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
     ]
 
 
-async def _arefresh_target_for_workspace(target, providers) -> Rediscovery:
+async def _arenewed_access_tokens(user, provider) -> tuple[list[tuple], bool]:
+    """``(pairs, failed)``: *user*'s tokens, renewing any that need it.
+
+    Only for the user a request names (G2): a refresh failure there follows from
+    their own add. A transient one records nothing (#596) and sets ``failed``; a
+    rejected grant has marked the credential for reconnect, so it is just dropped.
+    """
+    token_url = get_token_url(provider)
+    pairs, failed = [], False
+    for token in await aiter_social_tokens(user, provider):
+        can_refresh = bool(token_url and token.token_secret and token.app)
+        if not token_needs_refresh(token.expires_at, can_refresh=can_refresh):
+            if token.token:
+                pairs.append((token.account, token.token))
+            continue
+        if not can_refresh:
+            continue
+        try:
+            # Bounded by its own timeouts, never cancelled: cancelling between the
+            # provider rotating the grant and Scout storing it would lose the grant.
+            access_token = await refresh_oauth_token(
+                token,
+                token_url,
+                request_timeout=SHARE_REFRESH_TIMEOUT,
+                db_timeout=INTERACTIVE_DB_DEADLINE,
+            )
+        except TokenRefreshUnavailable:
+            failed = True
+            continue
+        except TokenRefreshError:
+            continue
+        pairs.append((token.account, access_token))
+    return pairs, failed
+
+
+async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> Rediscovery:
     """Best-effort, bounded server-side refresh of *target*'s memberships for the
-    workspace's tenant providers, using the target's OWN tokens as they stand.
+    workspace's tenant providers, using the target's OWN tokens.
 
     This is what lets a manager add someone who was granted access upstream after
     the target's last Scout login — without the target manually reconnecting.
-    Tokens are never renewed here (see ``_aunexpired_access_tokens``), so a target
-    whose only token has expired is not picked up until they sign in again.
+    ``renew`` renews expired tokens first, for the named target of an add only;
+    anyone else's tokens are used as they stand (see ``_aunexpired_access_tokens``).
 
     Additive only (``may_revoke=False``): the target did not start this request, so
     nothing it observes may archive their access or record a denial (#561 G1). A
@@ -143,7 +190,12 @@ async def _arefresh_target_for_workspace(target, providers) -> Rediscovery:
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
-        for account, token in await _aunexpired_access_tokens(target, provider):
+        if renew:
+            pairs, renewal_failed = await _arenewed_access_tokens(target, provider)
+            failed = failed or renewal_failed
+        else:
+            pairs = await _aunexpired_access_tokens(target, provider)
+        for account, token in pairs:
             try:
                 await asyncio.wait_for(
                     resolve(
@@ -807,9 +859,9 @@ class WorkspaceMemberListView(APIView):
         if gaps:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
-            # using their own unexpired token, then re-check.
+            # using their own token, renewed if it has expired, then re-check.
             providers = sorted({t.provider for t in gaps})
-            async_to_sync(_arefresh_target_for_workspace)(target, providers)
+            async_to_sync(_arefresh_target_for_workspace)(target, providers, renew=True)
 
         # Every member must cover every source (#381), so a target still missing
         # one after the refresh gets an invite that awaits it rather than a hard

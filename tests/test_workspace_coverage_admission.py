@@ -22,6 +22,7 @@ from rest_framework.test import APIClient
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.tenant_resolution import COMMCARE_DOMAIN_API
+from apps.users.services.token_refresh import get_token_url
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.api import workspace_views
 from apps.workspaces.models import (
@@ -351,8 +352,8 @@ class TestDirectAdd:
         assert resp.json()["result"] == "invite_awaiting_access"
         assert not WorkspaceMembership.objects.filter(workspace=ws, user=target).exists()
         assert refresh.call_args.args[1] == ["commcare"]
-        # The target's tokens are used as they are, never renewed on their behalf.
-        assert refresh.call_args.kwargs == {}
+        # The named target's own expired tokens are renewed (G2).
+        assert refresh.call_args.kwargs == {"renew": True}
 
     @pytest.mark.parametrize(
         ("strict", "expected"), [(False, "member"), (True, "invite_awaiting_access")]
@@ -371,6 +372,76 @@ class TestDirectAdd:
             resp = self._add(client, ws, target.email)
 
         assert resp.json()["result"] == expected
+
+    def test_an_expired_but_renewable_target_token_is_renewed_and_rediscovered(
+        self, client, user, httpx_mock, t1
+    ):
+        """G2: the named target's own expired token is renewed, so upstream access
+        granted since their last sign-in admits them without signing in again."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        _commcare_oauth(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
+        httpx_mock.add_response(
+            method="POST",
+            url=get_token_url("commcare"),
+            json={"access_token": "tok-new", "refresh_token": "refresh-2", "expires_in": 900},
+        )
+        httpx_mock.add_response(
+            url=COMMCARE_DOMAIN_API,
+            match_headers={"Authorization": "Bearer tok-new"},
+            json=_domains(t1),
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.status_code == 201
+        assert resp.json()["result"] == "member"
+        assert SocialToken.objects.get(account__user=target).token == "tok-new"
+
+    def test_a_target_whose_renewal_is_down_is_not_marked_for_reconnect(
+        self, client, user, httpx_mock, t1
+    ):
+        """G2: a transient refresh failure (#596) awaits access without condemning the
+        credential; nothing is sent upstream with the expired token."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        conn = _commcare_oauth(
+            target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        httpx_mock.add_response(method="POST", url=get_token_url("commcare"), status_code=503)
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.json()["result"] == "invite_awaiting_access"
+        conn.refresh_from_db()
+        assert conn.oauth_refresh_failure_fingerprint == ""
+        assert conn.upstream_denied_at is None
+
+    def test_a_target_whose_grant_is_rejected_is_marked_for_reconnect(
+        self, client, user, httpx_mock, t1
+    ):
+        """G2: a rejected grant is definitive (#596), so the credential needs replacing."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        conn = _commcare_oauth(
+            target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=get_token_url("commcare"),
+            status_code=400,
+            json={"error": "invalid_grant"},
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.json()["result"] == "invite_awaiting_access"
+        conn.refresh_from_db()
+        assert conn.oauth_refresh_failure_fingerprint != ""
+        assert conn.upstream_denied_at is None
 
     def test_full_coverage_target_becomes_a_member(self, client, user, t1, t2):
         ws = _workspace(user, t1, t2)
