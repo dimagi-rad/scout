@@ -200,6 +200,19 @@ class TestValueComparisonsAgainstEncryptedRows:
         assert not credential_is_current(conn, "other-access", snapshot)
         assert not credential_is_current(conn, "plain-access", (token.pk, "old", token.app_id))
 
+    def test_saving_an_undecryptable_row_keeps_its_ciphertext(self, commcare_token):
+        token, _conn = commcare_token
+        stored = _raw(token.pk)
+        with override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()):
+            loaded = SocialToken.objects.get(pk=token.pk)
+            assert (loaded.token, loaded.token_secret) == ("", "")
+            loaded.token = "reconnected-access"
+            loaded.save()
+            reconnected_access, kept_refresh = _raw(token.pk)
+        assert kept_refresh == stored[1]
+        assert decrypt_token_value(kept_refresh) == "plain-refresh"
+        assert reconnected_access != stored[0]
+
     def test_undecryptable_row_never_matches_an_empty_credential(self, user, commcare_token):
         token, conn = commcare_token
         _encrypt_raw(token)

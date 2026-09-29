@@ -47,8 +47,26 @@ def is_encrypted(value: str | None) -> bool:
     return bool(value) and value.startswith(CIPHERTEXT_PREFIX)
 
 
+class UndecryptableToken(str):
+    """Reads as ``""`` but keeps the stored ciphertext.
+
+    Saving a row read under a wrong or missing key must not overwrite a value
+    that restoring the key would recover, e.g. the refresh secret allauth leaves
+    untouched when a reconnect returns no new one.
+    """
+
+    ciphertext: str
+
+    def __new__(cls, ciphertext: str):
+        token = super().__new__(cls, "")
+        token.ciphertext = ciphertext
+        return token
+
+
 def encrypt_token_value(value: str | None) -> str | None:
     """Encrypt *value* for storage. Empty and already-encrypted values pass through."""
+    if isinstance(value, UndecryptableToken):
+        return value.ciphertext
     if not value or is_encrypted(value):
         return value
     return CIPHERTEXT_PREFIX + _current_fernet().encrypt(value.encode()).decode()
@@ -65,7 +83,7 @@ def decrypt_token_value(value: str | None) -> str | None:
     """Plaintext for a stored value; legacy plaintext rows are returned unchanged.
 
     An undecryptable ciphertext (a rotated, missing or malformed key) reads as
-    empty so callers treat the connection as needing reconnection instead of
+    an empty :class:`UndecryptableToken` so callers treat the connection as needing reconnection instead of
     sending ciphertext upstream as a bearer token. Callers comparing credentials
     must therefore never treat an empty value as a match.
     """
@@ -76,7 +94,7 @@ def decrypt_token_value(value: str | None) -> str | None:
             "Failed to decrypt stored OAuth token (%s) — key rotated/misconfigured or data corrupt",
             type(exc).__name__,
         )
-        return ""
+        return UndecryptableToken(value)
 
 
 class EncryptedTokenField(models.TextField):
