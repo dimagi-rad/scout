@@ -139,7 +139,7 @@ Errors:
 | GET | `…/artifacts/<artifact_id>/semantic-queries/` | read | The artifact's semantic queries, paginated with `limit` (default 25, max 100) and `offset`. |
 | GET, POST | `…/artifacts/<artifact_id>/recovery/` | read / read_write | Inspect the data behind an artifact, or start repairing it. |
 | GET | `…/artifacts/<artifact_id>/sandbox/` | read | HTML page that renders a non-story artifact in a sandboxed iframe. |
-| GET | `…/artifacts/<artifact_id>/export/<format>/` | read | Download as `html`. `png` and `pdf` return 501. |
+| GET | `…/artifacts/<artifact_id>/export/<format>/` | read | Download as `html`. Other formats return 400. |
 
 Artifacts have no public share links.
 
