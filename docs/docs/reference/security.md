@@ -99,7 +99,7 @@ allauth serializes into the session during login.
 ## Rate limiting
 
 - **Login**: 5 failed logins for an email within 5 minutes lock that email out
-  of login and signup. A successful login clears the counter. The Django admin
+  of login. A successful login clears the counter. The Django admin
   login uses the same limiter.
 - **Chat**: 20 messages per user per 60 seconds on `POST /api/chat/`. Over the
   limit the endpoint returns 429 with `Retry-After` and `X-RateLimit-*`

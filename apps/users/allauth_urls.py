@@ -1,7 +1,7 @@
 """Narrowed allauth URL surface (arch #258, finding 13#9).
 
-Scout's SPA owns the human-facing auth UI: email/password login + signup live at
-``/api/auth/`` (rate-limited, CSRF-protected) and social login is initiated from
+Scout's SPA owns the human-facing auth UI: email/password login lives at
+``/api/auth/`` (rate-limited, CSRF-protected; there is no self-registration) and social login is initiated from
 React via the provider login URLs returned by ``/api/auth/providers/``.
 
 Stock allauth (``include('allauth.urls')``) additionally mounts a *second*,

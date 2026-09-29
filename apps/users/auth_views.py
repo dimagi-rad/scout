@@ -1,15 +1,12 @@
-"""Auth endpoints: csrf, me, login, logout, signup, providers, disconnect."""
+"""Auth endpoints: csrf, me, login, logout, providers, disconnect."""
 
 import logging
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync
-from django.contrib.auth import authenticate, get_user_model, login, logout
-from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth import authenticate, login, logout
 from django.contrib.sites.models import Site
 from django.core.cache import cache
-from django.core.exceptions import ValidationError as _ValidationError
-from django.db import IntegrityError
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -38,8 +35,6 @@ from apps.users.services.tenant_resolution import (
 from apps.users.services.token_refresh import credential_fingerprint, get_token_url, token_health
 
 logger = logging.getLogger(__name__)
-
-UserModel = get_user_model()
 
 # Short-lived cache for the /me onboarding computation (arch #254, finding 07#4).
 # The SPA polls /me; without a guard each poll re-hit all three provider APIs
@@ -192,51 +187,6 @@ def logout_view(request):
     """Logout and clear session."""
     logout(request)
     return JsonResponse({"ok": True})
-
-
-@require_POST
-def signup_view(request):
-    """Create a new account with email and password, then log in."""
-    body, err = parse_json_object(request)
-    if err:
-        return err
-
-    email, err = string_field(body, "email")
-    if err:
-        return err
-    password, err = string_field(body, "password")
-    if err:
-        return err
-    email = email.strip().lower()
-
-    if not email or not password:
-        return JsonResponse({"error": "Email and password are required"}, status=400)
-
-    if check_rate_limit(email):
-        return JsonResponse({"error": "Too many attempts. Try again later."}, status=429)
-
-    try:
-        validate_password(password)
-    except _ValidationError as e:
-        return JsonResponse({"error": "; ".join(e.messages)}, status=400)
-
-    if UserModel.objects.filter(email=email).exists():
-        return JsonResponse(
-            {"error": "Unable to create account. If you already have an account, try logging in."},
-            status=400,
-        )
-
-    try:
-        user = UserModel.objects.create_user(email=email, password=password)
-    except IntegrityError:
-        return JsonResponse(
-            {"error": "Unable to create account. If you already have an account, try logging in."},
-            status=400,
-        )
-
-    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
-
-    return JsonResponse(_user_response(user), status=201)
 
 
 @require_POST

@@ -15,9 +15,17 @@ Covers:
 """
 
 import pytest
+from allauth.core.context import request_context
+from allauth.socialaccount.helpers import complete_social_login
+from allauth.socialaccount.models import SocialAccount, SocialLogin
 from django.conf import settings
+from django.contrib.auth.models import AnonymousUser
+from django.contrib.messages.middleware import MessageMiddleware
+from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import Client
 from django.urls import NoReverseMatch, Resolver404, resolve, reverse
+
+from apps.users.models import User
 
 # --- 13#9: dangerous allauth HTML routes are no longer mounted ------------- #
 
@@ -106,6 +114,30 @@ class TestSpaOauthRoutesPreserved:
         """OAuth cancel/error landing pages are part of the provider flow."""
         assert reverse("socialaccount_login_cancelled")
         assert reverse("socialaccount_login_error")
+
+
+class TestSocialSignupStillCreatesUsers:
+    """With password self-registration closed, OAuth is how new users arrive."""
+
+    @pytest.mark.django_db
+    def test_first_oauth_login_creates_a_user(self, rf):
+        email = "newcomer@example.com"
+        sociallogin = SocialLogin(
+            user=User(email=email),
+            account=SocialAccount(provider="github", uid="gh-newcomer"),
+        )
+        request = rf.get("/accounts/github/login/callback/")
+        SessionMiddleware(lambda request: None).process_request(request)
+        MessageMiddleware(lambda request: None).process_request(request)
+        request.user = AnonymousUser()
+
+        with request_context(request):
+            response = complete_social_login(request, sociallogin)
+
+        assert response.status_code == 302
+        user = User.objects.get(email=email)
+        assert SocialAccount.objects.filter(user=user, provider="github").exists()
+        assert request.session["_auth_user_id"] == str(user.pk)
 
 
 # --- 14#2: LOGIN_ON_GET requires POST -------------------------------------- #

@@ -50,7 +50,6 @@ Scout uses session cookies, not JWTs. The frontend gets a CSRF token from `/api/
 | `/api/auth/me/` | GET | Current user info |
 | `/api/auth/login/` | POST | Email/password login |
 | `/api/auth/logout/` | POST | End the session |
-| `/api/auth/signup/` | POST | Create an email/password account and log in |
 | `/api/auth/providers/` | GET | OAuth providers and your connection status |
 
 ## Creating users
@@ -60,7 +59,8 @@ Users are created by:
 1. **OAuth login.** The first login with any configured provider creates the user.
 2. **`createsuperuser`.** Run `uv run manage.py createsuperuser`.
 3. **The Django admin** at `/admin/users/user/add/`.
-4. **The sign-up API.** `POST /api/auth/signup/` with an email and password creates an account and logs it in. It needs no authentication and no email-domain restriction applies to it. There is no sign-up form in the UI, but the endpoint is reachable on every deployment. To give someone access to a workspace, a workspace manager adds them by email (see [Workspaces](workspaces.md#members)). If they don't have an account yet, the invite resolves when they first log in.
+
+There is no self-service sign-up with an email and password. To give someone access to a workspace, a workspace manager adds them by email (see [Workspaces](workspaces.md#members)). If they don't have an account yet, the invite resolves when they first log in with OAuth.
 
 ## Superusers
 

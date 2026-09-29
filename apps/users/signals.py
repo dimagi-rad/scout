@@ -48,10 +48,11 @@ def _canonical_provably_owns_email(canonical, email: str) -> bool:
     """Whether ``canonical`` has *proven* it owns ``email`` (01#8).
 
     Auto-merge folds the incoming OAuth identity INTO ``canonical``, so we must
-    be sure ``canonical`` is the legitimate owner of the email — otherwise an
-    attacker who ``/signup``'d with a victim's email (signup_view bypasses
-    allauth, creating no ``EmailAddress``) could absorb the victim's OAuth
-    account on the victim's next login (closed by commit 1dc1d58).
+    be sure ``canonical`` is the legitimate owner of the email — otherwise a
+    password account holding a victim's email (admin-created, or registered
+    through the since-removed ``/api/auth/signup/``, neither of which creates an
+    ``EmailAddress``) could absorb the victim's OAuth account on the victim's
+    next login (closed by commit 1dc1d58).
 
     Ownership is proven by EITHER:
 
@@ -63,9 +64,9 @@ def _canonical_provably_owns_email(canonical, email: str) -> bool:
        sync.
 
     SEAM (01#8 / #258): a canonical that owns the email ONLY via a password
-    ``/signup`` satisfies NEITHER and is (correctly) refused here. Making the
-    password->OAuth path auto-link safely needs allauth-side email verification
-    at signup — that perimeter is owned by issue #258. See the PR body.
+    account satisfies NEITHER and is (correctly) refused here. Making the
+    password->OAuth path auto-link safely needs email verification for password
+    accounts — that perimeter is owned by issue #258. See the PR body.
     """
     if EmailAddress.objects.filter(
         user=canonical,

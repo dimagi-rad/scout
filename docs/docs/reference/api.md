@@ -17,7 +17,6 @@ endpoint.
 | GET | `/api/auth/csrf/` | Sets the CSRF cookie and returns `{"csrfToken": "..."}`. |
 | GET | `/api/auth/me/` | Current user. 401 if not signed in. |
 | POST | `/api/auth/login/` | Email/password login. |
-| POST | `/api/auth/signup/` | Create an email/password account and sign in. Returns 201. |
 | POST | `/api/auth/logout/` | End the session. |
 | GET | `/api/auth/providers/` | OAuth providers configured for this site, with connection status when signed in. |
 | POST | `/api/auth/providers/<provider_id>/disconnect/` | Revoke the user's tokens for a provider. |
@@ -28,8 +27,7 @@ endpoint.
 | PATCH, DELETE | `/api/auth/connections/<connection_id>/` | Rotate a connection's API key, or remove the connection. |
 | GET | `/api/auth/api-key-providers/` | Providers that accept API-key connections. |
 
-Login and signup take `{"email": "...", "password": "..."}`. Login, signup and
-`me` return:
+Login takes `{"email": "...", "password": "..."}`. Login and `me` return:
 
 ```json
 {
@@ -44,9 +42,11 @@ Login and signup take `{"email": "...", "password": "..."}`. Login, signup and
 `onboarding_complete` is true once the user has at least one active tenant
 membership backed by a connection.
 
-Login and signup return 400 for invalid JSON or missing fields (signup also
-for a weak password or an existing email), 401 for bad credentials (login), and
-429 once an email has 5 failed logins within 5 minutes.
+Login returns 400 for invalid JSON or missing fields, 401 for bad credentials,
+and 429 once an email has 5 failed logins within 5 minutes.
+
+There is no sign-up endpoint. Accounts are created by the first OAuth login or
+by an administrator.
 
 ### OAuth
 
