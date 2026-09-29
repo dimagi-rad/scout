@@ -30,7 +30,12 @@ from apps.common.identifiers import (
     view_name,
 )
 from apps.users.models import Tenant
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     sync_tenant_data_lock,
@@ -113,6 +118,65 @@ class NoActiveTenantSchema(ExpectedStateError, ValueError):
             f"Workspace {workspace_id} has no active schema for any tenant. "
             "Run a data refresh before building the view schema."
         )
+
+
+def _served_sources(tenant_ids):
+    return TenantSchema.objects.filter(tenant_id__in=tenant_ids, state=SchemaState.ACTIVE)
+
+
+def view_schema_buildable(workspace_id) -> bool:
+    """Whether a view rebuild for this workspace can publish anything.
+
+    A single source is served from its own schema, and with no source served at
+    all the build can only fail with NoActiveTenantSchema, so queueing it is noise.
+    """
+    tenant_ids = list(
+        WorkspaceTenant.objects.filter(workspace_id=workspace_id).values_list(
+            "tenant_id", flat=True
+        )
+    )
+    return len(tenant_ids) > 1 and _served_sources(tenant_ids).exists()
+
+
+async def aview_schema_buildable(workspace_id) -> bool:
+    """Async twin of :func:`view_schema_buildable`."""
+    tenant_ids = [
+        tenant_id
+        async for tenant_id in WorkspaceTenant.objects.filter(
+            workspace_id=workspace_id
+        ).values_list("tenant_id", flat=True)
+    ]
+    return len(tenant_ids) > 1 and await _served_sources(tenant_ids).aexists()
+
+
+def fail_view_schema_if_unbuildable(workspace) -> bool:
+    """Record what a rebuild with no served source would; True when it did.
+
+    For callers deciding whether to queue a rebuild, inside their transaction.
+    The rows are locked before the check, as a build publishing ACTIVE holds that
+    lock, so a build that just succeeded is never overwritten with FAILED. Writes
+    the build's own FAILED state, ``last_error`` and coverage, so the views stop
+    claiming sources they cannot read; retired rows keep their lifecycle state
+    (see SchemaManager._save_build_failure). A source that loads later rebuilds
+    FAILED rows through the dependent-rebuild fan-out.
+    """
+    rows = WorkspaceViewSchema.objects.filter(workspace=workspace)
+    list(rows.select_for_update())
+    if view_schema_buildable(workspace.id):
+        return False
+    tenants = sorted(
+        workspace.tenants.all(),
+        key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
+    )
+    rows.exclude(state__in=RETIRED_VIEW_STATES).update(
+        state=SchemaState.FAILED,
+        last_error=str(NoActiveTenantSchema(workspace.id))[:500],
+        tenant_coverage={
+            "included_tenants": [],
+            "excluded_tenants": [coverage_entry(t) for t in tenants],
+        },
+    )
+    return True
 
 
 class SchemaStillReferenced(Exception):

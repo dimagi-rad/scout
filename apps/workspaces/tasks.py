@@ -125,6 +125,7 @@ from apps.workspaces.services.schema_manager import (
     SchemaManager,
     SchemaStillReferenced,
     ViewSchemaRetired,
+    aview_schema_buildable,
 )
 from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app
@@ -1340,7 +1341,7 @@ async def materialize_workspace(
     ``only_unserved`` loads every workspace source that serves nothing (typically
     the one just added) and republishes the views; if the run stops before publishing, a plain view
     rebuild is queued instead so the views reflect the sources that do serve, when there is
-    something for it to build (``_fallback_views_buildable``).
+    something for it to build (``aview_schema_buildable``).
     """
     job_id = context.job.id
     preflight_failures = None
@@ -1362,28 +1363,12 @@ async def materialize_workspace(
         published = reported_publication and (outcome is None or outcome.get("ok"))
         if only_unserved and not published:
             try:
-                if await _fallback_views_buildable(workspace_id):
+                if await aview_schema_buildable(workspace_id):
                     await rebuild_workspace_view_schema.defer_async(workspace_id=str(workspace_id))
             except Exception:
                 logger.exception("Could not queue the view rebuild for workspace %s", workspace_id)
         if notify_thread:
             await _defer_resume_for_job(job_id, preflight_failures)
-
-
-async def _fallback_views_buildable(workspace_id) -> bool:
-    """Whether a bare view rebuild after an unpublished load can build anything.
-
-    A single source is served from its own schema, so a view schema there is an
-    orphan; and with no source served at all (a new workspace whose first load
-    never ran) the rebuild can only mark the views FAILED although nothing did.
-    """
-    tenant_ids = await _workspace_tenant_ids(workspace_id)
-    return (
-        len(tenant_ids) > 1
-        and await TenantSchema.objects.filter(
-            tenant_id__in=tenant_ids, state=SchemaState.ACTIVE
-        ).aexists()
-    )
 
 
 def _resume_records(result: dict) -> list[dict]:
