@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -208,6 +209,23 @@ def test_message_loader_deduplicates_sessions_before_snapshot_fetch():
         f"{BASE_URL}/api/sessions/sess-2/",
     ]
     assert [row["session_id"] for rows, _ in pages for row in rows] == ["sess-1"]
+
+
+def test_message_loader_logs_sessions_without_an_id(caplog):
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    with (
+        patch.object(
+            loader,
+            "_paginate",
+            return_value=iter([([{"id": "sess-1"}, {}, {"id": ""}], None)]),
+        ),
+        patch.object(loader, "_get_json", return_value={"messages": []}) as detail,
+        caplog.at_level(logging.WARNING, logger="mcp_server.loaders.ocs_messages"),
+    ):
+        pages = list(loader.load_pages())
+    assert detail.call_count == 1
+    assert [total for _, total in pages] == [1]
+    assert "Skipped messages for 2 sessions with no id" in caplog.text
 
 
 def test_message_loader_indexes_sessions_before_fetching_details():
