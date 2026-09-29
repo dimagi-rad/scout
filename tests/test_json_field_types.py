@@ -7,6 +7,7 @@
 import pytest
 from django.test import Client
 
+from apps.chat.views import _last_message_text
 from apps.common.http import string_field
 from tests.tenant_access import usable_connection
 
@@ -119,3 +120,75 @@ class TestConnectionFieldTypes:
 
         assert resp.status_code == 400
         assert resp.json()["error"] == error
+
+
+class TestLastMessageText:
+    def test_null_content_falls_through_to_parts(self):
+        message = {"content": None, "parts": [{"type": "text", "text": "hi"}]}
+
+        assert _last_message_text(message) == ("hi", None)
+
+    def test_ignores_non_text_parts(self):
+        message = {"parts": [{"type": "file", "url": 5}, {"type": "text", "text": "hi"}]}
+
+        assert _last_message_text(message) == ("hi", None)
+
+
+@pytest.mark.django_db
+class TestChatFieldTypes:
+    @pytest.fixture
+    def post(self, client, workspace):
+        def post(**body):
+            body.setdefault("messages", [{"content": "hi"}])
+            body.setdefault("workspaceId", str(workspace.id))
+            return _post(client, "/api/chat/", body)
+
+        return post
+
+    @pytest.mark.parametrize("data", [5, ["x"], "x", True], ids=["number", "list", "str", "bool"])
+    def test_data_must_be_an_object(self, post, data):
+        resp = post(data=data)
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "data must be an object"
+
+    @pytest.mark.parametrize("messages", [5, {"a": 1}, "hi", True])
+    def test_messages_must_be_a_list(self, post, messages):
+        resp = post(messages=messages)
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "messages must be a list"
+
+    @pytest.mark.parametrize(
+        ("message", "error"),
+        [
+            (5, "Each message must be an object"),
+            (["hi"], "Each message must be an object"),
+            ({"content": 5}, "Message content must be a string"),
+            ({"content": ["hi"]}, "Message content must be a string"),
+            ({"parts": 5}, "Message parts must be a list of objects"),
+            ({"parts": {"type": "text"}}, "Message parts must be a list of objects"),
+            ({"parts": ["hi"]}, "Message parts must be a list of objects"),
+            ({"parts": [{"type": "text", "text": 5}]}, "Text part text must be a string"),
+            ({"parts": [{"type": "text", "text": None}]}, "Text part text must be a string"),
+        ],
+    )
+    def test_malformed_last_message(self, post, message, error):
+        resp = post(messages=[message])
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == error
+
+    @pytest.mark.parametrize("value", [5, ["x"], {"a": 1}, True])
+    @pytest.mark.parametrize("key", ["workspaceId", "threadId"])
+    def test_ids_must_be_strings(self, post, workspace, key, value):
+        resp = post(**{key: value})
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == f"{key} must be a string"
+
+    def test_ids_in_data_are_checked_too(self, post):
+        resp = post(data={"threadId": ["x"]})
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "threadId must be a string"
