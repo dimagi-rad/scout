@@ -51,6 +51,9 @@ export function MaterializationFailure({
   const headerText = isCancelled
     ? "Materialization cancelled"
     : "Materialization failed"
+  let retryLabel = "Retry"
+  if (retry.state === "pending") retryLabel = "Retrying..."
+  else if (retry.failure) retryLabel = retry.failure.retryable ? "Retry failed" : "Can't retry"
 
   return (
     <div
@@ -92,7 +95,7 @@ export function MaterializationFailure({
             className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors shrink-0 ${
               retry.blocked
                 ? "text-muted-foreground border border-border cursor-not-allowed"
-                : retry.state === "error"
+                : retry.failure
                   ? "text-red-500 border border-red-500/40"
                   : "text-red-600 hover:bg-red-500/10 border border-red-500/30"
             }`}
@@ -102,15 +105,7 @@ export function MaterializationFailure({
             <RotateCw
               className={`w-3 h-3 ${retry.state === "pending" ? "animate-spin" : ""}`}
             />
-            <span>
-              {retry.state === "pending"
-                ? "Retrying..."
-                : retry.failure
-                  ? retry.failure.retryable
-                    ? "Retry failed"
-                    : "Can't retry"
-                  : "Retry"}
-            </span>
+            <span>{retryLabel}</span>
           </button>
         )}
       </div>
