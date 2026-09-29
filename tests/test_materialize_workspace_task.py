@@ -564,7 +564,7 @@ async def test_materialize_workspace_blocking_waits_out_in_progress_run(
     tenants, the blocking entrypoint WAITS for it to clear before starting its
     own — never running two in parallel against the same tenant schema."""
     schema = await TenantSchema.objects.acreate(
-        tenant=tenant, schema_name="t_wait", state=SchemaState.MATERIALIZING
+        tenant=tenant, schema_name="t_wait", state=SchemaState.PROVISIONING
     )
     run = await MaterializationRun.objects.acreate(
         tenant_schema=schema,

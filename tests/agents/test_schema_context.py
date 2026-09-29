@@ -404,7 +404,7 @@ async def test_excluded_source_loading_does_not_block_serving_view(
         tenant=tenant, schema_name="coverage_ready", state=SchemaState.ACTIVE
     )
     loading = await TenantSchema.objects.acreate(
-        tenant=other, schema_name="coverage_loading", state=SchemaState.MATERIALIZING
+        tenant=other, schema_name="coverage_loading", state=SchemaState.PROVISIONING
     )
     await MaterializationRun.objects.acreate(
         tenant_schema=loading, pipeline="sync", state="loading"

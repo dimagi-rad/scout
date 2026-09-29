@@ -184,7 +184,7 @@ async def touch_workspace_schemas(workspace) -> None:
         tenant = await workspace.tenants.afirst()
         ts = await TenantSchema.objects.filter(
             tenant=tenant,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            state=SchemaState.ACTIVE,
         ).afirst()
         if ts is not None:
             await ts.atouch()
@@ -193,12 +193,12 @@ async def touch_workspace_schemas(workspace) -> None:
         tenant_ids = [t.id async for t in workspace.tenants.all()]
         await TenantSchema.objects.filter(
             tenant_id__in=tenant_ids,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            state=SchemaState.ACTIVE,
         ).aupdate(last_accessed_at=timezone.now())
 
         vs = await WorkspaceViewSchema.objects.filter(
             workspace=workspace,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            state=SchemaState.ACTIVE,
         ).afirst()
         if vs is not None:
             await vs.atouch()

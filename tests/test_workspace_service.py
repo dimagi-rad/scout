@@ -227,7 +227,7 @@ async def test_touch_multitenant_workspace_touches_constituent_tenant_schemas(
     ts2 = await TenantSchema.objects.acreate(
         tenant=tenant2,
         schema_name="touch_tenant_2",
-        state=SchemaState.MATERIALIZING,
+        state=SchemaState.ACTIVE,
         last_accessed_at=stale,
     )
     vs = await WorkspaceViewSchema.objects.acreate(
@@ -243,7 +243,6 @@ async def test_touch_multitenant_workspace_touches_constituent_tenant_schemas(
     await ts1.arefresh_from_db()
     await ts2.arefresh_from_db()
     await vs.arefresh_from_db()
-    # Both ACTIVE and MATERIALIZING tenant schemas refreshed.
     assert ts1.last_accessed_at >= before
     assert ts2.last_accessed_at >= before
     # The view schema is still touched as well.

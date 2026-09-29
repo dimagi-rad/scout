@@ -42,7 +42,6 @@ class Command(BaseCommand):
         ok = 0
         failed = 0
         try:
-            # MATERIALIZING is a dead state (never persisted), so only ACTIVE rows.
             tenant_schemas = TenantSchema.objects.filter(state=SchemaState.ACTIVE)
             for ts in tenant_schemas:
                 # Per-schema isolation: drift on one row must not strand every

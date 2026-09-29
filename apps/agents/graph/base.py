@@ -360,7 +360,7 @@ async def _fetch_semantic_model_context(
     except SemanticCatalogUnavailable:
         load_state, multi = await _catalog_unavailable_load_state(workspace)
         unresolved, every = await _unresolved_pipeline_providers(workspace)
-        if every and load_state != _LOADING:
+        if every:
             guidance = _pipeline_unresolved_guidance(
                 unresolved, loaded=load_state == _LOADED, write_capable=write_capable
             )
@@ -373,39 +373,30 @@ async def _fetch_semantic_model_context(
         return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}" if multi else guidance
 
 
-_NOT_LOADED, _LOADING, _LOADED = "not_loaded", "loading", "loaded"
+_NOT_LOADED, _LOADED = "not_loaded", "loaded"
 
 
 async def _catalog_unavailable_load_state(workspace) -> tuple[str, bool]:
-    """``(load state, multi-tenant)`` of a workspace whose semantic catalog is unavailable."""
+    """``(load state, multi-tenant)`` of a workspace whose semantic catalog is unavailable.
+
+    An in-flight load never reaches here: the caller answers it first from
+    ``MaterializationRun.ACTIVE_STATES``, the only written in-progress signal (#411).
+    """
     tenant_count = await workspace.tenants.acount()
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()
-        ts = await TenantSchema.objects.filter(
-            tenant=tenant,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-        ).afirst()
-        if ts is None:
-            return _NOT_LOADED, False
-        return (_LOADING if ts.state == SchemaState.MATERIALIZING else _LOADED), False
+        loaded = await TenantSchema.objects.filter(
+            tenant=tenant, state=SchemaState.ACTIVE
+        ).aexists()
+        return (_LOADED if loaded else _NOT_LOADED), False
     if tenant_count > 1:
         vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
-        state = vs.state if vs is not None else None
-        if state == SchemaState.MATERIALIZING:
-            return _LOADING, True
-        return (_LOADED if state == SchemaState.ACTIVE else _NOT_LOADED), True
+        loaded = vs is not None and vs.state == SchemaState.ACTIVE
+        return (_LOADED if loaded else _NOT_LOADED), True
     return _NOT_LOADED, False
 
 
 def _load_state_guidance(load_state: str, *, interactive: bool, write_capable: bool) -> str:
-    if load_state == _LOADING:
-        if not write_capable:
-            return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return (
-            _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
-            if interactive
-            else _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        )
     if load_state == _LOADED:
         return _LOADED_REBUILD_GUIDANCE if write_capable else _READ_ONLY_LOADED_SQL_GUIDANCE
     if not write_capable:

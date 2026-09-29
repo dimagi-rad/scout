@@ -44,14 +44,14 @@ def _resolve_tenant_schema(tenant):
     """Return the active TenantSchema for the given tenant, or None."""
     return TenantSchema.objects.filter(
         tenant=tenant,
-        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        state=SchemaState.ACTIVE,
     ).first()
 
 
 def _schema_unavailable_response(tenant) -> Response | None:
     """Return a 503 Response if the workspace schema is not available, else None.
 
-    Returns None when an ACTIVE or MATERIALIZING schema exists (data is readable).
+    Returns None when an ACTIVE schema exists (data is readable).
     """
     if tenant is None:
         return Response(
@@ -62,9 +62,7 @@ def _schema_unavailable_response(tenant) -> Response | None:
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
-    if TenantSchema.objects.filter(
-        tenant=tenant, state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING]
-    ).exists():
+    if TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).exists():
         return None
 
     provisioning = TenantSchema.objects.filter(

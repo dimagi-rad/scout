@@ -60,7 +60,7 @@ def classify_tenant_schemas(rows: Iterable[tuple[Any, str]]) -> tuple[set, set]:
     for tenant_id, state in rows:
         if state == SchemaState.ACTIVE:
             active.add(tenant_id)
-        elif state in (SchemaState.PROVISIONING, SchemaState.MATERIALIZING):
+        elif state == SchemaState.PROVISIONING:
             provisioning.add(tenant_id)
     return active, provisioning
 
@@ -84,7 +84,6 @@ def workspace_schema_status(
 SOURCE_STATE_SEVERITY = (
     SchemaState.FAILED,
     SchemaState.PROVISIONING,
-    SchemaState.MATERIALIZING,
     SchemaState.TEARDOWN,
     SchemaState.EXPIRED,
     SchemaState.ACTIVE,

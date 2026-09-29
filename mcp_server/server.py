@@ -1822,7 +1822,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tenant = await workspace.tenants.afirst()
             ts = await TenantSchema.objects.filter(
                 tenant=tenant,
-                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+                state=SchemaState.ACTIVE,
             ).afirst()
 
             if ts is None:
@@ -1874,7 +1874,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         # Multi-tenant: WorkspaceViewSchema + per-tenant materialization.
         vs = await WorkspaceViewSchema.objects.filter(
             workspace_id=workspace_id,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            state=SchemaState.ACTIVE,
         ).afirst()
 
         if vs is None:
