@@ -4,6 +4,8 @@ import { useAppStore } from "@/store/store"
 import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
 
+const URL_WORKSPACE_RECHECK_TIMEOUT_MS = 5_000
+
 /**
  * Two-way bridge between the chat URL (`/workspaces/:workspaceId/chat/:threadId`)
  * and the zustand store (`activeDomainId` / `threadId`).
@@ -62,7 +64,9 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     if (!awaitingUrlWorkspace || !urlWorkspaceId) return
     if (recheckRequestedRef.current === urlWorkspaceId) return
     recheckRequestedRef.current = urlWorkspaceId
-    void revalidateDomains().finally(() => setRecheckedWorkspaceId(urlWorkspaceId))
+    // The API client has no timeout; a stalled request must not freeze store → URL sync.
+    const timeout = new Promise<void>((resolve) => setTimeout(resolve, URL_WORKSPACE_RECHECK_TIMEOUT_MS))
+    void Promise.race([revalidateDomains(), timeout]).then(() => setRecheckedWorkspaceId(urlWorkspaceId))
   }, [awaitingUrlWorkspace, urlWorkspaceId, revalidateDomains])
 
   // Direction 1: URL → store

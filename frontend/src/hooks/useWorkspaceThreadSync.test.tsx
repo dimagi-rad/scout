@@ -312,6 +312,29 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
     })
   })
 
+  it("stops holding the link after 5s when the recheck stalls", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let release!: (domains: TenantMembership[]) => void
+    try {
+      vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
+      const WS_SLOW = "55555555-5555-5555-5555-555555555555"
+      renderPrettyChat(`/workspaces/${WS_SLOW}/chat`)
+      await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())
+      expect(screen.getByTestId("path").textContent).toBe(`/workspaces/${WS_SLOW}/chat`)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000)
+      })
+      await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+      ))
+    } finally {
+      vi.useRealTimers()
+      // Settle the slice's shared in-flight request so later tests start clean.
+      await act(async () => release(useAppStore.getState().domains))
+    }
+  })
+
   it("falls back to the active workspace when the recheck doesn't find the link's workspace", async () => {
     vi.spyOn(workspaceApi, "list").mockResolvedValue([
       domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B"),
