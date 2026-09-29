@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.catalog import ensure_semantic_model
-from apps.semantic.services.cube import cube_schema_yaml, generate_cube_schema
+from apps.semantic.services.cube import DROPPED_JOIN_CODES, cube_schema_yaml, generate_cube_schema
 from apps.semantic.services.cube_client import CubeClient
 from mcp_server.context import QueryContext, load_workspace_context
 
@@ -259,6 +259,7 @@ def _record_build_failure(workspace, model: SemanticModel, exc: Exception) -> No
                 semantic_model=model,
                 status=CubeSchema.Status.ACTIVE,
             )
+            .only("diagnostics")
             .order_by("-updated_at")
             .first()
         )
@@ -267,7 +268,7 @@ def _record_build_failure(workspace, model: SemanticModel, exc: Exception) -> No
         serving_relationship_diagnostics = [
             diagnostic
             for diagnostic in (active.diagnostics if active else None) or []
-            if isinstance(diagnostic, dict) and diagnostic.get("relationship")
+            if isinstance(diagnostic, dict) and diagnostic.get("code") in DROPPED_JOIN_CODES
         ]
         _set_last_build(model, ok=False, error=str(exc))
         model.diagnostics = [

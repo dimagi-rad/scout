@@ -18,6 +18,7 @@ from apps.semantic.models import (
     SemanticModel,
     SemanticRelationship,
 )
+from apps.semantic.services.cube import DROPPED_JOIN_CODES
 from apps.semantic.services.custom_datasets import (
     CustomDatasetError,
     compile_custom_dataset_sql,
@@ -922,7 +923,7 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
     unpublished = {
         diagnostic["relationship"]
         for diagnostic in model.diagnostics or []
-        if isinstance(diagnostic, dict) and diagnostic.get("relationship")
+        if isinstance(diagnostic, dict) and diagnostic.get("code") in DROPPED_JOIN_CODES
     }
 
     def relationship_entry(relationship: SemanticRelationship, direction: str) -> dict[str, Any]:

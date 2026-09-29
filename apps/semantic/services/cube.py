@@ -13,6 +13,17 @@ from apps.semantic.services.field_sql import compile_dimension_sql, dataset_colu
 
 logger = logging.getLogger(__name__)
 
+# Codes for relationships generate_cube_schema leaves out of Cube. Their
+# diagnostics carry a "relationship" key that the catalog turns into published: false.
+DROPPED_JOIN_CODES = frozenset(
+    {
+        "relationship_unpublished_endpoint",
+        "relationship_missing_primary_key",
+        "relationship_hidden_reference",
+        "relationship_stale_reference",
+    }
+)
+
 
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     """Return a Cube-compatible schema document derived from a semantic model."""
@@ -68,8 +79,10 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
                 unpublished(
                     relationship,
                     "relationship_unpublished_endpoint",
-                    f"dataset '{missing[0].name}' is hidden, no longer in the source, "
-                    "or has no SQL",
+                    f"{'datasets' if len(missing) > 1 else 'dataset'} "
+                    f"{' and '.join(repr(d.name) for d in missing)} "
+                    f"{'are' if len(missing) > 1 else 'is'} hidden, no longer in the source, "
+                    "or without SQL",
                 )
             continue
         # Cube refuses to compile a cube that defines a join but no primary key.

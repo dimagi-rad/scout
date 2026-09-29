@@ -210,6 +210,24 @@ def _stale_relationship_catalog(workspace) -> SemanticModel:
     return model
 
 
+def _stub_cube(monkeypatch, *, valid: bool = True) -> None:
+    validation = {"valid": True} if valid else {"valid": False, "errors": ["Cube compiler down"]}
+    monkeypatch.setattr(
+        cube_schema.CubeClient, "validate_schema", AsyncMock(return_value=validation)
+    )
+    monkeypatch.setattr(cube_schema.CubeClient, "invalidate_schema_cache", AsyncMock())
+    monkeypatch.setattr(
+        cube_schema,
+        "load_workspace_context",
+        AsyncMock(return_value=SimpleNamespace(schema_name="fixture", readonly_role="role")),
+    )
+
+
+def _published(model: SemanticModel, dataset: str) -> dict[str, bool]:
+    catalog = {d["name"]: d for d in serialize_catalog(model)["datasets"]}
+    return {r["name"]: r.get("published", True) for r in catalog[dataset]["relationships"]}
+
+
 @pytest.mark.django_db
 def test_valid_relationships_build_without_diagnostics(workspace):
     schema = generate_cube_schema(_stale_relationship_catalog(workspace))
@@ -235,15 +253,7 @@ def test_stale_relationship_is_skipped_and_reported_without_failing_the_build(
         relationship_type="many_to_one",
         join_expression="{cases.renamed_visit_id} = {visits.id}",
     )
-    monkeypatch.setattr(
-        cube_schema.CubeClient, "validate_schema", AsyncMock(return_value={"valid": True})
-    )
-    monkeypatch.setattr(cube_schema.CubeClient, "invalidate_schema_cache", AsyncMock())
-    monkeypatch.setattr(
-        cube_schema,
-        "load_workspace_context",
-        AsyncMock(return_value=SimpleNamespace(schema_name="fixture", readonly_role="role")),
-    )
+    _stub_cube(monkeypatch)
 
     active = build_and_promote_cube_schema(workspace, model=model)
 
@@ -269,9 +279,7 @@ def test_stale_relationship_is_skipped_and_reported_without_failing_the_build(
             }
         ]
     )
-    catalog = {dataset["name"]: dataset for dataset in serialize_catalog(model)["datasets"]}
-    published = {r["name"]: r.get("published", True) for r in catalog["visits"]["relationships"]}
-    assert published == {"visits_to_users": True, "cases_to_visits": False}
+    assert _published(model, "visits") == {"visits_to_users": True, "cases_to_visits": False}
 
 
 @pytest.mark.django_db
@@ -286,24 +294,6 @@ def test_relationship_through_hidden_member_is_skipped_and_reported(workspace):
     assert [(d["code"], d["relationship"]) for d in schema["diagnostics"]] == [
         ("relationship_hidden_reference", "visits_to_users")
     ]
-
-
-def _stub_cube(monkeypatch, *, valid: bool = True) -> None:
-    validation = {"valid": True} if valid else {"valid": False, "errors": ["Cube compiler down"]}
-    monkeypatch.setattr(
-        cube_schema.CubeClient, "validate_schema", AsyncMock(return_value=validation)
-    )
-    monkeypatch.setattr(cube_schema.CubeClient, "invalidate_schema_cache", AsyncMock())
-    monkeypatch.setattr(
-        cube_schema,
-        "load_workspace_context",
-        AsyncMock(return_value=SimpleNamespace(schema_name="fixture", readonly_role="role")),
-    )
-
-
-def _published(model: SemanticModel, dataset: str) -> dict[str, bool]:
-    catalog = {d["name"]: d for d in serialize_catalog(model)["datasets"]}
-    return {r["name"]: r.get("published", True) for r in catalog[dataset]["relationships"]}
 
 
 @pytest.mark.django_db
