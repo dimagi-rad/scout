@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link, useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { workspaceApi } from "@/api/workspaces"
@@ -23,6 +23,7 @@ import {
 } from "@/components/SearchFilterBar/SearchFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 
 interface Props {
@@ -235,7 +236,15 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                   className="rounded-md border border-dashed py-4 text-center text-sm text-muted-foreground"
                   data-testid="create-no-sources"
                 >
-                  No data sources available to add.
+                  No data sources available to add.{" "}
+                  <Link
+                    to={CONNECTIONS_PATH}
+                    onClick={onClose}
+                    className="underline underline-offset-2 hover:text-foreground"
+                    data-testid="create-no-sources-connect"
+                  >
+                    Connect one in Connected Accounts
+                  </Link>
                 </p>
               ) : (
                 <div className="space-y-3">
