@@ -21,6 +21,7 @@ from apps.workspaces.services.failure_guidance import (
     BLOCKS_IMMEDIATE_RETRY,
     summary_failures,
 )
+from apps.workspaces.services.load_progress import aworkspace_load_progress, progress_payload
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -35,25 +36,7 @@ RECENT_TERMINATION_WINDOW = timedelta(minutes=30)
 RECONCILE_THROTTLE_SECONDS = 30
 
 
-def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
-    progress = None
-    if run_progress:
-        rows_loaded = run_progress.get("rows_loaded") or 0
-        rows_total = run_progress.get("rows_total")
-        percent = None
-        if isinstance(rows_total, int) and rows_total > 0:
-            percent = int(100 * rows_loaded / rows_total)
-        progress = {
-            "percent": percent,
-            "rows_loaded": rows_loaded,
-            "rows_total": rows_total,
-            # "rows" for most sources; OCS reports per-session as "sessions".
-            "unit": run_progress.get("unit") or "rows",
-            "message": run_progress.get("message"),
-            "source": run_progress.get("source"),
-            "step": run_progress.get("step"),
-            "total_steps": run_progress.get("total_steps"),
-        }
+def _job_to_dict(job: ThreadJob, run_progress: dict | None, load: dict | None = None) -> dict:
     return {
         "thread_job_id": str(job.id),
         "thread_id": str(job.thread_id),
@@ -62,7 +45,10 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
         "tool_call_id": job.tool_call_id,
         "job_type": job.job_type,
         "state": job.state,
-        "progress": progress,
+        "progress": progress_payload(run_progress),
+        "source_index": load["source_index"] if load else None,
+        "source_total": load["source_total"] if load else None,
+        "tenant_name": load["tenant_name"] if load else None,
         "created_at": job.created_at.isoformat(),
     }
 
@@ -125,7 +111,8 @@ async def active_jobs_view(request, workspace_id):
     """GET /api/workspaces/<workspace_id>/jobs/active/
 
     Returns ThreadJobs in non-terminal states for the current user, enriched
-    with the latest MaterializationRun.progress. Also returns ThreadJobs that
+    with the latest MaterializationRun.progress, plus ``workspace_loads``: every
+    in-flight load of the workspace, whoever started it. Also returns ThreadJobs that
     transitioned to a terminal state within RECENT_TERMINATION_WINDOW so the
     frontend can render an inline failure card for jobs that have already
     vanished from the active list. Polled by useWorkspaceJobs.
@@ -190,6 +177,13 @@ async def active_jobs_view(request, workspace_id):
         # Last wins — the currently active tenant_schema run.
         runs_by_job[r.procrastinate_job_id] = r.progress or {}
 
+    workspace_loads = await aworkspace_load_progress(workspace)
+    loads_by_job = {
+        load["procrastinate_job_id"]: load
+        for load in workspace_loads
+        if load["procrastinate_job_id"] is not None
+    }
+
     cutoff = timezone.now() - RECENT_TERMINATION_WINDOW
     terminated_jobs = [
         j
@@ -222,7 +216,15 @@ async def active_jobs_view(request, workspace_id):
 
     return JsonResponse(
         {
-            "jobs": [_job_to_dict(j, runs_by_job.get(j.procrastinate_job_id)) for j in jobs],
+            "jobs": [
+                _job_to_dict(
+                    j,
+                    runs_by_job.get(j.procrastinate_job_id),
+                    loads_by_job.get(j.procrastinate_job_id),
+                )
+                for j in jobs
+            ],
+            "workspace_loads": workspace_loads,
             "recent_terminations": recent_terminations,
         }
     )
