@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.db import models
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -5,6 +6,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.common.http import string_field
 from apps.users.models import Tenant
 from apps.workspaces.models import TenantSchema, Workspace, WorkspaceRole
 
@@ -124,13 +126,15 @@ class TransformationRunViewSet(viewsets.ReadOnlyModelViewSet):
         Body: {"tenant_id": "...", "workspace_id": "..." (optional)}
         Triggers a transformation run synchronously.
         """
-        tenant_id = request.data.get("tenant_id")
+        tenant_id, err = string_field(request.data, "tenant_id")
+        if err:
+            return err
         if not tenant_id:
             return Response({"error": "tenant_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             tenant = Tenant.objects.get(id=tenant_id)
-        except (Tenant.DoesNotExist, ValueError):
+        except (Tenant.DoesNotExist, ValidationError):
             return Response({"error": "Tenant not found"}, status=status.HTTP_404_NOT_FOUND)
 
         if not request.user.tenant_memberships.filter(tenant=tenant).exists():
@@ -146,12 +150,20 @@ class TransformationRunViewSet(viewsets.ReadOnlyModelViewSet):
 
         workspace = None
         workspace_id = request.data.get("workspace_id")
+        # Optional, so an explicit null still means "no workspace" rather than a 400.
+        if workspace_id is not None and not isinstance(workspace_id, str):
+            return Response(
+                {"error": "workspace_id must be a string."}, status=status.HTTP_400_BAD_REQUEST
+            )
         if workspace_id:
-            workspace = Workspace.objects.filter(
-                id=workspace_id,
-                memberships__user=request.user,
-                memberships__role__in=[WorkspaceRole.READ_WRITE, WorkspaceRole.MANAGE],
-            ).first()
+            try:
+                workspace = Workspace.objects.filter(
+                    id=workspace_id,
+                    memberships__user=request.user,
+                    memberships__role__in=[WorkspaceRole.READ_WRITE, WorkspaceRole.MANAGE],
+                ).first()
+            except ValidationError:
+                workspace = None
             if not workspace:
                 raise PermissionDenied("Workspace not found or you are not a member.")
 
