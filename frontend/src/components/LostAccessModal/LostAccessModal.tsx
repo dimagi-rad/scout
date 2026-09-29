@@ -34,7 +34,13 @@ export function LostAccessModal() {
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
 
   const active = domains.find((d) => d.id === activeDomainId)
-  const accessible = useMemo(() => domains.filter(workspaceHasAccess), [domains])
+  const accessible = useMemo(
+    () =>
+      domains
+        .filter(workspaceHasAccess)
+        .sort((a, b) => a.display_name.localeCompare(b.display_name)),
+    [domains],
+  )
 
   // Connected Accounts and the workspace's own page (remove a source, leave,
   // delete) are where the user fixes this, so the gate must not cover them.

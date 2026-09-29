@@ -112,7 +112,15 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   }, [domains, selected])
 
   const normalizedSearch = search.trim().replace(/^#/, "").toLowerCase()
-  const filteredSources = sources.filter((t) => {
+  // The server's order puts never-selected sources first (#357); a picker wants names.
+  const sortedSources = useMemo(
+    () =>
+      [...sources].sort(
+        (a, b) => a.tenant_name.localeCompare(b.tenant_name) || a.tenant_id.localeCompare(b.tenant_id),
+      ),
+    [sources],
+  )
+  const filteredSources = sortedSources.filter((t) => {
     if (providerFilter && t.provider !== providerFilter) return false
     if (
       normalizedSearch &&

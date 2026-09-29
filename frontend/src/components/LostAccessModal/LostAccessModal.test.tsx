@@ -70,6 +70,19 @@ describe("LostAccessModal", () => {
     expect(screen.queryByTestId("lost-access-goto-skelly")).toBeNull()
   })
 
+  it("lists accessible workspaces alphabetically by display name", () => {
+    useAppStore.setState({
+      domains: [ws("skelly", false), ws("zulu", true), ws("bravo", true), ws("Alpha", true)],
+      activeDomainId: "skelly",
+    })
+    renderModal()
+
+    const order = [...screen.getByTestId("lost-access-picker").querySelectorAll("button")].map(
+      (el) => el.getAttribute("data-testid"),
+    )
+    expect(order).toEqual(["lost-access-goto-Alpha", "lost-access-goto-bravo", "lost-access-goto-zulu"])
+  })
+
   it("switches to a chosen accessible workspace", async () => {
     useAppStore.setState({
       domains: [ws("skelly", false), ws("live", true)],
