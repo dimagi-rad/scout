@@ -17,15 +17,19 @@ START
 
 - **agent** prepends the system prompt, prunes history, repairs any tool call
   left without a result, and calls Claude.
-- **tools** runs the calls. For MCP tools it injects `workspace_id`, `user_id`,
-  `thread_id` and `tool_call_id` from state. These are hidden from the model's
-  tool schemas, so the model can't choose its own data scope.
+- **tools** runs the calls. MCP tools get `workspace_id`, `user_id` and
+  `thread_id` from state. MCP tools and the `artifact_manager` and
+  `canvas_manager` subagents also get `tool_call_id`, taken from the call itself.
+  All of these are hidden from the model's tool schemas, so the model can't
+  choose its own data scope.
 - **escalate** ends the turn with a fixed message and makes no further tool calls
   (see [Escalation](#escalation)).
 
 There is no dedicated retry node. A failed tool returns an error envelope, and the
 model reads it on its next pass through `agent`. The caller's `recursion_limit`
-(50 for chat and recipe runs) caps the loop.
+caps the loop. It is 50 for chat and recipe runs, and
+`AGENT_RESUME_RECURSION_LIMIT` (default 20) for the turn that resumes a chat
+after materialization.
 
 Key characteristics:
 
@@ -57,9 +61,10 @@ Message history is automatically pruned to keep the last 20 messages plus system
 
 The graph is built per turn with two inputs that change its tools and prompts:
 
-- **write-capable**: the user holds the read-write workspace role. It is resolved
-  when the graph is built and fails closed: with no authenticated user, the run
-  is read-only.
+- **write-capable**: the user has at least the read-write workspace role
+  (`read_write` or `manage`). It is resolved when the graph is built and fails
+  closed: the run is read-only when there is no authenticated user or access is
+  denied.
 - **interactive**: `True` for chat. `False` for headless runs such as recipes.
 
 | Tool | Read-only member | Write-capable, chat | Write-capable, headless |
@@ -70,21 +75,27 @@ The graph is built per turn with two inputs that change its tools and prompts:
 | `artifact_graph_overview`, `get_artifact_semantic_queries` | yes | via `artifact_manager` | via `artifact_manager` |
 | `canvas_read` | chat only | yes | no |
 | `canvas_manager` | no | yes | no |
+
+Canvas tools need a conversation ID as well as an interactive run.
 | `save_learning`, `save_as_recipe` | no | yes | yes |
 
 `teardown_schema` is never exposed. Leaving a write tool out isn't the only
-guard: write tools re-check the user's role each time they run and return a
-write-denied error if the role has changed.
+guard: each write operation re-checks the role when it runs and is refused if
+the role has changed. The local tools do this in the tool, and the MCP server
+does it for MCP materialization. The `artifact_manager` and `canvas_manager`
+subagents rely on the checks in the tools they call.
 
 The prompt follows the same split. `select_base_system_prompt` picks one of three
 base prompts:
 
 - **Read-only**: never offers a rebuild. It refers repairs to a workspace member
-  with write access.
-- **Chat**: asks the user before re-materializing, then ends the turn once the
-  run starts. The conversation resumes when loading finishes.
-- **Headless**: calls the blocking `run_materialization` at most once and
-  continues in the same run.
+  with write access, and says a generic query error doesn't prove data is missing.
+- **Chat**: when an error's `recovery_action` is `materialization`, it asks before
+  re-materializing, unless the user already asked for a refresh. Once the run
+  starts it ends the turn, and the conversation resumes when loading finishes.
+- **Headless**: when `recovery_action` is `materialization`, it calls the
+  blocking `run_materialization` at most once per run and continues in the same
+  run.
 
 The artifact, data-availability and canvas sections also have read-only
 variants.
@@ -97,6 +108,25 @@ into, so `run_materialization` is a local tool that blocks until loading
 completes. The canvas tools are left out. If the turn ends on the escalation
 node, the recipe run is marked failed rather than completed. The runner spots
 this from the `scout_escalation` response metadata, not the message text.
+
+## Escalation
+
+After each tool round, the graph routes to `escalate` instead of back to
+`agent` in two cases:
+
+- **Workspace access denied**: a tool in the latest round returned
+  `WORKSPACE_ACCESS_DENIED`. The denial applies to every remaining call, so
+  the turn ends with the authorizer's message instead of retrying.
+- **Schema-error streak**: the last three tool results all returned
+  `NOT_FOUND` or `VALIDATION_ERROR`, which usually means the tables aren't
+  queryable. The graph matches the structured `error.code`, not the message
+  text. Any other result breaks the streak.
+
+For a schema-error streak, the message depends on the run. Read-only members
+are told that someone with write access can refresh the data. Chat asks whether
+to run materialization. Headless runs report that the data needs
+re-materializing. The message carries `scout_escalation` metadata
+(`workspace_access_denied` or `schema_errors`).
 
 ## MCP integration
 
@@ -258,10 +288,9 @@ Core agent behavior, in a read-only, chat or headless variant (see [Roles and ru
 
 Instructions for creating visualizations. Read-only members get a variant that only covers inspecting existing stories.
 
-- When to create artifacts vs. use tables
-- Artifact type selection guidelines
-- React component patterns with Recharts examples
-- Data handling best practices
+- When to create an artifact, and delegating it to `artifact_manager`
+- Runtime date controls (`date_filter`, `period_selector`) for story artifacts
+- What to do when an artifact needs a semantic model change
 
 ### 3. Project system prompt
 
@@ -358,25 +387,6 @@ The agent's LangGraph output is translated to Vercel AI SDK v6 format for the fr
 Artifact detection looks for:
 - UUID pattern in tool output
 - Keywords: "artifact_id", "artifact created", "chart saved", "visualization created"
-
-### Escalation
-
-After each tool round, the graph routes to `escalate` instead of back to
-`agent` in two cases:
-
-- **Workspace access denied**: a tool in the latest round returned
-  `WORKSPACE_ACCESS_DENIED`. The denial applies to every remaining call, so
-  the turn ends with the authorizer's message instead of retrying.
-- **Schema-error streak**: the last three tool results all returned
-  `NOT_FOUND` or `VALIDATION_ERROR`, which usually means the tables aren't
-  queryable. The graph matches the structured `error.code`, not the message
-  text. Any other result breaks the streak.
-
-For a schema-error streak, the message depends on the run. Read-only members
-are told that someone with write access can refresh the data. Chat asks whether
-to run materialization. Headless runs report that the data needs
-re-materializing. The message carries `scout_escalation` metadata
-(`workspace_access_denied` or `schema_errors`).
 
 ## Conversation persistence
 
