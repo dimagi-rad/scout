@@ -15,6 +15,7 @@ from procrastinate.manager import JobManager
 from apps.chat.models import Thread, ThreadJob
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.access import TENANT_ACCESS_LOST
 from apps.workspaces.api import jobs_cancel
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.api.jobs_views import _termination_to_dict
@@ -1307,7 +1308,7 @@ async def test_active_jobs_still_denies_a_non_member_during_an_outage(
     response = await _poll_active_jobs(other_user, workspace)
 
     assert response.status_code == 403
-    assert "jobs" not in response.json()
+    assert response.json() == {"error": "Workspace not found or access denied."}
 
 
 @pytest.mark.asyncio
@@ -1325,4 +1326,4 @@ async def test_active_jobs_still_denies_a_member_who_lost_the_source_during_an_o
     response = await _poll_active_jobs(user, workspace)
 
     assert response.status_code == 403
-    assert "jobs" not in response.json()
+    assert response.json()["reason"] == TENANT_ACCESS_LOST
