@@ -151,7 +151,7 @@ async def recipe_run_view(request, workspace_id, recipe_id):
     # Execution is async: a recipe may block on a materialization (loading fresh
     # data before building its dashboard), which must not hold the HTTP request
     # open. Create the run PENDING, defer the background task, and return 202;
-    # the client polls GET .../runs/<id>/ for progress and the final result.
+    # the client polls GET .../runs/ for progress and the final result.
     try:
         run = await RecipeRun.objects.acreate(
             recipe=recipe,
