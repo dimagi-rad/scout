@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { jobsApi, type ActiveJob, type RecentTermination } from "@/api/jobs"
+import {
+  jobsApi,
+  type ActiveJob,
+  type RecentTermination,
+  type WorkspaceLoad,
+} from "@/api/jobs"
 
 const POLL_INTERVAL_MS = 3000
 
 interface State {
+  workspaceId: string | null
   jobs: ActiveJob[]
+  workspaceLoads: WorkspaceLoad[]
   recentTerminations: RecentTermination[]
   lastError: string | null
 }
 
 export interface UseWorkspaceJobs {
   jobs: ActiveJob[]
+  /** Every in-flight load of the workspace, including ones other members or a
+   *  refresh started, which have no job in the caller's threads. */
+  workspaceLoads: WorkspaceLoad[]
   jobsByThreadId: Record<string, ActiveJob>
   /** Thread IDs whose job just transitioned to a terminal state on the most
    *  recent poll (gone from the active list). Consumers should refetch
@@ -38,16 +48,24 @@ export interface UseWorkspaceJobs {
 export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJobs {
   const [state, setState] = useState<State>({
     jobs: [],
+    workspaceId,
+    workspaceLoads: [],
     recentTerminations: [],
     lastError: null,
   })
   const [recentlyCompletedThreadIds, setRecentlyCompletedThreadIds] = useState<string[]>([])
   const prevThreadIdsRef = useRef<Set<string>>(new Set())
+  const workspaceIdRef = useRef(workspaceId)
+  useEffect(() => {
+    workspaceIdRef.current = workspaceId
+  }, [workspaceId])
 
   const fetchOnce = useCallback(async () => {
     if (!workspaceId) return
     try {
       const data = await jobsApi.active(workspaceId)
+      // A response for a workspace we have since left must not seed the new one's diff.
+      if (workspaceIdRef.current !== workspaceId) return
       const currentThreadIds = new Set(data.jobs.map((j) => j.thread_id))
       const justCompleted: string[] = []
       for (const prev of prevThreadIdsRef.current) {
@@ -58,6 +76,8 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       prevThreadIdsRef.current = currentThreadIds
       setState({
         jobs: data.jobs,
+        workspaceId,
+        workspaceLoads: data.workspace_loads ?? [],
         recentTerminations: data.recent_terminations ?? [],
         lastError: null,
       })
@@ -132,6 +152,8 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
 
   return {
     jobs: state.jobs,
+    // Else a switch shows the previous workspace's load until the first poll lands.
+    workspaceLoads: state.workspaceId === workspaceId ? state.workspaceLoads : [],
     jobsByThreadId,
     recentlyCompletedThreadIds,
     recentTerminations: state.recentTerminations,

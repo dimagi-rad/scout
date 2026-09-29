@@ -40,9 +40,18 @@ export interface WorkspaceListItem {
   member_count: number
   // Recorded tenant/view schema state; does not certify semantic query readiness.
   schema_status: SchemaStatus
+  // A run is active on any of the workspace's sources, whoever started it.
+  in_progress?: boolean
   // Latest completed or partial load. A later failure does not erase this history.
   last_synced_at: string | null
   created_at: string
+}
+
+export interface WorkspaceSourceFreshness {
+  tenant_id: string
+  tenant_name: string
+  provider: string
+  last_synced_at: string | null
 }
 
 export interface WorkspaceDetail {
@@ -56,6 +65,8 @@ export interface WorkspaceDetail {
   system_prompt: string
   missing_tenants?: MissingTenant[]
   schema_status: SchemaStatus
+  in_progress?: boolean
+  sources?: WorkspaceSourceFreshness[]
   tenant_count: number
   member_count: number
   last_synced_at: string | null
@@ -133,9 +144,10 @@ export type WorkspaceLoadState = "loading" | "recorded" | "unavailable" | "faile
  */
 export function workspaceLoadState(ws: {
   schema_status?: SchemaStatus
+  in_progress?: boolean
   last_synced_at?: string | null
 }): WorkspaceLoadState {
-  if (ws.schema_status === "provisioning") return "loading"
+  if (ws.in_progress || ws.schema_status === "provisioning") return "loading"
   if (ws.schema_status === "unavailable") return "unavailable"
   if (ws.schema_status === "failed") return "failed"
   return workspaceHasRecordedLoad(ws) ? "recorded" : "unknown"

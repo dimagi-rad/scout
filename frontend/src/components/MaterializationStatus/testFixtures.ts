@@ -9,6 +9,9 @@ export const job: ActiveJob = {
   job_type: "materialization",
   state: "running",
   progress: null,
+  source_index: null,
+  source_total: null,
+  tenant_name: null,
   created_at: "2026-09-23T10:00:00Z",
 }
 

@@ -62,6 +62,9 @@ const activeJob: ActiveJob = {
   thread_id: "thread-1",
   tool_call_id: "tool-1",
   job_type: "materialization",
+  source_index: 2,
+  source_total: 4,
+  tenant_name: "Clinic B",
   state: "running",
   created_at: "2026-06-26T12:00:00Z",
   progress: {

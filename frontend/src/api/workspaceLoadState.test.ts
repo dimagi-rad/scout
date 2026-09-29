@@ -13,6 +13,12 @@ describe("workspace recorded load metadata", () => {
     },
   )
 
+  it("shows loading whenever a run is active, even for an available schema", () => {
+    expect(
+      workspaceLoadState({ schema_status: "available", in_progress: true, last_synced_at }),
+    ).toBe("loading")
+  })
+
   it.each([
     [{ last_synced_at }, "recorded", true],
     [{ last_synced_at: null }, "unknown", false],
