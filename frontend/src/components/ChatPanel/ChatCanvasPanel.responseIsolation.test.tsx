@@ -329,7 +329,7 @@ describe("Canvas read and mutation ordering", () => {
   })
 })
 
-describe("Canvas for read-only members", () => {
+describe("Canvas role gating", () => {
   afterEach(() => useAppStore.setState({ domains: [] }))
 
   it("gives a read-write member the per-entry actions", async () => {
