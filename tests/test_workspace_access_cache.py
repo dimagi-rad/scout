@@ -2,9 +2,9 @@
 
 A chat turn resolves the same (user, workspace) for the graph and again at each
 local tool's sink; with the all-of gate every resolution costs several queries.
-These pin that repeats inside a request scope cost none, that nothing is cached
-outside one (workers, direct calls), that entries expire, and that a request's
-scope ends with it (including a streamed response's body).
+These pin that repeats inside a request scope cost only a live membership read,
+that nothing is cached outside one (workers, direct calls), that entries expire,
+and that a request's scope ends with it (including a streamed response's body).
 """
 
 import pytest
@@ -14,13 +14,21 @@ from django.http import HttpResponse, StreamingHttpResponse
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext
 
-from apps.users.models import Tenant
+from apps.common.error_codes import ErrorCode
+from apps.users.models import Tenant, TenantMembership
+from apps.users.services.tenant_resolution import _sync_memberships
+from apps.users.services.upstream_denial import record_validated_upstream_denial
 from apps.workspaces import access as access_module
 from apps.workspaces import access_cache
 from apps.workspaces.access import (
+    NOT_MEMBER,
+    TENANT_ACCESS_LOST,
     WorkspaceAccess,
     aresolve_workspace_access_ex,
+    aworkspace_write_allowed,
+    missing_tenants_for_member,
     resolve_workspace_access_ex,
+    workspace_write_allowed,
 )
 from apps.workspaces.models import (
     Workspace,
@@ -29,6 +37,10 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.access_freshness import VerificationBudget
+from apps.workspaces.services.workspace_service import (
+    add_workspace_tenant,
+    remove_workspace_tenant,
+)
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
 from tests.tenant_access import grant_tenant_access
 
@@ -44,12 +56,12 @@ def scope():
 
 
 @pytest.mark.django_db
-def test_repeat_resolution_in_a_scope_costs_no_queries(
+def test_repeat_resolution_in_a_scope_rereads_only_the_membership(
     scope, user, workspace, django_assert_num_queries
 ):
     first = resolve_workspace_access_ex(user, workspace.id)
 
-    with django_assert_num_queries(0):
+    with django_assert_num_queries(1):
         again = resolve_workspace_access_ex(user, workspace.id)
 
     assert first.granted
@@ -160,7 +172,7 @@ def test_middleware_caches_within_a_request_and_closes_after(
 
     def view(_request):
         resolve_workspace_access_ex(user, workspace.id)
-        with django_assert_num_queries(0):
+        with django_assert_num_queries(1):
             resolve_workspace_access_ex(user, workspace.id)
         scopes.append(access_cache._scope.get())
         return HttpResponse("ok")
@@ -256,3 +268,238 @@ async def test_sync_streamed_bodies_are_left_untouched():
 
     assert scopes[0].closed
     assert list(response.streaming_content) == [b"file"]
+
+
+@pytest.mark.django_db
+def test_a_removed_member_loses_a_cached_grant(scope, user, workspace):
+    """A6: removal lands on the very next check, not up to MAX_AGE_SECONDS later,
+    even though the removal happened outside this request's scope."""
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+
+    WorkspaceMembership.objects.filter(workspace=workspace, user=user).delete()
+
+    assert resolve_workspace_access_ex(user, workspace.id).denied_reason == NOT_MEMBER
+
+
+@pytest.mark.django_db
+def test_a_demoted_member_loses_a_cached_write_grant(scope, user, workspace):
+    assert workspace_write_allowed(user, workspace.id)
+    read_grant = resolve_workspace_access_ex(user, workspace.id)
+
+    WorkspaceMembership.objects.filter(workspace=workspace, user=user).update(
+        role=WorkspaceRole.READ
+    )
+
+    assert not workspace_write_allowed(user, workspace.id)
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    # Views branch on membership.role (MANAGE-only actions), so a reference taken
+    # before the demotion must see it too.
+    assert read_grant.membership.role == WorkspaceRole.READ
+
+
+@pytest.mark.django_db
+def test_an_exempt_grant_reflects_a_demotion(scope, user, uncovered_manager):
+    ws, _missing = uncovered_manager
+    assert resolve_workspace_access_ex(
+        user, ws.id, minimum_role=WorkspaceRole.MANAGE, require_coverage=False
+    ).granted
+
+    WorkspaceMembership.objects.filter(workspace=ws, user=user).update(role=WorkspaceRole.READ)
+
+    assert not resolve_workspace_access_ex(
+        user, ws.id, minimum_role=WorkspaceRole.MANAGE, require_coverage=False
+    ).granted
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_async_cached_write_grant_rechecks_the_role(user, workspace):
+    opened, token = access_cache.open_scope()
+    try:
+        assert await aworkspace_write_allowed(user, workspace.id)
+        await WorkspaceMembership.objects.filter(workspace=workspace, user=user).aupdate(
+            role=WorkspaceRole.READ
+        )
+        allowed = await aworkspace_write_allowed(user, workspace.id)
+    finally:
+        access_cache.close_scope(opened)
+        access_cache.detach_scope(token)
+
+    assert not allowed
+
+
+@pytest.mark.django_db
+def test_an_upstream_denial_drops_the_users_cached_decisions(
+    scope, user, workspace, tenant, django_capture_on_commit_callbacks
+):
+    """A6: a tool call that sees the provider revoke access must not leave the rest
+    of the turn running on the grant cached before it."""
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    connection = TenantMembership.objects.get(user=user, tenant=tenant).connection
+
+    with django_capture_on_commit_callbacks() as callbacks:
+        record_validated_upstream_denial(
+            connection, code=ErrorCode.AUTH_ACCESS_DENIED, tenant_id=tenant.id
+        )
+        # Not before commit: a sibling tool call could re-cache the unarchived rows.
+        assert resolve_workspace_access_ex(user, workspace.id).granted
+    for callback in callbacks:
+        callback()
+
+    assert resolve_workspace_access_ex(user, workspace.id).denied_reason == TENANT_ACCESS_LOST
+
+
+@pytest.fixture
+def uncovered_manager(user):
+    t1 = Tenant.objects.create(provider="commcare", external_id="u1", canonical_name="One")
+    t2 = Tenant.objects.create(provider="commcare", external_id="u2", canonical_name="Two")
+    ws = Workspace.objects.create(name="Partial", created_by=user)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    for tenant in (t1, t2):
+        WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    grant_tenant_access(user, t1)
+    return ws, t2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("path", ["", "members/"])
+def test_exempt_pages_evaluate_readiness_once_per_request(
+    client, user, uncovered_manager, mocker, path
+):
+    """A5: the gate already computed what the caller is missing; the exempt
+    handler narrowing on it must not run the readiness batch again."""
+    ws, _missing = uncovered_manager
+    client.force_login(user)
+    spy = mocker.spy(access_module, "member_coverage_gaps")
+
+    resp = client.get(f"/api/workspaces/{ws.id}/{path}")
+
+    assert resp.status_code == 200
+    assert spy.call_count == 1
+
+
+@pytest.mark.django_db
+def test_removing_the_missing_source_evaluates_readiness_once(
+    client, user, uncovered_manager, mocker
+):
+    ws, missing = uncovered_manager
+    wt = WorkspaceTenant.objects.get(workspace=ws, tenant=missing)
+    client.force_login(user)
+    spy = mocker.spy(access_module, "member_coverage_gaps")
+
+    resp = client.delete(f"/api/workspaces/{ws.id}/tenants/{wt.id}/")
+
+    assert resp.status_code == 204
+    assert spy.call_count == 1
+
+
+@pytest.mark.django_db
+def test_changing_a_workspaces_sources_drops_its_cached_coverage(
+    scope, user, uncovered_manager, django_capture_on_commit_callbacks
+):
+    ws, missing = uncovered_manager
+    assert [t.tenant_name for t in missing_tenants_for_member(user, ws)] == ["Two"]
+
+    with django_capture_on_commit_callbacks(execute=True):
+        remove_workspace_tenant(ws, WorkspaceTenant.objects.get(workspace=ws, tenant=missing))
+
+    assert missing_tenants_for_member(user, ws) == ()
+
+
+@pytest.mark.django_db
+def test_adding_a_source_drops_the_workspaces_cached_coverage(
+    scope, user, workspace, django_capture_on_commit_callbacks
+):
+    """Adding a source widens what members must cover, so a stale entry fails open."""
+    assert missing_tenants_for_member(user, workspace) == ()
+    extra = Tenant.objects.create(provider="commcare", external_id="x9", canonical_name="Extra")
+
+    with django_capture_on_commit_callbacks() as callbacks:
+        add_workspace_tenant(workspace, extra)
+        # Not before commit, or another connection could re-cache the old tenant set.
+        assert missing_tenants_for_member(user, workspace) == ()
+    for callback in callbacks:
+        callback()
+
+    assert [t.tenant_name for t in missing_tenants_for_member(user, workspace)] == ["Extra"]
+
+
+@pytest.mark.django_db
+def test_invalidate_matches_a_stringified_user_id(scope, user):
+    since = access_cache.generation()
+    access_cache.store(user, "ws", access_cache.COVERAGE, (), since=since)
+
+    access_cache.invalidate(user_id=str(user.pk))
+
+    assert access_cache.lookup(user, "ws", access_cache.COVERAGE) is None
+
+
+@pytest.mark.django_db
+def test_a_result_read_before_an_invalidation_is_not_stored(scope, user):
+    """A sibling that read the pre-denial rows must not re-cache after the drop."""
+    since = access_cache.generation()
+    access_cache.invalidate(user_id=user.pk)
+
+    access_cache.store(user, "ws", access_cache.COVERAGE, (), since=since)
+
+    assert access_cache.lookup(user, "ws", access_cache.COVERAGE) is None
+
+
+@pytest.mark.django_db
+def test_a_resolution_that_races_an_invalidation_is_not_cached(scope, user, workspace, monkeypatch):
+    real = access_module.member_coverage_gaps
+
+    def gaps_then_denial_elsewhere(*args, **kwargs):
+        result = real(*args, **kwargs)
+        access_cache.invalidate(user_id=user.pk)
+        return result
+
+    monkeypatch.setattr(access_module, "member_coverage_gaps", gaps_then_denial_elsewhere)
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+
+    assert access_cache.lookup(user, workspace.id, READ_KEY) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_membership_rediscovery_drops_the_users_cached_decisions(user, workspace, tenant):
+    """Member refreshes run rediscovery inside a gated request (source/member add)."""
+    membership = await TenantMembership.objects.select_related("connection").aget(
+        user=user, tenant=tenant
+    )
+    opened, token = access_cache.open_scope()
+    try:
+        assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+        # A fetch that no longer lists the tenant archives it.
+        await _sync_memberships(user, membership.connection, [])
+        after = await aresolve_workspace_access_ex(user, workspace.id)
+    finally:
+        access_cache.close_scope(opened)
+        access_cache.detach_scope(token)
+
+    assert after.denied_reason == TENANT_ACCESS_LOST
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_async_resolution_that_races_an_invalidation_is_not_cached(
+    user, workspace, monkeypatch
+):
+    """The motivating shape: parallel tool calls, one of which records a denial."""
+    real = access_module.amember_coverage_gaps
+
+    async def gaps_then_denial_elsewhere(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        access_cache.invalidate(user_id=user.pk)
+        return result
+
+    monkeypatch.setattr(access_module, "amember_coverage_gaps", gaps_then_denial_elsewhere)
+    opened, token = access_cache.open_scope()
+    try:
+        assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+        cached = access_cache.lookup(user, workspace.id, READ_KEY)
+    finally:
+        access_cache.close_scope(opened)
+        access_cache.detach_scope(token)
+
+    assert cached is None

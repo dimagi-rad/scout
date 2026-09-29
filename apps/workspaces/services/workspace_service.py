@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from apps.workspaces import access_cache
 from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
@@ -22,6 +23,13 @@ from apps.workspaces.tasks import (
     rebuild_workspace_view_schema,
     teardown_view_schema_task,
 )
+
+
+def _invalidate_on_commit(workspace) -> None:
+    # Not before commit: a resolution on another connection would read the old
+    # tenant set under the new generation and cache it.
+    workspace_id = workspace.id
+    transaction.on_commit(lambda: access_cache.invalidate(workspace_id=workspace_id))
 
 
 def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[WorkspaceTenant, bool]:
@@ -44,6 +52,7 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
     with transaction.atomic():
         wt, created = WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
         if created:
+            _invalidate_on_commit(workspace)
             serving = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).exists()
             if serving or actor_id is None:
                 WorkspaceViewSchema.objects.filter(workspace=workspace).update(
@@ -146,6 +155,7 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         if len(tenant_ids) <= 1:
             raise ValidationError("Cannot remove the last tenant from a workspace.")
         wt.delete()
+        _invalidate_on_commit(workspace)
         remaining = len(tenant_ids) - 1
         if remaining <= 1:
             for vs in WorkspaceViewSchema.objects.filter(

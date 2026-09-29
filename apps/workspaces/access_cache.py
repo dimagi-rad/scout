@@ -8,16 +8,33 @@ explicit scope (``WorkspaceAccessCacheMiddleware`` opens one per HTTP request)
 and only for ``MAX_AGE_SECONDS``, so a long turn still re-checks and a background
 worker, which opens no scope, always resolves afresh. Within a scope, repeat
 calls return the same ``WorkspaceAccess`` and model instances, not fresh rows.
+
+Only credential readiness is really served from here: ``access`` re-reads the
+membership row on every cached grant, so a removal or demotion made by another
+request or process lands on the next check. Writers of coverage inputs that can
+be followed by an access check in the same request call ``invalidate``: recording
+an upstream denial, membership rediscovery, and adding or removing a workspace
+source. The disconnect views archive memberships too but read no coverage
+afterwards; one that starts to must invalidate first. A change made by another
+request or process is seen within ``MAX_AGE_SECONDS``.
+
+A resolution that started before an ``invalidate`` must not store what it read:
+callers take ``generation()`` before reading and pass it to ``store``.
 """
 
 from __future__ import annotations
 
+import itertools
 import time
 from contextvars import ContextVar
 
-# Short enough that a revocation or role change mid-turn still lands on the next
-# tool call a few seconds later; long enough to absorb a turn's burst of checks.
+# Short enough that an upstream revocation noticed by another process still lands
+# on a tool call a few seconds later; long enough to absorb a turn's burst of checks.
 MAX_AGE_SECONDS = 10.0
+
+# The ``options`` slot for a member's missing tenants, which the gate computes and
+# the coverage-exempt handlers need again to narrow what they allow.
+COVERAGE = "coverage"
 
 
 class Scope(dict):
@@ -25,6 +42,12 @@ class Scope(dict):
     that copy the context (async tool runs, ``sync_to_async``) share one cache."""
 
     closed = False
+    generation = 0
+
+    def __init__(self):
+        super().__init__()
+        # next() on a count is atomic, unlike += on an attribute shared with threads.
+        self._bumps = itertools.count(1)
 
 
 _scope: ContextVar[Scope | None] = ContextVar("workspace_access_cache", default=None)
@@ -73,8 +96,36 @@ def lookup(user, workspace_id, options):
     return result
 
 
-def store(user, workspace_id, options, result) -> None:
+def generation() -> int | None:
+    scope = _active()
+    return None if scope is None else scope.generation
+
+
+def store(user, workspace_id, options, result, *, since: int | None) -> None:
+    """Cache ``result``, computed from reads made at generation ``since``."""
     scope = _active()
     key = _key(user, workspace_id, options)
-    if scope is not None and key is not None:
-        scope[key] = (time.monotonic(), result)
+    if scope is None or key is None or since != scope.generation:
+        return
+    entry = (time.monotonic(), result)
+    scope[key] = entry
+    # Re-checked after the write: invalidate bumps before it drops, so an
+    # invalidation racing this store either is seen here or removes the entry.
+    if since != scope.generation and scope.get(key) is entry:
+        scope.pop(key, None)
+
+
+def invalidate(*, user_id=None, workspace_id=None) -> None:
+    """Drop the active scope's entries for ``user_id`` and/or ``workspace_id``."""
+    scope = _active()
+    if scope is None:
+        return
+    scope.generation = next(scope._bumps)
+    workspace_id = None if workspace_id is None else str(workspace_id)
+    user_id = None if user_id is None else str(user_id)
+    for key in list(scope):
+        entry_user, entry_workspace, _options = key
+        if (user_id is None or str(entry_user) == user_id) and (
+            workspace_id is None or entry_workspace == workspace_id
+        ):
+            scope.pop(key, None)

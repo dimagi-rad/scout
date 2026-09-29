@@ -365,8 +365,15 @@ def _missing_by_workspace(tenants_by_ws: dict, granted: set, gaps: dict) -> dict
 
 def missing_tenants_for_member(user, workspace) -> tuple[MissingTenant, ...]:
     """:func:`missing_workspace_tenants` for one workspace, for handlers that
-    resolved with ``require_coverage=False`` and must narrow what they allow."""
-    return missing_workspace_tenants(user, _workspace_tenants(workspace))
+    resolved with ``require_coverage=False`` and must narrow what they allow.
+
+    Reuses what the gate computed earlier in the request (A5)."""
+    missing = access_cache.lookup(user, workspace.id, access_cache.COVERAGE)
+    if missing is None:
+        since = access_cache.generation()
+        missing = missing_workspace_tenants(user, _workspace_tenants(workspace))
+        access_cache.store(user, workspace.id, access_cache.COVERAGE, missing, since=since)
+    return missing
 
 
 def _workspace_tenants(workspace) -> list:
@@ -387,17 +394,17 @@ def _resolve_local_access_ex(
     user, workspace_id, *, minimum_role: str, require_coverage: bool
 ) -> WorkspaceAccess:
     """Membership, tenant coverage and role, from local state only."""
+    since = access_cache.generation()
     try:
         wm = WorkspaceMembership.objects.select_related("workspace").get(
             workspace_id=workspace_id, user=user
         )
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
-    missing = (
-        missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
-        if require_coverage
-        else ()
-    )
+    missing = ()
+    if require_coverage:
+        missing = missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
+        access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
     if missing:
         return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not role_satisfies(wm.role, minimum_role):
@@ -407,6 +414,7 @@ def _resolve_local_access_ex(
 
 async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) -> WorkspaceAccess:
     """Async twin of ``_resolve_local_access_ex`` (always requires coverage)."""
+    since = access_cache.generation()
     try:
         wm = await WorkspaceMembership.objects.select_related("workspace").aget(
             workspace_id=workspace_id, user=user
@@ -414,6 +422,7 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     missing = await amissing_workspace_tenants(user, await _aworkspace_tenants(wm.workspace))
+    access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
     if missing:
         return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not role_satisfies(wm.role, minimum_role):
@@ -450,17 +459,47 @@ def resolve_workspace_access_ex(
     # call so an exempt grant can never be served to a data path.
     options = (minimum_role, verification)
     result = access_cache.lookup(user, workspace_id, options)
+    if result is not None and result.granted:
+        result = _with_live_role(
+            result,
+            WorkspaceMembership.objects.filter(pk=result.membership.pk)
+            .values_list("role", flat=True)
+            .first(),
+            user,
+            workspace_id,
+            minimum_role,
+        )
     if result is None:
+        since = access_cache.generation()
         result = _resolve_with_freshness(
             user, workspace_id, minimum_role=minimum_role, verification=verification
         )
         if not result.retryable:
-            access_cache.store(user, workspace_id, options, result)
+            access_cache.store(user, workspace_id, options, result, since=since)
     if require_coverage or not all_of_access_enforced() or not result.missing_tenants:
         return result
     return _resolve_local_access_ex(
         user, workspace_id, minimum_role=minimum_role, require_coverage=False
     )
+
+
+def _with_live_role(cached, role, user, workspace_id, minimum_role):
+    """A cached grant checked against the membership row as it is now (A6).
+
+    Readiness is what the cache saves; the membership lookup is one indexed row,
+    so it is never cached. That makes a removal or demotion by another request or
+    process land on the next check, for reads and writes alike, where a
+    per-process invalidation could only catch changes made in this one. ``None``
+    means resolve afresh.
+    """
+    if role is None:
+        access_cache.invalidate(user_id=user.pk, workspace_id=workspace_id)
+        return None
+    # Shared with every holder of this decision in the request, so they all see it.
+    cached.membership.role = role
+    if not role_satisfies(role, minimum_role):
+        return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
+    return cached
 
 
 def _resolve_with_freshness(
@@ -498,12 +537,23 @@ async def aresolve_workspace_access_ex(
     """
     options = (minimum_role, verification)
     cached = access_cache.lookup(user, workspace_id, options)
+    if cached is not None and cached.granted:
+        cached = _with_live_role(
+            cached,
+            await WorkspaceMembership.objects.filter(pk=cached.membership.pk)
+            .values_list("role", flat=True)
+            .afirst(),
+            user,
+            workspace_id,
+            minimum_role,
+        )
     if cached is None:
+        since = access_cache.generation()
         cached = await _aresolve_workspace_access_ex(
             user, workspace_id, minimum_role=minimum_role, verification=verification
         )
         if not cached.retryable:
-            access_cache.store(user, workspace_id, options, cached)
+            access_cache.store(user, workspace_id, options, cached, since=since)
     return cached
 
 

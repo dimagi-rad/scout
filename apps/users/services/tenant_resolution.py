@@ -44,6 +44,7 @@ from apps.users.services.upstream_denial import (
     arecord_upstream_denial,
     credential_is_current,
 )
+from apps.workspaces import access_cache
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,10 @@ def _sync_memberships(
             tm.save(update_fields=fields)
             memberships.append(tm)
             fresh_ids.add(tenant.id)
+        # Rediscovery can run inside a workspace-gated request (member refresh on
+        # source add); coverage it changes must not be served from that request's cache.
+        user_id = user.pk
+        transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
 
         archive_qs = TenantMembership.all_objects.filter(
             user=user, connection=connection, archived_at__isnull=True
