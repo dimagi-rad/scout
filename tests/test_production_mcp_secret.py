@@ -5,18 +5,10 @@ process booting without one is misconfigured; fail at import, not at the first
 agent tool call.
 """
 
-import sys
-
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
-from tests.production_settings import PRODUCTION_SETTINGS, load_production_settings
-
-
-@pytest.fixture(autouse=True)
-def _drop_loaded_module():
-    yield
-    sys.modules.pop(PRODUCTION_SETTINGS, None)
+from tests.production_settings import load_production_settings
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])
