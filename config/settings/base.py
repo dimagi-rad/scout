@@ -329,6 +329,9 @@ if SENTRY_DSN:
         release=env("SENTRY_RELEASE", default="") or None,
         traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
         send_default_pii=env.bool("SENTRY_SEND_DEFAULT_PII", default=False),
+        # Frame locals would ship decrypted credentials and DB_CREDENTIAL_KEY itself
+        # (e.g. decrypt_credential's ``key``) with any logged traceback.
+        include_local_variables=False,
         before_send=before_send if SENTRY_SUPPRESS_EXPECTED_STATES else None,
     )
     ignore_noisy_loggers()
