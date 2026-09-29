@@ -574,6 +574,16 @@ function RelationshipsSection({
                   <span className="truncate text-base font-semibold text-foreground group-hover:text-primary">
                     {other}
                   </span>
+                  {relationship.published === false && (
+                    <Badge
+                      variant="outline"
+                      className="ml-auto shrink-0 border-amber-500/40 text-amber-700 dark:text-amber-400"
+                      title="The last semantic layer build skipped this join, so queries can't use it."
+                      data-testid={`relationship-unpublished-${relationship.name}`}
+                    >
+                      Not queryable
+                    </Badge>
+                  )}
                 </span>
                 <span className="mt-1 block text-xs text-muted-foreground">
                   {relationship.relationship_type}

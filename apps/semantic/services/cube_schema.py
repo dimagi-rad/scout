@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.catalog import ensure_semantic_model
-from apps.semantic.services.cube import cube_schema_yaml, generate_cube_schema
+from apps.semantic.services.cube import DROPPED_JOIN_CODES, cube_schema_yaml, generate_cube_schema
 from apps.semantic.services.cube_client import CubeClient
 from mcp_server.context import QueryContext, load_workspace_context
 
@@ -253,17 +253,30 @@ def _set_last_build(
 def _record_build_failure(workspace, model: SemanticModel, exc: Exception) -> None:
     """Persist a build failure without breaking last-known-good reads."""
     try:
-        has_active = CubeSchema.objects.filter(
-            workspace=workspace,
-            semantic_model=model,
-            status=CubeSchema.Status.ACTIVE,
-        ).exists()
+        active = (
+            CubeSchema.objects.filter(
+                workspace=workspace,
+                semantic_model=model,
+                status=CubeSchema.Status.ACTIVE,
+            )
+            .only("diagnostics")
+            .order_by("-updated_at")
+            .first()
+        )
+        # The serving schema still lacks the joins it dropped; keep saying so,
+        # or the catalog would advertise them as published again.
+        serving_relationship_diagnostics = [
+            diagnostic
+            for diagnostic in (active.diagnostics if active else None) or []
+            if isinstance(diagnostic, dict) and diagnostic.get("code") in DROPPED_JOIN_CODES
+        ]
         _set_last_build(model, ok=False, error=str(exc))
         model.diagnostics = [
             *(model.metadata or {}).get("catalog_diagnostics", []),
+            *serving_relationship_diagnostics,
             {"level": "error", "message": str(exc)[:500]},
         ]
-        model.status = SemanticModel.Status.ACTIVE if has_active else SemanticModel.Status.ERROR
+        model.status = SemanticModel.Status.ACTIVE if active else SemanticModel.Status.ERROR
         model.save(update_fields=["status", "diagnostics", "metadata", "updated_at"])
     except Exception:
         logger.exception(
