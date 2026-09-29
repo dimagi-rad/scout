@@ -35,6 +35,7 @@ from apps.workspaces.services.data_operation import (
     sync_tenant_data_lock,
     sync_workspace_data_lock,
 )
+from apps.workspaces.services.tenant_coverage import coverage_entry
 from apps.workspaces.services.view_sources import VIEW_SOURCES_VERSION
 
 logger = logging.getLogger(__name__)
@@ -1111,11 +1112,7 @@ class SchemaManager:
 
     @staticmethod
     def _tenant_coverage_entry(tenant: Tenant) -> dict[str, str]:
-        return {
-            "tenant_id": str(tenant.id),
-            "provider": tenant.provider,
-            "external_id": tenant.external_id,
-        }
+        return coverage_entry(tenant)
 
     def teardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
         """Drop the physical PostgreSQL schema for a WorkspaceViewSchema.

@@ -1,6 +1,14 @@
 """Interpret persisted view coverage without treating malformed data as complete."""
 
 
+def coverage_entry(tenant) -> dict[str, str]:
+    return {
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "external_id": tenant.external_id,
+    }
+
+
 def parse_coverage(value) -> dict | None:
     if not isinstance(value, dict):
         return None
