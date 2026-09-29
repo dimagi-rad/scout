@@ -61,7 +61,23 @@ export function ChatPanel() {
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
   // A load the caller has no job for here (a teammate's, or a refresh) still
   // changes the data they are reading, so show it read-only.
-  const foreignLoads = activeMaterializationJob ? [] : (workspaceLoads ?? [])
+  const foreignLoads = (workspaceLoads ?? []).filter(
+    (load) =>
+      !(
+        activeMaterializationJob &&
+        load.tenant_name === activeMaterializationJob.tenant_name &&
+        load.source_index === activeMaterializationJob.source_index
+      ),
+  )
+  const loadBanners =
+    activeDomainId &&
+    foreignLoads.map((load) => (
+      <MaterializationProgressBanner
+        key={`${load.tenant_id}-${load.started_at}`}
+        load={load}
+        workspaceId={activeDomainId}
+      />
+    ))
   const currentThread = threads.find((thread) => thread.id === threadId)
   const threadTitle = currentThread?.title ?? "Untitled"
   const titleIsCustom = currentThread?.title_is_custom ?? false
@@ -299,13 +315,16 @@ export function ChatPanel() {
 
   if (messages.length === 0) {
     return (
-      <div className="h-full min-w-0">
-        <ChatEmptyState
-          input={input}
-          setInput={setInput}
-          onSend={handleSend}
-          disabled={isStreaming}
-        />
+      <div className="flex h-full min-w-0 flex-col">
+        {loadBanners}
+        <div className="min-h-0 flex-1">
+          <ChatEmptyState
+            input={input}
+            setInput={setInput}
+            onSend={handleSend}
+            disabled={isStreaming}
+          />
+        </div>
       </div>
     )
   }
@@ -353,20 +372,13 @@ export function ChatPanel() {
             />
           )}
 
-        {activeDomainId &&
-          foreignLoads.map((load) => (
-            <MaterializationProgressBanner
-              key={load.tenant_id}
-              load={load}
-              workspaceId={activeDomainId}
-            />
-          ))}
+        {loadBanners}
 
         {activeDomainId && (
           <SourceFreshness
             key={activeDomainId}
             workspaceId={activeDomainId}
-            loading={Boolean(activeMaterializationJob) || foreignLoads.length > 0}
+            loading={Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0}
           />
         )}
 

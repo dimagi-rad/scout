@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { workspaceApi, type WorkspaceSourceFreshness } from "@/api/workspaces"
 import { formatRelativeTime } from "@/lib/relativeTime"
 
@@ -15,21 +15,26 @@ interface Props {
  */
 export function SourceFreshness({ workspaceId, loading = false }: Props) {
   const [sources, setSources] = useState<WorkspaceSourceFreshness[]>([])
+  const mountedRef = useRef(true)
 
   useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  // A load starting mid-fetch must not discard the response already on its way.
+  useEffect(() => {
     if (loading) return
-    let cancelled = false
     workspaceApi
       .getDetail(workspaceId)
       .then((detail) => {
-        if (!cancelled) setSources(detail.sources ?? [])
+        if (mountedRef.current) setSources(detail.sources ?? [])
       })
       .catch(() => {
         // Freshness is informational; the chat works without it.
       })
-    return () => {
-      cancelled = true
-    }
   }, [workspaceId, loading])
 
   if (sources.length === 0) return null

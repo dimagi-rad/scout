@@ -42,7 +42,7 @@ export interface WorkspaceLoad {
   tenant_name: string
   source_index: number
   source_total: number
-  state: string
+  state: "started" | "discovering" | "loading" | "transforming"
   started_at: string
   progress: JobProgress | null
 }
