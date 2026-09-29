@@ -1,7 +1,7 @@
 import json
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -469,9 +469,8 @@ async def test_retry_endpoint_dispatches_new_materialization():
 
     client = AsyncClient()
     await client.alogin(email="retry@b.c", password="x")
-    fake_job = type("J", (), {"id": 5005})()
-    with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
-        mock_task.defer_async = AsyncMock(return_value=fake_job)
+    with patch("apps.workspaces.services.thread_job_dispatch.materialize_workspace") as mock_task:
+        mock_task.defer = MagicMock(return_value=5005)
         resp = await client.post(
             f"/api/workspaces/{ws.id}/materialize/retry/",
             data=json.dumps({"thread_id": str(thread.id), "tool_call_id": "tc-retry"}),

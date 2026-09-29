@@ -1,7 +1,11 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
+from django.db import connection
+from django.db.models.signals import pre_save
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant, TenantMembership
@@ -16,6 +20,8 @@ from mcp_server.server import run_materialization
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
+DISPATCH = "mcp_server.server.adispatch_thread_materialization"
+QUEUE = "apps.workspaces.services.thread_job_dispatch.materialize_workspace"
 
 
 async def _grant_manage(workspace, user):
@@ -33,14 +39,14 @@ async def test_run_materialization_observes_artifact_recovery(workspace, user):
         requested_by=user,
         recovery_type="semantic_rebuild",
     )
-    with patch("mcp_server.server.materialize_workspace.defer_async", new=AsyncMock()) as defer:
+    with patch(DISPATCH, new=AsyncMock()) as dispatch:
         result = await run_materialization(
             workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
         )
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["workspace_recovery_id"] == str(recovery.id)
     assert "no automatic chat follow-up" in result["data"]["message"]
-    defer.assert_not_awaited()
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -89,9 +95,8 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
     await _grant_manage(ws, user)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
-    job_mock = MagicMock(id=7777)
-    with patch("mcp_server.server.materialize_workspace") as mw:
-        mw.defer_async = AsyncMock(return_value=job_mock)
+    with patch(QUEUE) as mw:
+        mw.defer = MagicMock(return_value=7777)
         result = await run_materialization(
             workspace_id=str(ws.id),
             user_id=str(user.id),
@@ -102,56 +107,11 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
     assert result["data"]["status"] == "started"
     assert "thread_job_id" in result["data"]
     # Intent is captured before queueing, so an equivalent pending load is joined.
-    assert mw.defer_async.call_args.kwargs["load_intent"] == {str(tenant.id): 1}
+    assert mw.defer.call_args.kwargs["load_intent"] == {str(tenant.id): 1}
     tj = await ThreadJob.objects.aget(procrastinate_job_id=7777)
     assert tj.thread_id == thread.id
     assert tj.tool_call_id == "tc-xyz"
     assert tj.state == ThreadJob.State.PENDING
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db(transaction=True)
-async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fails():
-    """If ThreadJob.acreate raises after the procrastinate job has been
-    deferred, the procrastinate job is aborted and an error envelope is
-    returned. Documents that the rollback path is wired correctly even if
-    its best-effort nature is acceptable per the design."""
-    user = await User.objects.acreate_user(email="b@b.c", password="x")
-    ws = await Workspace.objects.acreate(name="W2", created_by=user)
-    tenant = await Tenant.objects.acreate(
-        external_id="t2", provider="commcare", canonical_name="Test Tenant 2"
-    )
-    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
-    await TenantMembership.objects.acreate(
-        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
-    )
-    await _grant_manage(ws, user)
-    thread = await Thread.objects.acreate(workspace=ws, user=user)
-
-    job_mock = MagicMock(id=8888)
-    cancel_mock = AsyncMock(return_value=None)
-
-    with (
-        patch("mcp_server.server.materialize_workspace") as mw,
-        patch("mcp_server.server.ThreadJob.objects.acreate", side_effect=Exception("DB down")),
-        patch("mcp_server.server.procrastinate_app") as proc_app,
-    ):
-        mw.defer_async = AsyncMock(return_value=job_mock)
-        proc_app.job_manager.cancel_job_by_id_async = cancel_mock
-        result = await run_materialization(
-            workspace_id=str(ws.id),
-            user_id=str(user.id),
-            thread_id=str(thread.id),
-            tool_call_id="tc-rollback",
-        )
-
-    # Error envelope: {"success": False, "error": {"code": ..., "message": ...}}
-    assert result["success"] is False
-    assert result["error"]["code"] == "INTERNAL_ERROR"
-    # No ThreadJob persisted for this procrastinate job id
-    assert not await ThreadJob.objects.filter(procrastinate_job_id=8888).aexists()
-    # Rollback abort was attempted
-    cancel_mock.assert_awaited_once_with(8888, abort=True)
 
 
 @pytest.mark.asyncio
@@ -268,9 +228,8 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     # Thread 2 is a different chat — should be allowed to dispatch its own.
     thread2 = await Thread.objects.acreate(workspace=ws, user=user)
 
-    job_mock = MagicMock(id=33333)
-    with patch("mcp_server.server.materialize_workspace") as mw:
-        mw.defer_async = AsyncMock(return_value=job_mock)
+    with patch(QUEUE) as mw:
+        mw.defer = MagicMock(return_value=33333)
         result = await run_materialization(
             workspace_id=str(ws.id),
             user_id=str(user.id),
@@ -283,3 +242,97 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     assert await ThreadJob.objects.filter(thread__workspace_id=ws.id).acount() == 2
     new_tj = await ThreadJob.objects.aget(procrastinate_job_id=33333)
     assert new_tj.thread_id == thread2.id
+
+
+def _visible_to_a_worker(job_id) -> bool:
+    """Whether another connection, as a worker's would, can already see the job."""
+    settings = connection.settings_dict
+    with psycopg.connect(
+        host=settings["HOST"] or None,
+        port=settings["PORT"] or None,
+        dbname=settings["NAME"],
+        user=settings["USER"],
+        password=settings["PASSWORD"],
+        autocommit=True,
+    ) as other:
+        return (
+            other.execute("SELECT 1 FROM procrastinate_jobs WHERE id = %s", [job_id]).fetchone()
+            is not None
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_materialization_hides_the_job_from_workers_until_its_threadjob_exists():
+    """#365: the job was committed before its ThreadJob, so a worker could finish it
+    while the resume lookup still found no ThreadJob, and the chat never resumed."""
+    user = await User.objects.acreate_user(email="race@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-race", created_by=user)
+    tenant = await Tenant.objects.acreate(
+        external_id="trace", provider="commcare", canonical_name="Race Tenant"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
+    await _grant_manage(ws, user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+
+    seen_before_threadjob = []
+
+    def record(sender, instance, **kwargs):
+        seen_before_threadjob.append(_visible_to_a_worker(instance.procrastinate_job_id))
+
+    pre_save.connect(record, sender=ThreadJob)
+    try:
+        result = await run_materialization(
+            workspace_id=str(ws.id),
+            user_id=str(user.id),
+            thread_id=str(thread.id),
+            tool_call_id="tc-race",
+        )
+    finally:
+        pre_save.disconnect(record, sender=ThreadJob)
+
+    assert result["data"]["status"] == "started"
+    assert seen_before_threadjob == [False]
+    tj = await ThreadJob.objects.aget(id=result["data"]["thread_job_id"])
+    assert await sync_to_async(_visible_to_a_worker)(tj.procrastinate_job_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_materialization_queues_nothing_when_its_threadjob_cannot_be_saved():
+    user = await User.objects.acreate_user(email="rollback@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-rollback", created_by=user)
+    tenant = await Tenant.objects.acreate(
+        external_id="trollback", provider="commcare", canonical_name="Rollback Tenant"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
+    await _grant_manage(ws, user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    queued = []
+
+    def fail_after_queueing(sender, instance, **kwargs):
+        queued.append(instance.procrastinate_job_id)
+        raise RuntimeError("DB down")
+
+    pre_save.connect(fail_after_queueing, sender=ThreadJob)
+    try:
+        result = await run_materialization(
+            workspace_id=str(ws.id),
+            user_id=str(user.id),
+            thread_id=str(thread.id),
+            tool_call_id="tc-rollback",
+        )
+    finally:
+        pre_save.disconnect(fail_after_queueing, sender=ThreadJob)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "INTERNAL_ERROR"
+    assert len(queued) == 1
+    assert not await sync_to_async(_visible_to_a_worker)(queued[0])
+    assert not await ThreadJob.objects.filter(thread=thread).aexists()
