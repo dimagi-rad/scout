@@ -23,6 +23,8 @@ export interface SemanticRelationship {
   relationship_type: string
   join_expression: string
   direction?: "outgoing" | "incoming"
+  /** False when the last Cube build dropped this join; see the model diagnostics. */
+  published?: boolean
 }
 
 export interface SemanticDataset {
