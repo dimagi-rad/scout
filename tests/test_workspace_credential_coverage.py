@@ -671,11 +671,11 @@ def test_ocs_api_key_memberships_on_one_connection_must_have_one_team(user):
     assert str(membership.id) in {gap.membership_id for gap in report.gaps}
 
 
-def _shared_api_connection(user, workspace, *, tenants, key="usable-key"):
-    first = _tenant(workspace, "commcare", "domain-0", "Domain 0")
+def _shared_api_connection(user, workspace, *, tenants, key="usable-key", prefix="domain"):
+    first = _tenant(workspace, "commcare", f"{prefix}-0", "Domain 0")
     _membership, conn = _api_membership(user, first, key=key)
     for index in range(1, tenants):
-        tenant = _tenant(workspace, "commcare", f"domain-{index}", f"Domain {index}")
+        tenant = _tenant(workspace, "commcare", f"{prefix}-{index}", f"Domain {index}")
         TenantMembership.objects.create(user=user, tenant=tenant, connection=conn)
     return conn
 
@@ -743,17 +743,25 @@ def test_rotated_key_logs_one_error_with_safe_fields_only(user, settings, caplog
         assert secret not in message
 
 
-def test_unchanged_decrypt_failures_are_not_rereported_every_evaluation(user, settings, caplog):
+def test_repeated_decrypt_failures_are_throttled_across_members(user, other_user, settings, caplog):
     workspace = _workspace()
     _member(workspace, user)
     _shared_api_connection(user, workspace, tenants=2)
+    other_workspace = _workspace("Other")
+    _member(other_workspace, other_user)
+    _shared_api_connection(other_user, other_workspace, tenants=1, prefix="other")
     settings.DB_CREDENTIAL_KEY = Fernet.generate_key().decode()
 
     with caplog.at_level(logging.ERROR, logger="apps.workspaces.services.credential_coverage"):
         for _ in range(3):
             assert _only_report(workspace, user).covered is False
+            assert _only_report(other_workspace, other_user).covered is False
+        assert len([r for r in caplog.records if r.name.endswith("credential_coverage")]) == 1
 
-    assert len([r for r in caplog.records if r.name.endswith("credential_coverage")]) == 1
+        credential_coverage._decrypt_failure_last_reported.clear()
+        _only_report(workspace, user)
+
+    assert len([r for r in caplog.records if r.name.endswith("credential_coverage")]) == 2
 
 
 def test_resolver_decrypt_failure_logs_without_traceback(user, settings, caplog):
