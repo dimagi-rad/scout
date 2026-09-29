@@ -5,6 +5,7 @@ every member sees a load, not just the one who started it (#369, #411).
 """
 
 from django.db.models import Q
+from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.chat.models import ThreadJob
 from apps.workspaces.models import (
@@ -13,6 +14,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceTenant,
 )
+from apps.workspaces.services.load_activity import aunserved_tenant_ids
 from apps.workspaces.services.query_state import synced_runs
 
 
@@ -30,11 +32,13 @@ def workspace_ids_in_progress(workspace_ids) -> set:
 
 def last_synced_by_tenant(tenant_ids) -> dict:
     """Newest synced completion time per tenant id (one query)."""
-    latest: dict = {}
-    rows = synced_runs().filter(tenant_schema__tenant_id__in=list(tenant_ids))
-    for tenant_id, completed_at in rows.values_list("tenant_schema__tenant_id", "completed_at"):
-        latest.setdefault(tenant_id, completed_at)
-    return latest
+    rows = (
+        synced_runs()
+        .filter(tenant_schema__tenant_id__in=list(tenant_ids))
+        .order_by("tenant_schema__tenant_id", "-completed_at")
+        .distinct("tenant_schema__tenant_id")
+    )
+    return dict(rows.values_list("tenant_schema__tenant_id", "completed_at"))
 
 
 def progress_payload(progress: dict | None) -> dict | None:
@@ -104,14 +108,26 @@ async def aworkspace_load_progress(workspace: Workspace) -> list[dict]:
 
     job_ids = {run.procrastinate_job_id for run in active} - {None}
     run_ids_by_job: dict[int, list] = {}
-    async for run_id, job_id in (
+    tenant_ids_by_job: dict[int, set] = {}
+    async for run_id, job_id, tenant_id in (
         MaterializationRun.objects.filter(
             tenant_schema__tenant_id__in=list(tenants), procrastinate_job_id__in=job_ids
         )
         .order_by("started_at", "id")
-        .values_list("id", "procrastinate_job_id")
+        .values_list("id", "procrastinate_job_id", "tenant_schema__tenant_id")
     ):
         run_ids_by_job.setdefault(job_id, []).append(run_id)
+        tenant_ids_by_job.setdefault(job_id, set()).add(tenant_id)
+
+    # Adding a source loads only the unserved ones, so the denominator is not
+    # every tenant of the workspace.
+    only_unserved_jobs = {
+        job_id
+        async for job_id in ProcrastinateJob.objects.filter(
+            id__in=job_ids, args__only_unserved=True
+        ).values_list("id", flat=True)
+    }
+    unserved = await aunserved_tenant_ids(workspace.id) if only_unserved_jobs else set()
 
     sequenced_jobs = {
         run.procrastinate_job_id
@@ -124,6 +140,10 @@ async def aworkspace_load_progress(workspace: Workspace) -> list[dict]:
         job_id = run.procrastinate_job_id
         sequenced = job_id in sequenced_jobs
         position = run_ids_by_job[job_id].index(run.id) + 1 if sequenced else 1
+        if job_id in only_unserved_jobs:
+            total = len(tenant_ids_by_job[job_id] | unserved)
+        else:
+            total = len(tenants)
         tenant = tenants[run.tenant_schema.tenant_id]
         loads.append(
             {
@@ -131,7 +151,7 @@ async def aworkspace_load_progress(workspace: Workspace) -> list[dict]:
                 "tenant_id": str(tenant.id),
                 "tenant_name": tenant.canonical_name or tenant.external_id,
                 "source_index": position,
-                "source_total": max(len(tenants), position) if sequenced else 1,
+                "source_total": max(total, position) if sequenced else 1,
                 "state": run.state,
                 "started_at": run.started_at.isoformat(),
                 "progress": progress_payload(run.progress),

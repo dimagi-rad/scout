@@ -3,6 +3,7 @@
 from datetime import timedelta
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test import AsyncClient, Client
@@ -20,13 +21,13 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from tests.tenant_access import ausable_connection
+from tests.tenant_access import ausable_connection, grant_tenant_access
 
 User = get_user_model()
 RunState = MaterializationRun.RunState
 
 
-async def _member(workspace, email, role=WorkspaceRole.READ_WRITE):
+async def _member(workspace, email, role):
     user = await User.objects.acreate_user(email=email, password="x")
     await WorkspaceMembership.objects.acreate(workspace=workspace, user=user, role=role)
     return user
@@ -146,6 +147,58 @@ async def test_four_source_load_reports_source_position():
     assert (job["source_index"], job["source_total"], job["tenant_name"]) == (3, 4, "Source 2")
 
 
+def _insert_job(args_json):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO procrastinate_jobs (queue_name, task_name, status, args) "
+            "VALUES ('default', 'test_task', 'doing'::procrastinate_job_status, %s::jsonb) "
+            "RETURNING id",
+            [args_json],
+        )
+        return cursor.fetchone()[0]
+
+
+def _delete_job(job_id):
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM procrastinate_jobs WHERE id = %s", [job_id])
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_adding_a_source_loads_only_the_unserved_ones():
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    schemas = await _sources(ws, [user], 4)
+    for served in schemas[:3]:
+        served.state = SchemaState.ACTIVE
+        await served.asave(update_fields=["state"])
+    job_id = await sync_to_async(_insert_job)('{"only_unserved": true}')
+    try:
+        thread = await Thread.objects.acreate(workspace=ws, user=user)
+        await ThreadJob.objects.acreate(
+            thread=thread,
+            job_type="materialization",
+            procrastinate_job_id=job_id,
+            tool_call_id="tc",
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schemas[3],
+            pipeline="commcare_sync",
+            state=RunState.LOADING,
+            procrastinate_job_id=job_id,
+        )
+
+        body = await _active_jobs("a@b.c", ws)
+    finally:
+        await sync_to_async(_delete_job)(job_id)
+
+    [load] = body["workspace_loads"]
+    assert (load["source_index"], load["source_total"]) == (1, 1)
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_another_workspaces_load_of_a_shared_source_is_not_ours():
@@ -174,9 +227,7 @@ def _make_loading_workspace(user, index):
     ws = Workspace.objects.create(name=tenant.canonical_name, created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
-    TenantMembership.objects.bulk_create(
-        [TenantMembership(user=user, tenant=tenant)], ignore_conflicts=True
-    )
+    grant_tenant_access(user, tenant)
     schema = TenantSchema.objects.create(
         tenant=tenant, schema_name=f"prog_{index}", state=SchemaState.PROVISIONING
     )
