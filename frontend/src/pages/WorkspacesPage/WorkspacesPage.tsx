@@ -296,7 +296,7 @@ export function WorkspacesPage() {
                 value={sort}
                 onChange={(e) => handleSortChange(e.target.value as SortKey)}
                 data-testid="workspaces-sort"
-                className="h-9 rounded-md border border-input bg-transparent px-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 {SORT_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
