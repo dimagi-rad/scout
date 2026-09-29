@@ -27,8 +27,10 @@ const reported = new Set<string>()
 
 // Error text can echo customer values (JSON.parse snippets, SQL literals such as
 // `invalid input syntax for type integer: "..."`), so quoted spans are dropped.
+// It spans first quote to last on the line: pairing quotes would leave the values
+// between a JSON snippet's own quotes (`"{"name":"Alice"}"`) exposed.
 function redactQuoted(text: string): string {
-  return text.replace(/(["'`])(?:(?!\1)[^\n])*\1/g, "$1…$1")
+  return text.replace(/["'`][^\n]*["'`]/g, "\"…\"")
 }
 
 function safeMessage(message: string): string {

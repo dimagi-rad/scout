@@ -61,9 +61,9 @@ describe("ArtifactCanvas sandbox error reporting", () => {
     expect(Sentry.captureException).toHaveBeenCalledTimes(1)
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.name).toBe("TypeError")
-    expect(reported.message).toBe("Cannot read properties of undefined (reading '…') near \"…\"")
+    expect(reported.message).toBe('Cannot read properties of undefined (reading "…"')
     expect(reported.stack).toBe([
-      "TypeError: Cannot read properties of undefined (reading '…') near \"…\"",
+      'TypeError: Cannot read properties of undefined (reading "…"',
       "    at App (eval at render (sandbox:1:1), <anonymous>:4:12)",
       "    at renderWithHooks (react-dom.js:10:5)",
     ].join("\n"))
@@ -79,6 +79,21 @@ describe("ArtifactCanvas sandbox error reporting", () => {
     )
     post(sandboxError)
     expect(Sentry.captureException).toHaveBeenCalledTimes(1)
+  })
+
+  it("redacts every value inside a JSON snippet, not only the quoted pieces", () => {
+    const { post } = renderCanvas()
+
+    post({
+      type: "artifact-error",
+      error: {
+        title: "Parse Error",
+        message: `Unexpected token 'x', "{"name":"O'Brien","dob":"1990"}" is not valid JSON`,
+      },
+    })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.message).toBe('Unexpected token "…" is not valid JSON')
   })
 
   it("ignores artifact-error messages from any window but its own iframe", () => {
