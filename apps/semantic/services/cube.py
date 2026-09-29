@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from enum import StrEnum
 from typing import Any
 
 import yaml
@@ -13,16 +14,21 @@ from apps.semantic.services.field_sql import compile_dimension_sql, dataset_colu
 
 logger = logging.getLogger(__name__)
 
-# Codes for relationships generate_cube_schema leaves out of Cube. Their
-# diagnostics carry a "relationship" key that the catalog turns into published: false.
-DROPPED_JOIN_CODES = frozenset(
-    {
-        "relationship_unpublished_endpoint",
-        "relationship_missing_primary_key",
-        "relationship_hidden_reference",
-        "relationship_stale_reference",
-    }
-)
+
+class DroppedJoin(StrEnum):
+    """Why generate_cube_schema left a relationship out of Cube.
+
+    Diagnostics with these codes carry a "relationship" key that the catalog
+    turns into published: false.
+    """
+
+    UNPUBLISHED_ENDPOINT = "relationship_unpublished_endpoint"
+    MISSING_PRIMARY_KEY = "relationship_missing_primary_key"
+    HIDDEN_REFERENCE = "relationship_hidden_reference"
+    STALE_REFERENCE = "relationship_stale_reference"
+
+
+DROPPED_JOIN_CODES = frozenset(DroppedJoin)
 
 
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
@@ -56,13 +62,13 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     diagnostics: list[dict[str, Any]] = []
     join_references = references | {"CUBE"}
 
-    def unpublished(relationship: SemanticRelationship, code: str, reason: str) -> None:
+    def unpublished(relationship: SemanticRelationship, code: DroppedJoin, reason: str) -> None:
         message = f"Relationship '{relationship.name}' was not published: {reason}."
         logger.warning("%s (relationship %s)", message, relationship.id)
         diagnostics.append(
             {
                 "level": "warning",
-                "code": code,
+                "code": code.value,
                 "relationship": relationship.name,
                 "message": message,
             }
@@ -80,7 +86,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             if any(dataset.is_visible for dataset in endpoints):
                 unpublished(
                     relationship,
-                    "relationship_unpublished_endpoint",
+                    DroppedJoin.UNPUBLISHED_ENDPOINT,
                     f"{'datasets' if len(missing) > 1 else 'dataset'} "
                     f"{' and '.join(repr(d.name) for d in missing)} "
                     f"{'are' if len(missing) > 1 else 'is'} hidden, no longer in the source, "
@@ -91,7 +97,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         if not relationship.from_dataset.primary_key:
             unpublished(
                 relationship,
-                "relationship_missing_primary_key",
+                DroppedJoin.MISSING_PRIMARY_KEY,
                 f"dataset '{relationship.from_dataset.name}' has no primary key",
             )
             continue
@@ -105,7 +111,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             state = "hidden or no longer in the source" if hidden else "not in the semantic catalog"
             unpublished(
                 relationship,
-                "relationship_hidden_reference" if hidden else "relationship_stale_reference",
+                DroppedJoin.HIDDEN_REFERENCE if hidden else DroppedJoin.STALE_REFERENCE,
                 f"it references '{exc.reference[:200]}', which is {state}",
             )
             continue
