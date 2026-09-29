@@ -1325,3 +1325,114 @@ async def test_schema_status_discloses_missing_sources(user, view_state, malform
     assert result["data"]["data_complete"] is (
         False if view_state == SchemaState.ACTIVE and not malformed else None
     )
+
+
+async def _tenant_in(workspace, name):
+    tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id=name, canonical_name=name
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    return tenant
+
+
+async def _run(tenant, state, job_id, *, schema_state=SchemaState.ACTIVE, progress=None):
+    schema = await TenantSchema.objects.filter(tenant=tenant).afirst()
+    if schema is None:
+        schema = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name=f"s_{tenant.external_id}", state=schema_state
+        )
+    return await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=state,
+        procrastinate_job_id=job_id,
+        progress=progress,
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_schema_status_reports_which_source_an_in_flight_load_is_on(user):
+    """#411: while a multi-source load runs, report "source 2 of 3", not only stale state."""
+    workspace = await Workspace.objects.acreate(name="Loading workspace", created_by=user)
+    done, loading, waiting = [
+        await _tenant_in(workspace, name) for name in ("alpha", "bravo", "charlie")
+    ]
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace, schema_name="ws_loading_status", state=SchemaState.ACTIVE
+    )
+    # An earlier job's run must not count as progress through the current one.
+    await _run(waiting, MaterializationRun.RunState.COMPLETED, 41)
+    await _run(done, MaterializationRun.RunState.COMPLETED, 42)
+    await _run(
+        loading,
+        MaterializationRun.RunState.LOADING,
+        42,
+        progress={
+            "step": 3,
+            "total_steps": 5,
+            "source": "visits",
+            "message": "Loading visits from commcare API...",
+            "rows_loaded": 100,
+            "rows_total": 400,
+            "unit": "rows",
+        },
+    )
+
+    with (
+        patch("mcp_server.server._resolve_mcp_context", AsyncMock()),
+        patch("mcp_server.server.workspace_list_tables", AsyncMock(return_value=[])),
+    ):
+        result = await get_schema_status(workspace_id=str(workspace.id))
+
+    assert result["success"] is True
+    in_flight = result["data"]["load_in_progress"]
+    assert in_flight["sources_total"] == 3
+    assert in_flight["sources_finished"] == 1
+    assert "source 2 of 3" in in_flight["message"]
+    assert "bravo" in in_flight["message"]
+    assert [(s["name"], s["state"]) for s in in_flight["sources"]] == [
+        ("alpha", "completed"),
+        ("bravo", "loading"),
+        ("charlie", "waiting"),
+    ]
+    current = in_flight["sources"][1]
+    assert current["step"] == 3
+    assert current["total_steps"] == 5
+    assert current["table"] == "visits"
+    assert current["rows_loaded"] == 100
+    assert current["rows_total"] == 400
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_schema_status_reports_a_first_load_before_any_schema_is_active(user):
+    """#411: a first load used to read as plain "not_provisioned" while it ran."""
+    workspace = await Workspace.objects.acreate(name="First load", created_by=user)
+    tenant = await _tenant_in(workspace, "solo")
+    await _run(
+        tenant,
+        MaterializationRun.RunState.DISCOVERING,
+        7,
+        schema_state=SchemaState.PROVISIONING,
+    )
+
+    result = await get_schema_status(workspace_id=str(workspace.id))
+
+    assert result["success"] is True
+    assert result["data"]["state"] == "not_provisioned"
+    in_flight = result["data"]["load_in_progress"]
+    assert in_flight["sources_total"] == 1
+    assert "source 1 of 1" in in_flight["message"]
+    assert in_flight["sources"][0]["state"] == "discovering"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_schema_status_reports_no_load_when_every_run_has_finished(user):
+    workspace = await Workspace.objects.acreate(name="Idle", created_by=user)
+    tenant = await _tenant_in(workspace, "idle")
+    await _run(tenant, MaterializationRun.RunState.COMPLETED, 9)
+
+    with patch("mcp_server.server.pipeline_list_tables", AsyncMock(return_value=[])):
+        result = await get_schema_status(workspace_id=str(workspace.id))
+
+    assert result["success"] is True
+    assert result["data"]["load_in_progress"] is None
