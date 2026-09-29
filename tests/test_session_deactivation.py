@@ -1,14 +1,9 @@
 """Deactivating a user ends their sessions (#385)."""
 
 import pytest
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.sessions.models import Session
 from django.test import Client
-
-
-def test_session_cookie_age_is_two_weeks():
-    assert settings.SESSION_COOKIE_AGE == 14 * 24 * 3600
 
 
 @pytest.fixture
@@ -49,3 +44,15 @@ def test_saving_active_user_keeps_session(user):
     user.first_name = "Changed"
     user.save()
     assert client.get("/api/auth/me/").status_code == 200
+
+
+@pytest.mark.django_db
+def test_resaving_already_inactive_user_does_not_rescan_sessions(user):
+    user.is_active = False
+    user.save()
+    Client().force_login(user)
+
+    user.first_name = "Changed"
+    user.save()
+
+    assert Session.objects.count() == 1

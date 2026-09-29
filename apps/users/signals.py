@@ -8,7 +8,7 @@ from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.sessions.models import Session
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 
@@ -86,14 +86,23 @@ def _canonical_provably_owns_email(canonical, email: str) -> bool:
     return False
 
 
+@receiver(pre_save, sender=settings.AUTH_USER_MODEL)
+def remember_was_active(sender, instance, **kwargs):
+    instance._was_active = (
+        sender.objects.filter(pk=instance.pk).values_list("is_active", flat=True).first()
+        if instance.pk
+        else None
+    )
+
+
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def end_sessions_on_deactivation(sender, instance, created, **kwargs):
-    """Drop all DB sessions of a user once they are saved as inactive (#385).
+    """Drop all DB sessions of a user when a save flips them from active to inactive (#385).
 
     Sessions are keyed by opaque ids, so we must decode each live one to find the owner.
     QuerySet.update() bypasses signals; deactivate via save().
     """
-    if created or instance.is_active:
+    if created or instance.is_active or not getattr(instance, "_was_active", False):
         return
     user_pk = str(instance.pk)
     stale = [
