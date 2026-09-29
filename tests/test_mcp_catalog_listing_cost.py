@@ -12,6 +12,7 @@ from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
+from apps.semantic.models import SemanticModel
 from apps.users.models import Tenant
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from mcp_server import server
@@ -59,7 +60,7 @@ def _count_queries(tool, **kwargs):
     return len(captured.captured_queries)
 
 
-@pytest.mark.parametrize("tool", [server.list_workspaces])
+@pytest.mark.parametrize("tool", [server.list_workspaces, server.list_datasets])
 async def test_listing_cost_does_not_grow_with_memberships(tool, upstream_provider):
     few, many = await _member_of(5), await _member_of(50)
 
@@ -101,3 +102,28 @@ async def test_one_stale_proof_on_a_shared_connection_blocks_only_its_workspaces
     assert [w["id"] for w in data["workspaces"]] == [str(only_fresh.id)]
     assert data["unverified_workspace_ids"] == sorted([str(only_stale.id), str(both.id)])
     assert data["inaccessible_workspace_ids"] == []
+
+
+async def test_datasets_listing_names_each_workspace_without_a_queryable_model():
+    user = await User.objects.acreate_user(email="models@example.com", password="pw")
+    workspaces = {}
+    for name in ("Ready", "Draft", "Bare"):
+        tenant = await _tenant(name.lower())
+        await agrant_tenant_access(user, tenant)
+        workspaces[name] = await _workspace(user, name, [tenant])
+    await SemanticModel.objects.acreate(workspace=workspaces["Ready"], name="m")
+    await SemanticModel.objects.acreate(
+        workspace=workspaces["Draft"], name="m", status=SemanticModel.Status.DRAFT
+    )
+
+    result = await server.list_datasets(user_id=str(user.id))
+
+    errors = result["data"]["workspace_errors"]
+    assert [e["workspace_id"] for e in errors] == [
+        str(workspaces["Bare"].id),
+        str(workspaces["Draft"].id),
+    ]
+    assert {e["schema_status"] for e in errors} == {"unavailable"}
+    assert {e["error"] for e in errors} == {
+        "No active semantic model is available. Refresh workspace data."
+    }

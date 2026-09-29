@@ -488,12 +488,16 @@ def _active_semantic_models(workspace):
     return SemanticModel.objects.filter(workspace=workspace, status=SemanticModel.Status.ACTIVE)
 
 
+def no_active_semantic_model() -> SemanticCatalogUnavailable:
+    return SemanticCatalogUnavailable(
+        "No active semantic model is available. Refresh workspace data.",
+        schema_status="unavailable",
+    )
+
+
 def _require_active_semantic_model(model) -> SemanticModel:
     if model is None:
-        raise SemanticCatalogUnavailable(
-            "No active semantic model is available. Refresh workspace data.",
-            schema_status="unavailable",
-        )
+        raise no_active_semantic_model()
     return model
 
 
@@ -505,6 +509,18 @@ def get_active_semantic_model(workspace) -> SemanticModel:
 async def aget_active_semantic_model(workspace) -> SemanticModel:
     """Async counterpart using the same queryability predicate."""
     return _require_active_semantic_model(await _active_semantic_models(workspace).afirst())
+
+
+async def aworkspace_ids_with_active_semantic_model(workspace_ids) -> set:
+    """Of ``workspace_ids``, those :func:`aget_active_semantic_model` would accept."""
+    return {
+        workspace_id
+        async for workspace_id in SemanticModel.objects.filter(
+            workspace_id__in=list(workspace_ids), status=SemanticModel.Status.ACTIVE
+        )
+        .order_by()
+        .values_list("workspace_id", flat=True)
+    }
 
 
 def _sync_custom_datasets(

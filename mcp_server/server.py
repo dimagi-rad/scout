@@ -39,7 +39,9 @@ from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
+    aworkspace_ids_with_active_semantic_model,
     get_active_semantic_model,
+    no_active_semantic_model,
     serialize_catalog,
     serialize_dataset,
 )
@@ -829,11 +831,12 @@ async def list_datasets(
 
         ready_workspace_ids: list[str] = []
         workspace_errors: list[dict] = []
+        with_model = await aworkspace_ids_with_active_semantic_model(w.id for w in workspaces)
         for workspace in workspaces:
-            try:
-                await sync_to_async(get_active_semantic_model, thread_sensitive=True)(workspace)
+            if workspace.id in with_model:
                 ready_workspace_ids.append(str(workspace.id))
-            except SemanticCatalogUnavailable as exc:
+            else:
+                exc = no_active_semantic_model()
                 workspace_errors.append(
                     {
                         "workspace_id": str(workspace.id),
