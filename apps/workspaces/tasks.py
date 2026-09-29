@@ -795,7 +795,10 @@ async def _already_loaded(tm, served) -> dict:
     # "the run recorded nothing" (it produced no run of its own).
     run_id = await (
         MaterializationRun.objects.filter(
-            tenant_schema=served, state=MaterializationRun.RunState.COMPLETED
+            tenant_schema=served,
+            state=MaterializationRun.RunState.COMPLETED,
+            # Postgres sorts NULLs first under DESC; a timestampless run would shadow real ones.
+            completed_at__isnull=False,
         )
         .order_by("-completed_at")
         .values_list("id", flat=True)

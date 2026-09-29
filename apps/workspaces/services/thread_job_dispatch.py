@@ -19,9 +19,9 @@ from mcp_server.pipeline_registry import get_registry
 logger = logging.getLogger(__name__)
 
 # The resume can't tell a live turn is still streaming on the same thread, and a
-# load refused in preflight settles in about a second. Starting after the
-# chat's one-sentence acknowledgement keeps the resume from writing the
-# checkpoint alongside it; a real load takes far longer than this delay.
+# load refused in preflight settles in about a second. The delay usually lets
+# the chat's one-sentence acknowledgement finish first; it narrows the race
+# rather than closing it (a slow or tool-calling turn can still overlap).
 CHAT_LOAD_START_DELAY_SECONDS = 30
 
 
@@ -50,6 +50,7 @@ def adispatch_thread_materialization(
     if start_in_seconds:
         options["schedule_in"] = {"seconds": start_in_seconds}
     task = materialize_workspace.configure(**options) if options else materialize_workspace
+    # Omitted when False so existing dispatches' job args stay unchanged.
     extra = {"only_unserved": True} if only_unserved else {}
     with transaction.atomic():
         job = task.defer(
