@@ -19,24 +19,12 @@ def test_thread_has_no_tenant_membership_field(workspace, user):
     assert not hasattr(thread, "tenant_membership_id")
 
 
-def test_thread_has_no_is_public_field(workspace, user):
+def test_thread_has_no_public_sharing_fields(workspace, user):
     from apps.chat.models import Thread
 
     thread = Thread.objects.create(workspace=workspace, user=user, title="Test")
-    assert not hasattr(thread, "is_public")
-
-
-def test_thread_sharing_uses_is_shared_and_share_token(workspace, user):
-    from apps.chat.models import Thread
-
-    thread = Thread.objects.create(workspace=workspace, user=user, title="Test")
-    assert thread.is_shared is False
-    assert thread.share_token is None
-
-    thread.is_shared = True
-    thread.save()
-    thread.refresh_from_db()
-    assert thread.share_token is not None
+    for field in ("is_public", "is_shared", "share_token"):
+        assert not hasattr(thread, field)
 
 
 def test_thread_workspace_deletion_cascades(workspace, user):

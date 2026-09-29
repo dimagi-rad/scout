@@ -6,7 +6,6 @@ from django.contrib import admin
 from django.http import HttpResponse
 from django.urls import include, path
 
-from apps.chat.thread_views import public_thread_view
 from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
 from apps.recipes.api.views import PublicRecipeRunView
@@ -114,10 +113,5 @@ urlpatterns = [
         "api/recipes/runs/shared/<str:share_token>/",
         PublicRecipeRunView.as_view(),
         name="public-recipe-run",
-    ),
-    path(
-        "api/chat/threads/shared/<str:share_token>/",
-        public_thread_view,
-        name="public-thread",
     ),
 ]

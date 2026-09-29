@@ -46,9 +46,6 @@ const threads: Thread[] = [
     created_at: "2026-06-29T13:10:00Z",
     updated_at: "2026-06-30T12:35:00Z",
     last_viewed_at: "2026-06-30T11:00:00Z",
-    is_shared: false,
-    is_public: false,
-    share_token: null,
   },
   {
     id: "thread-2",
@@ -58,9 +55,6 @@ const threads: Thread[] = [
     created_at: "2026-06-27T09:00:00Z",
     updated_at: "2026-06-27T10:20:00Z",
     last_viewed_at: "2026-06-27T10:20:00Z",
-    is_shared: true,
-    is_public: false,
-    share_token: "story-token",
   },
   {
     id: "thread-3",
@@ -70,9 +64,6 @@ const threads: Thread[] = [
     created_at: "2026-06-20T14:00:00Z",
     updated_at: "2026-06-21T15:40:00Z",
     last_viewed_at: "2026-06-21T15:40:00Z",
-    is_shared: false,
-    is_public: false,
-    share_token: null,
   },
 ]
 
