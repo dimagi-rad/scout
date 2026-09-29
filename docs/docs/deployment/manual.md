@@ -152,11 +152,15 @@ server {
 
     location /health/ {
         proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # Embed widget script
     location = /widget.js {
         proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # Django static files (admin CSS/JS)
@@ -170,3 +174,4 @@ Key points for the proxy configuration:
 
 - **Disable buffering** for `/api/chat/` -- the streaming chat endpoint uses Server-Sent Events, which requires `proxy_buffering off`.
 - **Increase read timeout** -- chat responses can take time to generate.
+- **Forward `Host` and `X-Forwarded-Proto`** on every backend route. Django checks `Host` against `DJANGO_ALLOWED_HOSTS`, and the production settings redirect to HTTPS unless `X-Forwarded-Proto: https` is present.

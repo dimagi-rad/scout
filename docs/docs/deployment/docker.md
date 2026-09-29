@@ -78,7 +78,7 @@ API alone does not prove that semantic queries can run.
 - Set `CSRF_TRUSTED_ORIGINS` to your frontend's origin.
 - Use a strong, unique `DJANGO_SECRET_KEY`.
 - Consider placing a reverse proxy (nginx, Caddy) in front for TLS termination.
-- Set `MCP_SERVER_URL` if the MCP server runs elsewhere (defaults to `http://localhost:8100/mcp`). Its hostname must be one the MCP server accepts; see [Manual deployment](manual.md#mcp-server).
+- Set `MCP_SERVER_URL` if the MCP server runs elsewhere (defaults to `http://localhost:8100/mcp`). Its hostname must be one the MCP server accepts; see [Manual deployment](manual.md#mcp-server). The Compose file's `http://mcp-server:8100/mcp` uses a hostname that isn't on that list, so the MCP server rejects the API's requests in the full-Docker stack; the host-based Honcho setup reaches it on `localhost`.
 - Set the same `MCP_SHARED_SECRET` on the API, worker and MCP server; the production settings refuse to start without it.
 - Set `MANAGED_DATABASE_URL`; only the development settings fall back to the main database.
 - Keep PostgreSQL, MCP, Cube, and the validator on private interfaces. Do not
