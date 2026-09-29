@@ -384,7 +384,8 @@ async def _fetch_semantic_model_context(
     except SemanticCatalogUnavailable:
         load_state, multi = await _catalog_unavailable_load_state(workspace)
         unresolved, every = await _unresolved_pipeline_providers(workspace)
-        if every and load_state != _LOADING:
+        # Waiting can't help either: no load finishes without a pipeline (G12).
+        if every:
             guidance = _pipeline_unresolved_guidance(
                 unresolved, loaded=load_state == _LOADED, write_capable=write_capable
             )

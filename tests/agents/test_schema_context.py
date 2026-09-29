@@ -440,7 +440,7 @@ async def _unresolvable_workspace(workspace, tenant, *, multi, state, partial=Fa
     """Make ``workspace``'s providers unresolvable: all of them, or one of two if ``partial``.
 
     ``state`` is the serving schema's state, or None for nothing loaded. No run is active,
-    so a MATERIALIZING schema here is a stuck load.
+    so a MATERIALIZING schema here is a stuck load (G12).
     """
     if not partial:
         await Tenant.objects.filter(id=tenant.id).aupdate(provider="retired_provider")
@@ -466,12 +466,13 @@ _SERVING_STATES = [None, SchemaState.ACTIVE, SchemaState.MATERIALIZING]
 @pytest.mark.parametrize("interactive", [True, False])
 @pytest.mark.parametrize("write_capable", [True, False])
 @pytest.mark.parametrize("multi", [False, True])
-@pytest.mark.parametrize("state", [None, SchemaState.ACTIVE])
+@pytest.mark.parametrize("state", _SERVING_STATES)
 async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
     workspace, tenant, interactive, write_capable, multi, state
 ):
     """F2: a re-run fails PIPELINE_UNRESOLVED for a provider with no pipeline, so
-    telling the agent to (re-)run materialization only wastes a job every turn."""
+    telling the agent to (re-)run materialization only wastes a job every turn.
+    G12: a stuck MATERIALIZING load can't finish either, so waiting is no better."""
     await _unresolvable_workspace(workspace, tenant, multi=multi, state=state)
 
     context = await _fetch_semantic_model_context(
