@@ -1,6 +1,6 @@
 # Security
 
-Scout implements multiple layers of security to protect data and prevent abuse.
+How Scout limits what the agent and API callers can reach, and how it protects stored credentials.
 
 ## Semantic-first query access
 
@@ -54,53 +54,97 @@ are included with the result for provenance.
 
 ## Database isolation
 
-### Encrypted credentials
+### Read-only query roles
 
-Project database credentials (username and password) are encrypted at rest using Fernet symmetric encryption. The encryption key is stored in the `DB_CREDENTIAL_KEY` environment variable, never in the database.
+Each tenant schema has its own read-only PostgreSQL role. Both query paths run
+under it:
 
-### Read-only connections
+- **Raw SQL** (MCP server): the pooled executor switches to the role, sets
+  `search_path` to the workspace schema, enables
+  `default_transaction_read_only`, and sets a 30-second `statement_timeout`.
+  Because pooled connections use autocommit, each query runs in its own
+  read-only transaction. `RESET ROLE` and `RESET ALL` run before the connection
+  returns to the pool.
+- **Semantic queries** (Cube): the database driver connects with the role,
+  `search_path` set to the workspace schema and `public`, and a 30-second
+  `statement_timeout` (`cube_config/cube.js`).
 
-Both query paths run under the workspace's read-only database role. The pooled
-executor sets `search_path` to the workspace schema and enables
-`default_transaction_read_only` before execution. Because pooled connections
-use autocommit, each query runs in a read-only transaction. Role and session
-settings are reset before the connection returns to the pool. `search_path`
-controls name resolution; PostgreSQL role privileges enforce database access.
+`search_path` only controls name resolution; the role's privileges are what
+limit database access.
 
-### Statement timeout
+### Schema names
 
-Each connection sets a `statement_timeout` based on the project's `max_query_timeout_seconds` setting (default: 30 seconds). Long-running queries are automatically terminated.
+Scout mints schema and role names itself. A tenant schema name is the
+sanitized external ID plus a digest of the provider and external ID, capped at
+50 bytes (`apps/common/identifiers.py`), so two tenants can't map to the same
+schema. Names are quoted with psycopg's `sql.Identifier` when they are put into
+SQL.
 
 ### Connection pooling
 
-Database connections are pooled per-project with a configurable maximum (`MAX_CONNECTIONS_PER_PROJECT`, default: 5).
+The MCP server keeps a small set of connection pools to the managed database:
+at most 4 pools of up to 10 connections each (`mcp_server/services/pool.py`).
+
+## Encrypted credentials
+
+OAuth access and refresh tokens, and API-key connection credentials, are
+encrypted at rest with Fernet. The key is the `DB_CREDENTIAL_KEY` environment
+variable and is never stored in the database.
 
 ## Rate limiting
 
-### Login rate limiting
-
-Login attempts are rate-limited per email address: 5 attempts within 5 minutes triggers a lockout. The counter resets on successful login.
-
-### Query rate limiting
-
-Semantic query execution is rate-limited per user at `MAX_QUERIES_PER_MINUTE` (default: 60 queries per minute).
+- **Login and signup**: 5 failed attempts for an email within 5 minutes locks
+  that email out. A successful login clears the counter. The Django admin login
+  uses the same limiter.
+- **Chat**: 20 messages per user per 60 seconds on `POST /api/chat/`. Over the
+  limit the endpoint returns 429 with `Retry-After` and `X-RateLimit-*`
+  headers. The `CHAT_RATE_LIMIT` and `CHAT_RATE_WINDOW` Django settings
+  override the defaults.
+- **DRF endpoints**: 60 requests per minute for anonymous clients and 120 per
+  minute for signed-in users.
 
 ## Session security
 
-- **Session cookies** -- authentication uses HTTP-only session cookies (not JWT).
-- **CSRF protection** -- all mutating requests require a valid CSRF token. The SPA reads the token from a non-HTTP-only CSRF cookie.
-- **Allowed hosts** -- `DJANGO_ALLOWED_HOSTS` restricts which host headers are accepted.
-- **Trusted origins** -- `CSRF_TRUSTED_ORIGINS` restricts which origins can make cross-origin requests.
+- **Session cookies**: authentication uses HTTP-only session cookies (not JWT).
+- **CSRF protection**: all mutating requests need a valid CSRF token. The SPA
+  reads it from the CSRF cookie, which is not HTTP-only.
+- **Allowed hosts**: `DJANGO_ALLOWED_HOSTS` restricts accepted host headers.
+- **Trusted origins**: `CSRF_TRUSTED_ORIGINS` restricts which origins can make
+  cross-origin requests.
+- **Production**: secure cookies, HTTPS redirect and HSTS are enabled in
+  `config/settings/production.py`.
+
+## Public share links
+
+Two endpoints serve content without authentication:
+
+- `GET /api/chat/threads/shared/<share_token>/` returns a shared thread's
+  messages and the code and saved data of its linked artifacts. A thread owner
+  needs the `read_write` role to share it. Unsharing clears the token.
+- `GET /api/recipes/runs/shared/<share_token>/` returns a recipe run that has
+  `is_public` set.
+
+Artifacts have no share links of their own.
 
 ## MCP server security
 
-The MCP server acts as the data access layer between the agent and project databases. Security features include:
+The MCP server is the data access layer between the agent and the tenant
+schemas.
 
-- **Auth token handling** -- OAuth tokens passed through to data sources are scrubbed from audit logs.
-- **Error codes** -- Standardized error codes (e.g., `AUTH_TOKEN_EXPIRED`) allow the agent to respond appropriately to auth failures.
-- **Response envelopes** -- All MCP responses use a consistent envelope format with timing data and audit metadata.
-- **Circuit breaker** -- Repeated failures to a project database trigger a circuit breaker to prevent cascading timeouts.
+- **Shared secret**: every request must carry an `X-Scout-MCP-Secret` header
+  matching `MCP_SHARED_SECRET`, compared in constant time. If the secret is
+  unset, the server rejects every request. Production settings refuse to start
+  without it.
+- **Server-side scope**: the agent graph injects `workspace_id`, `user_id` and
+  `thread_id` into each call, and the model can't set them. The server resolves
+  the workspace from them and checks the user's access.
+- **Response envelopes**: every tool returns a consistent envelope with a
+  structured error code (for example `AUTH_TOKEN_EXPIRED` or
+  `WORKSPACE_ACCESS_DENIED`) and timing data.
+- **Audit log**: each tool call writes a line to the `mcp_server.audit` logger
+  with the tool, workspace, user, thread, status and duration.
+- **Excluded tools**: `teardown_schema` is never given to the agent.
 
-## Schema name validation
-
-Database schema names are validated with a regex pattern (`^[a-zA-Z_][a-zA-Z0-9_]*$`) to prevent SQL injection through schema names.
+On the Django side, the MCP client opens a circuit breaker after five
+consecutive connection failures and fails fast for 30 seconds
+(`apps/agents/mcp_client.py`).
