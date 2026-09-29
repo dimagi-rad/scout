@@ -47,6 +47,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+import psycopg
 from asgiref.sync import async_to_sync
 from django.utils import timezone
 from psycopg import sql as psql
@@ -517,7 +518,17 @@ def run_pipeline(
     run.state = MaterializationRun.RunState.TRANSFORMING
     transform_result: dict = {}
 
-    if asset_snapshot:
+    if defer_schema_promotion:
+        try:
+            _drop_transform_outputs(schema_name, pipeline)
+        except Exception as e:
+            # A leftover model would be published as if this run built it.
+            logger.exception("Could not clear prior transform outputs in %s", schema_name)
+            transform_result = {"error": f"Could not clear prior transform outputs: {e}"}
+
+    if transform_result:
+        report("Skipping transforms")
+    elif asset_snapshot:
         report("Running transforms...")
         try:
             transform_result = _run_transform_phase(
@@ -1188,6 +1199,71 @@ def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None
     run.completed_at = datetime.now(UTC)
     run.result = {"pipeline": pipeline.name, "sources": source_results, **(error or {})}
     run.save(update_fields=["state", "completed_at", "result"])
+
+
+_DROP_STATEMENTS = {
+    "v": "DROP VIEW",
+    "m": "DROP MATERIALIZED VIEW",
+    "r": "DROP TABLE",
+    "p": "DROP TABLE",
+    "f": "DROP FOREIGN TABLE",
+}
+
+
+def _drop_transform_outputs(schema_name: str, pipeline: PipelineConfig) -> list[str]:
+    """Drop every relation in an unpublished candidate that the raw load did not write.
+
+    A resumed candidate keeps what its failed attempt built. dbt rebuilds every
+    current model but never removes one that was renamed or removed since (by a
+    transform-only deploy, which no longer blocks resume, or by changed tenant
+    metadata), so the stale table would be promoted as fresh. Raw tables are
+    named by the pipeline config, which the raw-load fingerprint pins for a
+    resume, and are kept: they carry the resume's committed progress. Only runs
+    on a deferred-promotion target, which nothing serves yet.
+    """
+    keep = pipeline.raw_table_names
+    conn = get_managed_db_connection()
+    try:
+        with conn.transaction():
+            remaining = [
+                (name, kind)
+                for name, kind in conn.execute(
+                    "SELECT c.relname, c.relkind FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'f', 'v', 'm') "
+                    "AND NOT c.relispartition",
+                    (schema_name,),
+                ).fetchall()
+                if name not in keep
+            ]
+            dropped: list[str] = []
+            # No CASCADE, which could reach views outside the schema. Instead each
+            # pass drops what nothing else still depends on; dependents go first.
+            while remaining:
+                progressed = False
+                for name, kind in list(remaining):
+                    try:
+                        with conn.transaction():
+                            conn.execute(
+                                psql.SQL(_DROP_STATEMENTS[kind] + " {}").format(
+                                    psql.Identifier(schema_name, name)
+                                )
+                            )
+                    except psycopg.errors.DependentObjectsStillExist:
+                        continue
+                    remaining.remove((name, kind))
+                    dropped.append(name)
+                    progressed = True
+                if not progressed:
+                    raise RuntimeError(
+                        f"Relations in {schema_name} still have dependents: "
+                        f"{sorted(name for name, _kind in remaining)}"
+                    )
+    finally:
+        conn.close()
+    if dropped:
+        logger.info("Dropped prior transform outputs in %s: %s", schema_name, sorted(dropped))
+    return dropped
 
 
 def _run_transform_phase(schema_name: str, tenant=None, assets=None) -> dict:
