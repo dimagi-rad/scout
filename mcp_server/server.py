@@ -1701,8 +1701,9 @@ def _load_progress_message(sources: list[dict], finished: int, single_job: bool)
     message = f"Loading source {finished + 1} of {len(sources)} ({current['name']})"
     if current["detail"]:
         message += f": {current['detail']}"
-    if current["rows_loaded"] and current["rows_total"]:
-        message += f" ({current['rows_loaded']:,} of {current['rows_total']:,} {current['unit']})"
+    if current["rows_loaded"] is not None and current["rows_total"]:
+        rows = f"{current['rows_loaded']:,} of {current['rows_total']:,} {current['unit']}"
+        message += f" ({rows})"
     return message
 
 

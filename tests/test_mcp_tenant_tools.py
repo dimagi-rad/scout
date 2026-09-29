@@ -1365,3 +1365,31 @@ async def test_schema_status_reports_no_load_when_every_run_has_finished(user):
 
     assert result["success"] is True
     assert result["data"]["load_in_progress"] is None
+
+
+async def _schema_status(workspace):
+    with (
+        patch("mcp_server.server._resolve_mcp_context", AsyncMock()),
+        patch("mcp_server.server.workspace_list_tables", AsyncMock(return_value=[])),
+        patch("mcp_server.server.pipeline_list_tables", AsyncMock(return_value=[])),
+    ):
+        result = await get_schema_status(workspace_id=str(workspace.id))
+    assert result["success"] is True
+    return result["data"]["load_in_progress"]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_schema_status_shows_a_zero_row_counter(user):
+    """G7: the "0 of 400 rows" a load reports at its start must not be hidden."""
+    workspace = await Workspace.objects.acreate(name="Starting", created_by=user)
+    tenant = await _tenant_in(workspace, "solo")
+    await _run(
+        tenant,
+        MaterializationRun.RunState.LOADING,
+        90,
+        progress={"rows_loaded": 0, "rows_total": 400, "unit": "rows"},
+    )
+
+    in_flight = await _schema_status(workspace)
+
+    assert "(0 of 400 rows)" in in_flight["message"]
