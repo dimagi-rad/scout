@@ -39,6 +39,7 @@ from apps.users.services.tenant_resolution import (
 from apps.workspaces.models import Workspace
 
 TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
+FORCED_REFRESH_FLOOR = 60  # seconds between user-requested refreshes that hit upstream
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ _PROVIDER_RESOLVERS = {
 }
 
 
-async def _arefresh_all_identities(user) -> None:
+async def _arefresh_all_identities(user, *, force: bool = False) -> None:
     """Refresh upstream memberships for every identity the user holds.
 
     The TTL is keyed per *identity*, not per provider. A user with two OCS teams
@@ -62,11 +63,19 @@ async def _arefresh_all_identities(user) -> None:
     Each identity is independent: one team's failure must not stop the others, and
     a raise means "skip refresh" (never revoke on an inconclusive fetch), so the
     TTL is only written on success.
+
+    ``force`` bypasses the per-identity TTL so a user can pick up an opportunity or
+    domain they were just added to. A per-user floor keeps a spammed button from
+    fanning out to every upstream API; inside it the call degrades to the TTL path.
     """
+    if force and not await cache.aadd(
+        f"tenant_refresh_floor:{user.id}", True, FORCED_REFRESH_FLOOR
+    ):
+        force = False
     for provider, resolve in _PROVIDER_RESOLVERS.items():
         for token_obj in await aiter_social_tokens(user, provider):
             cache_key = f"tenant_refresh:{user.id}:{provider}:{token_obj.account_id}"
-            if await cache.aget(cache_key):
+            if not force and await cache.aget(cache_key):
                 continue
             try:
                 credential = await _aresolve_oauth_credential(token_obj, provider)
@@ -129,10 +138,11 @@ async def tenant_list_view(request):
 
     Refreshes each connected identity's upstream access (TTL-throttled) before
     returning, so a team the user authorised elsewhere shows up on the next poll.
+    ``?refresh=1`` bypasses the TTL (rate-limited per user) for an explicit Refresh.
     """
     user = request._authenticated_user
 
-    await _arefresh_all_identities(user)
+    await _arefresh_all_identities(user, force=request.GET.get("refresh") == "1")
 
     memberships = []
     # Not Meta.ordering: -last_selected_at sorts never-selected (NULL) rows first (#357).
