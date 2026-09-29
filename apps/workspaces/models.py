@@ -283,13 +283,16 @@ class Workspace(models.Model):
     def display_name_for(self, tenants: Sequence[Tenant]) -> str:
         """The label for this workspace over ``tenants``, for callers already holding them.
 
-        Only a single-source workspace is decorated by its provider template. With
-        several sources no one tenant's id describes the workspace, and picking one
-        let an unrelated source's add or rename change the label and the URL (#354).
+        A single-source workspace is decorated by its provider template. With several
+        sources no one tenant's id describes the workspace (picking one let an
+        unrelated source's add or rename change the label, #354), so the label carries
+        the count instead. Labels may repeat across workspaces; URLs and lookups use ids.
         """
-        if len(tenants) != 1:
+        if not tenants:
             return self.name
-        return tenants[0].format_display_name(self.name)
+        if len(tenants) == 1:
+            return tenants[0].format_display_name(self.name)
+        return f"{self.name} \u00b7 {len(tenants)} sources"
 
     @property
     def external_tenant_id(self):

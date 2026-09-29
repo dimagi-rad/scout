@@ -114,12 +114,12 @@ def test_display_name_for_single_bot_workspace_keeps_bot_id(user):
 
 
 @pytest.mark.django_db
-def test_display_name_for_multi_bot_workspace_names_no_single_bot(user):
+def test_display_name_for_multi_bot_workspace_carries_source_count(user):
     ws = Workspace.objects.create(name="Demo", created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-b", "Bravo"))
     WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-c", "Charlie"))
-    assert ws.display_name == "Demo"
+    assert ws.display_name == "Demo \u00b7 2 sources"
 
     # Tenants order by canonical_name, so an alphabetically-earlier bot used to take over.
     WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-a", "Alpha"))
-    assert ws.display_name == "Demo"
+    assert ws.display_name == "Demo \u00b7 3 sources"
