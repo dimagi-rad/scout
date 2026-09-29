@@ -879,6 +879,7 @@ class SchemaManager:
             )
             retired_as = current_state if current_state in _RETIRED_VIEW_STATES else None
             if retired_as is None:
+                coverage = self._name_sources_added_since(workspace, coverage, tenants)
                 self._publish_view_row(vs, coverage, planned_sources, build_token)
         if retired_as is not None:
             # Retired while this build ran (the workspace dropped to one source):
@@ -897,6 +898,28 @@ class SchemaManager:
             views_created,
         )
         return vs
+
+    @staticmethod
+    def _name_sources_added_since(workspace, coverage, planned_tenants) -> dict:
+        """Name sources linked after the plan was read as missing from these views.
+
+        Adding a source records it as excluded on the ACTIVE row without W, so a
+        build that planned before the add must not publish coverage that forgets it.
+        Read under the row lock that the add's recording also takes: an add that
+        committed first is seen here, and one committing later records onto this row.
+        """
+        added = sorted(
+            Tenant.objects.filter(workspace_tenants__workspace=workspace).exclude(
+                id__in=[tenant.id for tenant in planned_tenants]
+            ),
+            key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
+        )
+        if not added:
+            return coverage
+        return {
+            **coverage,
+            "excluded_tenants": [*coverage["excluded_tenants"], *map(coverage_entry, added)],
+        }
 
     @staticmethod
     def _publish_view_row(vs, coverage, planned_sources, build_token) -> None:

@@ -82,9 +82,12 @@ def _record_pending_source(workspace, tenant) -> None:
     every source, so answers would omit this one without a warning.
     """
     entry = coverage_entry(tenant)
-    for vs in WorkspaceViewSchema.objects.select_for_update().filter(
-        workspace=workspace, state=SchemaState.ACTIVE
-    ):
+    # Locks rows in every state: a rebuild publishing a non-ACTIVE row as ACTIVE
+    # holds this lock while it reads the workspace's sources, so one side always
+    # sees the other (SchemaManager._name_sources_added_since).
+    for vs in WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace):
+        if vs.state != SchemaState.ACTIVE:
+            continue
         if vs.tenant_coverage in (None, {}):
             coverage = _legacy_coverage(workspace, excluding=tenant)
         else:
