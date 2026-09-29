@@ -16,6 +16,7 @@ from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
 )
+from apps.workspaces.services.tenant_coverage import coverage_entry, parse_coverage
 from apps.workspaces.tasks import (
     materialize_workspace,
     rebuild_workspace_view_schema,
@@ -30,11 +31,12 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
     this workspace's views rebuilt. One with nothing loaded is loaded as
     ``actor_id``, and that load republishes the views and Cube with it. Until then
     the views are rebuilt without it but stay ACTIVE (not provisioning, which
-    would take every source's data tools offline for the whole load): the
-    rebuild records the new source under ``excluded_tenants``, so coverage
-    honestly reports it missing instead of the views silently omitting it. Uses
-    get_or_create to handle concurrent requests; only a newly created link
-    dispatches work.
+    would take every source's data tools offline for the whole load). The new
+    source is recorded under the ACTIVE views' ``excluded_tenants`` in this
+    transaction, and the rebuild keeps it there, so coverage honestly reports it
+    missing from the moment it is added instead of the views silently omitting
+    it. Uses get_or_create to handle concurrent requests; only a newly created
+    link dispatches work.
 
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
@@ -49,6 +51,7 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 )
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
             else:
+                _record_pending_source(workspace, tenant)
                 # Queued first: both take the workspace lock W, and the load holds
                 # it for its whole run, so on a worker with more than one slot a
                 # rebuild dequeued second would wait out the load (or the lock
@@ -64,6 +67,58 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 )
 
     return wt, created
+
+
+def _record_pending_source(workspace, tenant) -> None:
+    """Name ``tenant`` as missing from the serving views until a rebuild includes it.
+
+    The queued rebuild may wait behind a long load (the worker runs one job at a
+    time), and until then the ACTIVE row's coverage would otherwise still claim
+    every source, so answers would omit this one without a warning.
+    """
+    entry = coverage_entry(tenant)
+    for vs in WorkspaceViewSchema.objects.select_for_update().filter(
+        workspace=workspace, state=SchemaState.ACTIVE
+    ):
+        if vs.tenant_coverage in (None, {}):
+            coverage = _legacy_coverage(workspace, excluding=tenant)
+        else:
+            coverage = parse_coverage(vs.tenant_coverage)
+            if coverage is None:
+                # Already reported as unknown coverage; don't overwrite it.
+                continue
+        vs.tenant_coverage = {
+            **coverage,
+            "included_tenants": [
+                e for e in coverage["included_tenants"] if e["tenant_id"] != entry["tenant_id"]
+            ],
+            "excluded_tenants": [
+                *(e for e in coverage["excluded_tenants"] if e["tenant_id"] != entry["tenant_id"]),
+                entry,
+            ],
+        }
+        vs.save(update_fields=["tenant_coverage"])
+
+
+def _legacy_coverage(workspace, *, excluding) -> dict:
+    """Coverage for a row that never recorded any, by the rebuild's own rule.
+
+    Only a source with an ACTIVE schema can be in the views, so a linked source
+    without one is named missing rather than claimed as covered.
+    """
+    others = sorted(
+        workspace.tenants.exclude(id=excluding.id),
+        key=lambda t: (t.provider, t.external_id, str(t.id)),
+    )
+    serving = set(
+        TenantSchema.objects.filter(tenant__in=others, state=SchemaState.ACTIVE).values_list(
+            "tenant_id", flat=True
+        )
+    )
+    return {
+        "included_tenants": [coverage_entry(t) for t in others if t.id in serving],
+        "excluded_tenants": [coverage_entry(t) for t in others if t.id not in serving],
+    }
 
 
 def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:

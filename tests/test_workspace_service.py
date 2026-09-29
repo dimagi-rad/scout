@@ -11,6 +11,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.tenant_coverage import coverage_complete, coverage_warning
 from apps.workspaces.services.workspace_service import (
     add_workspace_tenant,
     remove_workspace_tenant,
@@ -55,6 +56,102 @@ def test_add_workspace_tenant_creates_record_and_marks_provisioning(
     assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant2).exists()
     vs.refresh_from_db()
     assert vs.state == SchemaState.PROVISIONING
+
+
+def _entry(tenant):
+    return {
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "external_id": tenant.external_id,
+    }
+
+
+def _add_unloaded(workspace, tenant, user):
+    with (
+        patch(
+            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        ) as rebuild,
+        patch(
+            "apps.workspaces.services.workspace_service.materialize_workspace.defer"
+        ) as materialize,
+    ):
+        add_workspace_tenant(workspace, tenant, actor_id=user.id)
+    rebuild.assert_called_once_with(workspace_id=str(workspace.id))
+    materialize.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_adding_an_unloaded_source_reports_it_missing_before_the_rebuild_runs(
+    workspace, tenant, user, tenant2, tenant_membership2, tenant3, tenant_membership3
+):
+    """B3: coverage said "complete" until the queued rebuild ran, so answers
+    silently omitted the new source."""
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    for source in (tenant, tenant2):
+        TenantSchema.objects.create(
+            tenant=source, schema_name=f"live_{source.external_id}", state=SchemaState.ACTIVE
+        )
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace,
+        schema_name="ws_test",
+        state=SchemaState.ACTIVE,
+        tenant_coverage={
+            "included_tenants": [_entry(tenant), _entry(tenant2)],
+            "excluded_tenants": [],
+        },
+    )
+
+    _add_unloaded(workspace, tenant3, user)
+
+    vs.refresh_from_db()
+    # Still serving the loaded sources, but no longer claiming to cover them all.
+    assert vs.state == SchemaState.ACTIVE
+    assert vs.tenant_coverage == {
+        "included_tenants": [_entry(tenant), _entry(tenant2)],
+        "excluded_tenants": [_entry(tenant3)],
+    }
+    assert coverage_complete(vs.tenant_coverage) is False
+    assert "test-domain-3" in coverage_warning(vs.tenant_coverage)
+
+
+@pytest.mark.django_db
+def test_adding_an_unloaded_source_to_a_legacy_view_reports_it_missing(
+    workspace, tenant, user, tenant2, tenant_membership2, tenant3, tenant_membership3
+):
+    """A view built before coverage was recorded can only serve sources with an
+    ACTIVE schema, so a linked source without one is named missing too."""
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    TenantSchema.objects.create(tenant=tenant, schema_name="live_one", state=SchemaState.ACTIVE)
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
+    )
+
+    _add_unloaded(workspace, tenant3, user)
+
+    vs.refresh_from_db()
+    assert vs.tenant_coverage == {
+        "included_tenants": [_entry(tenant)],
+        "excluded_tenants": [_entry(tenant2), _entry(tenant3)],
+    }
+
+
+@pytest.mark.django_db
+def test_adding_an_unloaded_source_leaves_unknown_coverage_unknown(
+    workspace, tenant, user, tenant2, tenant_membership2, tenant3, tenant_membership3
+):
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace,
+        schema_name="ws_test",
+        state=SchemaState.ACTIVE,
+        tenant_coverage={"included_tenants": "garbled"},
+    )
+
+    _add_unloaded(workspace, tenant3, user)
+
+    vs.refresh_from_db()
+    assert vs.tenant_coverage == {"included_tenants": "garbled"}
+    assert coverage_complete(vs.tenant_coverage) is None
 
 
 @pytest.mark.django_db
