@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react"
-import { Link, useNavigate } from "react-router-dom"
+import { Link, useLocation, useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { workspaceApi } from "@/api/workspaces"
@@ -32,6 +32,7 @@ interface Props {
 
 export function CreateWorkspaceModal({ onClose }: Props) {
   const navigate = useNavigate()
+  const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
   const isCurrentAccount = useIsCurrentAccount()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
@@ -238,7 +239,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 >
                   No data sources available to add.{" "}
                   <Link
-                    to={CONNECTIONS_PATH}
+                    to={`${pathPrefix}${CONNECTIONS_PATH}`}
                     onClick={onClose}
                     className="underline underline-offset-2 hover:text-foreground"
                     data-testid="create-no-sources-connect"
