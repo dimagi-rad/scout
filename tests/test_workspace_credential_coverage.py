@@ -756,6 +756,22 @@ def test_unchanged_decrypt_failures_are_not_rereported_every_evaluation(user, se
     assert len([r for r in caplog.records if r.name.endswith("credential_coverage")]) == 1
 
 
+def test_resolver_decrypt_failure_logs_without_traceback(user, settings, caplog):
+    workspace = _workspace()
+    tenant = _tenant(workspace, "commcare", "domain", "Domain")
+    membership, conn = _api_membership(user, tenant, key="secret-api-key")
+    settings.DB_CREDENTIAL_KEY = Fernet.generate_key().decode()
+
+    with caplog.at_level(logging.ERROR, logger="apps.users.services.credential_resolver"):
+        assert async_to_sync(aresolve_credential)(membership) is None
+
+    [record] = [r for r in caplog.records if r.name.endswith("credential_resolver")]
+    assert record.exc_info is None
+    assert str(conn.id) in record.getMessage()
+    assert "InvalidToken" in record.getMessage()
+    assert "secret-api-key" not in record.getMessage()
+
+
 def test_readable_api_keys_log_nothing(user, caplog):
     workspace = _workspace()
     _member(workspace, user)

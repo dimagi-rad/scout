@@ -152,8 +152,15 @@ async def aresolve_credential(membership) -> dict | None:
         try:
             decrypted = decrypt_credential(conn.encrypted_credential)
             return {"type": "api_key", "value": decrypted}
-        except Exception:
-            logger.exception("Failed to decrypt API key for membership %s", membership.id)
+        except Exception as exc:
+            # No exc_info: the traceback's frames hold the ciphertext and the Fernet key.
+            logger.error(  # noqa: TRY400
+                "Failed to decrypt API key for membership %s (connection %s, provider %s): %s",
+                membership.id,
+                conn.id,
+                conn.provider,
+                type(exc).__name__,
+            )
             return None
 
     token_obj = await aget_connection_token(conn)
