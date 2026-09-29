@@ -17,6 +17,10 @@ from django.db import models
 
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
+from apps.transformations.services.repeat_identity import (
+    CASE_PROPERTIES_COLUMN,
+    REPEAT_ELEMENT_COLUMN,
+)
 from apps.workspaces.models import SchemaState, WorkspaceViewSchema
 from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.view_sources import (
@@ -37,11 +41,17 @@ logger = logging.getLogger(__name__)
 # only in these raw JSON columns (#712); without a hint the agent assumes a field
 # with no column does not exist.
 _STAGING_MODEL = re.compile(r"(^|__)stg_")
-_STAGING_RAW_JSON_COLUMNS = ("form_json", "form_data", "properties", "repeat_data")
+_STAGING_RAW_JSON_COLUMNS = (
+    "form_json",
+    "form_data",
+    CASE_PROPERTIES_COLUMN,
+    REPEAT_ELEMENT_COLUMN,
+)
 _STAGING_RAW_JSON_NOTE = (
-    "Raw JSON source for this row. Fields with no column of their own (very large "
-    "forms or case types fold them to fit PostgreSQL's column limit) are read from "
-    "here, e.g. form_json #>> '{data,question_id}' or properties->>'prop'."
+    "Raw JSON source for this row. Prefer the typed columns; only a field that has "
+    "no column (very large forms or case types fold the excess to fit PostgreSQL's "
+    "column limit) needs to be read from here, e.g. form_json #>> '{data,question_id}' "
+    "or properties->>'prop'."
 )
 
 
@@ -349,7 +359,9 @@ def _build_jsonb_annotations(
 ) -> dict[str, str]:
     """Build per-column description strings for known JSONB columns.
 
-    Returns an empty dict if TenantMetadata is absent or the table has no annotations.
+    Generated ``stg_*`` models get their raw JSON columns annotated whether or not
+    TenantMetadata exists; other tables return an empty dict if TenantMetadata is
+    absent or the table has no annotations.
     """
     if _STAGING_MODEL.search(table_name):
         return dict.fromkeys(_STAGING_RAW_JSON_COLUMNS, _STAGING_RAW_JSON_NOTE)
