@@ -13,13 +13,22 @@ import type {
   WorkspaceTenant,
   UserTenant,
 } from "@/api/workspaces"
-import { ApiError } from "@/api/client"
+import { ApiError, asRecord } from "@/api/client"
 import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import {
   Select,
   SelectContent,
@@ -508,8 +517,25 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
 
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 
-export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
+function requiresWorkspaceDelete(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    err.status === 409 &&
+    asRecord(err.body)?.requires_confirmation === "delete_workspace"
+  )
+}
+
+export function TenantsTab({
+  workspaceId,
+  isManager,
+  onWorkspaceDeleted,
+}: {
+  workspaceId: string
+  isManager: boolean
+  onWorkspaceDeleted: () => void
+}) {
   const userId = useAppStore((s) => s.user?.id)
+  const isCurrentAccount = useIsCurrentAccount()
 
   // Connected sources — fast local-DB query, gates only its own section.
   const [tenants, setTenants] = useState<WorkspaceTenant[]>([])
@@ -529,6 +555,10 @@ export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; is
   const [providerFilter, setProviderFilter] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
+  // The workspace's last source: removing it deletes the whole workspace (#381).
+  const [lastSource, setLastSource] = useState<WorkspaceTenant | null>(null)
+  const [deletingWorkspace, setDeletingWorkspace] = useState(false)
+  const [deleteWorkspaceError, setDeleteWorkspaceError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!showAdd) {
@@ -665,9 +695,51 @@ export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; is
       setTenants((prev) => prev.filter((t) => t.id !== wt.id))
       setConfirmRemoveId(null)
     } catch (err) {
-      setMutationError(err instanceof ApiError ? err.message : "Failed to remove data source")
+      // Another manager removed the other sources since this list loaded.
+      if (requiresWorkspaceDelete(err)) {
+        setConfirmRemoveId(null)
+        openLastSourceDialog(wt)
+      } else {
+        setMutationError(err instanceof ApiError ? err.message : "Failed to remove data source")
+      }
     } finally {
       setRemovingId(null)
+    }
+  }
+
+  function openLastSourceDialog(wt: WorkspaceTenant) {
+    setDeleteWorkspaceError(null)
+    setLastSource(wt)
+  }
+
+  async function handleRemoveLastSource() {
+    if (!lastSource) return
+    setDeletingWorkspace(true)
+    setDeleteWorkspaceError(null)
+    try {
+      const result = await workspaceApi.removeTenant(workspaceId, lastSource.id, {
+        confirmDeleteWorkspace: true,
+      })
+      if (!isCurrentAccount()) {
+        setLastSource(null)
+        return
+      }
+      if (result?.workspace_deleted) {
+        onWorkspaceDeleted()
+        return
+      }
+      // A source was added meanwhile, so only this one was removed; this list
+      // doesn't have the new one yet.
+      setLastSource(null)
+      void loadConnected()
+    } catch (err) {
+      if (!isCurrentAccount()) {
+        setLastSource(null)
+        return
+      }
+      setDeleteWorkspaceError(err instanceof ApiError ? err.message : "Failed to delete workspace")
+    } finally {
+      setDeletingWorkspace(false)
     }
   }
 
@@ -877,7 +949,7 @@ export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; is
                     </div>
                   </div>
                 </div>
-                {isManager && tenants.length > 1 && (
+                {isManager && (
                   confirmRemoveId === t.id ? (
                     <div className="flex items-center justify-end gap-2">
                       <span className="text-xs text-muted-foreground">Remove?</span>
@@ -899,7 +971,9 @@ export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; is
                       variant="ghost"
                       size="sm"
                       className="text-destructive hover:text-destructive"
-                      onClick={() => setConfirmRemoveId(t.id)}
+                      onClick={() =>
+                        tenants.length === 1 ? openLastSourceDialog(t) : setConfirmRemoveId(t.id)
+                      }
                       data-testid={`remove-tenant-${t.id}`}
                     >
                       Remove
@@ -911,6 +985,40 @@ export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; is
           })}
         </div>
       )}
+
+      <AlertDialog
+        open={lastSource !== null}
+        onOpenChange={(open) => { if (!open && !deletingWorkspace) setLastSource(null) }}
+      >
+        <AlertDialogContent data-testid="last-source-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this workspace?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {lastSource?.tenant_name ?? "This source"} is this workspace&rsquo;s only data
+              source. Removing it deletes the workspace, its conversations and its data for
+              every member. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {deleteWorkspaceError && (
+            <p className="text-sm text-destructive" role="alert" data-testid="last-source-error">
+              {deleteWorkspaceError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingWorkspace} data-testid="last-source-cancel">
+              Cancel
+            </AlertDialogCancel>
+            <Button
+              variant="destructive"
+              onClick={handleRemoveLastSource}
+              disabled={deletingWorkspace}
+              data-testid="last-source-confirm"
+            >
+              {deletingWorkspace ? "Deleting…" : "Delete workspace"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -1193,7 +1301,7 @@ export function WorkspaceDetailPage() {
 
   function handleDelete() {
     fetchDomains()
-    navigate("/workspaces")
+    navigate(`${location.pathname.startsWith("/embed") ? "/embed" : ""}/workspaces`)
   }
 
   useEffect(() => {
@@ -1267,7 +1375,11 @@ export function WorkspaceDetailPage() {
         </TabsContent>
 
         <TabsContent value="tenants">
-          <TenantsTab workspaceId={workspace.id} isManager={isManager} />
+          <TenantsTab
+            workspaceId={workspace.id}
+            isManager={isManager}
+            onWorkspaceDeleted={handleDelete}
+          />
         </TabsContent>
 
         <TabsContent value="settings">

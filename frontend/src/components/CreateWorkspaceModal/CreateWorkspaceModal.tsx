@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link, useLocation, useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { workspaceApi } from "@/api/workspaces"
@@ -23,6 +23,7 @@ import {
 } from "@/components/SearchFilterBar/SearchFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 
 interface Props {
@@ -31,6 +32,7 @@ interface Props {
 
 export function CreateWorkspaceModal({ onClose }: Props) {
   const navigate = useNavigate()
+  const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
   const isCurrentAccount = useIsCurrentAccount()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
@@ -44,6 +46,8 @@ export function CreateWorkspaceModal({ onClose }: Props) {
 
   const [sources, setSources] = useState<UserTenant[]>([])
   const [sourcesLoading, setSourcesLoading] = useState(true)
+  const [sourcesError, setSourcesError] = useState<string | null>(null)
+  const [sourcesAttempt, setSourcesAttempt] = useState(0)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState("")
   const [providerFilter, setProviderFilter] = useState<string | null>(null)
@@ -55,12 +59,16 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     let cancelled = false
     async function loadSources() {
       setSourcesLoading(true)
+      setSourcesError(null)
       try {
         const data = await getUserTenantsCached(userId!)
         if (!cancelled) setSources(data)
-      } catch {
-        // Non-fatal: workspace can still be created without a data source.
-        if (!cancelled) setSources([])
+      } catch (err) {
+        // A source is required, so an empty list here would be a silent dead end.
+        if (!cancelled) {
+          setSources([])
+          setSourcesError(err instanceof ApiError ? err.message : "Failed to load data sources")
+        }
       } finally {
         if (!cancelled) setSourcesLoading(false)
       }
@@ -69,7 +77,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     return () => {
       cancelled = true
     }
-  }, [userId])
+  }, [userId, sourcesAttempt])
 
   // Ensure the user's workspace list is loaded so duplicate detection has data
   // to compare against, even if the modal is opened before the list is fetched.
@@ -142,12 +150,12 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     if (!duplicateWorkspace) return
     setActiveDomain(duplicateWorkspace.id)
     onClose()
-    navigate(workspacePath(duplicateWorkspace))
+    navigate(`${pathPrefix}${workspacePath(duplicateWorkspace)}`)
   }
 
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
-    if (!name.trim()) return
+    if (!name.trim() || selected.size === 0) return
     // Hold for an explicit decision when this exact data-source set already
     // exists, unless the user has chosen to create anyway.
     if (duplicateWorkspace && !duplicateAcknowledged) return
@@ -160,7 +168,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       if (!isCurrentAccount()) return
       setActiveDomain(workspace.id)
       onClose()
-      navigate(workspacePath(workspace))
+      navigate(`${pathPrefix}${workspacePath(workspace)}`)
     } catch (err) {
       if (!isCurrentAccount()) return
       setError(err instanceof ApiError ? err.message : "Failed to create workspace")
@@ -196,23 +204,50 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 <span className="text-xs text-muted-foreground">
                   {selected.size > 0
                     ? `${selected.size} selected`
-                    : "Optional"}
+                    : "Required"}
                 </span>
               </div>
               <p className="mb-2 text-xs text-muted-foreground">
-                Add at least one data source so your workspace isn&rsquo;t empty.
+                Choose at least one data source for the workspace.
               </p>
 
               {sourcesLoading ? (
                 <p className="py-4 text-center text-sm text-muted-foreground">
                   Loading data sources…
                 </p>
+              ) : sourcesError ? (
+                <div
+                  className="rounded-md border border-dashed py-4 text-center text-sm"
+                  data-testid="create-sources-error"
+                >
+                  <p className="text-destructive" role="alert">
+                    {sourcesError}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => setSourcesAttempt((n) => n + 1)}
+                    data-testid="create-sources-retry"
+                  >
+                    Retry
+                  </Button>
+                </div>
               ) : sources.length === 0 ? (
                 <p
                   className="rounded-md border border-dashed py-4 text-center text-sm text-muted-foreground"
                   data-testid="create-no-sources"
                 >
-                  No data sources available to add.
+                  No data sources available to add.{" "}
+                  <Link
+                    to={`${pathPrefix}${CONNECTIONS_PATH}`}
+                    onClick={onClose}
+                    className="underline underline-offset-2 hover:text-foreground"
+                    data-testid="create-no-sources-connect"
+                  >
+                    Connect one in Connected Accounts
+                  </Link>
                 </p>
               ) : (
                 <div className="space-y-3">
@@ -320,6 +355,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
               type="submit"
               disabled={
                 !name.trim() ||
+                selected.size === 0 ||
                 loading ||
                 (!!duplicateWorkspace && !duplicateAcknowledged)
               }

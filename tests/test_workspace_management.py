@@ -168,17 +168,15 @@ class TestWorkspaceCreate:
         )
         assert resp.status_code == 400
 
-    def test_create_workspace_with_no_tenants(self, client, user):
-        """POST /api/workspaces/ succeeds with tenant_ids=[] (tenants added later)."""
+    @pytest.mark.parametrize("body", [{"name": "Empty WS", "tenant_ids": []}, {"name": "No key"}])
+    def test_create_without_a_source_is_refused(self, client, user, body):
+        """A workspace never exists without a source (#381)."""
         client.force_login(user)
-        resp = client.post(
-            "/api/workspaces/",
-            {"name": "Empty WS", "tenant_ids": []},
-            content_type="application/json",
-        )
-        assert resp.status_code == 201, resp.json()
-        assert resp.json()["name"] == "Empty WS"
-        assert resp.json()["tenants"] == []
+        before = Workspace.objects.count()
+        resp = client.post("/api/workspaces/", body, content_type="application/json")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "Choose at least one data source for the workspace."
+        assert Workspace.objects.count() == before
 
     @pytest.mark.parametrize(
         ("body", "error"),
@@ -200,11 +198,11 @@ class TestWorkspaceCreate:
         assert resp.json()["error"] == error
         assert Workspace.objects.count() == before
 
-    def test_create_name_at_limit_is_accepted(self, client, user):
+    def test_create_name_at_limit_is_accepted(self, client, user, tenant_membership):
         client.force_login(user)
         resp = client.post(
             "/api/workspaces/",
-            {"name": "n" * 255, "tenant_ids": []},
+            {"name": "n" * 255, "tenant_ids": [str(tenant_membership.tenant_id)]},
             content_type="application/json",
         )
         assert resp.status_code == 201

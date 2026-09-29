@@ -61,7 +61,7 @@ frontend reads them from `/api/auth/providers/`.
 | Method | Path | Role | Description |
 |--------|------|------|-------------|
 | GET | `/api/workspaces/` | — | Workspaces the user belongs to. |
-| POST | `/api/workspaces/` | — | Create a workspace from `name` and `tenant_ids`. The creator becomes its manager. |
+| POST | `/api/workspaces/` | — | Create a workspace from `name` and `tenant_ids` (at least one; a workspace never exists without a source). The creator becomes its manager. |
 | GET | `…/` | read | Workspace detail. |
 | PATCH | `…/` | manage | Rename (`name`), or set the agent's `system_prompt` (max 10,000 characters). |
 | DELETE | `…/` | manage | Delete. |
@@ -72,7 +72,7 @@ frontend reads them from `/api/auth/providers/`.
 | PATCH, DELETE | `…/invites/<invite_id>/` | manage | Change an invite's role, or revoke it. |
 | GET | `/api/invites/` | — | The signed-in user's invites that are waiting on tenant access. |
 | GET, POST | `…/tenants/` | read / manage | List the workspace's tenants, or add one (`tenant_id`). |
-| DELETE | `…/tenants/<workspace_tenant_id>/` | manage | Remove a tenant. |
+| DELETE | `…/tenants/<workspace_tenant_id>/` | manage | Remove a tenant. Removing the last one deletes the whole workspace: without `?confirm_delete_workspace=true` it answers 409 with `requires_confirmation: "delete_workspace"`, `workspace_name` and `member_count` and changes nothing; with it, the workspace is deleted under the same refusals as `DELETE …/` and it answers 200 `{"workspace_deleted": true}`. |
 | POST | `…/access/verify/` | — | Re-check the caller's access to the workspace's tenants upstream. |
 
 ## Chat

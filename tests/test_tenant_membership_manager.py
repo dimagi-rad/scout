@@ -58,7 +58,10 @@ def test_cascade_deletes_archived_rows():
 
     u = User.objects.create(email="c@dimagi.com", username="c")
     t = _tenant("3")
-    TenantMembership.all_objects.create(user=u, tenant=t, archived_at=timezone.now())
+    # bulk_create skips the auto-created workspace, whose source would block the delete.
+    TenantMembership.all_objects.bulk_create(
+        [TenantMembership(user=u, tenant=t, archived_at=timezone.now())]
+    )
     t.delete()
     assert TenantMembership.all_objects.filter(tenant_id=t.id).count() == 0
 

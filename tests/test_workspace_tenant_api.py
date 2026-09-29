@@ -1,12 +1,19 @@
+from unittest.mock import patch
+
 import pytest
+from django.db.models import ProtectedError
 from rest_framework.test import APIClient
 
-from apps.users.models import Tenant
+from apps.chat.models import Thread
+from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.api import workspace_views
 from apps.workspaces.models import (
+    Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.workspace_service import LastWorkspaceTenant
 from tests.tenant_access import grant_tenant_access
 
 
@@ -88,12 +95,168 @@ def test_remove_tenant_from_workspace(api_client, user, workspace, tenant2, tena
     assert not WorkspaceTenant.objects.filter(id=wt.id).exists()
 
 
-def test_cannot_remove_last_tenant_from_workspace(api_client, user, workspace, tenant):
+@pytest.fixture
+def sibling_workspace(db, user, tenant):
+    """Another workspace of ``user``'s over ``tenant``, so deleting ``workspace`` is
+    not refused as their last one covering it."""
+    ws = Workspace.objects.create(name="Sibling", created_by=user)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    return ws
+
+
+def _last_source_url(workspace, tenant, *, confirm=False):
     wt = WorkspaceTenant.objects.get(workspace=workspace, tenant=tenant)
+    suffix = "?confirm_delete_workspace=true" if confirm else ""
+    return f"/api/workspaces/{workspace.id}/tenants/{wt.id}/{suffix}"
+
+
+def test_removing_last_source_asks_to_confirm_deleting_the_workspace(
+    api_client, user, workspace, tenant, sibling_workspace
+):
+    Thread.objects.create(workspace=workspace, user=user)
     api_client.force_login(user)
-    resp = api_client.delete(f"/api/workspaces/{workspace.id}/tenants/{wt.id}/")
+
+    resp = api_client.delete(_last_source_url(workspace, tenant))
+
+    assert resp.status_code == 409, resp.data
+    assert resp.data["requires_confirmation"] == "delete_workspace"
+    assert resp.data["member_count"] == 1
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+    assert Thread.objects.filter(workspace=workspace).exists()
+
+
+def test_removing_last_source_with_confirmation_deletes_the_workspace(
+    api_client, user, workspace, tenant, sibling_workspace
+):
+    Thread.objects.create(workspace=workspace, user=user)
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data == {"workspace_deleted": True}
+    assert not Workspace.objects.filter(id=workspace.id).exists()
+    assert not Thread.objects.filter(workspace_id=workspace.id).exists()
+    assert WorkspaceTenant.objects.filter(workspace=sibling_workspace, tenant=tenant).exists()
+
+
+def test_source_added_before_the_confirmed_delete_keeps_the_workspace(
+    api_client, user, workspace, tenant, tenant2, sibling_workspace
+):
+    """A source that lands between the last-source check and the delete wins."""
+    url = _last_source_url(workspace, tenant, confirm=True)
+    WorkspaceTenant.objects.create(workspace=sibling_workspace, tenant=tenant2)
+    real_remove = workspace_views.remove_workspace_tenant
+    calls = []
+
+    def last_then_real(ws, wt):
+        calls.append(wt.id)
+        if len(calls) == 1:
+            WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+            raise LastWorkspaceTenant("Cannot remove the last tenant from a workspace.")
+        return real_remove(ws, wt)
+
+    api_client.force_login(user)
+    with patch.object(workspace_views, "remove_workspace_tenant", side_effect=last_then_real):
+        resp = api_client.delete(url)
+
+    assert resp.status_code == 204
+    assert Workspace.objects.filter(id=workspace.id).exists()
+    assert list(workspace.workspace_tenants.values_list("tenant_id", flat=True)) == [tenant2.id]
+
+
+def test_a_double_submitted_confirmed_delete_is_idempotent(
+    api_client, user, workspace, tenant, sibling_workspace
+):
+    url = _last_source_url(workspace, tenant, confirm=True)
+
+    def other_request_deleted_it(ws, wt):
+        Workspace.objects.filter(id=ws.id).delete()
+        raise LastWorkspaceTenant("Cannot remove the last tenant from a workspace.")
+
+    api_client.force_login(user)
+    with patch.object(
+        workspace_views, "remove_workspace_tenant", side_effect=other_request_deleted_it
+    ):
+        resp = api_client.delete(url)
+
+    assert resp.status_code == 200
+    assert resp.data == {"workspace_deleted": True}
+
+
+def test_non_manager_cannot_remove_last_source_even_confirmed(
+    api_client, workspace, tenant, write_user
+):
+    api_client.force_login(write_user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 403
+    assert resp.data["error"] == "Only workspace managers can remove tenants."
+    assert Workspace.objects.filter(id=workspace.id).exists()
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+
+
+def test_removing_last_source_keeps_the_last_workspace_covering_it(
+    api_client, user, workspace, tenant
+):
+    """Workspace delete's guard applies, and is checked before asking to confirm."""
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
     assert resp.status_code == 400
-    assert "last" in resp.data["error"].lower()
+    assert resp.data["error"].startswith("Removing the last data source deletes the workspace.")
+    assert "last workspace covering a tenant" in resp.data["error"]
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+
+
+def test_removing_a_missing_last_source_of_a_shared_workspace_is_refused(
+    settings, api_client, user, workspace, tenant, read_user
+):
+    """Workspace delete's refusal for a manager missing a source of a shared workspace."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
+    TenantMembership.objects.filter(user=user, tenant=tenant).delete()
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 403
+    assert "shared workspace" in resp.data["error"]
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+
+
+def test_removing_a_missing_last_source_of_an_unshared_workspace_deletes_it(
+    settings, api_client, user, workspace, tenant
+):
+    """The source they lack doesn't count as covered, so this is not their last one."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
+    TenantMembership.objects.filter(user=user, tenant=tenant).delete()
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 200, resp.data
+    assert not Workspace.objects.filter(id=workspace.id).exists()
+
+
+@pytest.mark.parametrize("via_queryset", [False, True])
+def test_deleting_a_tenant_a_workspace_uses_is_blocked(workspace, tenant, via_queryset):
+    """A tenant delete would otherwise cascade to the link and empty the workspace."""
+    with pytest.raises(ProtectedError):
+        if via_queryset:
+            Tenant.objects.filter(id=tenant.id).delete()
+        else:
+            tenant.delete()
+
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+
+
+def test_deleting_a_tenant_no_workspace_uses_still_works(tenant2):
+    tenant2.delete()
+
+    assert not Tenant.objects.filter(id=tenant2.id).exists()
 
 
 def test_add_tenant_refused_when_member_lacks_a_workspace_tenant(

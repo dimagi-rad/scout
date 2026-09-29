@@ -58,20 +58,29 @@ it("searches on Enter without creating a workspace", async () => {
   expect(workspaceApi.create).not.toHaveBeenCalled()
 })
 
-it.each([false, true])("deliberate Create works with selected source: %s", async (selectSource) => {
+it("creates with the selected source", async () => {
   const { user, onClose } = await openModal()
-  if (selectSource) await user.click(screen.getByTestId("create-source-tenant-a"))
+  await user.click(screen.getByTestId("create-source-tenant-a"))
   await user.click(screen.getByTestId("create-workspace-submit"))
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
-  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", selectSource ? ["tenant-a"] : [])
+  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-a"])
+})
+
+it("refuses to create a workspace with no source (#381)", async () => {
+  const { user } = await openModal()
+  expect(screen.getByTestId("create-workspace-submit")).toBeDisabled()
+  await user.click(screen.getByLabelText("Name"))
+  await user.keyboard("{Enter}")
+  expect(workspaceApi.create).not.toHaveBeenCalled()
 })
 
 it("preserves keyboard submission from the workspace name", async () => {
   const { user, onClose } = await openModal()
+  await user.click(screen.getByTestId("create-source-tenant-a"))
   await user.click(screen.getByLabelText("Name"))
   await user.keyboard("{Enter}")
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
-  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", [])
+  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-a"])
 })
 
 it("lists data sources alphabetically, whatever order the server sends", async () => {
@@ -85,4 +94,19 @@ it("lists data sources alphabetically, whatever order the server sends", async (
   const order = [...screen.getByTestId("create-sources-list").querySelectorAll("[data-testid^='create-source-']")]
     .map((el) => el.getAttribute("data-testid"))
   expect(order).toEqual(["create-source-tenant-a", "create-source-tenant-b", "create-source-tenant-z"])
+})
+
+it("offers a retry when the data sources fail to load, since one is required", async () => {
+  vi.mocked(getUserTenantsCached)
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce([
+      { id: "membership-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null },
+    ])
+  const user = userEvent.setup()
+  render(<MemoryRouter><CreateWorkspaceModal onClose={vi.fn()} /></MemoryRouter>)
+
+  expect(await screen.findByTestId("create-sources-error")).toHaveTextContent("Failed to load data sources")
+  await user.click(screen.getByTestId("create-sources-retry"))
+
+  expect(await screen.findByTestId("create-source-tenant-a")).toBeInTheDocument()
 })

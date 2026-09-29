@@ -10,7 +10,8 @@ invite rather than any-of access.
 Final checks and mutations run under a lock on the workspace row, shared by every
 admission mutation here, so a concurrent member add and source add cannot each pass
 against the state the other is about to change. Source removal does not take it;
-that race can only refuse an admission, never admit a gap. Upstream refreshes
+that race can only refuse an admission, never admit a gap. Deleting a workspace
+along with its last source does take it, so no source is added under the delete. Upstream refreshes
 happen before the lock, never inside it.
 """
 
