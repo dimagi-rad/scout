@@ -44,16 +44,41 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     joins_by_dataset: dict[str, list[dict[str, Any]]] = {}
     diagnostics: list[dict[str, Any]] = []
     join_references = references | {"CUBE"}
+
+    def unpublished(relationship: SemanticRelationship, code: str, reason: str) -> None:
+        message = f"Relationship '{relationship.name}' was not published: {reason}."
+        logger.warning("%s (relationship %s)", message, relationship.id)
+        diagnostics.append(
+            {
+                "level": "warning",
+                "code": code,
+                "relationship": relationship.name,
+                "message": message,
+            }
+        )
+
     for relationship in relationships:
-        if (
-            relationship.from_dataset_id not in visible_ids
-            or relationship.to_dataset_id not in visible_ids
-        ):
+        endpoints = (relationship.from_dataset, relationship.to_dataset)
+        missing = [dataset for dataset in endpoints if dataset.id not in visible_ids]
+        if missing:
+            # Catalog refresh hides the dataset of a vanished source table. The
+            # catalog lists a relationship under its visible endpoints only, so
+            # one with no visible endpoint is advertised nowhere.
+            if any(dataset.is_visible for dataset in endpoints):
+                unpublished(
+                    relationship,
+                    "relationship_unpublished_endpoint",
+                    f"dataset '{missing[0].name}' is hidden, no longer in the source, "
+                    "or has no SQL",
+                )
             continue
-        # Cube refuses to compile a cube that defines a join but no primary
-        # key; skipping the join keeps the rest of the schema buildable while
-        # the relationship stays visible in the catalog.
+        # Cube refuses to compile a cube that defines a join but no primary key.
         if not relationship.from_dataset.primary_key:
+            unpublished(
+                relationship,
+                "relationship_missing_primary_key",
+                f"dataset '{relationship.from_dataset.name}' has no primary key",
+            )
             continue
         try:
             join_sql = embed_cube_sql(relationship.join_expression, references=join_references)
@@ -61,29 +86,12 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             # A join only adds a path between cubes, so dropping one changes no
             # metric; failing here would take every cube in the workspace down.
             hidden = exc.reference in known_references
-            reference = exc.reference[:200]
             # Catalog refresh hides dropped source columns rather than deleting them.
             state = "hidden or no longer in the source" if hidden else "not in the semantic catalog"
-            logger.warning(
-                "Skipping relationship %s referencing %s member %s",
-                relationship.id,
-                "hidden" if hidden else "unknown",
-                reference,
-            )
-            diagnostics.append(
-                {
-                    "level": "warning",
-                    "code": (
-                        "relationship_hidden_reference"
-                        if hidden
-                        else "relationship_stale_reference"
-                    ),
-                    "relationship": relationship.name,
-                    "message": (
-                        f"Relationship '{relationship.name}' was not published: it references "
-                        f"'{reference}', which is {state}."
-                    ),
-                }
+            unpublished(
+                relationship,
+                "relationship_hidden_reference" if hidden else "relationship_stale_reference",
+                f"it references '{exc.reference[:200]}', which is {state}",
             )
             continue
         joins_by_dataset.setdefault(relationship.from_dataset.name, []).append(

@@ -286,3 +286,39 @@ def test_relationship_through_hidden_member_is_skipped_and_reported(workspace):
     assert [(d["code"], d["relationship"]) for d in schema["diagnostics"]] == [
         ("relationship_hidden_reference", "visits_to_users")
     ]
+
+
+@pytest.mark.django_db
+def test_relationship_to_hidden_dataset_is_reported_as_unpublished(workspace):
+    model = _stale_relationship_catalog(workspace)
+    # Catalog refresh hides the dataset of a source table that disappeared.
+    SemanticDataset.objects.filter(name="users").update(is_visible=False)
+
+    schema = generate_cube_schema(model)
+
+    assert "joins" not in {c["name"]: c for c in schema["cubes"]}["visits"]
+    assert [(d["code"], d["relationship"]) for d in schema["diagnostics"]] == [
+        ("relationship_unpublished_endpoint", "visits_to_users")
+    ]
+    assert "'users'" in schema["diagnostics"][0]["message"]
+
+
+@pytest.mark.django_db
+def test_relationship_between_hidden_datasets_is_not_reported(workspace):
+    model = _stale_relationship_catalog(workspace)
+    SemanticDataset.objects.filter(name__in=["visits", "users"]).update(is_visible=False)
+
+    assert generate_cube_schema(model)["diagnostics"] == []
+
+
+@pytest.mark.django_db
+def test_relationship_from_dataset_without_primary_key_is_reported(workspace):
+    model = _stale_relationship_catalog(workspace)
+    SemanticDataset.objects.filter(name="visits").update(primary_key="")
+
+    schema = generate_cube_schema(model)
+
+    assert "joins" not in {c["name"]: c for c in schema["cubes"]}["visits"]
+    assert [(d["code"], d["relationship"]) for d in schema["diagnostics"]] == [
+        ("relationship_missing_primary_key", "visits_to_users")
+    ]
