@@ -209,7 +209,7 @@ def test_removing_last_source_keeps_the_last_workspace_covering_it(
     assert resp.status_code == 400
     assert resp.data["error"].startswith("Removing the last data source deletes the workspace.")
     assert "last workspace covering a tenant" in resp.data["error"]
-    assert Workspace.objects.filter(id=workspace.id).exists()
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
 
 
 def test_removing_a_missing_last_source_of_a_shared_workspace_is_refused(
@@ -224,7 +224,7 @@ def test_removing_a_missing_last_source_of_a_shared_workspace_is_refused(
 
     assert resp.status_code == 403
     assert "shared workspace" in resp.data["error"]
-    assert Workspace.objects.filter(id=workspace.id).exists()
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
 
 
 def test_removing_a_missing_last_source_of_an_unshared_workspace_deletes_it(

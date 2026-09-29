@@ -327,3 +327,13 @@ def test_removal_that_lost_a_race_is_not_a_last_source_removal(
 
     assert list(workspace.workspace_tenants.values_list("tenant_id", flat=True)) == [tenant2.id]
     mock_rebuild.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_removal_that_lost_to_a_workspace_delete_reports_the_last_source(workspace, tenant):
+    """The caller then answers as the delete it lost to, not as a plain removal."""
+    stale = WorkspaceTenant.objects.get(workspace=workspace, tenant=tenant)
+    WorkspaceTenant.objects.filter(workspace=workspace).delete()
+
+    with pytest.raises(LastWorkspaceTenant):
+        remove_workspace_tenant(workspace, stale)
