@@ -321,6 +321,40 @@ async def tenant_data_lock_if_free(tenant_id):
             _held_tenants.reset(token)
 
 
+@asynccontextmanager
+async def workspace_data_lock_if_free(workspace_id):
+    """Take one workspace's W only if nobody holds it; yield whether it was taken.
+
+    The W counterpart of ``tenant_data_lock_if_free``: every view build runs
+    under W, so a held W means a live builder and a sweep skips the workspace.
+    """
+    key = str(workspace_id)
+    owner, inherited = _held_workspaces.get()
+    task = asyncio.current_task()
+    held = inherited if owner is task else frozenset()
+    if key in held:
+        yield True
+        return
+    _tenant_owner, tenant_keys = _held_tenants.get()
+    if tenant_keys:
+        raise LockOrderError(_WORKSPACE_AFTER_TENANT)
+    async with await psycopg.AsyncConnection.connect(
+        **_connection_params(), autocommit=True
+    ) as conn:
+        cursor = await conn.execute(
+            "SELECT pg_try_advisory_lock(%s, %s)", (_LOCK_NAMESPACE, _lock_key(key))
+        )
+        (acquired,) = await cursor.fetchone()
+        if not acquired:
+            yield False
+            return
+        token = _held_workspaces.set((task, held | {key}))
+        try:
+            yield True
+        finally:
+            _held_workspaces.reset(token)
+
+
 def serialized_workspace_data(function):
     @wraps(function)
     async def wrapped(workspace_id, *args, **kwargs):

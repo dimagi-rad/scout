@@ -71,6 +71,7 @@ from apps.workspaces.services.data_operation import (
     tenant_data_lock,
     tenant_data_lock_if_free,
     workspace_data_lock,
+    workspace_data_lock_if_free,
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
 from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE as _CREDENTIAL_GUIDANCE
@@ -3207,7 +3208,102 @@ async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
         )
         if await _fail_zombie_materialization_run(run, reason):
             failed += 1
-    return {"failed": failed}
+    return {"failed": failed, "view_schemas_settled": await _settle_orphaned_view_builds()}
+
+
+ORPHANED_VIEW_BUILD_ERROR = (
+    "The view build stopped before it finished (its worker died or it never started). "
+    "Refresh workspace data to rebuild the views."
+)
+
+
+_VIEW_BUILD_TASK_NAMES = (rebuild_workspace_view_schema.name, materialize_workspace.name)
+# Explicit, not derived: only a started job has a worker to heartbeat, so a new
+# not-yet-started status must never land here and read as dead.
+_STARTED_JOB_STATUSES = ["doing", "aborting"]
+
+
+def _settle_orphaned_view_build(view_schema_id, stalled_before) -> WorkspaceViewSchema | None:
+    """Under W, fail a PROVISIONING view schema that no queued or live job will build.
+
+    A row is PROVISIONING only while a W holder builds it or while the rebuild
+    deferred in the same transaction as the flip is still queued. The caller
+    holds W, so only queue evidence is left. A job is dead only when it ended or
+    its worker stopped heartbeating (Procrastinate's stalled-job rule); any other
+    status, including one this code does not know, keeps the row. An active data
+    recovery rebuilds the view too, so it also keeps the row. The row lock orders
+    this against add/remove_workspace_tenant's flip.
+    """
+    with transaction.atomic():
+        vs = (
+            WorkspaceViewSchema.objects.select_for_update()
+            .filter(id=view_schema_id, state=SchemaState.PROVISIONING)
+            .first()
+        )
+        if vs is None:
+            return None
+        # Unlike find_legacy_refresh_jobs, this unindexed full args scan may run
+        # under W because it runs only when a row is stranded, normally never.
+        live_owner = (
+            ProcrastinateJob.objects.filter(
+                task_name__in=_VIEW_BUILD_TASK_NAMES,
+                args__workspace_id=str(vs.workspace_id),
+            )
+            .exclude(status__in=list(_MATERIALIZATION_TERMINAL_STATUSES))
+            .filter(
+                ~Q(status__in=_STARTED_JOB_STATUSES) | Q(worker__last_heartbeat__gte=stalled_before)
+            )
+            .exists()
+        ) or (
+            # Stays live only while expire_stale_workspace_data_recoveries
+            # keeps settling dead recoveries.
+            WorkspaceDataRecovery.objects.filter(
+                workspace_id=vs.workspace_id,
+                state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+            ).exists()
+        )
+        if live_owner:
+            return None
+        vs.state = SchemaState.FAILED
+        vs.last_error = ORPHANED_VIEW_BUILD_ERROR
+        vs.save(update_fields=["state", "last_error"])
+        return vs
+
+
+async def _settle_orphaned_view_builds() -> int:
+    """Fail view schemas stranded in PROVISIONING by a build that will never finish.
+
+    world_state reports a PROVISIONING view as a load in progress, so a dead
+    build otherwise tells the user to wait forever. FAILED is honest and any
+    later load or refresh of a source rebuilds it.
+    """
+    stalled_before = timezone.now() - timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS)
+    candidates = [
+        (vs_id, workspace_id)
+        async for vs_id, workspace_id in WorkspaceViewSchema.objects.filter(
+            state=SchemaState.PROVISIONING
+        ).values_list("id", "workspace_id")
+    ]
+    settled = 0
+    for vs_id, workspace_id in candidates:
+        try:
+            async with workspace_data_lock_if_free(workspace_id) as locked:
+                if not locked:
+                    continue
+                vs = await _to_thread_fresh_db(_settle_orphaned_view_build, vs_id, stalled_before)
+        except Exception:
+            logger.exception("Could not reconcile view schema %s", vs_id)
+            continue
+        if vs is not None:
+            logger.error(
+                "Settled orphaned view schema %s (%s) for workspace %s as FAILED: "
+                "no live job was building it",
+                vs.id,
+                vs.schema_name,
+                workspace_id,
+            )
+            settled += 1
+    return settled
 
 
 # procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~144 janitor
