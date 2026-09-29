@@ -1,9 +1,7 @@
 """
 Tests for the tenant-based MCP server tools (list_tables, describe_table, get_metadata).
 
-These tools query information_schema via execute_internal_query, bypassing
-the SQL validator. Tests verify the full chain from tool handler through
-to the parameterized query execution.
+Tests verify the full chain from tool handler through to query execution.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -37,9 +35,6 @@ from tests.tenant_access import ausable_connection
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
 
-# Patch target: the helpers do `from mcp_server.services.query import execute_internal_query`
-# inside the function body, so we must patch on the source module.
-PATCH_INTERNAL_QUERY = "mcp_server.services.query.execute_internal_query"
 PATCH_WORKSPACE_CONTEXT = "mcp_server.server.load_workspace_context"
 # Pipeline resolution moved into apps.workspaces.services.pipeline_resolver,
 # so the tenant lookup is patched where it is now consumed.
@@ -79,71 +74,6 @@ def tenant_context(tenant_id, schema_name):
             "options": f"-c search_path={schema_name},public -c statement_timeout=30000",
         },
     )
-
-
-# ---------------------------------------------------------------------------
-# execute_internal_query
-# ---------------------------------------------------------------------------
-
-
-class TestExecuteInternalQuery:
-    """Test that execute_internal_query bypasses validation and passes params."""
-
-    @patch("mcp_server.services.query._execute_async_parameterized")
-    async def test_passes_sql_and_params(self, mock_exec, tenant_context):
-        from mcp_server.services.query import execute_internal_query
-
-        mock_exec.return_value = {
-            "columns": ["table_name"],
-            "rows": [["cases"]],
-            "row_count": 1,
-        }
-
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = %s"
-        params = ("test_domain",)
-        result = await execute_internal_query(tenant_context, sql, params)
-
-        mock_exec.assert_called_once_with(tenant_context, sql, params, 30)
-        assert result["row_count"] == 1
-        assert result["rows"] == [["cases"]]
-
-    @patch("mcp_server.services.query._execute_async_parameterized")
-    async def test_does_not_validate_sql(self, mock_exec, tenant_context):
-        """Internal queries should NOT go through the SQL validator."""
-        from mcp_server.services.query import execute_internal_query
-
-        mock_exec.return_value = {"columns": [], "rows": [], "row_count": 0}
-
-        # This SQL references information_schema — the validator blocked it before.
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = %s"
-        result = await execute_internal_query(tenant_context, sql, ("test_domain",))
-
-        assert "error" not in result
-        mock_exec.assert_called_once()
-
-    @patch("mcp_server.services.query._execute_async_parameterized")
-    async def test_does_not_inject_limit(self, mock_exec, tenant_context):
-        """Internal queries should NOT have LIMIT injected."""
-        from mcp_server.services.query import execute_internal_query
-
-        mock_exec.return_value = {"columns": [], "rows": [], "row_count": 0}
-
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = %s"
-        await execute_internal_query(tenant_context, sql, ("test_domain",))
-
-        # The SQL passed to _execute_async_parameterized should be unchanged
-        called_sql = mock_exec.call_args[0][1]
-        assert "LIMIT" not in called_sql.upper()
-
-    @patch("mcp_server.services.query._execute_async_parameterized")
-    async def test_returns_error_envelope_on_exception(self, mock_exec, tenant_context):
-        from mcp_server.services.query import execute_internal_query
-
-        mock_exec.side_effect = RuntimeError("connection failed")
-        result = await execute_internal_query(tenant_context, "SELECT 1", ())
-
-        assert result["success"] is False
-        assert "error" in result
 
 
 # ---------------------------------------------------------------------------

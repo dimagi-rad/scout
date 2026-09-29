@@ -3,9 +3,7 @@ Query execution service for the MCP server.
 
 Validates and executes read-only SQL against a tenant's database schema.
 Agent-authored SQL goes through ``execute_query``, which enforces the
-SQLValidator rules and row limits; backend-authored parameterized SQL goes
-through ``execute_internal_query``. Both share the same pooled executor, so
-both run under the tenant's read-only role.
+SQLValidator rules and row limits and runs under the tenant's read-only role.
 """
 
 from __future__ import annotations
@@ -78,16 +76,6 @@ async def _execute_async_parameterized(
         finally:
             await cursor.execute("RESET ROLE")
             await cursor.execute("RESET ALL")
-
-
-async def execute_internal_query(ctx: QueryContext, sql: str, params: tuple = ()) -> dict[str, Any]:
-    """Execute a trusted internal query built by Scout backend code."""
-    try:
-        return await _execute_async_parameterized(ctx, sql, params, ctx.max_query_timeout_seconds)
-    except Exception as e:
-        code, message = _classify_error(e)
-        logger.error("Internal query error: %s", message, exc_info=True)
-        return error_response(code, message)
 
 
 async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
