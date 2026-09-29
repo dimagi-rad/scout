@@ -4,26 +4,36 @@ Scout's AI agent is built on LangGraph with Claude as the LLM backend. This docu
 
 ## Overview
 
-The agent implements a self-correcting conversation graph that automatically retries failed semantic queries up to three times:
+`build_agent_graph` (`apps/agents/graph/base.py`) compiles a three-node graph:
 
 ```
 START
   → agent (call LLM)
-    → should_continue? (has tool calls?)
-      → tools (execute)
-        → check_result (error detection)
-          → result_ok? (error found?)
-            → diagnose_and_retry → agent (up to 3 retries)
-            → agent (success)
-      → END (no tool calls)
+    → tool calls? → tools (execute, with workspace/user/thread IDs injected)
+        → workspace access denied, or a schema-error streak? → escalate → END
+        → otherwise → agent
+    → no tool calls → END
 ```
+
+- **agent** prepends the system prompt, prunes history, repairs any tool call
+  left without a result, and calls Claude.
+- **tools** runs the calls. For MCP tools it injects `workspace_id`, `user_id`,
+  `thread_id` and `tool_call_id` from state. These are hidden from the model's
+  tool schemas, so the model can't choose its own data scope.
+- **escalate** ends the turn with a fixed message and makes no further tool calls
+  (see [Escalation](#escalation)).
+
+There is no dedicated retry node. A failed tool returns an error envelope, and the
+model reads it on its next pass through `agent`. The caller's `recursion_limit`
+(50 for chat and recipe runs) caps the loop.
 
 Key characteristics:
 
-- **LLM Backend**: Claude (configurable model per project)
+- **LLM Backend**: Claude (`DEFAULT_LLM_MODEL`)
 - **Framework**: LangGraph for conversation flow and state management
-- **Persistence**: PostgreSQL checkpointer for conversation history
-- **Self-correction**: Automatic error detection and retry with diagnosis
+- **Persistence**: PostgreSQL checkpointer for chat threads; headless runs have none
+- **Role-aware**: tools and prompts depend on the user's workspace role
+  (see [Roles and run modes](#roles-and-run-modes))
 - **Semantic-first access**: Canonical metrics use the semantic model; read-only SQL is available when the model cannot express the question
 
 ## Agent state
@@ -42,6 +52,51 @@ The agent maintains state across conversation turns:
 | `correction_context` | dict | Error details for diagnosis |
 
 Message history is automatically pruned to keep the last 20 messages plus system messages. Orphaned tool messages (those whose parent AI message was pruned) are removed.
+
+## Roles and run modes
+
+The graph is built per turn with two inputs that change its tools and prompts:
+
+- **write-capable**: the user holds the read-write workspace role. It is resolved
+  when the graph is built and fails closed: with no authenticated user, the run
+  is read-only.
+- **interactive**: `True` for chat. `False` for headless runs such as recipes.
+
+| Tool | Read-only member | Write-capable, chat | Write-capable, headless |
+|------|------------------|---------------------|-------------------------|
+| MCP read tools (`semantic_query`, `query`, ...) | yes | yes | yes |
+| `run_materialization`, `cancel_materialization` | no | MCP (starts a run and returns) | local blocking `run_materialization`; MCP `cancel_materialization` |
+| `artifact_manager` | no | yes | yes |
+| `artifact_graph_overview`, `get_artifact_semantic_queries` | yes | via `artifact_manager` | via `artifact_manager` |
+| `canvas_read` | chat only | yes | no |
+| `canvas_manager` | no | yes | no |
+| `save_learning`, `save_as_recipe` | no | yes | yes |
+
+`teardown_schema` is never exposed. Leaving a write tool out isn't the only
+guard: write tools re-check the user's role each time they run and return a
+write-denied error if the role has changed.
+
+The prompt follows the same split. `select_base_system_prompt` picks one of three
+base prompts:
+
+- **Read-only**: never offers a rebuild. It refers repairs to a workspace member
+  with write access.
+- **Chat**: asks the user before re-materializing, then ends the turn once the
+  run starts. The conversation resumes when loading finishes.
+- **Headless**: calls the blocking `run_materialization` at most once and
+  continues in the same run.
+
+The artifact, data-availability and canvas sections also have read-only
+variants.
+
+### Headless runs
+
+`RecipeRunner` builds the graph with `interactive=False`, no checkpointer, and
+a synthetic `recipe-run-<id>` thread ID. There is no chat thread to resume
+into, so `run_materialization` is a local tool that blocks until loading
+completes. The canvas tools are left out. If the turn ends on the escalation
+node, the recipe run is marked failed rather than completed. The runner spots
+this from the `scout_escalation` response metadata, not the message text.
 
 ## MCP integration
 
@@ -122,45 +177,19 @@ See [Security](security.md#raw-sql-validation) for the enforcement details.
 
 `teardown_schema` remains excluded from the agent's tools.
 
-### create_artifact
+### artifact_manager
 
-Create interactive visualizations and content.
+Delegates story artifact work to the Artifact Manager subagent, which has its
+own tools and recursion limit. It discovers data, checks the semantic queries,
+and writes the story through `artifact_write`. That is the only write path for
+story artifacts, and it validates the story before publishing. The parent agent
+passes a task description. If the model sends an empty task, the graph builds
+one from the user's latest message.
 
-**Parameters:**
-- `title` (string, required): Human-readable title
-- `artifact_type` (string, required): One of `react`, `html`, `markdown`, `svg`, `story`
-- `code` (string, required): Source code for the artifact
-- `description` (string, optional): What the artifact visualizes
-- `data` (dict, optional): JSON data passed to React components as `data` prop
-- `semantic_queries` (list, optional): Named semantic query specs that provide live story data
+Read-only members get `artifact_graph_overview` and
+`get_artifact_semantic_queries` instead, to inspect existing stories.
 
-**Artifact types:**
-
-| Type | Use case | Code format |
-|------|----------|-------------|
-| `react` | Interactive dashboards, charts with Recharts | JSX with default export |
-| `html` | Simple tables, static content | HTML markup |
-| `markdown` | Documentation, reports | Markdown text |
-| `svg` | Custom diagrams, flowcharts | SVG markup |
-| `story` | Semantic-query-backed analysis stories | `data.story_doc` plus `semantic_queries` |
-
-**React artifacts:**
-- Recharts is pre-loaded (no imports from CDN needed)
-- Use Recharts for every chart; Plotly is not available in the artifact runtime
-- Tailwind CSS classes available
-- Data passed via `data` prop to the default export component
-
-### update_artifact
-
-Create a new version of an existing artifact.
-
-**Parameters:**
-- `artifact_id` (string, required): UUID of artifact to update
-- `code` (string, required): Complete new source code
-- `title` (string, optional): New title
-- `data` (dict, optional): New data payload
-
-Creates an `ArtifactVersion` record preserving history.
+See [Artifact types](artifact-types.md) for the story document format.
 
 ### save_learning
 
@@ -215,7 +244,7 @@ The system prompt is assembled from multiple sources at runtime:
 
 ### 1. Base system prompt
 
-Core agent behavior (~150 lines):
+Core agent behavior, in a read-only, chat or headless variant (see [Roles and run modes](#roles-and-run-modes)):
 
 - **Core principles**: Precision over speed, data-driven responses, explain reasoning, acknowledge uncertainty
 - **Response format**: Markdown tables for small results, summaries for large results
@@ -227,7 +256,7 @@ Core agent behavior (~150 lines):
 
 ### 2. Artifact prompt
 
-Instructions for creating visualizations:
+Instructions for creating visualizations. Read-only members get a variant that only covers inspecting existing stories.
 
 - When to create artifacts vs. use tables
 - Artifact type selection guidelines
@@ -330,31 +359,24 @@ Artifact detection looks for:
 - UUID pattern in tool output
 - Keywords: "artifact_id", "artifact created", "chart saved", "visualization created"
 
-### Error correction flow
+### Escalation
 
-When `check_result_node` detects an error:
+After each tool round, the graph routes to `escalate` instead of back to
+`agent` in two cases:
 
-1. **Error classification**: Categorizes as syntax, column_not_found, table_not_found, permission, timeout, type_mismatch, or execution
-2. **Context capture**: Stores error message, failed SQL, tables accessed
-3. **Diagnosis prompt**: Injects guidance specific to the error type
-4. **Retry**: Routes back to agent node with correction context
+- **Workspace access denied**: a tool in the latest round returned
+  `WORKSPACE_ACCESS_DENIED`. The denial applies to every remaining call, so
+  the turn ends with the authorizer's message instead of retrying.
+- **Schema-error streak**: the last three tool results all returned
+  `NOT_FOUND` or `VALIDATION_ERROR`, which usually means the tables aren't
+  queryable. The graph matches the structured `error.code`, not the message
+  text. Any other result breaks the streak.
 
-After 3 retries, the agent is instructed to:
-- Explain what it was trying to do
-- Describe the error in plain language
-- Suggest alternative approaches
-- Optionally save a learning for future reference
-
-### Error-specific guidance
-
-| Error Type | Guidance |
-|------------|----------|
-| `syntax` | Check commas, parentheses, quotes, keywords |
-| `column_not_found` | Use describe_table, check case sensitivity, verify aliases |
-| `table_not_found` | Check data dictionary, verify schema, check underscores vs hyphens |
-| `permission` | SELECT only, no system tables, check excluded tables |
-| `timeout` | Add WHERE conditions, use LIMIT, avoid SELECT * |
-| `type_mismatch` | Check column types, use explicit casts, handle NULLs |
+For a schema-error streak, the message depends on the run. Read-only members
+are told that someone with write access can refresh the data. Chat asks whether
+to run materialization. Headless runs report that the data needs
+re-materializing. The message carries `scout_escalation` metadata
+(`workspace_access_denied` or `schema_errors`).
 
 ## Conversation persistence
 
