@@ -55,11 +55,17 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
   })
   const [recentlyCompletedThreadIds, setRecentlyCompletedThreadIds] = useState<string[]>([])
   const prevThreadIdsRef = useRef<Set<string>>(new Set())
+  const workspaceIdRef = useRef(workspaceId)
+  useEffect(() => {
+    workspaceIdRef.current = workspaceId
+  }, [workspaceId])
 
   const fetchOnce = useCallback(async () => {
     if (!workspaceId) return
     try {
       const data = await jobsApi.active(workspaceId)
+      // A response for a workspace we have since left must not seed the new one's diff.
+      if (workspaceIdRef.current !== workspaceId) return
       const currentThreadIds = new Set(data.jobs.map((j) => j.thread_id))
       const justCompleted: string[] = []
       for (const prev of prevThreadIdsRef.current) {
