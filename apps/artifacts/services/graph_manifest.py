@@ -91,7 +91,8 @@ def backfill_missing_semantic_query_manifest(artifact: Artifact) -> None:
 
     Checks the stored row rather than ``artifact``, which a read path may already
     have filled in memory. The check runs under the row lock, so a caller that loses
-    a race sees the winner's manifest and does nothing.
+    a race sees the winner's manifest and does nothing. A story soft-deleted since
+    the caller loaded it is left alone.
     """
     if artifact.artifact_type != ArtifactType.STORY:
         return
@@ -99,8 +100,11 @@ def backfill_missing_semantic_query_manifest(artifact: Artifact) -> None:
         stored = (
             Artifact.objects.select_for_update()
             .only("artifact_type", "semantic_queries", "semantic_query_manifest")
-            .get(pk=artifact.pk)
+            .filter(pk=artifact.pk)
+            .first()
         )
+        if stored is None:
+            return
         artifact.semantic_queries = stored.semantic_queries
         artifact.semantic_query_manifest = stored.semantic_query_manifest
         if lacks_semantic_query_manifest(stored):

@@ -1379,6 +1379,32 @@ def test_recovery_post_persists_the_missing_manifest(workspace, member_user):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_recovery_post_survives_a_delete_racing_the_backfill(workspace, member_user):
+    artifact = _manifest_less_story(workspace, member_user)
+    client = Client()
+    client.force_login(member_user)
+
+    def delete_then_backfill(resolved):
+        Artifact.objects.get(pk=resolved.pk).soft_delete(member_user)
+        backfill_missing_semantic_query_manifest(resolved)
+
+    with (
+        patch(
+            "apps.artifacts.views.backfill_missing_semantic_query_manifest",
+            new=delete_then_backfill,
+        ),
+        patch(
+            "apps.artifacts.views._current_artifact_data_state",
+            new=AsyncMock(return_value={"status": "ready", "queryable": True}),
+        ),
+    ):
+        response = client.post(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/recovery/")
+
+    assert response.status_code == 200, response.content
+    assert not ArtifactSemanticQuery.objects.filter(artifact=artifact).exists()
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("persist", "expected_inserts"),
     [
