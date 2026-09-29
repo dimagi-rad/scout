@@ -58,6 +58,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from mcp_server.server import mcp as scout_mcp
+from tests.tenant_access import acovered_source
 
 pytestmark = pytest.mark.asyncio(loop_scope="function")
 
@@ -329,17 +330,18 @@ async def test_get_schema_status_rejects_empty_workspace_id():
 async def test_run_materialization_enforces_thread_ownership_server_side(db):
     """run_materialization enforces workspace/thread membership server-side.
 
-    With a valid-looking but unauthorized context (no membership, no thread), the
-    real handler refuses rather than dispatching a job — proving the trust boundary
-    lives on the server, not the LLM-facing schema (07#0). Asserted on the real
-    wire end to end.
+    A member who may read the workspace but names a thread that doesn't exist is
+    refused by the real handler rather than dispatching a job — proving the trust
+    boundary lives on the server, not the LLM-facing schema (07#0). Asserted on
+    the real wire end to end.
     """
     user = await _make_user("run-mat@example.com")
     ws = await Workspace.objects.acreate(name="RunMat WS", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
 
-    # workspace has no tenants and the user has no tenant membership -> NOT_FOUND,
-    # and there is no thread, so the tool must NOT dispatch a materialization job.
+    # The user may read the workspace but there is no such thread, so the tool
+    # must NOT dispatch a materialization job.
     async with mcp_wire() as (_session, tools):
         raw = await tools["run_materialization"].ainvoke(
             {
@@ -375,6 +377,7 @@ async def test_injecting_tool_node_flows_workspace_id_to_real_server(db):
     """
     user = await _make_user("inject@example.com")
     ws = await Workspace.objects.acreate(name="Inject WS", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
 
     async with mcp_wire() as (_session, tools):
@@ -423,6 +426,7 @@ async def test_injecting_tool_node_flows_workspace_id_to_real_server(db):
 async def test_cancel_injects_actor_over_real_wire_and_rechecks_revocation(role):
     user = await _make_user("cancel-wire@example.com")
     ws = await Workspace.objects.acreate(name="Cancel wire", created_by=user)
+    await acovered_source(ws, user)
     membership = await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=role)
     async with mcp_wire() as (_session, tools):
         node = _make_injecting_tool_node(

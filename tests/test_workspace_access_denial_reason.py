@@ -17,7 +17,7 @@ from apps.workspaces.access import (
     resolve_workspace_access_ex,
 )
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
-from tests.tenant_access import grant_tenant_access
+from tests.tenant_access import acovered_source, grant_tenant_access
 
 User = get_user_model()
 
@@ -82,6 +82,7 @@ async def test_async_authorizer_enforces_ordered_minimum_role(
         email=f"async-{membership_role}-{minimum_role}@example.com", password="pass"
     )
     workspace = await Workspace.objects.acreate(name="Async role", created_by=user)
+    await acovered_source(workspace, user)
     await WorkspaceMembership.objects.acreate(workspace=workspace, user=user, role=membership_role)
 
     result = await aresolve_workspace_access_ex(user, workspace.id, minimum_role=minimum_role)

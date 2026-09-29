@@ -10,6 +10,7 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
 )
+from tests.tenant_access import acovered_source
 
 User = get_user_model()
 
@@ -19,6 +20,7 @@ User = get_user_model()
 async def test_thread_viewed_sets_last_viewed_at():
     user = await User.objects.acreate_user(email="a@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -59,6 +61,7 @@ async def test_thread_viewed_returns_403_for_non_member():
 async def test_thread_viewed_returns_404_for_unknown_thread():
     user = await User.objects.acreate_user(email="d@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W3", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
