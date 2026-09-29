@@ -365,6 +365,25 @@ class TestArtifactSandboxView:
                 f"'*'; found: {target_arg!r}"
             )
 
+    def test_sandbox_reports_errors_the_renderer_does_not_see(
+        self, authenticated_client, artifact, workspace
+    ):
+        """React render crashes and async errors must reach the parent for Sentry.
+
+        The in-frame React boundary renders the error inline without calling
+        showError, and errors thrown from handlers or timers bypass both.
+        """
+        response = authenticated_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
+        )
+        content = response.content.decode()
+
+        did_catch = content[content.index("componentDidCatch(error)") :]
+        assert did_catch.index("notifyParentOfError(") < did_catch.index("render()")
+        assert "window.addEventListener('error'" in content
+        assert "window.addEventListener('unhandledrejection'" in content
+        assert "error: { title, message, details, name }" in content
+
     def test_sandbox_live_query_fetch_respects_script_prefix(
         self, authenticated_client, artifact, workspace
     ):
