@@ -1,9 +1,12 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from django.core.cache import cache
 from django.test import Client
 from django.utils import timezone
 
+from apps.users import views as user_views
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers import (
@@ -356,3 +359,63 @@ class TestTenantCrossAccessAPI:
         assert response.status_code == 400
         assert not TenantMembership.objects.filter(user=user).exists()
         assert not TenantConnection.objects.filter(user=user).exists()
+
+
+@pytest.fixture
+def upstream_resolver(user):
+    """One OAuth identity whose resolver call count shows when upstream was hit."""
+    resolver = AsyncMock()
+    token = SimpleNamespace(account_id=987001, account=object())
+    keys = [
+        f"tenant_refresh:{user.id}:commcare:{token.account_id}",
+        f"tenant_refresh_floor:{user.id}",
+    ]
+    cache.delete_many(keys)
+    with (
+        patch.dict(user_views._PROVIDER_RESOLVERS, {"commcare": resolver}, clear=True),
+        patch.object(user_views, "aiter_social_tokens", AsyncMock(return_value=[token])),
+        patch.object(
+            user_views, "_aresolve_oauth_credential", AsyncMock(return_value={"value": "tok"})
+        ),
+    ):
+        yield resolver
+    cache.delete_many(keys)
+
+
+@pytest.mark.django_db
+class TestTenantListForcedRefresh:
+    def test_cached_identity_is_skipped_without_refresh_param(
+        self, user, client, upstream_resolver
+    ):
+        client.force_login(user)
+        client.get("/api/auth/tenants/")
+        client.get("/api/auth/tenants/")
+        assert upstream_resolver.await_count == 1
+
+    def test_refresh_param_re_resolves_inside_the_ttl(self, user, client, upstream_resolver):
+        client.force_login(user)
+        client.get("/api/auth/tenants/")
+        assert upstream_resolver.await_count == 1
+
+        response = client.get("/api/auth/tenants/?refresh=1")
+
+        assert response.status_code == 200
+        assert upstream_resolver.await_count == 2
+
+    def test_second_forced_refresh_inside_the_floor_is_not_re_resolved(
+        self, user, client, upstream_resolver
+    ):
+        client.force_login(user)
+        client.get("/api/auth/tenants/?refresh=1")
+        response = client.get("/api/auth/tenants/?refresh=1")
+
+        assert response.status_code == 200
+        assert upstream_resolver.await_count == 1
+
+    def test_forced_refresh_keeps_the_non_replacing_resolver_contract(
+        self, user, client, upstream_resolver
+    ):
+        client.force_login(user)
+        client.get("/api/auth/tenants/?refresh=1")
+
+        assert upstream_resolver.await_args.kwargs["allow_replace"] is False
