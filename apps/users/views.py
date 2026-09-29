@@ -30,6 +30,7 @@ from apps.users.services.credential_resolver import (
 )
 from apps.users.services.oauth_scope import scope_account_ids
 from apps.users.services.ocs_team import adetect_team_from_api_key
+from apps.users.services.onboarding_cache import me_onboarding_cache_key
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -334,6 +335,7 @@ async def tenant_credential_list_view(request):
         logger.exception("Failed to persist connection for provider %s", provider)
         return JsonResponse({"error": str(e)}, status=500)
 
+    await cache.adelete(me_onboarding_cache_key(user))
     return JsonResponse({"memberships": memberships_payload}, status=201)
 
 
@@ -374,6 +376,7 @@ async def connection_detail_view(request, connection_id):
 
     if request.method == "DELETE":
         await _archive_and_delete_connection(conn)
+        await cache.adelete(me_onboarding_cache_key(user))
         return JsonResponse({"status": "removed"})
 
     body, err = parse_json_object(request)

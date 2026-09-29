@@ -29,6 +29,7 @@ from apps.users.services.oauth_scope import (
     ocs_scope_unusable,
     provider_accounts,
 )
+from apps.users.services.onboarding_cache import ME_ONBOARDING_TTL, me_onboarding_cache_key
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -37,20 +38,6 @@ from apps.users.services.tenant_resolution import (
 from apps.users.services.token_refresh import credential_fingerprint, get_token_url, token_health
 
 logger = logging.getLogger(__name__)
-
-# Short-lived cache for the /me onboarding computation (arch #254, finding 07#4).
-# The SPA polls /me; without a guard each poll re-hit all three provider APIs
-# (CommCare / Connect / OCS) for a token-bearing user with no persisted
-# memberships. We cache the computed flag briefly so a poll loop doesn't
-# re-resolve. We deliberately cache only the *complete* (True) result long, and
-# the *incomplete* (False) result for a short window — long enough to throttle
-# the poll storm, short enough that onboarding still completes promptly once the
-# user connects a tenant.
-_ME_ONBOARDING_TTL = 30  # seconds
-
-
-def _me_onboarding_cache_key(user) -> str:
-    return f"me_onboarding:{user.pk}"
 
 
 def _user_response(user, *, onboarding_complete=False):
@@ -121,7 +108,7 @@ async def me_view(request):
     """
     user = request._authenticated_user
 
-    cache_key = _me_onboarding_cache_key(user)
+    cache_key = me_onboarding_cache_key(user)
     cached = await cache.aget(cache_key)
     if cached is not None:
         return JsonResponse(_user_response(user, onboarding_complete=cached))
@@ -142,7 +129,7 @@ async def me_view(request):
         # membership, so the flag can't flap True for a token-but-no-tenant user.
         onboarding_complete = await _aonboarding_complete(user)
 
-    await cache.aset(cache_key, onboarding_complete, _ME_ONBOARDING_TTL)
+    await cache.aset(cache_key, onboarding_complete, ME_ONBOARDING_TTL)
     return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
 
 
@@ -244,7 +231,7 @@ def disconnect_provider_view(request, provider_id):
 
     # Bust the cached /me onboarding flag so the change is reflected immediately
     # rather than after the TTL (arch #254, 07#4).
-    cache.delete(_me_onboarding_cache_key(request.user))
+    cache.delete(me_onboarding_cache_key(request.user))
 
     return JsonResponse({"status": "disconnected"})
 
