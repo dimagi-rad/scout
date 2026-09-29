@@ -23,8 +23,12 @@ jobs:
     # `queue: max` keeps every pending run, so a burst of merges queues one full
     # ~22-minute test+deploy per commit. When a newer deploy of main is already
     # queued it ships this commit too, so skip ours instead of redeploying.
-    # Trade-off: if that newer run then fails tests, this commit is not deployed
-    # either; the deploy-failure issue reports that run.
+    # Also skip when a newer commit is already live, so re-running an old run
+    # cannot roll production back. Skipping touches nothing on the host, so the
+    # drain/deploy handoff with the staging destination is unchanged.
+    # Trade-off: if that newer run fails tests, this commit is not deployed either
+    # (the deploy-failure issue reports that run). If it is cancelled while
+    # pending, nothing reports it: re-run the newest skipped run instead.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -53,8 +57,9 @@ jobs:
 
   deploy:
     needs: test
-    # The implicit success() also requires `supersede` to succeed, which would
-    # turn a failed check back into a blocked deploy.
+    # Explicit: the implicit success() also checks indirect ancestors
+    # (actions/runner#491), so a failed `supersede` would skip the deploy even
+    # after `test` ran and passed.
     if: ${{ !cancelled() && needs.test.result == 'success' }}
     runs-on: ubuntu-latest
     # Bound setup/prebuild hangs too; post-drain steps have tighter limits.

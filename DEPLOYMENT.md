@@ -368,8 +368,12 @@ serializes both destinations without replacing the other destination's pending
 run; GitHub supports up to 100 pending runs. A production run whose commit is
 already included in a newer queued production run skips its tests and deploy, so
 a burst of merges deploys once instead of once per commit (a staging run never
-counts as newer). Manual shell commands and workflows
-dispatched from older branch revisions are outside this updated group: check
+counts as newer). A production run also skips when a newer commit is already
+live, so re-running an old run cannot roll production back (redeploying the
+live commit still works). A skipped run shows green but deployed nothing and
+reports nothing; if you cancel a queued production run, re-run the newest run
+that skipped because of it. Manual shell commands and workflows dispatched from
+older branch revisions are outside this updated group: check
 both destinations before starting those, and do not overlap them with Actions.
 See [GitHub's concurrency queue contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
@@ -688,7 +692,8 @@ df -h /var/lib/docker && docker system df
 docker image prune -af      # removes only images no container (running or stopped) uses
 ```
 
-Rerun the failed deploy from the Actions tab. If that is not enough, check
+Rerun the failed deploy from the Actions tab (it skips itself if a newer commit
+is already queued or live; then that run is the one to watch). If that is not enough, check
 stopped containers (`docker ps -a --filter status=exited`). Remove old API, MCP,
 Cube or frontend containers freely, but never a stopped worker named by a
 pending drain receipt (see [Migration-safe backend handoff](#migration-safe-backend-handoff)).
@@ -705,7 +710,8 @@ pending drain receipt (see [Migration-safe backend handoff](#migration-safe-back
 
 A failed production deploy on `main` opens (or comments on) a single GitHub issue
 labelled `deploy-failure` and mentions whoever pushed; the next successful deploy
-closes it.
+closes it. A run that skipped because a newer run covers its commit neither opens
+nor closes the issue.
 
 ## Infrastructure Changes
 
