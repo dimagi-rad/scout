@@ -2039,6 +2039,23 @@ def _run_server(args: argparse.Namespace) -> None:
     mcp.run(transport=args.transport)
 
 
+# Internal Docker network hostnames in addition to loopback. The MCP server is
+# internal-only; DNS rebinding protection is still on. "mcp-server" is the Compose
+# service name the API reaches it by (docker-compose.yml's MCP_SERVER_URL).
+TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[
+        "127.0.0.1:*",
+        "localhost:*",
+        "[::1]:*",
+        "scout-mcp-web:*",
+        "scout-staging-mcp-web:*",
+        "mcp-server",
+        "mcp-server:*",
+    ],
+)
+
+
 def _run_streamable_http(args: argparse.Namespace) -> None:
     """Serve the streamable-HTTP transport with shared-secret caller auth.
 
@@ -2049,18 +2066,7 @@ def _run_streamable_http(args: argparse.Namespace) -> None:
     """
     mcp.settings.host = args.host
     mcp.settings.port = args.port
-    # Allow internal Docker network hostname in addition to loopback defaults.
-    # The MCP server is internal-only; DNS rebinding protection is still on.
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "127.0.0.1:*",
-            "localhost:*",
-            "[::1]:*",
-            "scout-mcp-web:*",
-            "scout-staging-mcp-web:*",
-        ],
-    )
+    mcp.settings.transport_security = TRANSPORT_SECURITY
 
     app = mcp.streamable_http_app()
     app.add_middleware(SharedSecretMiddleware, secret=settings.MCP_SHARED_SECRET)
