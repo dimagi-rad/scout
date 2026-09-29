@@ -65,6 +65,7 @@ from apps.workspaces.services.credential_coverage import (
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     notify_member_added,
+    notify_role_changed,
     send_pending_invite_email,
 )
 from apps.workspaces.services.member_coverage import (
@@ -1009,8 +1010,11 @@ class WorkspaceMemberDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        target.role = new_role
-        target.save(update_fields=["role"])
+        if target.role != new_role:
+            target.role = new_role
+            target.save(update_fields=["role"])
+            if target.user_id != request.user.id:
+                transaction.on_commit(lambda: notify_role_changed(target, request.user))
         return Response({"id": str(target.id), "role": target.role})
 
     def delete(self, request, workspace_id, membership_id):

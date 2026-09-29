@@ -330,3 +330,84 @@ class TestDirectAddEmail:
 
         message = _deferred_emails(mock_task)[0]["message"]
         assert message.startswith("A Scout workspace manager added you")
+
+
+class TestRoleChangeEmail:
+    """#382: a member whose role a manager changes is told."""
+
+    def _patch(self, client, workspace, membership, role):
+        return client.patch(
+            f"/api/workspaces/{workspace.id}/members/{membership.id}/",
+            {"role": role},
+            content_type="application/json",
+        )
+
+    def test_role_change_emails_the_member(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._patch(client, workspace, target, WorkspaceRole.READ_WRITE)
+
+        assert resp.status_code == 200
+        emails = _deferred_emails(mock_task)
+        assert [e["recipient_list"] for e in emails] == [["reader@example.com"]]
+        assert workspace.name in emails[0]["subject"]
+        assert "to Read-Write" in emails[0]["message"]
+        assert f"/workspaces/{workspace.id}/chat" in emails[0]["message"]
+
+    def test_email_waits_for_commit(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            self._patch(client, workspace, target, WorkspaceRole.READ_WRITE)
+
+        mock_task.defer.assert_not_called()
+        assert len(callbacks) == 1
+
+    def test_same_role_sends_nothing(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._patch(client, workspace, target, WorkspaceRole.READ)
+
+        assert resp.status_code == 200
+        mock_task.defer.assert_not_called()
+
+    def test_changing_your_own_role_sends_nothing(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        WorkspaceMembership.objects.filter(workspace=workspace, user=read_user).update(
+            role=WorkspaceRole.MANAGE
+        )
+        own = WorkspaceMembership.objects.get(workspace=workspace, user=user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._patch(client, workspace, own, WorkspaceRole.READ)
+
+        assert resp.status_code == 200
+        mock_task.defer.assert_not_called()
+
+    def test_email_less_member_is_skipped(self, workspace, user, mocker):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        nameless = User.objects.create_user(email=None, password="pass")
+        membership = WorkspaceMembership.objects.create(
+            workspace=workspace, user=nameless, role=WorkspaceRole.READ
+        )
+
+        invite_notifications.notify_role_changed(membership, user)
+
+        mock_task.defer.assert_not_called()

@@ -49,6 +49,10 @@ def _user_label(user) -> str:
     return (user and (user.get_full_name() or user.email)) or "A Scout workspace manager"
 
 
+def _workspace_link(workspace) -> str:
+    return f"{settings.SCOUT_BASE_URL.rstrip('/')}/workspaces/{workspace.id}/chat"
+
+
 def _inviter_label(invite) -> str:
     return _user_label(invite.invited_by)
 
@@ -125,7 +129,7 @@ def notify_member_added(membership, added_by):
     """Tell a user a manager added them straight to a workspace (#382): the direct
     path creates a membership with no invite, so no other notice ever reaches them."""
     workspace = membership.workspace
-    link = f"{settings.SCOUT_BASE_URL.rstrip('/')}/workspaces/{workspace.id}/chat"
+    link = _workspace_link(workspace)
     _dispatch(
         f"You've been added to '{workspace.name}' on Scout",
         (
@@ -133,4 +137,29 @@ def notify_member_added(membership, added_by):
             f"workspace on Scout.\n\nOpen it: {link}\n"
         ),
         [membership.user.email],
+    )
+
+
+# Matches the role names the members UI shows, not the model's choice labels.
+_ROLE_LABELS = {"read": "Read", "read_write": "Read-Write", "manage": "Manager"}
+
+
+def _role_label(role) -> str:
+    return _ROLE_LABELS.get(role, role)
+
+
+def notify_role_changed(membership, changed_by):
+    """Tell a member a manager changed their role (#382)."""
+    workspace = membership.workspace
+    user = membership.user
+    if not user.email:
+        return
+    _dispatch(
+        f"Your role in '{workspace.name}' on Scout changed",
+        (
+            f"{_user_label(changed_by)} changed your role in the '{workspace.name}' "
+            f"workspace on Scout to {_role_label(membership.role)}.\n\n"
+            f"Open it: {_workspace_link(workspace)}\n"
+        ),
+        [user.email],
     )
