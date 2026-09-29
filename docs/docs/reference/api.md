@@ -152,7 +152,7 @@ Artifacts have no public share links.
 | GET | `…/recipes/` | read | Recipes in the workspace. |
 | GET | `…/recipes/<recipe_id>/` | read | Recipe detail. |
 | PUT | `…/recipes/<recipe_id>/` | read_write | Update a recipe. |
-| DELETE | `…/recipes/<recipe_id>/` | read_write | Delete a recipe. |
+| DELETE | `…/recipes/<recipe_id>/` | read_write | Soft-delete a recipe. There is no undelete endpoint. |
 | POST | `…/recipes/<recipe_id>/run/` | read | Start a run with `variable_values`. Returns 202 with the pending run; the run executes in the background worker. |
 | GET | `…/recipes/<recipe_id>/runs/` | read | Runs for a recipe, newest first. |
 | PATCH | `…/recipes/<recipe_id>/runs/<run_id>/` | read_write | Set `is_shared` or `is_public` on a run. |

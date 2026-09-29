@@ -116,7 +116,7 @@ variable and is never stored in the database.
 
 ## Public share links
 
-Two endpoints serve content without authentication:
+Two endpoints serve workspace content without authentication:
 
 - `GET /api/chat/threads/shared/<share_token>/` returns a shared thread's
   messages and the code and saved data of its linked artifacts. A thread owner
@@ -124,7 +124,9 @@ Two endpoints serve content without authentication:
 - `GET /api/recipes/runs/shared/<share_token>/` returns a recipe run that has
   `is_public` set.
 
-Artifacts have no share links of their own.
+Artifacts have no share links of their own. Other unauthenticated routes are
+`/health/` (database and queue status), `/widget.js`, the API landing page at
+`/`, and the allauth OAuth login routes under `/accounts/`.
 
 ## MCP server security
 
