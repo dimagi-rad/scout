@@ -1308,7 +1308,8 @@ async def materialize_workspace(
     source, a retry sent without a thread), which have no ThreadJob to resume.
     ``only_unserved`` loads every workspace source that serves nothing (typically
     the one just added) and republishes the views; if the run stops before publishing, a plain view
-    rebuild is queued instead so the views reflect the sources that do serve.
+    rebuild is queued instead so the views reflect the sources that do serve, when there is
+    something for it to build (``_fallback_views_buildable``).
     """
     job_id = context.job.id
     preflight_failures = None
