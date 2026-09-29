@@ -58,7 +58,10 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
     default_invite_expiry,
 )
-from apps.workspaces.services.credential_coverage import CoverageRecovery
+from apps.workspaces.services.credential_coverage import (
+    CoverageRecovery,
+    oauth_token_counts_as_expired,
+)
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     notify_member_added,
@@ -102,9 +105,11 @@ _UPSTREAM_AUTH_ERRORS = (CommCareAuthError, ConnectAuthError, OCSAuthError)
 class Rediscovery:
     """What rediscovering one user's access with their stored sign-ins found."""
 
-    # A provider error or timeout: retrying may give a different answer.
+    # The check couldn't settle coverage: a provider error, a timeout, or a refusal
+    # that proves nothing (Connect's export-list 403). Retrying may help.
     failed: bool = False
-    # Upstream refused a stored sign-in (401); only the user signing in again settles it.
+    # A stored sign-in upstream refused (401), or one that can't be renewed and that
+    # admission counts as expired: only the user signing in again settles it.
     needs_sign_in: bool = False
 
 
@@ -133,24 +138,29 @@ def _usable_as_is(token, now) -> bool:
     return bool(token.token) and not (token.expires_at and token.expires_at <= now)
 
 
-async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple], bool]:
-    """``(pairs, failed)``: *user*'s tokens, renewing any that need it.
+async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple], Rediscovery]:
+    """``(pairs, outcome)``: *user*'s tokens, renewing any that need it.
 
     Only for the user a request names (G2). They did not start the request, so a
     failed renewal records nothing on their credential (G1). A token that isn't
-    renewed is used as it stands while unexpired; ``failed`` is set only when a
-    transient failure, or the ``deadline`` (event-loop time) passing before a
-    renewal starts, leaves nothing to use.
+    renewed is used as it stands while unexpired. When one leaves nothing to use,
+    ``outcome`` says why: ``failed`` for a transient failure or the ``deadline``
+    (event-loop time) passing before a renewal starts, ``needs_sign_in`` when the
+    provider refused to renew it. A token that cannot be renewed and that admission
+    counts as expired sets ``needs_sign_in`` even while it is still used.
     """
     token_url = get_token_url(provider)
     now = timezone.now()
-    pairs, failed = [], False
+    pairs, failed, needs_sign_in = [], False, False
     for token in await aiter_social_tokens(user, provider):
         stored = (token.account, token.token) if _usable_as_is(token, now) else None
         can_refresh = bool(token_url and token.token_secret and token.app)
         if not can_refresh or not token_needs_refresh(token.expires_at):
             if stored:
                 pairs.append(stored)
+            # Still used while it lists anything, but admission will refuse it anyway.
+            if not stored or oauth_token_counts_as_expired(token, provider):
+                needs_sign_in = True
             continue
         if asyncio.get_running_loop().time() >= deadline:
             if stored:
@@ -175,9 +185,13 @@ async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple]
                 pairs.append(stored)
             elif isinstance(error, TokenRefreshUnavailable):
                 failed = True
+            else:
+                # Any non-transient refusal is what a user's own refresh records as
+                # "reconnect required"; here it is only reported, never recorded (G1).
+                needs_sign_in = True
             continue
         pairs.append((token.account, access_token))
-    return pairs, failed
+    return pairs, Rediscovery(failed=failed, needs_sign_in=needs_sign_in)
 
 
 async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> Rediscovery:
@@ -207,8 +221,9 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
         if resolve is None:
             continue
         if renew:
-            pairs, renewal_failed = await _arenewed_access_tokens(target, provider, deadline)
-            failed = failed or renewal_failed
+            pairs, renewal = await _arenewed_access_tokens(target, provider, deadline)
+            failed = failed or renewal.failed
+            needs_sign_in = needs_sign_in or renewal.needs_sign_in
         else:
             pairs = await _aunexpired_access_tokens(target, provider)
         for account, token in pairs:
@@ -232,7 +247,12 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
             except _UPSTREAM_AUTH_ERRORS as refused:
                 # A 403 is upstream withholding access, which signing in again cannot
                 # change (#372): it stays a plain "not covered", neither flag set.
+                # Connect's export-list 403 is the exception: it can refuse a user who
+                # still holds the opportunity (see tenant_resolution), so it proves
+                # nothing and reads as a check that couldn't finish.
                 needs_sign_in = needs_sign_in or refused.status_code == 401
+                if isinstance(refused, ConnectAuthError) and refused.status_code == 403:
+                    failed = True
                 logger.info(
                     "Share-time refresh refused upstream (HTTP %s) for target=%s "
                     "provider=%s account=%s",
