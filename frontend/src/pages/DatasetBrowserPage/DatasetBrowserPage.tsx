@@ -579,7 +579,7 @@ function RelationshipsSection({
                       variant="outline"
                       className="ml-auto shrink-0 border-amber-500/40 text-amber-700 dark:text-amber-400"
                       title="The last semantic layer build skipped this join, so queries can't use it."
-                      data-testid={`relationship-unpublished-${other}`}
+                      data-testid={`relationship-unpublished-${relationship.name}`}
                     >
                       Not queryable
                     </Badge>

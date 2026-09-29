@@ -208,6 +208,38 @@ describe("DatasetBrowserPage routing", () => {
     expect(sqlBlock).toHaveTextContent("GROUP BY")
   })
 
+  it("marks relationships the semantic layer build dropped", async () => {
+    const relationship = {
+      from_dataset: "raw_visits",
+      to_dataset: "raw_payments",
+      relationship_type: "many_to_one",
+      join_expression: "",
+      direction: "outgoing" as const,
+    }
+    const linkedVisits = dataset({
+      ...rawVisits,
+      relationships: [
+        { ...relationship, id: "rel-1", name: "visits_to_payments" },
+        { ...relationship, id: "rel-2", name: "visits_to_payments_by_user", published: false },
+      ],
+    })
+    vi.spyOn(api, "get").mockImplementation(async (url: string) => {
+      if (url === `/api/workspaces/${WORKSPACE_ID}/datasets/`) {
+        return { ...catalog(), datasets: [linkedVisits, rawPayments] } as never
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    renderDatasetPage("/datasets/raw_visits")
+
+    expect(
+      await screen.findByTestId("relationship-unpublished-visits_to_payments_by_user"),
+    ).toHaveTextContent("Not queryable")
+    expect(
+      screen.queryByTestId("relationship-unpublished-visits_to_payments"),
+    ).not.toBeInTheDocument()
+  })
+
   it("shows value formats for fields", async () => {
     const formattedVisits = dataset({
       ...rawVisits,
