@@ -64,8 +64,6 @@ env:
     CUBE_VALIDATOR_URL: "http://scout-cube-web:4010"
     CUBE_SCHEMA_VALIDATION_REQUIRED: "True"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
-    MAX_CONNECTIONS_PER_PROJECT: 5
-    MAX_QUERIES_PER_MINUTE: 60
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
