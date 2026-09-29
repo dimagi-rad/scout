@@ -5,6 +5,7 @@ Tests artifact models, views, access control and versioning.
 """
 
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -450,6 +451,38 @@ class TestArtifactSandboxView:
             ["Uncaught Error", "query timed out", None, None],
             ["Uncaught Error", "Script error.", None, None],
             ["Uncaught Error", "bad", "stack", "RangeError"],
+        ]
+
+    def test_sandbox_catch_sites_read_no_fields_of_a_thrown_non_error(self):
+        """A render-time `throw row` or `throw null` goes through describeThrown."""
+        catch_sites = re.findall(
+            r"catch \(error\) \{\s*(.*?)\n", SANDBOX_HTML_TEMPLATE, flags=re.DOTALL
+        )
+        reads_fields = [line for line in catch_sites if "error.message" in line]
+        assert reads_fields == [
+            "this.showError('Parse Error', 'Failed to parse embedded artifact data: '"
+            " + error.message);"
+        ]
+        boundary = SANDBOX_HTML_TEMPLATE[
+            SANDBOX_HTML_TEMPLATE.index("class _ErrorBoundary") : SANDBOX_HTML_TEMPLATE.index(
+                "render() {", SANDBOX_HTML_TEMPLATE.index("class _ErrorBoundary")
+            )
+        ]
+        assert "error.message" not in boundary
+
+        calls = _run_sandbox_error_listeners(
+            "for (const thrown of [null, { message: 'Alice', name: 'Bob' }, 'boom',"
+            " new TypeError('bad')]) {\n"
+            "  const d = describeThrown(thrown);\n"
+            "  calls.push(['describe', d.message, d.stack, d.name]);\n"
+            "}\n"
+        )
+
+        assert calls == [
+            ["describe", "Non-Error exception (null)", None, None],
+            ["describe", "Non-Error exception (object)", None, None],
+            ["describe", "boom", None, None],
+            ["describe", "bad", "stack", "TypeError"],
         ]
 
     def test_sandbox_never_fetches_live_data_itself(

@@ -346,7 +346,8 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                             this.showError('Unknown artifact type', `Type "${artifact.type}" is not supported.`);
                     }
                 } catch (error) {
-                    this.showError('Render Error', error.message, error.stack, error.name);
+                    const thrown = describeThrown(error);
+                    this.showError('Render Error', thrown.message, thrown.stack, thrown.name);
                 }
             },
 
@@ -489,9 +490,10 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         // Wrap in error boundary to catch render-time crashes
                         class _ErrorBoundary extends React.Component {
                             constructor(props) { super(props); this.state = { error: null }; }
-                            static getDerivedStateFromError(error) { return { error }; }
+                            static getDerivedStateFromError(error) { return { error: describeThrown(error) }; }
                             componentDidCatch(error) {
-                                ArtifactRenderer.notifyParentOfError('React Render Error', error.message, error.stack, error.name);
+                                const thrown = describeThrown(error);
+                                ArtifactRenderer.notifyParentOfError('React Render Error', thrown.message, thrown.stack, thrown.name);
                             }
                             render() {
                                 if (this.state.error) {
@@ -511,7 +513,8 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         this.showError('Component Not Found', 'Could not find a valid React component to render. Make sure your code exports a component or defines App, Component, Chart, or Visualization.');
                     }
                 } catch (error) {
-                    this.showError('React Render Error', error.message, error.stack, error.name);
+                    const thrown = describeThrown(error);
+                    this.showError('React Render Error', thrown.message, thrown.stack, thrown.name);
                 }
             },
 
@@ -561,7 +564,8 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         </article>
                     `;
                 } catch (error) {
-                    this.showError('Markdown Render Error', error.message, null, error.name);
+                    const thrown = describeThrown(error);
+                    this.showError('Markdown Render Error', thrown.message, null, thrown.name);
                 }
             },
 
@@ -581,7 +585,8 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         this.container.innerHTML = code;
                     }
                 } catch (error) {
-                    this.showError('SVG Render Error', error.message, error.stack, error.name);
+                    const thrown = describeThrown(error);
+                    this.showError('SVG Render Error', thrown.message, thrown.stack, thrown.name);
                 }
             },
 
@@ -640,6 +645,12 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
             return typeof value === 'string'
                 ? value
                 : `Non-Error ${what} (${value === null ? 'null' : typeof value})`;
+        }
+        // For the catch sites and React boundary, which get whatever artifact code threw.
+        function describeThrown(thrown) {
+            return thrown instanceof Error
+                ? { message: thrown.message, stack: thrown.stack, name: thrown.name }
+                : { message: nonErrorMessage(thrown, 'exception'), stack: null, name: null };
         }
         window.addEventListener('error', (event) => {
             const error = event.error;
