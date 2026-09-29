@@ -509,3 +509,15 @@ def test_rediscovery_for_another_member_never_renews_their_tokens(user):
     pairs = async_to_sync(workspace_views._aunexpired_access_tokens)(user, "ocs")
 
     assert [account.pk for account, _token in pairs] == [live.social_account_id]
+
+
+@pytest.mark.django_db
+def test_rediscovery_uses_a_token_with_no_recorded_expiry(user):
+    """Coverage treats an unrecorded expiry as usable, so rediscovery must too, or
+    it would skip exactly the member it exists to pick up."""
+    unknown = ocs_team_connection(user, "team-a")
+    unknown.social_account.socialtoken_set.update(expires_at=None)
+
+    pairs = async_to_sync(workspace_views._aunexpired_access_tokens)(user, "ocs")
+
+    assert [account.pk for account, _token in pairs] == [unknown.social_account_id]

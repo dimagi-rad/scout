@@ -91,13 +91,14 @@ async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
 
     For refreshes a *different* user triggers: renewing someone else's token can
     record a refresh failure on a transient provider error, which would take away
-    access they currently have.
+    access they currently have. An unrecorded expiry counts as usable, as it does
+    in the coverage check this rediscovery feeds.
     """
     now = timezone.now()
     return [
         (token.account, token.token)
         for token in await aiter_social_tokens(user, provider)
-        if token.token and token.expires_at is not None and token.expires_at > now
+        if token.token and not (token.expires_at and token.expires_at <= now)
     ]
 
 
