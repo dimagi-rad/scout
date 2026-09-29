@@ -10,10 +10,8 @@ import hashlib
 import json
 import logging
 import secrets
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import datetime
 from typing import Any
-from uuid import UUID
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -746,21 +744,6 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             "version": artifact.version,
             "date_context": date_context(),
         }
-
-
-def _json_safe(value: Any) -> Any:
-    """Coerce database result values to JSON-serializable types."""
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, datetime | date):
-        return value.isoformat()
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
 
 
 class ArtifactQueryDataView(View):

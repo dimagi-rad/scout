@@ -310,7 +310,7 @@ class TestExecuteQuery:
 # --- Server tool handler tests ---
 # NOTE: Tool handler tests for list_tables, describe_table, and get_metadata
 # have been moved to test_mcp_tenant_tools.py which tests the current tenant-based
-# code paths (load_tenant_context + execute_internal_query).
+# code paths.
 
 
 # --- Audit log scrubbing ---

@@ -35,7 +35,7 @@ from apps.workspaces.services.pipeline_resolver import (
     aresolve_pipeline_config,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
+from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
 from apps.workspaces.services.view_sources import (
     ViewSourcesError,
     parse_view_sources,
@@ -219,13 +219,6 @@ def _infer_display_metadata(
     if _is_integer(data_type) and measure_type != SemanticField.MeasureType.AVG:
         return {"format": "number_0"}
     return {"format": "number_2"}
-
-
-def _tenant_metadata_for_schema(schema_name: str):
-    ts = TenantSchema.objects.filter(schema_name=schema_name).first()
-    if ts is None:
-        return None
-    return get_tenant_metadata(ts.tenant_id)
 
 
 async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTable]]:

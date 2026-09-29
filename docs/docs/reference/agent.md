@@ -445,7 +445,7 @@ Conversations are persisted using LangGraph's PostgreSQL checkpointer:
 - **Thread ID**: Unique identifier for each conversation
 - **Checkpoints**: Full state saved after each turn
 - **Connection pooling**: Max 20 connections for checkpoint operations
-- **Fallback**: MemorySaver for development/testing
+- **No in-memory fallback**: if Postgres is unavailable, chat returns an error rather than silently dropping history
 
 To continue a conversation, pass the same `thread_id` in the config:
 
