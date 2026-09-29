@@ -103,7 +103,7 @@ By default, CommCare sign-in only accepts `dimagi.com` email addresses. To test 
 ### 5. Log in via CommCare
 
 1. Open `https://abc123.ngrok-free.app` in your browser (use the ngrok URL, not localhost).
-2. Under **or continue with**, click the button for the social application you registered (named **CommCare HQ** by `setup_oauth_apps`), or click **Connect with OAuth** in the onboarding wizard.
+2. Under **or continue with**, click the button for the social application you registered (named **CommCare HQ** by `setup_oauth_apps`). If you're already logged in with a password account that has no connection yet, click **Connect with OAuth** in the onboarding wizard instead.
 3. Authorise the application in CommCare HQ.
 4. You are redirected back and logged in. Scout fetches your CommCare domains and creates a membership, and an auto-created workspace, for each one.
 
