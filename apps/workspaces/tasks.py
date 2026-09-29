@@ -1407,7 +1407,9 @@ def _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id=None):
 
     A workspace qualifies when it (i) contains at least one of the given tenants,
     (ii) is multi-tenant (>= 2 tenants), and (iii) has a WorkspaceViewSchema row
-    in any state. When ``exclude_workspace_id`` is given, that workspace is left
+    that is not retiring. A rebuild marks the row ACTIVE, so rebuilding a TEARDOWN
+    or EXPIRED row would revive an idle workspace's views for another TTL (C2);
+    its pending teardown already accounts for the dropped views. When ``exclude_workspace_id`` is given, that workspace is left
     out — used by the materialize path, which rebuilds its own view schema inline
     and only needs to fan out to the *siblings*. The refresh/teardown paths pass
     no exclusion because they are not scoped to a workspace.
@@ -1419,7 +1421,7 @@ def _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id=None):
     qs = Workspace.objects.filter(
         workspace_tenants__tenant_id__in=tenant_ids,
         view_schema__isnull=False,
-    )
+    ).exclude(view_schema__state__in=(SchemaState.TEARDOWN, SchemaState.EXPIRED))
     if exclude_workspace_id is not None:
         qs = qs.exclude(id=exclude_workspace_id)
     return (
