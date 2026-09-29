@@ -78,30 +78,6 @@ def workspace_schema_status(
     )
 
 
-# Every state a source can report, most severe first. "unavailable" (never
-# loaded, e.g. just added) ranks last: it describes only that source, which the
-# per-source list reports, so it must not mask the state of sources that have data.
-SOURCE_STATE_SEVERITY = (
-    SchemaState.FAILED,
-    SchemaState.PROVISIONING,
-    SchemaState.TEARDOWN,
-    SchemaState.EXPIRED,
-    SchemaState.ACTIVE,
-    "unavailable",
-)
-
-
-def aggregate_source_state(states: Iterable[str]) -> str:
-    """The most severe of *states*, failure first, so an aggregate never hides one.
-
-    *states* must be non-empty. A state outside ``SOURCE_STATE_SEVERITY`` is
-    returned as-is only when no known state is present.
-    """
-    states = list(states)
-    present = set(states)
-    return next((state for state in SOURCE_STATE_SEVERITY if state in present), states[0])
-
-
 def serving_excluded_tenant_ids(coverage: dict[str, Any] | None) -> set[str]:
     """Tenant ids a serving view explicitly left out, so its data cannot depend on them.
 

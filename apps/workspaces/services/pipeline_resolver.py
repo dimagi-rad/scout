@@ -98,11 +98,3 @@ async def aresolve_pipeline_config(tenant_schema, last_run) -> PipelineConfig:
         return config
     tenant = await Tenant.objects.aget(id=tenant_schema.tenant_id)
     return select_pipeline_config(last_run_pipeline=last_run_pipeline, provider=tenant.provider)
-
-
-def resolve_pipeline_config(tenant_schema, last_run) -> PipelineConfig:
-    """Sync sibling of ``aresolve_pipeline_config`` for DRF views."""
-    return select_pipeline_config(
-        last_run_pipeline=last_run.pipeline if last_run else None,
-        provider=tenant_schema.tenant.provider,
-    )

@@ -372,7 +372,3 @@ def test_a_single_source_error_is_a_server_error(
     assert resp.status_code == 500
     assert resp.data == {"error": "The refresh could not be started because of a server error."}
     assert not TenantSchema.objects.filter(tenant=tenant).exists()
-
-
-def _detail_status(client, workspace):
-    return client.get(f"/api/workspaces/{workspace.id}/").data["schema_status"]

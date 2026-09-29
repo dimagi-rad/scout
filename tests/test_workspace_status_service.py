@@ -20,8 +20,6 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.services.status import (
-    SOURCE_STATE_SEVERITY,
-    aggregate_source_state,
     classify_tenant_schemas,
     derive_schema_status,
     serving_excluded_tenant_ids,
@@ -163,25 +161,6 @@ async def test_prompt_and_query_surface_agree_on_serving_writers(
 )
 def test_derive_schema_status(tenant_count, active_count, provisioning, view_state, expected):
     assert derive_schema_status(tenant_count, active_count, provisioning, view_state) == expected
-
-
-@pytest.mark.parametrize(
-    ("states", "expected"),
-    [
-        ([SchemaState.ACTIVE, SchemaState.FAILED], SchemaState.FAILED),
-        ([SchemaState.ACTIVE, "unavailable"], SchemaState.ACTIVE),
-        (["unavailable", SchemaState.PROVISIONING], SchemaState.PROVISIONING),
-        ([SchemaState.EXPIRED, SchemaState.TEARDOWN], SchemaState.TEARDOWN),
-        (["unknown", "also_unknown"], "unknown"),
-        (["unknown", "unavailable"], "unavailable"),
-    ],
-)
-def test_aggregate_source_state_picks_the_most_severe(states, expected):
-    assert aggregate_source_state(states) == expected
-
-
-def test_every_schema_state_has_a_severity():
-    assert set(SchemaState.values) | {"unavailable"} == set(SOURCE_STATE_SEVERITY)
 
 
 @pytest.mark.parametrize(

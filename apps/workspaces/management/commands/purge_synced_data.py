@@ -18,8 +18,7 @@ class Command(BaseCommand):
     help = (
         "Purge all materialized tenant data: drops managed-DB tenant AND view "
         "schemas, deletes TenantSchema/MaterializationRun/TenantMetadata/"
-        "WorkspaceViewSchema records, and clears data dictionaries. Chat, "
-        "artifacts, and learnings are preserved."
+        "WorkspaceViewSchema records. Chat, artifacts, and learnings are preserved."
     )
 
     def add_arguments(self, parser):
