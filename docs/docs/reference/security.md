@@ -93,9 +93,9 @@ variable and is never stored in the database.
 
 ## Rate limiting
 
-- **Login and signup**: 5 failed attempts for an email within 5 minutes locks
-  that email out. A successful login clears the counter. The Django admin login
-  uses the same limiter.
+- **Login**: 5 failed logins for an email within 5 minutes lock that email out
+  of login and signup. A successful login clears the counter. The Django admin
+  login uses the same limiter.
 - **Chat**: 20 messages per user per 60 seconds on `POST /api/chat/`. Over the
   limit the endpoint returns 429 with `Retry-After` and `X-RateLimit-*`
   headers. The `CHAT_RATE_LIMIT` and `CHAT_RATE_WINDOW` Django settings

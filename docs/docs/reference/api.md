@@ -44,9 +44,9 @@ Login and signup take `{"email": "...", "password": "..."}`. Login, signup and
 `onboarding_complete` is true once the user has at least one active tenant
 membership backed by a connection.
 
-Login and signup return 400 for invalid JSON or missing fields, 401 for bad
-credentials (login), and 429 after 5 failed attempts for an email within 5
-minutes.
+Login and signup return 400 for invalid JSON or missing fields (signup also
+for a weak password or an existing email), 401 for bad credentials (login), and
+429 once an email has 5 failed logins within 5 minutes.
 
 ### OAuth
 
