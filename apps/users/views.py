@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 
 from allauth.socialaccount.models import SocialToken
@@ -14,6 +13,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
+from apps.common.http import parse_json_object
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
@@ -161,10 +161,9 @@ async def tenant_select_view(request):
     """POST /api/auth/tenants/select/ — Mark a tenant as the active selection."""
     user = request._authenticated_user
 
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request)
+    if err:
+        return err
     tenant_membership_id = body.get("tenant_id")
 
     try:
@@ -250,10 +249,9 @@ async def tenant_credential_list_view(request):
             )
         return JsonResponse(results, safe=False)
 
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request)
+    if err:
+        return err
 
     provider = body.get("provider", "").strip()
     fields = body.get("fields") or {}
@@ -349,10 +347,9 @@ async def connection_detail_view(request, connection_id):
         await _archive_and_delete_connection(conn)
         return JsonResponse({"status": "removed"})
 
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request)
+    if err:
+        return err
 
     fields = body.get("fields") or {}
 
@@ -406,10 +403,9 @@ async def tenant_ensure_view(request):
     """
     user = request._authenticated_user
 
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request)
+    if err:
+        return err
 
     provider = body.get("provider", "").strip()
     tenant_id = body.get("tenant_id", "").strip()

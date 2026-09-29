@@ -3,7 +3,6 @@ API views for recipe management.
 """
 
 import hashlib
-import json
 import logging
 import time
 
@@ -16,6 +15,7 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.common.http import parse_json_object
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner, VariableValidationError
 from apps.recipes.tasks import run_recipe
@@ -136,10 +136,9 @@ async def recipe_run_view(request, workspace_id, recipe_id):
     except Recipe.DoesNotExist:
         return JsonResponse({"error": "Recipe not found."}, status=404)
 
-    try:
-        body = json.loads(request.body) if request.body else {}
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    body, err = parse_json_object(request, allow_empty=True)
+    if err:
+        return err
 
     serializer = RunRecipeSerializer(data=body)
     if not await sync_to_async(serializer.is_valid)():

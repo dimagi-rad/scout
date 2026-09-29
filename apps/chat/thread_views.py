@@ -1,6 +1,5 @@
 """Thread CRUD endpoints: list, messages, share, public."""
 
-import json
 import logging
 from datetime import UTC, datetime
 
@@ -18,6 +17,7 @@ from apps.chat.helpers import (
 )
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
+from apps.common.http import parse_json_object
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -237,10 +237,9 @@ async def thread_detail_view(request, workspace_id, thread_id):
         return JsonResponse(await _thread_summary_for_response(thread))
 
     if request.method == "PATCH":
-        try:
-            body = json.loads(request.body)
-        except (json.JSONDecodeError, ValueError):
-            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        body, err = parse_json_object(request)
+        if err:
+            return err
         title = _short_thread_title(str(body.get("title", "")))
         if thread is None:
             thread = Thread(
@@ -334,11 +333,10 @@ async def thread_share_view(request, workspace_id, thread_id):
     user = request._authenticated_user
 
     if request.method == "PATCH":
-        try:
-            body = json.loads(request.body)
-        except (json.JSONDecodeError, ValueError):
-            return JsonResponse({"error": "Invalid JSON"}, status=400)
-        if not isinstance(body, dict) or type(body.get("is_shared")) is not bool:
+        body, err = parse_json_object(request)
+        if err:
+            return err
+        if type(body.get("is_shared")) is not bool:
             return JsonResponse({"error": "is_shared must be a boolean"}, status=400)
 
         is_shared = body["is_shared"]
