@@ -20,6 +20,7 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
 
+from apps.common.errors import ExpectedStateError
 from apps.common.identifiers import (
     dbt_role_name,
     readonly_role_name,
@@ -96,6 +97,22 @@ class ViewSchemaRetired(Exception):
 
 
 RETIRED_VIEW_STATES = (SchemaState.TEARDOWN, SchemaState.EXPIRED)
+
+
+class NoActiveTenantSchema(ExpectedStateError, ValueError):
+    """No source of the workspace has an ACTIVE schema, so there is nothing to view.
+
+    Expected (apps.common.errors): a source added before its first load, or whose
+    load failed, is routine. It is surfaced as the view row's ``last_error`` and
+    coverage, and resolved by the next load, which rebuilds the views (#361).
+    A ValueError so it takes the build's existing validation-failure path.
+    """
+
+    def __init__(self, workspace_id):
+        super().__init__(
+            f"Workspace {workspace_id} has no active schema for any tenant. "
+            "Run a data refresh before building the view schema."
+        )
 
 
 class SchemaStillReferenced(Exception):
@@ -698,10 +715,7 @@ class SchemaManager:
             }
 
             if not tenant_schemas:
-                raise ValueError(
-                    f"Workspace {workspace.id} has no active schema for any tenant. "
-                    "Run a data refresh before building the view schema."
-                )
+                raise NoActiveTenantSchema(workspace.id)
         except ValueError as exc:
             fields = ["state", "last_error", "tenant_coverage"]
             # When the sources are retiring these views can never serve again, and
