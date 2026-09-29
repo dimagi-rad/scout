@@ -4,7 +4,7 @@ import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { workspaceApi } from "@/api/workspaces"
 import { type UserTenant } from "@/api/auth"
-import { getUserTenantsCached } from "@/api/userTenantsCache"
+import { getUserTenantsCached, refreshUserTenants } from "@/api/userTenantsCache"
 import { ApiError } from "@/api/client"
 import {
   Dialog,
@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { AlertTriangle, Check } from "lucide-react"
+import { AlertTriangle, Check, RefreshCw } from "lucide-react"
 import {
   SearchFilterBar,
   type FilterGroup,
@@ -48,6 +48,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [sourcesLoading, setSourcesLoading] = useState(true)
   const [sourcesError, setSourcesError] = useState<string | null>(null)
   const [sourcesAttempt, setSourcesAttempt] = useState(0)
+  const [sourcesRefreshing, setSourcesRefreshing] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState("")
   const [providerFilter, setProviderFilter] = useState<string | null>(null)
@@ -78,6 +79,19 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       cancelled = true
     }
   }, [userId, sourcesAttempt])
+
+  async function handleRefreshSources() {
+    if (!userId) return
+    setSourcesRefreshing(true)
+    setSourcesError(null)
+    try {
+      setSources(await refreshUserTenants(userId))
+    } catch (err) {
+      setSourcesError(err instanceof ApiError ? err.message : "Failed to refresh data sources")
+    } finally {
+      setSourcesRefreshing(false)
+    }
+  }
 
   // Ensure the user's workspace list is loaded so duplicate detection has data
   // to compare against, even if the modal is opened before the list is fetched.
@@ -201,11 +215,24 @@ export function CreateWorkspaceModal({ onClose }: Props) {
             <div>
               <div className="mb-1 flex items-center justify-between">
                 <Label>Data sources</Label>
-                <span className="text-xs text-muted-foreground">
-                  {selected.size > 0
-                    ? `${selected.size} selected`
-                    : "Required"}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {selected.size > 0
+                      ? `${selected.size} selected`
+                      : "Required"}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleRefreshSources}
+                    disabled={sourcesLoading || sourcesRefreshing}
+                    data-testid="create-sources-refresh"
+                  >
+                    <RefreshCw className={sourcesRefreshing ? "animate-spin" : undefined} />
+                    {sourcesRefreshing ? "Refreshing…" : "Refresh sources"}
+                  </Button>
+                </div>
               </div>
               <p className="mb-2 text-xs text-muted-foreground">
                 Choose at least one data source for the workspace.

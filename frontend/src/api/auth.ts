@@ -10,5 +10,7 @@ export interface UserTenant {
 }
 
 export const authApi = {
-  getUserTenants: () => api.get<UserTenant[]>("/api/auth/tenants/"),
+  // refresh=1 makes the server re-resolve upstream access instead of trusting its hourly TTL.
+  getUserTenants: (options?: { refresh?: boolean }) =>
+    api.get<UserTenant[]>(options?.refresh ? "/api/auth/tenants/?refresh=1" : "/api/auth/tenants/"),
 }

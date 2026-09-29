@@ -4,11 +4,14 @@ import { MemoryRouter } from "react-router-dom"
 import { beforeEach, expect, it, vi } from "vitest"
 
 import { workspaceApi } from "@/api/workspaces"
-import { getUserTenantsCached } from "@/api/userTenantsCache"
+import { getUserTenantsCached, refreshUserTenants } from "@/api/userTenantsCache"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
 vi.mock("@/api/workspaces", () => ({ workspaceApi: { create: vi.fn() } }))
-vi.mock("@/api/userTenantsCache", () => ({ getUserTenantsCached: vi.fn() }))
+vi.mock("@/api/userTenantsCache", () => ({
+  getUserTenantsCached: vi.fn(),
+  refreshUserTenants: vi.fn(),
+}))
 vi.mock("@/store/store", () => {
   const state = {
     user: { id: "user" }, domains: [], domainsStatus: "loaded",
@@ -109,4 +112,17 @@ it("offers a retry when the data sources fail to load, since one is required", a
   await user.click(screen.getByTestId("create-sources-retry"))
 
   expect(await screen.findByTestId("create-source-tenant-a")).toBeInTheDocument()
+})
+
+it("refreshes upstream sources on request so a newly granted one appears", async () => {
+  vi.mocked(refreshUserTenants).mockResolvedValue([
+    { id: "membership-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null },
+    { id: "membership-c", tenant_uuid: "tenant-c", provider: "commcare_connect", tenant_id: "c", tenant_name: "Gamma", last_selected_at: null },
+  ])
+  const { user } = await openModal()
+
+  await user.click(screen.getByTestId("create-sources-refresh"))
+
+  expect(await screen.findByTestId("create-source-tenant-c")).toBeInTheDocument()
+  expect(refreshUserTenants).toHaveBeenCalledExactlyOnceWith("user")
 })
