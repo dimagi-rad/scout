@@ -95,7 +95,7 @@ class ViewSchemaRetired(Exception):
         super().__init__(f"View schema for workspace {workspace_id} is {state}; not rebuilding")
 
 
-_RETIRED_VIEW_STATES = (SchemaState.TEARDOWN, SchemaState.EXPIRED)
+RETIRED_VIEW_STATES = (SchemaState.TEARDOWN, SchemaState.EXPIRED)
 
 
 class SchemaStillReferenced(Exception):
@@ -662,7 +662,7 @@ class SchemaManager:
                 workspace=workspace,
                 defaults={"schema_name": view_schema_name, "state": SchemaState.PROVISIONING},
             )
-            if not revive_retired and vs.state in _RETIRED_VIEW_STATES:
+            if not revive_retired and vs.state in RETIRED_VIEW_STATES:
                 raise ViewSchemaRetired(workspace.id, vs.state)
             was_active = vs.state == SchemaState.ACTIVE
             vs.schema_name = view_schema_name
@@ -718,7 +718,7 @@ class SchemaManager:
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
             vs.tenant_coverage = coverage
-            vs.save(update_fields=fields)
+            self._save_build_failure(vs, fields)
             raise
 
         build_token = uuid.uuid4().hex
@@ -863,7 +863,7 @@ class SchemaManager:
                 # row still lists; rolling back cannot bring those back.
                 vs.state = SchemaState.FAILED
                 vs.tenant_coverage = coverage
-                vs.save(update_fields=["state", "last_error", "tenant_coverage"])
+                self._save_build_failure(vs, ["state", "last_error", "tenant_coverage"])
             raise
         finally:
             if not conn.closed:
@@ -877,17 +877,22 @@ class SchemaManager:
                 .values_list("state", flat=True)
                 .get(pk=vs.pk)
             )
-            retired_as = current_state if current_state in _RETIRED_VIEW_STATES else None
+            retired_as = current_state if current_state in RETIRED_VIEW_STATES else None
             if retired_as is None:
                 coverage = self._name_sources_added_since(workspace, coverage, tenants)
                 self._publish_view_row(vs, coverage, planned_sources, build_token)
         if retired_as is not None:
             # Retired while this build ran (the workspace dropped to one source):
             # that later decision wins, and marking the row ACTIVE would make its
-            # queued teardown abort. After an EXPIRED teardown already ran, the
-            # schema this build just created is ours to drop.
-            if retired_as == SchemaState.EXPIRED:
-                self._drop_view_schema_physically(view_schema_name)
+            # queued teardown abort. That teardown may already have dropped the old
+            # schema before this build recreated it, so drop what this build made.
+            if not self._drop_view_schema_physically(view_schema_name):
+                logger.error(
+                    "View schema '%s' was republished after its row retired (%s) and "
+                    "could not be dropped; it will block retiring its source schemas",
+                    view_schema_name,
+                    retired_as,
+                )
             raise ViewSchemaRetired(workspace.id, retired_as)
 
         logger.info(
@@ -898,6 +903,24 @@ class SchemaManager:
             views_created,
         )
         return vs
+
+    @staticmethod
+    def _save_build_failure(vs, fields) -> None:
+        """Record a failed build, leaving the state of a row that retired meanwhile.
+
+        Writing FAILED over TEARDOWN would make the queued teardown abort and strand
+        the schema; nothing sweeps a FAILED row.
+        """
+        with transaction.atomic():
+            current_state = (
+                WorkspaceViewSchema.objects.select_for_update()
+                .values_list("state", flat=True)
+                .get(pk=vs.pk)
+            )
+            if current_state in RETIRED_VIEW_STATES:
+                vs.state = current_state
+                fields = [f for f in fields if f not in ("state", "tenant_coverage")]
+            vs.save(update_fields=fields)
 
     @staticmethod
     def _name_sources_added_since(workspace, coverage, planned_tenants) -> dict:
@@ -1167,7 +1190,9 @@ class SchemaManager:
             reason,
         )
         try:
-            self._build_view_schema(workspace)
+            self._build_view_schema(workspace, revive_retired=False)
+        except ViewSchemaRetired:
+            return {"status": "retiring"}
         except Exception as exc:
             # The build already recorded its outcome on the row; report rather
             # than raise so callers using this as a pre-check still run.

@@ -1099,6 +1099,9 @@ async def materialize_workspace_core(
                 "error": None,
                 "tenant_coverage": tenant_coverage,
             }
+        except ViewSchemaRetired as exc:
+            # Dropped to one source during the load: its tenant schema serves now.
+            logger.info("Workspace %s needs no view schema: %s", workspace_id, exc)
         except Exception as exc:
             # Don't re-raise — the resume task must still fire. The failure is
             # recorded on the WorkspaceViewSchema row (state=FAILED, last_error),
@@ -2529,12 +2532,15 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
         return
 
     manager = SchemaManager()
+    # Both outcome writes are conditional: adding or removing a source can mark
+    # the row PROVISIONING while the DROP runs, and its queued rebuild would skip
+    # a row this task then blindly marked EXPIRED.
+    retiring = WorkspaceViewSchema.objects.filter(pk=vs.pk, state=SchemaState.TEARDOWN)
     try:
         await asyncio.to_thread(manager.teardown_view_schema, vs)
     except Exception:
         logger.exception("Failed to drop view schema '%s'", vs.schema_name)
-        vs.state = SchemaState.ACTIVE
-        await vs.asave(update_fields=["state"])
+        await retiring.aupdate(state=SchemaState.ACTIVE)
         raise
 
     # Destructive op must leave a trace (arch #257, finding 08#9).
@@ -2546,8 +2552,7 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
         vs.last_accessed_at.isoformat() if vs.last_accessed_at else None,
     )
 
-    vs.state = SchemaState.EXPIRED
-    await vs.asave(update_fields=["state"])
+    await retiring.aupdate(state=SchemaState.EXPIRED)
 
 
 # Retirement retry backoff: a sibling workspace still reading the old schema

@@ -1,7 +1,9 @@
 """A view rebuild publishes what the workspace is now, not what it was when queued."""
 
+import contextlib
 import os
 import threading
+import time
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -21,7 +23,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.schema_manager import SchemaManager, ViewSchemaRetired
 from apps.workspaces.services.tenant_coverage import coverage_entry
 from apps.workspaces.services.workspace_service import add_workspace_tenant
-from apps.workspaces.tasks import rebuild_workspace_view_schema
+from apps.workspaces.tasks import rebuild_workspace_view_schema, teardown_view_schema_task
 
 pytestmark = [
     pytest.mark.skipif(
@@ -48,17 +50,27 @@ def two_live_sources(workspace, tenant):
         provider="commcare", external_id=f"race-{uuid4().hex[:8]}", canonical_name="Race Two"
     )
     WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+    manager = SchemaManager()
+    view_schema = manager._view_schema_name(workspace.id)
     owned = []
-    for source in (tenant, second):
-        name = f"race_{uuid4().hex[:12]}"
-        _managed(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(name)))
-        _managed(sql.SQL("CREATE TABLE {}.cases (id text)").format(sql.Identifier(name)))
-        TenantSchema.objects.create(tenant=source, schema_name=name, state=SchemaState.ACTIVE)
-        owned.append(name)
-    view_schema = SchemaManager()._view_schema_name(workspace.id)
-    yield workspace, second, view_schema
-    for name in (view_schema, *owned):
-        _managed(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(name)))
+    try:
+        for source in (tenant, second):
+            name = f"race_{uuid4().hex[:12]}"
+            owned.append(name)
+            _managed(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(name)))
+            _managed(sql.SQL("CREATE TABLE {}.cases (id text)").format(sql.Identifier(name)))
+            TenantSchema.objects.create(tenant=source, schema_name=name, state=SchemaState.ACTIVE)
+        yield workspace, second, view_schema
+    finally:
+        with psycopg.connect(settings.MANAGED_DATABASE_URL, autocommit=True) as conn:
+            cursor = conn.cursor()
+            for name in (view_schema, *owned):
+                cursor.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(name))
+                )
+            with contextlib.suppress(Exception):
+                manager._drop_readonly_role(cursor, view_schema)
+                manager._drop_dbt_role(cursor, view_schema)
 
 
 @pytest.mark.parametrize("retired", [SchemaState.TEARDOWN, SchemaState.EXPIRED])
@@ -114,8 +126,8 @@ def test_a_retirement_during_the_build_wins_over_publication(two_live_sources, r
         SchemaManager().build_view_schema(workspace)
 
     assert WorkspaceViewSchema.objects.get(workspace=workspace).state == retired
-    # Its teardown already ran, so nothing else would drop what this build created.
-    assert _schema_exists(view_schema) is (retired == SchemaState.TEARDOWN)
+    # Its teardown may already have run, so nothing else would drop what this build made.
+    assert not _schema_exists(view_schema)
 
 
 @pytest.mark.parametrize("was_active", [True, False], ids=["rebuild", "first-build"])
@@ -183,13 +195,33 @@ def test_an_add_still_committing_when_the_first_build_publishes_is_named_missing
             connection.close()
 
     adder = threading.Thread(target=add)
+
+    def release_once_publication_waits():
+        # Only release the add once the publish is blocked on its row lock; without
+        # that lock the publish never waits and reads the sources before the commit.
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND wait_event_type = 'Lock' AND query ILIKE %s",
+                        ["%workspaces_workspaceviewschema%FOR UPDATE%"],
+                    )
+                    if cursor.fetchone():
+                        break
+                time.sleep(0.02)
+        finally:
+            release_add.set()
+            connection.close()
+
     write_marker = SchemaManager._write_publication_marker
 
     def add_mid_build(cursor, schema_name, build_token):
         write_marker(cursor, schema_name, build_token)
         adder.start()
         assert add_open.wait(10)
-        threading.Timer(0.5, release_add.set).start()
+        threading.Thread(target=release_once_publication_waits).start()
 
     try:
         with patch.object(SchemaManager, "_write_publication_marker", side_effect=add_mid_build):
@@ -201,3 +233,50 @@ def test_an_add_still_committing_when_the_first_build_publishes_is_named_missing
     assert not failures
     coverage = WorkspaceViewSchema.objects.get(workspace=workspace).tenant_coverage
     assert coverage["excluded_tenants"] == [coverage_entry(added)]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("DDL failed"), ValueError("plan failed")])
+def test_a_failed_build_leaves_a_retirement_during_it_alone(two_live_sources, failure):
+    """Writing FAILED over TEARDOWN made the queued teardown abort, stranding the schema."""
+    workspace, _, _ = two_live_sources
+    SchemaManager().build_view_schema(workspace)
+
+    def retire_then_fail(*_):
+        WorkspaceViewSchema.objects.filter(workspace=workspace).update(state=SchemaState.TEARDOWN)
+        raise failure
+
+    with (
+        patch.object(SchemaManager, "_write_publication_marker", side_effect=retire_then_fail),
+        pytest.raises(type(failure)),
+    ):
+        SchemaManager().build_view_schema(workspace)
+
+    row = WorkspaceViewSchema.objects.get(workspace=workspace)
+    assert row.state == SchemaState.TEARDOWN
+    assert row.last_error == str(failure)
+
+
+@pytest.mark.parametrize("drop_fails", [False, True], ids=["dropped", "drop-failed"])
+@pytest.mark.asyncio
+async def test_a_teardown_leaves_a_row_wanted_again_during_its_drop(two_live_sources, drop_fails):
+    """Adding a source marks a TEARDOWN row PROVISIONING and queues a rebuild; the
+    teardown's blind EXPIRED write then made that rebuild skip the row."""
+    workspace, _, view_schema = two_live_sources
+    vs = await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace, schema_name=view_schema, state=SchemaState.TEARDOWN
+    )
+
+    def wanted_again_during_drop(_):
+        WorkspaceViewSchema.objects.filter(pk=vs.pk).update(state=SchemaState.PROVISIONING)
+        if drop_fails:
+            raise RuntimeError("drop failed")
+
+    with patch.object(SchemaManager, "teardown_view_schema", side_effect=wanted_again_during_drop):
+        if drop_fails:
+            with pytest.raises(RuntimeError):
+                await teardown_view_schema_task.func(str(vs.id))
+        else:
+            await teardown_view_schema_task.func(str(vs.id))
+
+    await vs.arefresh_from_db()
+    assert vs.state == SchemaState.PROVISIONING

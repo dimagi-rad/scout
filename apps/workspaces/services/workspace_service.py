@@ -16,6 +16,7 @@ from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
 )
+from apps.workspaces.services.schema_manager import RETIRED_VIEW_STATES
 from apps.workspaces.services.tenant_coverage import coverage_entry, parse_coverage
 from apps.workspaces.tasks import (
     materialize_workspace,
@@ -54,7 +55,7 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 # A retired row serves nothing, and the rebuild below skips it
                 # unless it is marked as wanted again.
                 WorkspaceViewSchema.objects.filter(
-                    workspace=workspace, state__in=(SchemaState.TEARDOWN, SchemaState.EXPIRED)
+                    workspace=workspace, state__in=RETIRED_VIEW_STATES
                 ).update(state=SchemaState.PROVISIONING)
                 _record_pending_source(workspace, tenant)
                 # Queued first: both take the workspace lock W, and the load holds
