@@ -36,21 +36,31 @@ INTENT_RECONCILE_MISSING = "reconcile_missing"
 INTENT_KINDS = frozenset({INTENT_FULL_REFRESH, INTENT_RECONCILE_MISSING})
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-# The code whose behaviour decides what a load produces. A deploy that changes
-# any of it must not compare equal to a generation loaded before it.
+# The code whose behaviour decides what a load produces, in two halves. A deploy
+# that changes either must not compare equal to a generation published before
+# it. Only the raw half gates resuming a FAILED candidate: the transform half
+# runs after the raw rows are written and a resumed load re-runs it in full.
+# A raw-shaping module filed under transform would let a resume keep rows the
+# new code would not write, so anything that touches raw rows goes in raw.
 # tests/test_load_fingerprint_coverage.py fails when the load path imports a
-# module that is neither listed here nor excluded there.
-_IMPLEMENTATION_PATHS = (
+# module that is in neither list nor excluded there, or when a module the raw
+# load reaches sits in the transform list.
+_RAW_LOAD_PATHS = (
     "mcp_server/services/materializer.py",
-    "mcp_server/services/dbt_runner.py",
     "mcp_server/event_time.py",
     "mcp_server/loaders",
     "mcp_server/pipeline_registry.py",
+    "pipelines",
+)
+_TRANSFORM_PATHS = (
+    "mcp_server/services/dbt_runner.py",
     "apps/common/identifiers.py",
     "apps/common/localized.py",
     "apps/transformations/services",
-    "pipelines",
 )
+# Part of every payload, so a digest stored before the split (one combined
+# revision) never equals a current one: it reads as "both halves changed".
+_FINGERPRINT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -60,17 +70,23 @@ class ReuseEvidence:
     schema: TenantSchema
 
 
-def implementation_revision() -> str:
-    configured = getattr(settings, "SCOUT_IMPLEMENTATION_REVISION", "")
-    if configured:
-        return str(configured)
-    return _source_tree_revision()
+def raw_load_revision() -> str:
+    return _configured_revision() or _source_tree_revision(_RAW_LOAD_PATHS)
+
+
+def transform_revision() -> str:
+    return _configured_revision() or _source_tree_revision(_TRANSFORM_PATHS)
+
+
+def _configured_revision() -> str:
+    # One deploy-wide value cannot say which half changed, so it stands for both.
+    return str(getattr(settings, "SCOUT_IMPLEMENTATION_REVISION", "") or "")
 
 
 @cache
-def _source_tree_revision() -> str:
+def _source_tree_revision(paths: tuple[str, ...]) -> str:
     digest = hashlib.sha256()
-    for relative in _IMPLEMENTATION_PATHS:
+    for relative in paths:
         path = _REPO_ROOT / relative
         if not path.exists():
             # A renamed path would silently stop tracking code changes, and reuse
@@ -101,17 +117,22 @@ def _config_payload(pipeline_config) -> dict:
 
 
 def raw_load_fingerprint(pipeline_config) -> str:
-    """Equivalence key for the raw tables a load writes: config and loader code.
+    """Equivalence key for the raw tables a load writes: config and raw-load code.
 
-    Transform assets are excluded on purpose: a resumed candidate re-runs every
-    transform, so only what decides the raw rows has to match.
+    Transform assets and transform code are excluded on purpose: a resumed
+    candidate re-runs every transform, so only what decides the raw rows has to
+    match. ``pipeline_fingerprint`` covers both for reuse of a published load.
     """
-    payload = {"pipeline": _config_payload(pipeline_config), "revision": implementation_revision()}
+    payload = {
+        "version": _FINGERPRINT_VERSION,
+        "pipeline": _config_payload(pipeline_config),
+        "raw_revision": raw_load_revision(),
+    }
     return hashlib.sha256(_canonical(payload).encode()).hexdigest()
 
 
 def pipeline_fingerprint(pipeline_config, tenant, *, assets=None) -> str:
-    """Equivalence key for "the same load": config, transform assets and code."""
+    """Equivalence key for "the same load": config, transform assets and both code halves."""
     if assets is None:
         assets = TransformationAsset.objects.filter(tenant=tenant)
     asset_snapshot = [
@@ -124,9 +145,11 @@ def pipeline_fingerprint(pipeline_config, tenant, *, assets=None) -> str:
         for asset in sorted(assets, key=lambda asset: (asset.scope, asset.name))
     ]
     payload = {
+        "version": _FINGERPRINT_VERSION,
         "pipeline": _config_payload(pipeline_config),
         "assets": asset_snapshot,
-        "revision": implementation_revision(),
+        "raw_revision": raw_load_revision(),
+        "transform_revision": transform_revision(),
     }
     return hashlib.sha256(_canonical(payload).encode()).hexdigest()
 
