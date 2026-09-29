@@ -47,11 +47,17 @@ SCHEMA_RETRY_BASE_DELAY_SECONDS = 2.0
 # The validator abandons a compile at 60s (CUBE_VALIDATOR_COMPILE_TIMEOUT_MS) and
 # answers 503; reading past that lets its answer arrive instead of a ReadTimeout.
 VALIDATE_TIMEOUT = httpx.Timeout(75.0, connect=5.0)
+# One wall-clock budget across attempts: fast failures (a restarting validator,
+# a dropped connection) get their retries, but a compile that is simply too slow
+# cannot triple a canvas commit's wait.
+VALIDATE_BUDGET_SECONDS = 90.0
 # /v1/meta only starts the compile: Cube finishes it after the client disconnects
 # (large multi-source models outlast 30s, SCOUT-DJANGO-3N), so neither a longer
 # wait nor a retry buys anything, and the warm-up can run on a request thread.
 META_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 META_ATTEMPTS = 1
+# Retrying with less than this left would only manufacture another timeout.
+MIN_SCHEMA_ATTEMPT_SECONDS = 5.0
 
 
 class CubeConfigurationError(RuntimeError):
@@ -237,6 +243,7 @@ class CubeClient:
             operation="schema warm-up",
             limits=META_TIMEOUT,
             attempts=META_ATTEMPTS,
+            budget_seconds=META_TIMEOUT.read,
             headers=self._headers(security_context),
         )
 
@@ -247,6 +254,7 @@ class CubeClient:
         *,
         operation: str,
         limits: httpx.Timeout,
+        budget_seconds: float,
         attempts: int = SCHEMA_REQUEST_ATTEMPTS,
         **kwargs: Any,
     ) -> httpx.Response:
@@ -256,10 +264,17 @@ class CubeClient:
         the compile already in flight for that schema hash.
         """
         last_error: Exception | None = None
+        deadline = time.monotonic() + budget_seconds
         async with httpx.AsyncClient(timeout=limits) as client:
             for attempt in range(1, attempts + 1):
+                remaining = deadline - time.monotonic()
                 try:
-                    response = await client.request(method, url, **kwargs)
+                    response = await client.request(
+                        method,
+                        url,
+                        timeout=httpx.Timeout(min(limits.read, remaining), connect=limits.connect),
+                        **kwargs,
+                    )
                     response.raise_for_status()
                 except httpx.TransportError as exc:
                     last_error = exc
@@ -275,7 +290,10 @@ class CubeClient:
                             attempt - 1,
                         )
                     return response
-                if attempt == attempts:
+                delay = SCHEMA_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                delay *= random.uniform(0.5, 1.5)  # noqa: S311 -- retry jitter, not security
+                remaining = deadline - time.monotonic() - delay
+                if attempt == attempts or remaining < MIN_SCHEMA_ATTEMPT_SECONDS:
                     break
                 logger.info(
                     "Retrying Cube %s after transient failure (%s), retry %s/%s",
@@ -284,11 +302,9 @@ class CubeClient:
                     attempt,
                     attempts - 1,
                 )
-                delay = SCHEMA_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-                await asyncio.sleep(delay * random.uniform(0.5, 1.5))  # noqa: S311 -- retry jitter
+                await asyncio.sleep(delay)
         raise CubeServiceUnavailable(
-            f"Cube {operation} failed after {attempts} attempt(s): "
-            f"{_describe_transient(last_error)}"
+            f"Cube {operation} failed after {attempt} attempt(s): {_describe_transient(last_error)}"
         ) from last_error
 
     async def validate_schema(self, content: str) -> dict[str, Any]:
@@ -308,6 +324,7 @@ class CubeClient:
             f"{validator_url}/internal/validate-cube-schema",
             operation="schema validation",
             limits=VALIDATE_TIMEOUT,
+            budget_seconds=VALIDATE_BUDGET_SECONDS,
             json={"schema": content},
             headers={"Authorization": f"Bearer {self.api_secret}"},
         )

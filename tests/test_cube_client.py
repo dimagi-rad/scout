@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -427,3 +428,21 @@ async def test_schema_operations_fail_fast_when_cube_is_unreachable(
 
     assert timeouts[0]["connect"] <= 10
     assert timeouts[0]["read"] is not None
+
+
+@pytest.mark.asyncio
+async def test_slow_validator_failure_is_not_retried_past_the_budget(monkeypatch, validator_url):
+    monkeypatch.setattr(cube_client_module, "VALIDATE_BUDGET_SECONDS", 5.2)
+    read_timeouts = []
+
+    def handler(request):
+        read_timeouts.append(request.extensions["timeout"]["read"])
+        time.sleep(0.3)
+        return httpx.Response(503, json={"valid": False})
+
+    _patched_async_client(monkeypatch, handler)
+    with pytest.raises(cube_client_module.CubeServiceUnavailable, match="after 1 attempt"):
+        await _schema_operation("validate")
+
+    assert len(read_timeouts) == 1
+    assert read_timeouts[0] <= 5.2
