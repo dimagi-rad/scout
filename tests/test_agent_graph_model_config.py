@@ -62,6 +62,7 @@ async def test_llm_keeps_thinking_adaptive_and_tool_choice_auto():
 
     kwargs = MockChat.call_args.kwargs
     assert kwargs["thinking"]["type"] == "adaptive"
-    assert kwargs["max_tokens"] == DEFAULT_MAX_TOKENS >= 16_000
+    assert kwargs["max_tokens"] == DEFAULT_MAX_TOKENS
+    assert kwargs["max_tokens"] >= 16_000
     bind_kwargs = MockChat.return_value.bind_tools.call_args.kwargs
     assert bind_kwargs.get("tool_choice") in (None, "auto")

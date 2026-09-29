@@ -56,11 +56,16 @@ def _artifact_kwargs() -> dict:
     return chat.call_args.kwargs
 
 
-@pytest_asyncio.fixture(params=["main", "canvas", "artifact"])
-async def site_payload(request) -> dict:
-    if request.param == "main":
+@pytest.fixture(params=["main", "canvas", "artifact"])
+def site(request) -> str:
+    return request.param
+
+
+@pytest_asyncio.fixture
+async def site_payload(site) -> dict:
+    if site == "main":
         kwargs = await _main_agent_kwargs()
-    elif request.param == "canvas":
+    elif site == "canvas":
         kwargs = _canvas_kwargs()
     else:
         kwargs = _artifact_kwargs()
@@ -84,9 +89,8 @@ async def test_thinking_is_summarized_so_the_thinking_card_has_text(site_payload
 
 
 @pytest.mark.asyncio
-async def test_effort_is_explicit_per_site(site_payload, request):
+async def test_effort_is_explicit_per_site(site, site_payload):
     """Opus 5.5 defaults to medium; pin it so a model change can't shift it
     silently, and run the narrow subagents at low."""
-    site = request.node.callspec.params["site_payload"]
     expected = {"main": "medium", "canvas": "low", "artifact": "low"}[site]
     assert site_payload["output_config"]["effort"] == expected
