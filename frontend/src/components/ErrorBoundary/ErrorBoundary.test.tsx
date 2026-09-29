@@ -65,6 +65,22 @@ describe("ErrorBoundary Sentry reporting", () => {
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.name).toBe("Error")
     expect(reported.message).toBe(message)
+    expect(screen.getByText("Something went wrong")).toBeInTheDocument()
+    expect(screen.queryByText("Alice")).not.toBeInTheDocument()
+  })
+
+  it("renders its fallback when the thrown object's message is not text", () => {
+    function ThrowsObject(): never {
+      throw { message: { rows: [1] } }
+    }
+    render(
+      <ErrorBoundary>
+        <ThrowsObject />
+      </ErrorBoundary>,
+    )
+
+    expect(screen.getByText("Something went wrong")).toBeInTheDocument()
+    expect(screen.getByText("Non-Error exception (object)")).toBeInTheDocument()
   })
 
   it("clears the caught error when resetKey changes", () => {
