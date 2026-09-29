@@ -394,7 +394,11 @@ function buildNode(
   for (const [name, value] of Object.entries(safeNodeProps(node.type, node.props ?? {}))) {
     props[name] = resolveProp(value)
   }
-  if (node.type === "YAxis" && props.type === "category" && props.width === undefined) {
+  // Rotated or nested-key axes keep Recharts' default tick, which handles angle and dot-paths.
+  if (
+    node.type === "YAxis" && props.type === "category" && props.width === undefined
+    && typeof props.dataKey === "string" && !props.dataKey.includes(".") && props.angle === undefined
+  ) {
     const tickFormatter = typeof props.tickFormatter === "function"
       ? (props.tickFormatter as (value: unknown, index: number) => string)
       : undefined
