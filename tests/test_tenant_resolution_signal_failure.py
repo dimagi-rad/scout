@@ -16,8 +16,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from django.core.cache import cache
 
 from apps.users import signals
+from apps.users.services.onboarding_cache import me_onboarding_cache_key
 
 SIGNALS_LOGGER = "apps.users.signals"
 
@@ -65,3 +67,15 @@ def test_missing_token_still_warns_and_returns():
     with patch.object(signals, "resolve_ocs_chatbots", AsyncMock()) as resolver:
         signals.resolve_tenant_on_social_login(request=None, sociallogin=sl)
     resolver.assert_not_called()
+
+
+def test_login_clears_the_cached_onboarding_flag():
+    """Otherwise /me keeps serving onboarding_complete=False for its TTL after the
+    user connects their first data source, bouncing them back to the wizard."""
+    sl = _sociallogin("ocs")
+    cache.set(me_onboarding_cache_key(sl.user), False)
+
+    with patch.object(signals, "resolve_ocs_chatbots", AsyncMock(return_value=[])):
+        signals.resolve_tenant_on_social_login(request=None, sociallogin=sl)
+
+    assert cache.get(me_onboarding_cache_key(sl.user)) is None

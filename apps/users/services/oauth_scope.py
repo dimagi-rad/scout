@@ -1,6 +1,7 @@
 """OAuth identity scope shared by resolution and credential lifecycle operations."""
 
 from allauth.socialaccount.models import SocialAccount
+from django.conf import settings
 
 from apps.users.providers.ocs.provider import team_slug_from_uid
 
@@ -69,6 +70,22 @@ def account_scope(account) -> str:
     # The qualified UID is allauth's identity key; prefer it over mutable claims.
     return (
         team_slug_from_uid(account.uid) or str((account.extra_data or {}).get("team") or "").strip()
+    )
+
+
+def ocs_scope_unusable(provider: str, scope: str) -> bool:
+    """Whether an OCS identity or connection with this scope can reach no data (#379).
+
+    Under all-of access a team-less OCS membership is never covered and team-scoped
+    sync can never archive it, so such an identity discovers nothing and must be
+    reconnected choosing a team. Under any-of it still works. Reads the setting
+    behind ``access.all_of_access_enforced``, which this module cannot import
+    without a cycle through ``credential_coverage``.
+    """
+    return (
+        canonical_provider(provider) == "ocs"
+        and not scope
+        and settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT
     )
 
 

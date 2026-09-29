@@ -8,12 +8,14 @@ from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.sessions.models import Session
+from django.core.cache import cache
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 
 from apps.users.services.merge import merge_users
 from apps.users.services.oauth_scope import canonical_provider
+from apps.users.services.onboarding_cache import me_onboarding_cache_key
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -200,6 +202,13 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
         resolve_pending_invites_on_login(sociallogin.user)
     except Exception:
         logger.exception("Failed to resolve pending workspace invites after login")
+
+    # /me caches a negative onboarding flag; without this, a user who just connected
+    # their first data source is sent back to onboarding until it expires.
+    try:
+        cache.delete(me_onboarding_cache_key(sociallogin.user))
+    except Exception:
+        logger.warning("Failed to clear the onboarding cache after login", exc_info=True)
 
 
 def resolve_pending_invites_on_login(user):

@@ -43,7 +43,12 @@ from django.utils import timezone
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
-from apps.users.services.oauth_scope import account_scope, provider_accounts, scope_account_ids
+from apps.users.services.oauth_scope import (
+    account_scope,
+    ocs_scope_unusable,
+    provider_accounts,
+    scope_account_ids,
+)
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
 from apps.users.services.upstream_denial import (
     adiscovery_connection,
@@ -373,13 +378,23 @@ async def resolve_ocs_chatbots(
     OCS tokens are **team-scoped** — a successful ``/api/experiments/`` fetch returns
     only the team the user selected during OAuth consent. Archival is therefore
     restricted to that team's memberships (``archive_team_slug``); memberships from
-    other teams the user previously authorized are left untouched.
+    other teams the user previously authorized are left untouched. Under all-of
+    access an identity with no team discovers nothing; the user must reconnect
+    choosing a team.
     """
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com").rstrip("/")
 
     account = social_account if social_account is not None else await _anewest_account(user, "ocs")
-    observed = await adiscovery_connection(user, "ocs", access_token, account)
     team_slug = account_scope(account)
+    if ocs_scope_unusable("ocs", team_slug):
+        # A settled outcome, not drift: raising would read as "retry may help" to
+        # every caller and loop on each refresh.
+        logger.info(
+            "Skipping OCS discovery: identity %s carries no team",
+            account.pk if account else None,
+        )
+        return []
+    observed = await adiscovery_connection(user, "ocs", access_token, account)
     team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
 
     experiments: list[dict] = []

@@ -47,8 +47,9 @@ class OCSProvider(OAuth2Provider):
         of the ``TenantConnection`` uniqueness constraint. Qualifying the uid with
         the ``team`` claim gives each team its own account and its own token.
 
-        A response with no ``team`` claim keeps the bare ``sub``, so an OCS deploy
-        that does not emit the claim behaves exactly as before.
+        A response with no ``team`` claim keeps the bare ``sub``, so sign-in still
+        works on an OCS deploy that does not emit the claim, but under all-of access
+        such an identity discovers no chatbots (``resolve_ocs_chatbots``, #379).
         """
         sub = data.get("sub")
         if not sub:

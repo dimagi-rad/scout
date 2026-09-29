@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from "react"
+import { useCallback, useEffect, useState, type FormEvent } from "react"
 import { BASE_PATH } from "@/config"
+import { oauthConnectUrl, type OAuthProvider } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
 import { Button } from "@/components/ui/button"
@@ -24,6 +25,29 @@ export function OnboardingWizard() {
   const [error, setError] = useState<string | null>(null)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
+  // An OCS-only user lands here too, e.g. once their team-less memberships are
+  // archived (#379), so the wizard must offer OCS or they have no way forward.
+  const [ocs, setOcs] = useState<OAuthProvider | null>(null)
+  const [providersState, setProvidersState] = useState<"loading" | "loaded" | "failed">(
+    "loading",
+  )
+
+  const loadProviders = useCallback(async () => {
+    setProvidersState("loading")
+    try {
+      const data = await api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
+      setOcs(data.providers.find((p) => p.id === "ocs") ?? null)
+      setProvidersState("loaded")
+    } catch (err) {
+      console.error("Failed to load sign-in options", err)
+      setOcs(null)
+      setProvidersState("failed")
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadProviders()
+  }, [loadProviders])
 
   async function handleApiKeySubmit(e: FormEvent) {
     e.preventDefault()
@@ -119,9 +143,14 @@ export function OnboardingWizard() {
     <div className="flex min-h-screen items-center justify-center p-4">
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
-          <CardTitle>Connect your CommCare data</CardTitle>
+          {/* Neutral until providers load, so the heading never flips from CommCare. */}
+          <CardTitle>
+            {ocs || providersState === "loading" ? "Connect your data" : "Connect your CommCare data"}
+          </CardTitle>
           <CardDescription>
-            Choose how to connect Scout to your CommCare account.
+            {ocs || providersState === "loading"
+              ? "Choose how to connect Scout to your data."
+              : "Choose how to connect Scout to your CommCare account."}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -140,6 +169,31 @@ export function OnboardingWizard() {
           >
             Use an API Key
           </Button>
+          {ocs && (
+            <>
+              {ocs.status === "needs_team" && (
+                <p
+                  className="text-sm text-amber-600"
+                  data-testid="onboarding-ocs-needs-team"
+                >
+                  Your {ocs.name} sign-in has no team. Connect {ocs.name} and choose a team.
+                </p>
+              )}
+              <Button className="w-full" variant="outline" data-testid="onboarding-ocs" asChild>
+                <a href={oauthConnectUrl(ocs, "/")}>
+                  Connect {ocs.name}
+                </a>
+              </Button>
+            </>
+          )}
+          {providersState === "failed" && (
+            <div className="space-y-2 text-center" data-testid="onboarding-providers-error">
+              <p className="text-sm text-destructive">Couldn't load other sign-in options.</p>
+              <Button variant="ghost" size="sm" onClick={() => void loadProviders()}>
+                Try again
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

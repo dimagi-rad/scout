@@ -3,12 +3,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers import (
     CredentialVerificationError,
     TenantDescriptor,
 )
+from apps.users.services.onboarding_cache import me_onboarding_cache_key
 
 
 @pytest.fixture
@@ -44,6 +46,32 @@ def test_commcare_post_returns_single_membership(client, user):
     m = body["memberships"][0]
     assert m["tenant_id"] == "dimagi"
     assert m["tenant_name"] == "dimagi"
+
+
+def test_adding_a_connection_clears_the_cached_onboarding_flag(client, user):
+    """The wizard's API-key path calls /me right after; a cached False would keep
+    the user on onboarding after they connected."""
+    client.force_login(user)
+    cache.set(me_onboarding_cache_key(user), False)
+    with patch(
+        "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_and_discover",
+        new_callable=AsyncMock,
+        return_value=[TenantDescriptor("dimagi", "dimagi")],
+    ):
+        resp = _post(
+            client,
+            {
+                "provider": "commcare",
+                "fields": {"domain": "dimagi", "username": "u", "api_key": "k"},
+            },
+        )
+    assert resp.status_code == 201, resp.content
+    assert cache.get(me_onboarding_cache_key(user)) is None
+
+    conn = TenantConnection.objects.get(user=user)
+    cache.set(me_onboarding_cache_key(user), True)
+    assert client.delete(f"/api/auth/connections/{conn.id}/").status_code == 200
+    assert cache.get(me_onboarding_cache_key(user)) is None
 
 
 def test_ocs_post_returns_multiple_memberships(client, user):

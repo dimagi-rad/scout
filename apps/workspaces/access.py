@@ -293,7 +293,12 @@ async def _ashares_live_tenant(user, tenant_ids) -> bool:
 
 
 def all_of_access_enforced() -> bool:
-    """Rollout switch for the read gate; see ``WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT``."""
+    """Rollout switch for the read gate; see ``WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT``.
+
+    Also stops OCS discovery for a team-less identity and gates
+    ``archive_teamless_ocs_memberships --apply`` (#379): such a row only works
+    under any-of.
+    """
     return settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT
 
 
