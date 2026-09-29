@@ -166,6 +166,25 @@ def test_source_added_before_the_confirmed_delete_keeps_the_workspace(
     assert list(workspace.workspace_tenants.values_list("tenant_id", flat=True)) == [tenant2.id]
 
 
+def test_a_double_submitted_confirmed_delete_is_idempotent(
+    api_client, user, workspace, tenant, sibling_workspace
+):
+    url = _last_source_url(workspace, tenant, confirm=True)
+
+    def other_request_deleted_it(ws, wt):
+        Workspace.objects.filter(id=ws.id).delete()
+        raise LastWorkspaceTenant("Cannot remove the last tenant from a workspace.")
+
+    api_client.force_login(user)
+    with patch.object(
+        workspace_views, "remove_workspace_tenant", side_effect=other_request_deleted_it
+    ):
+        resp = api_client.delete(url)
+
+    assert resp.status_code == 200
+    assert resp.data == {"workspace_deleted": True}
+
+
 def test_non_manager_cannot_remove_last_source_even_confirmed(
     api_client, workspace, tenant, write_user
 ):

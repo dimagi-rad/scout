@@ -1375,9 +1375,16 @@ def _delete_for_last_source(request, workspace, wt) -> Response:
         # The last-source check's row locks ended with its transaction. Adding a
         # source takes this lock (add_tenant_covered_by_members), so re-checking
         # under it means no source can land between the check and the delete.
-        Workspace.objects.select_for_update().only("pk").get(pk=workspace.pk)
+        if not Workspace.objects.select_for_update().filter(pk=workspace.pk).exists():
+            # A concurrent confirmed delete (a double submit) already removed it.
+            return Response({"workspace_deleted": True}, status=status.HTTP_200_OK)
         if workspace.workspace_tenants.exclude(id=wt.id).exists():
-            remove_workspace_tenant(workspace, wt)
-            return Response(status=status.HTTP_204_NO_CONTENT)
+            try:
+                remove_workspace_tenant(workspace, wt)
+            except LastWorkspaceTenant:
+                # Removal doesn't take this lock, so the other source can go too.
+                pass
+            else:
+                return Response(status=status.HTTP_204_NO_CONTENT)
         workspace.delete()
     return Response({"workspace_deleted": True}, status=status.HTTP_200_OK)
