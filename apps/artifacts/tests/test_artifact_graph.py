@@ -1407,6 +1407,21 @@ def test_recovery_post_survives_a_delete_racing_the_backfill(workspace, member_u
 
 
 @pytest.mark.django_db
+def test_backfill_builds_from_the_locked_row_and_reports_whether_it_wrote(workspace, member_user):
+    artifact = _manifest_less_story(workspace, member_user)
+    stale = Artifact.objects.get(pk=artifact.pk)
+    stale.data = {}
+
+    assert backfill_missing_semantic_query_manifest(stale) is True
+    assert [q["name"] for q in stale.semantic_queries] == ["q.visits_by_day"]
+    assert backfill_missing_semantic_query_manifest(stale) is False
+
+    deleted = _manifest_less_story(workspace, member_user)
+    Artifact.objects.get(pk=deleted.pk).soft_delete(member_user)
+    assert backfill_missing_semantic_query_manifest(deleted) is False
+
+
+@pytest.mark.django_db
 def test_backfill_command_dry_run_writes_nothing(workspace, member_user):
     artifact = _manifest_less_story(workspace, member_user)
     out = StringIO()
@@ -1442,7 +1457,7 @@ def test_backfill_command_apply_persists_legacy_manifests_once(workspace, member
 
     rerun = StringIO()
     call_command("backfill_story_manifests", "--apply", stdout=rerun)
-    assert "Backfilled 0 stories, 0 failed." in rerun.getvalue()
+    assert "Backfilled 0 stories, 0 already done or deleted, 0 failed." in rerun.getvalue()
 
 
 @pytest.mark.django_db(transaction=True)

@@ -86,29 +86,33 @@ def derive_missing_semantic_query_manifest(artifact: Artifact) -> None:
     artifact.semantic_query_manifest = manifest
 
 
-def backfill_missing_semantic_query_manifest(artifact: Artifact) -> None:
+def backfill_missing_semantic_query_manifest(artifact: Artifact) -> bool:
     """Persist the manifest for a manifest-less story, once, from a write path.
 
     Checks the stored row rather than ``artifact``, which a read path may already
     have filled in memory. The check runs under the row lock, so a caller that loses
     a race sees the winner's manifest and does nothing. A story soft-deleted since
-    the caller loaded it is left alone.
+    the caller loaded it is left alone. The manifest is built from the locked row's
+    ``data``, not the caller's copy. Returns whether a manifest was written.
     """
     if artifact.artifact_type != ArtifactType.STORY:
-        return
+        return False
     with transaction.atomic():
         stored = (
             Artifact.objects.select_for_update()
-            .only("artifact_type", "semantic_queries", "semantic_query_manifest")
+            .only("artifact_type", "data", "semantic_queries", "semantic_query_manifest")
             .filter(pk=artifact.pk)
             .first()
         )
         if stored is None:
-            return
+            return False
+        artifact.data = stored.data
         artifact.semantic_queries = stored.semantic_queries
         artifact.semantic_query_manifest = stored.semantic_query_manifest
-        if lacks_semantic_query_manifest(stored):
-            sync_artifact_semantic_query_manifest(artifact)
+        if not lacks_semantic_query_manifest(stored):
+            return False
+        sync_artifact_semantic_query_manifest(artifact)
+        return True
 
 
 def sync_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]:

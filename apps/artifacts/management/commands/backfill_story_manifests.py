@@ -50,23 +50,27 @@ class Command(BaseCommand):
             return
 
         done = 0
+        skipped = 0
         failed = 0
         for artifact_id in artifact_ids:
-            # Re-fetched one at a time: a story deleted since the listing is skipped.
             artifact = Artifact.objects.filter(pk=artifact_id).first()
             if artifact is None:
+                skipped += 1
                 continue
             try:
-                backfill_missing_semantic_query_manifest(artifact)
+                wrote = backfill_missing_semantic_query_manifest(artifact)
             except Exception:
                 failed += 1
                 logger.exception("backfill_story_manifests: failed for story %s", artifact_id)
                 self.stderr.write(self.style.ERROR(f"  Failed story {artifact_id}"))
                 continue
+            if not wrote:
+                skipped += 1
+                continue
             done += 1
             self.stdout.write(f"  Backfilled story {artifact_id}")
 
-        summary = f"Backfilled {done} stories, {failed} failed."
+        summary = f"Backfilled {done} stories, {skipped} already done or deleted, {failed} failed."
         if failed:
             raise CommandError(summary)
         self.stdout.write(self.style.SUCCESS(summary))
