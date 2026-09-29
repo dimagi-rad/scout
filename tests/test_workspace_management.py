@@ -139,6 +139,36 @@ class TestWorkspaceCreate:
         assert resp.json()["name"] == "Empty WS"
         assert resp.json()["tenants"] == []
 
+    @pytest.mark.parametrize(
+        ("body", "error"),
+        [
+            ({"name": 5}, "name must be a string."),
+            ({"name": None}, "name must be a string."),
+            ({"name": ["x"]}, "name must be a string."),
+            ({"name": "x" * 256}, "name must be 255 characters or fewer."),
+            ({"name": "Valid", "tenant_ids": 5}, "tenant_ids must be a list."),
+            ({"name": "Valid", "tenant_ids": "abc"}, "tenant_ids must be a list."),
+        ],
+    )
+    def test_malformed_body_returns_400_and_creates_nothing(self, client, user, body, error):
+        """E5: mirrors PATCH's validation; these used to raise and return 500."""
+        client.force_login(user)
+        before = Workspace.objects.count()
+        resp = client.post("/api/workspaces/", body, content_type="application/json")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == error
+        assert Workspace.objects.count() == before
+
+    def test_create_name_at_limit_is_accepted(self, client, user):
+        client.force_login(user)
+        resp = client.post(
+            "/api/workspaces/",
+            {"name": "n" * 255, "tenant_ids": []},
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "n" * 255
+
 
 # ---------------------------------------------------------------------------
 # Workspace rename (PATCH)

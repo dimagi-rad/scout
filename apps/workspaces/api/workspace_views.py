@@ -223,6 +223,16 @@ def _members_lack_source_body(tenant, gaps, *, recheck_complete=True) -> dict:
     }
 
 
+def _name_error(name) -> str | None:
+    """Why ``name`` can't be a workspace name, or None; shared by create and rename."""
+    if not isinstance(name, str):
+        return "name must be a string."
+    name_limit = Workspace._meta.get_field("name").max_length
+    if len(name.strip()) > name_limit:
+        return f"name must be {name_limit} characters or fewer."
+    return None
+
+
 def _is_last_manager(workspace, membership):
     """Return True if membership is the sole manager of workspace."""
     if membership.role != WorkspaceRole.MANAGE:
@@ -416,11 +426,18 @@ class WorkspaceListView(APIView):
         return Response(results)
 
     def post(self, request):
-        name = request.data.get("name", "").strip()
+        name = request.data.get("name", "")
+        if error := _name_error(name):
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        name = name.strip()
         if not name:
             return Response({"error": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         tenant_ids = request.data.get("tenant_ids", [])
+        if not isinstance(tenant_ids, list):
+            return Response(
+                {"error": "tenant_ids must be a list."}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         accessible_tenant_ids = set(
             str(tid)
@@ -591,13 +608,9 @@ class WorkspaceDetailView(APIView):
                 {"error": "system_prompt must be a string."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if error := _name_error(name):
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
         name = name.strip()
-        name_limit = Workspace._meta.get_field("name").max_length
-        if len(name) > name_limit:
-            return Response(
-                {"error": f"name must be {name_limit} characters or fewer."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         if name:
             workspace.name = name
         if system_prompt is not None:
