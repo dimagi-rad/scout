@@ -75,6 +75,7 @@ class TestResolveConnectOpportunities:
                 "opportunities": [
                     {"id": 42, "name": "x" * 300},
                     {"id": 43, "name": None},
+                    {"id": 44},
                 ],
             },
         )
@@ -82,7 +83,7 @@ class TestResolveConnectOpportunities:
         memberships = await resolve_connect_opportunities(user, "fake-token")
 
         names = {tm.tenant.external_id: tm.tenant.canonical_name for tm in memberships}
-        assert names == {"42": "x" * 255, "43": "43"}
+        assert names == {"42": "x" * 255, "43": "43", "44": "44"}
 
     @pytest.mark.asyncio
     async def test_auth_error_raises(self, user, httpx_mock):

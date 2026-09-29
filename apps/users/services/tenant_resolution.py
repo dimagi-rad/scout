@@ -267,7 +267,7 @@ async def resolve_commcare_domains(
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="commcare",
             external_id=domain["domain_name"],
-            defaults={"canonical_name": domain["project_name"]},
+            defaults={"canonical_name": domain.get("project_name")},
         )
         fresh.append(tenant)
 
@@ -324,7 +324,7 @@ async def resolve_connect_opportunities(
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="commcare_connect",
             external_id=str(opp["id"]),
-            defaults={"canonical_name": opp["name"]},
+            defaults={"canonical_name": opp.get("name")},
         )
         fresh.append(tenant)
 
