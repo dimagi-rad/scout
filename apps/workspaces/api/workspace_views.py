@@ -949,8 +949,15 @@ class WorkspaceInviteDetailView(APIView):
             return err
         # Conditional: revoking an invite login already accepted would hide a live
         # member behind a REVOKED row (#561 G4).
-        if not _update_if_live(
+        revoked = _update_if_live(
             invite, status=WorkspaceInviteStatus.REVOKED, updated_at=timezone.now()
+        )
+        # Already REVOKED is the requested state (e.g. a retry after a dropped 204).
+        if (
+            not revoked
+            and not WorkspaceInvite.objects.filter(
+                pk=invite.pk, status=WorkspaceInviteStatus.REVOKED
+            ).exists()
         ):
             return _invite_no_longer_live()
         return Response(status=status.HTTP_204_NO_CONTENT)

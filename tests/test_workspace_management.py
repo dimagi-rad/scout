@@ -853,6 +853,16 @@ class TestInviteDetail:
         invite.refresh_from_db()
         assert invite.status == WorkspaceInviteStatus.REVOKED
 
+    def test_revoking_an_already_revoked_invite_succeeds(self, client, user, workspace):
+        """A retry after a dropped 204 finds the invite already in the requested state."""
+        invite = self._make_invite(workspace)
+        WorkspaceInvite.objects.filter(pk=invite.pk).update(status=WorkspaceInviteStatus.REVOKED)
+        client.force_login(user)
+
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+
+        assert resp.status_code == 204
+
     def test_manager_can_change_invite_role(self, client, user, workspace):
         invite = self._make_invite(workspace)
         client.force_login(user)
