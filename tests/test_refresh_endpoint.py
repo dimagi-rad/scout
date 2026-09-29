@@ -512,7 +512,13 @@ def test_refresh_status_state_matches_workspace_detail(manage_client, workspace,
 
     resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
 
-    assert resp.data["state"] == _detail_status(manage_client, workspace)
+    expected = {
+        "active": "available",
+        "provisioning_first_load": "provisioning",
+        "failed_first_load": "unavailable",
+        "refresh_failed_behind_active": "available",
+    }[scenario]
+    assert resp.data["state"] == expected == _detail_status(manage_client, workspace)
 
 
 @pytest.mark.django_db
