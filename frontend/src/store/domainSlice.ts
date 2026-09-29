@@ -83,7 +83,17 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
             if (JSON.stringify(domains) === JSON.stringify(current.domains)) return
-            set({ domains, activeDomainId: current.activeDomainId ?? defaultDomainId(domains) })
+            const activeId = current.activeDomainId
+            // Removed from the active workspace: every lookup of it would now miss,
+            // and a missing role reads as writable, so move to the default.
+            const removed =
+              activeId !== null &&
+              current.domains.some((d) => d.id === activeId) &&
+              !domains.some((d) => d.id === activeId)
+            set({
+              domains,
+              activeDomainId: activeId === null || removed ? defaultDomainId(domains) : activeId,
+            })
           })
           .catch(() => {
             // The list on screen is still usable, so a failed background refresh stays silent.

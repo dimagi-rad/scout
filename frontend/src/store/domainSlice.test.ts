@@ -151,6 +151,24 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     expect(statuses.every((s) => s === "loaded")).toBe(true)
   })
 
+  it("moves to the default workspace when the active one disappears from the list", async () => {
+    useAppStore.setState({ domains: [ws("a"), ws("b")] })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("b")])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("b")
+  })
+
+  it("keeps an active id that was never in the list, such as a deep link being checked", async () => {
+    useAppStore.setState({ activeDomainId: "linked" })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("b")])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("linked")
+  })
+
   it("keeps the same list object when nothing changed, so subscribers don't re-run", async () => {
     const before = useAppStore.getState().domains
     vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a")])
