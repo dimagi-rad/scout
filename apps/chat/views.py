@@ -235,16 +235,16 @@ async def chat_view(request):
     # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
-    # Before the agent is built, so its prompt already sees the load as started.
-    if role_satisfies(access.membership.role, WorkspaceRole.READ_WRITE):
-        await astart_chat_load(workspace=workspace, user=user, thread_id=thread_id)
-
     try:
         mcp_tools = await get_mcp_tools()
     except Exception as e:
         error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
         return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
+
+    # Before the agent is built, so its prompt already sees the load as started.
+    if role_satisfies(access.membership.role, WorkspaceRole.READ_WRITE):
+        await astart_chat_load(workspace=workspace, user=user, thread_id=thread_id)
 
     # Retry once with a fresh checkpointer on connection errors.
     try:

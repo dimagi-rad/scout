@@ -18,6 +18,12 @@ from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
+# The resume can't tell a live turn is still streaming on the same thread, and a
+# load refused in preflight settles in about a second. Starting after the
+# chat's one-sentence acknowledgement keeps the resume from writing the
+# checkpoint alongside it; a real load takes far longer than this delay.
+CHAT_LOAD_START_DELAY_SECONDS = 30
+
 
 @sync_to_async
 def adispatch_thread_materialization(
@@ -28,6 +34,8 @@ def adispatch_thread_materialization(
     user_id: str,
     load_intent: dict | None,
     queueing_lock: str | None = None,
+    start_in_seconds: int = 0,
+    only_unserved: bool = False,
 ) -> ThreadJob:
     """Defer ``materialize_workspace`` and create its PENDING ThreadJob in one commit.
 
@@ -36,16 +44,19 @@ def adispatch_thread_materialization(
     could finish before the row committed and the resume lookup found nothing,
     leaving the chat waiting on the janitor (#365).
     """
-    task = (
-        materialize_workspace.configure(queueing_lock=queueing_lock)
-        if queueing_lock
-        else materialize_workspace
-    )
+    options = {}
+    if queueing_lock:
+        options["queueing_lock"] = queueing_lock
+    if start_in_seconds:
+        options["schedule_in"] = {"seconds": start_in_seconds}
+    task = materialize_workspace.configure(**options) if options else materialize_workspace
+    extra = {"only_unserved": True} if only_unserved else {}
     with transaction.atomic():
         job = task.defer(
             workspace_id=str(workspace_id),
             user_id=str(user_id) if user_id else "",
             load_intent=load_intent,
+            **extra,
         )
         return ThreadJob.objects.create(
             thread_id=thread_id,
@@ -94,6 +105,10 @@ async def astart_chat_load(*, workspace, user, thread_id) -> ThreadJob | None:
             load_intent=load_intent,
             # Two chats opening at once both pass the pending check above.
             queueing_lock=f"chat-load:{workspace.id}",
+            start_in_seconds=CHAT_LOAD_START_DELAY_SECONDS,
+            # Sources already serving are published, not re-fetched: a deploy
+            # that changed the load fingerprint would otherwise reload them too.
+            only_unserved=True,
         )
     except AlreadyEnqueued:
         return None
