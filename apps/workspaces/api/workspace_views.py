@@ -32,7 +32,6 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
-    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -58,7 +57,8 @@ from apps.workspaces.services.member_coverage import (
     missing_for_user,
     requester_gaps,
 )
-from apps.workspaces.services.status import SYNCED_RUN_STATES, derive_schema_status
+from apps.workspaces.services.query_state import synced_runs
+from apps.workspaces.services.status import derive_schema_status
 from apps.workspaces.services.workspace_service import remove_workspace_tenant
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -329,16 +329,9 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # completed_at__isnull=False because Postgres sorts NULLs first under
-        # DESC — one state-bearing run without a timestamp would otherwise shadow
-        # every real one and return null.
         latest_run = (
-            MaterializationRun.objects.filter(
-                state__in=SYNCED_RUN_STATES,
-                completed_at__isnull=False,
-                tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
-            )
-            .order_by("-completed_at")
+            synced_runs()
+            .filter(tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"))
             .values("completed_at")[:1]
         )
 
@@ -512,12 +505,8 @@ class WorkspaceDetailView(APIView):
         )
 
         last_run_at = (
-            MaterializationRun.objects.filter(
-                state__in=SYNCED_RUN_STATES,
-                completed_at__isnull=False,
-                tenant_schema__tenant__in=tenants,
-            )
-            .order_by("-completed_at")
+            synced_runs()
+            .filter(tenant_schema__tenant__in=tenants)
             .values_list("completed_at", flat=True)
             .first()
         )
