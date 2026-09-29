@@ -16,6 +16,10 @@ from django.test import override_settings
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.access_verification_service import _load_claim_token
+from apps.users.services.credential_resolver import (
+    CredentialResolutionError,
+    _aresolve_oauth_credential,
+)
 from apps.users.services.tenant_resolution import _aoauth_connection
 from apps.users.services.upstream_denial import (
     adiscovery_connection,
@@ -194,6 +198,43 @@ class TestValueComparisonsAgainstEncryptedRows:
                 )
                 is None
             )
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_undecryptable_row_is_not_resolved_by_discovery_or_claims(self, user):
+        account = await SocialAccount.objects.acreate(
+            user=user, provider="ocs", uid="broken", extra_data={"team": "team-b"}
+        )
+        token = await SocialToken.objects.acreate(account=account, token="broken-access")
+        await TenantConnection.objects.acreate(
+            user=user,
+            provider="ocs",
+            credential_type="oauth",
+            scope_key="team-b",
+            social_account=account,
+        )
+        await _aencrypt_raw(token)
+        claim = SimpleNamespace(
+            request=SimpleNamespace(token_snapshot=(token.pk, "", None), credential=""),
+            observation=SimpleNamespace(account_identity=str(account.pk)),
+        )
+
+        with override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()):
+            assert await adiscovery_connection(user, "ocs", "") is None
+            assert await _load_claim_token(claim) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_undecryptable_row_resolves_to_reconnect(self, user):
+        account = await SocialAccount.objects.acreate(user=user, provider="commcare", uid="r")
+        token = await SocialToken.objects.acreate(account=account, token="resolve-access")
+        await _aencrypt_raw(token)
+
+        with override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()):
+            loaded = await SocialToken.objects.aget(pk=token.pk)
+            with pytest.raises(CredentialResolutionError) as excinfo:
+                await _aresolve_oauth_credential(loaded, "commcare")
+        assert excinfo.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
 
     def test_bind_checks_current_token_against_encrypted_row(self, user, commcare_token):
         token, conn = commcare_token

@@ -8,9 +8,8 @@ instances, ``values()`` and ``refresh_from_db()`` all see plaintext in Python.
 Stored ciphertext carries :data:`CIPHERTEXT_PREFIX` so plaintext rows and
 encrypted rows can coexist and be told apart. A provider token that itself began
 with the prefix would be mistaken for ciphertext; none of Scout's providers issue
-such tokens. Reads accept both; writes are
-still plaintext so that every process running during the next deploy can
-already read the ciphertext that deploy starts writing.
+such tokens. Reads accept both; writes are still plaintext so that every process
+running during the next deploy can already read the ciphertext it starts writing.
 """
 
 from __future__ import annotations
