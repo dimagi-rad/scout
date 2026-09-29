@@ -2570,7 +2570,13 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
             # revert to ACTIVE rather than stranding readable data in TEARDOWN.
             # Touching last_accessed_at gives it a full TTL before the sweep retries;
             # otherwise a drop that keeps failing would flip sibling views off and
-            # back on every sweep.
+            # back on every sweep. The cost: a transient failure now waits a TTL too.
+            logger.warning(
+                "teardown_schema: reverting schema %s to ACTIVE after a failed drop — "
+                "last_accessed_at=%s reset to now",
+                schema.id,
+                schema.last_accessed_at.isoformat() if schema.last_accessed_at else None,
+            )
             schema.state = SchemaState.ACTIVE
             schema.last_accessed_at = timezone.now()
             await schema.asave(update_fields=["state", "last_accessed_at"])
