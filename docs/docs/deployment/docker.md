@@ -26,26 +26,8 @@ network. Procrastinate uses PostgreSQL for jobs, not Redis. For multi-worker or
 multi-process production deployments, configure a shared Redis cache through
 [`REDIS_URL`](configuration.md#cache) so login lockouts and rate limits share state.
 
-> **Known limitation:** the API container reaches MCP at `http://mcp-server:8100/mcp`,
-> but `mcp-server` is not one of the hostnames the MCP server's DNS-rebinding
-> protection accepts (see [Manual deployment](manual.md#mcp-server)). The MCP server
-> rejects those requests, so agent tool calls fail in this stack. One way around it
-> is to give the MCP service an accepted name by merging this into
-> `docker-compose.override.yml` (keep its existing `ports` block):
->
-> ```yaml
-> services:
->   mcp-server:
->     networks:
->       default:
->         aliases: [scout-mcp-web]
->   api:
->     environment:
->       - MCP_SERVER_URL=http://scout-mcp-web:8100/mcp
-> ```
->
-> The host-based Honcho setup from the
-> [installation guide](../getting-started/installation.md) is unaffected; it reaches MCP on `localhost`.
+The API container reaches MCP by its Compose service name, `http://mcp-server:8100/mcp`,
+which the MCP server's DNS-rebinding protection accepts (see [Manual deployment](manual.md#mcp-server)).
 
 ## Configuration
 
