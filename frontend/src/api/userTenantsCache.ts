@@ -30,12 +30,13 @@ export function getUserTenantsCached(userId: string): Promise<UserTenant[]> {
 }
 
 /**
- * Forces a fresh fetch, replacing the cached promise. Use for an explicit
- * "Refresh" affordance.
+ * Forces a fresh fetch, replacing the cached promise, and asks the server to
+ * re-check upstream access rather than serve its hourly cache. Use for an
+ * explicit "Refresh" affordance.
  */
 export function refreshUserTenants(userId: string): Promise<UserTenant[]> {
   cachedUserId = userId
-  cachedPromise = authApi.getUserTenants().catch((err) => {
+  cachedPromise = authApi.getUserTenants({ refresh: true }).catch((err) => {
     if (cachedUserId === userId) cachedPromise = null
     throw err
   })

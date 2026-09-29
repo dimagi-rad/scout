@@ -13,7 +13,10 @@ _generate_stg_visits — including collision-suffixed names like ``status_2``.
 """
 
 from apps.knowledge.models import TableKnowledge
-from apps.transformations.services.connect_staging import visit_column_map
+from apps.transformations.services.connect_staging import (
+    folded_visit_aliases,
+    visit_column_map,
+)
 
 
 async def sync_column_notes(workspace, table_name: str, form_definitions: dict) -> TableKnowledge:
@@ -47,7 +50,15 @@ async def sync_column_notes(workspace, table_name: str, form_definitions: dict) 
     existing = await TableKnowledge.objects.filter(
         workspace=workspace, table_name=table_name
     ).afirst()
-    merged_notes = {**(existing.column_notes if existing else {}), **column_notes}
+    # A sync before #712 noted every field, including ones now folded into form_json;
+    # the agent would be told about columns that do not exist.
+    folded = folded_visit_aliases(form_definitions)
+    kept_existing = {
+        name: note
+        for name, note in (existing.column_notes if existing else {}).items()
+        if name not in folded
+    }
+    merged_notes = {**kept_existing, **column_notes}
 
     tk, _created = await TableKnowledge.objects.aupdate_or_create(
         workspace=workspace,

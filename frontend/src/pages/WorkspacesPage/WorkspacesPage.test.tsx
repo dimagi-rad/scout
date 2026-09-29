@@ -4,14 +4,14 @@ import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
 import { WorkspacesPage } from "./WorkspacesPage"
 import { useAppStore } from "@/store/store"
-import type { TenantMembership } from "@/store/domainSlice"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
 vi.mock("@/api/workspaces", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/workspaces")>()
   return { ...actual, workspaceApi: { ...actual.workspaceApi, getMyInvites: vi.fn().mockResolvedValue([]) } }
 })
 
-const ws = (id: string, display_name: string, created_at: string): TenantMembership => ({
+const ws = (id: string, display_name: string, created_at: string): WorkspaceListItem => ({
   id,
   name: display_name,
   display_name,
@@ -39,7 +39,7 @@ function rowIds() {
     .map((el) => el.getAttribute("data-testid")!.replace("workspace-row-", ""))
 }
 
-function many(n: number): TenantMembership[] {
+function many(n: number): WorkspaceListItem[] {
   // Newest first, as the server returns them.
   return Array.from({ length: n }, (_, i) => {
     const seq = String(n - i).padStart(3, "0")

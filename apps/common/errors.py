@@ -189,6 +189,12 @@ class CommCareAccessDeniedError(CommCareAuthError, UpstreamAccessDenied):
     """CommCare HQ returned 403 for a specific domain."""
 
 
+class CommCareUnavailableError(UpstreamUnavailable):
+    """CommCare HQ kept failing transiently (5xx, throttle, timeout) after retries."""
+
+    provider = "commcare"
+
+
 class ConnectAuthError(Exception):
     """Raised when CommCare Connect refuses our credential."""
 
@@ -211,6 +217,12 @@ class ConnectUnavailableError(UpstreamUnavailable):
     """Connect kept failing transiently (5xx, throttle, timeout) after retries."""
 
     provider = "commcare_connect"
+
+
+class OCSUnavailableError(UpstreamUnavailable):
+    """OCS kept failing transiently (5xx, throttle, timeout) after retries."""
+
+    provider = "ocs"
 
 
 class OCSAuthError(Exception):

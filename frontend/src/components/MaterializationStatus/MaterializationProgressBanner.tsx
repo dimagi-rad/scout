@@ -1,15 +1,16 @@
 import { Loader2, X } from "lucide-react"
 import { api } from "@/api/client"
-import type { ActiveJob } from "@/api/jobs"
+import type { ActiveJob, WorkspaceLoad } from "@/api/jobs"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 
 const CANCEL_FAILED = "Cancel failed — try again"
 
-interface Props {
-  job: ActiveJob
-  workspaceId: string
-}
+type Props = { workspaceId: string } & (
+  // The caller's own job shows Stop; another member's or a refresh's load is read-only.
+  | { job: ActiveJob; load?: never }
+  | { load: WorkspaceLoad; job?: never }
+)
 
 /**
  * Slim status card shown above the chat input while a materialization job is
@@ -21,20 +22,25 @@ interface Props {
  * so there is no denominator: the bar sweeps indeterminately and we show the
  * live row count instead of a fake fill.
  */
-export function MaterializationProgressBanner({ job, workspaceId }: Props) {
+export function MaterializationProgressBanner({ job, load, workspaceId }: Props) {
   const { canWrite } = useWorkspaceRole(workspaceId)
   const cancel = useRetryableAction(CANCEL_FAILED, canWrite)
+  const canStop = canWrite && job !== undefined
 
   const handleCancel = async (e: React.MouseEvent) => {
     e.preventDefault()
-    if (cancel.blocked) return
+    if (cancel.blocked || !job) return
     // On success stay "Stopping…" until the poll drops this banner.
     await cancel.run(() =>
       api.post(`/api/workspaces/${workspaceId}/jobs/${job.thread_job_id}/cancel/`, {}),
     )
   }
 
-  const progress = job.progress
+  const active = job ?? load
+  const progress = active?.progress ?? null
+  const sourceIndex = active?.source_index ?? null
+  const sourceTotal = active?.source_total ?? null
+  const tenantName = active?.tenant_name ?? null
   const rowsLoaded = progress?.rows_loaded ?? 0
   const rowsTotal = progress?.rows_total ?? null
   const percent = progress?.percent ?? null
@@ -61,6 +67,12 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
   }
 
   const stepText = step != null && totalSteps != null ? `Step ${step} of ${totalSteps}` : null
+  // Sequential loads run one bar per source, so say which of how many this is.
+  const positionText =
+    sourceIndex != null && sourceTotal != null && sourceTotal > 1
+      ? `Source ${sourceIndex} of ${sourceTotal}`
+      : null
+  const sourceText = [positionText, tenantName].filter(Boolean).join(" · ") || null
   const stopLabel =
     cancel.state === "pending"
       ? "Stopping…"
@@ -74,7 +86,7 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
     <div className="px-4 pt-1 pb-2">
       <div
         className="flex items-center gap-3 rounded-lg border border-blue-600/40 bg-blue-50 px-4 py-2.5 dark:border-blue-400/30 dark:bg-blue-950/40"
-        data-testid="materialization-progress-banner"
+        data-testid={job ? "materialization-progress-banner" : "workspace-load-banner"}
         role="status"
         aria-live="polite"
       >
@@ -91,8 +103,21 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
             >
               {sourceName ? `Fetching ${sourceName}` : "Materializing data"}
             </span>
+            {sourceText && (
+              <span
+                className="text-xs font-medium text-blue-700 dark:text-blue-300"
+                data-testid="materialization-banner-source-position"
+              >
+                {sourceText}
+              </span>
+            )}
             {stepText && (
-              <span className="text-xs text-blue-700/70 dark:text-blue-300/70">{stepText}</span>
+              <span
+                className="text-xs text-blue-700/70 dark:text-blue-300/70"
+                data-testid="materialization-banner-step"
+              >
+                {stepText}
+              </span>
             )}
             {percent != null && (
               <span
@@ -140,7 +165,7 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
           )}
         </div>
 
-        {canWrite && (
+        {canStop && (
           <button
             type="button"
             onClick={handleCancel}

@@ -4,8 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { createMemoryRouter, MemoryRouter, Outlet, Route, RouterProvider, Routes, useLocation } from "react-router-dom"
 import { useAppStore } from "@/store/store"
-import type { TenantMembership } from "@/store/domainSlice"
-import { workspaceApi } from "@/api/workspaces"
+import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
 import { Sidebar } from "@/components/Sidebar/Sidebar"
 import { ChatPanel } from "./ChatPanel"
 import { ChatRoute } from "./ChatRoute"
@@ -31,7 +30,7 @@ const history: UIMessage[] = [{
   parts: [{ type: "text", text: REPLY }],
 }]
 
-function workspace(id: string, name: string): TenantMembership {
+function workspace(id: string, name: string): WorkspaceListItem {
   return {
     id, name, display_name: name, is_auto_created: false, role: "manage", tenants: [],
     member_count: 1, schema_status: "available", last_synced_at: null, created_at: "2026-01-01",
@@ -170,7 +169,7 @@ describe("chat thread identity", () => {
       domains: [], domainsStatus: "idle", activeDomainId: null, threadId: crypto.randomUUID(),
     })
     const api = mockChatApi()
-    let finishLoading!: (domains: TenantMembership[]) => void
+    let finishLoading!: (domains: WorkspaceListItem[]) => void
     vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => {
       finishLoading = resolve
     }))

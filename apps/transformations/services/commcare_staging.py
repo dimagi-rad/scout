@@ -11,13 +11,19 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from django.db import transaction
 
 from apps.common.identifiers import dbt_column_alias, dbt_model_name, fit_identifier
 from apps.common.localized import localized_str
 from apps.transformations.models import TransformationAsset, TransformationScope
-from apps.transformations.services.repeat_identity import GeneratedRepeat, preserve_repeat_names
+from apps.transformations.services.repeat_identity import (
+    CASE_PROPERTIES_COLUMN,
+    REPEAT_ELEMENT_COLUMN,
+    GeneratedRepeat,
+    preserve_repeat_names,
+)
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.models import Tenant
 from mcp_server.event_time import event_time_sql
@@ -157,6 +163,117 @@ def _typed_expression(expr: str, question_type: str | None) -> str:
     return f"NULLIF({expr}, ''){cast}"
 
 
+# PostgreSQL rejects a table with more than 1600 columns (and a SELECT with more
+# than 1664 entries); staging models materialize as tables, so a big form or case
+# type failed the whole system stage (#712). Only a model that cannot build folds,
+# so every model that builds today keeps its columns; a folded model drops to
+# MAX_STAGING_COLUMNS so a few added questions don't reshape it again.
+POSTGRES_MAX_TABLE_COLUMNS = 1600
+MAX_STAGING_COLUMNS = 1500
+# Labels and containers carry no answer of their own, so they fold before answers do.
+_NON_ANSWER_TYPES = frozenset({"Trigger", "Group", "FieldList", "Repeat"})
+
+
+@dataclass(frozen=True)
+class StagedColumn:
+    question: dict
+    alias: str
+    # The untyped JSON extraction; columns with equal sources hold the same data.
+    source: str
+
+    def select_sql(self) -> str:
+        return f'    {_typed_expression(self.source, self.question.get("type"))} AS "{self.alias}"'
+
+
+def exceeds_table_column_limit(fixed_count: int, field_count: int) -> bool:
+    return fixed_count + field_count > POSTGRES_MAX_TABLE_COLUMNS
+
+
+def fold_to_column_budget(columns: list[StagedColumn], *, fixed_count: int) -> list[StagedColumn]:
+    """Return *columns* unchanged if the model fits a PostgreSQL table, else fold.
+
+    A folded model keeps ``MAX_STAGING_COLUMNS - fixed_count`` columns, in their
+    original order.
+
+    Selection depends only on the metadata, never on data or run state, so load
+    fingerprints and dependent views see the same model every run. Aliases are
+    assigned before folding, so a kept column is named exactly as it would be
+    without the cap. Repeated sources fold first (their data is already a
+    column), then labels and containers, then the latest fields in form order.
+    """
+    if not exceeds_table_column_limit(fixed_count, len(columns)):
+        return columns
+    budget = MAX_STAGING_COLUMNS - fixed_count
+    seen_sources: set[str] = set()
+    ranks: list[tuple[int, int]] = []
+    for index, column in enumerate(columns):
+        if column.source in seen_sources:
+            tier = 2
+        elif column.question.get("type") in _NON_ANSWER_TYPES:
+            tier = 1
+        else:
+            tier = 0
+        seen_sources.add(column.source)
+        ranks.append((tier, index))
+    kept = {index for _, index in sorted(ranks)[:budget]}
+    return [column for index, column in enumerate(columns) if index in kept]
+
+
+def warn_folded(tenant, model: str, *, total: int, kept: int, raw_column: str) -> None:
+    if kept < total:
+        logger.warning(
+            "Staging model %s for tenant %s folded %d of %d fields into %s to stay under "
+            "PostgreSQL's %d-column table limit (a folded model keeps %d columns)",
+            model,
+            tenant.external_id,
+            total - kept,
+            total,
+            raw_column,
+            POSTGRES_MAX_TABLE_COLUMNS,
+            MAX_STAGING_COLUMNS,
+        )
+
+
+def repeat_child_columns(
+    tenant,
+    model_name: str,
+    child_questions: list[dict],
+    seen_aliases: dict[str, int],
+    fallbacks: _NameFallbacks | None = None,
+) -> list[str]:
+    """Select lines for a repeat model's child questions, after its id and index columns.
+
+    A folded repeat also selects the whole element as ``repeat_data`` so its
+    dropped children stay queryable next to the kept ones.
+    """
+    staged_questions = [q for q in child_questions if _question_path(q)]
+    fixed_count = len(seen_aliases)
+    folding = exceeds_table_column_limit(fixed_count, len(staged_questions))
+    if folding:
+        seen_aliases[REPEAT_ELEMENT_COLUMN] = 1
+        fixed_count += 1
+    question_slugs = {
+        q["value"]: _leaf_slug(q["value"], kind="question", fallbacks=fallbacks)
+        for q in staged_questions
+    }
+    reserved_aliases = set(seen_aliases) | set(question_slugs.values())
+    columns = [
+        StagedColumn(
+            q,
+            dbt_column_alias(question_slugs[q["value"]], seen_aliases, reserved=reserved_aliases),
+            f"elem.value->>'{_sql_escape(q['value'].rsplit('/', 1)[-1])}'",
+        )
+        for q in staged_questions
+    ]
+    kept = fold_to_column_budget(columns, fixed_count=fixed_count)
+    warn_folded(
+        tenant, model_name, total=len(columns), kept=len(kept), raw_column=REPEAT_ELEMENT_COLUMN
+    )
+    select_parts = [f'    elem.value AS "{REPEAT_ELEMENT_COLUMN}"'] if folding else []
+    select_parts.extend(column.select_sql() for column in kept)
+    return select_parts
+
+
 def _collect_case_properties(case_type_name: str, metadata: dict) -> list[str]:
     """Walk app_definitions to collect all properties for a case type."""
     props: set[str] = set()
@@ -251,6 +368,11 @@ def _generate_case_type_asset(
     select_parts: list[str] = []
     # Seed with core column names so custom properties that collide get a suffix.
     seen_aliases: dict[str, int] = {(alias or expr): 1 for expr, alias in _CASE_CORE_COLUMNS}
+    fixed_count = len(_CASE_CORE_COLUMNS)
+    folding = exceeds_table_column_limit(fixed_count, len(properties))
+    if folding:
+        seen_aliases[CASE_PROPERTIES_COLUMN] = 1
+        fixed_count += 1
     property_columns = {
         prop: _slug_or_digest(
             prop, identity=f"prop:{prop}", kind="case property", fallbacks=fallbacks
@@ -264,10 +386,22 @@ def _generate_case_type_asset(
             select_parts.append(f'    {expr} AS "{alias}"')
         else:
             select_parts.append(f"    {expr}")
+    if folding:
+        select_parts.append(f"    {CASE_PROPERTIES_COLUMN}")
 
-    for prop in properties:
-        col = dbt_column_alias(property_columns[prop], seen_aliases, reserved=reserved_aliases)
-        select_parts.append(f"    properties->>'{_sql_escape(prop)}' AS \"{col}\"")
+    columns = [
+        StagedColumn(
+            {},
+            dbt_column_alias(property_columns[prop], seen_aliases, reserved=reserved_aliases),
+            f"properties->>'{_sql_escape(prop)}'",
+        )
+        for prop in properties
+    ]
+    kept = fold_to_column_budget(columns, fixed_count=fixed_count)
+    warn_folded(
+        tenant, model_name, total=len(columns), kept=len(kept), raw_column=CASE_PROPERTIES_COLUMN
+    )
+    select_parts.extend(column.select_sql() for column in kept)
 
     lines.append(",\n".join(select_parts))
     lines.append("FROM raw_cases")
@@ -316,21 +450,23 @@ def _generate_form_asset(
     }
     reserved_aliases = set(seen_aliases) | set(question_slugs.values())
 
-    for q in staged_questions:
-        value_path = q["value"]
-        json_path = _question_path_to_json_path(value_path)
-        col_name = dbt_column_alias(
-            question_slugs[value_path], seen_aliases, reserved=reserved_aliases
+    columns = [
+        StagedColumn(
+            q,
+            dbt_column_alias(question_slugs[q["value"]], seen_aliases, reserved=reserved_aliases),
+            f"form_data #>> {_question_path_to_json_path(q['value'])}",
         )
-        raw_expr = f"form_data #>> {json_path}"
-        q_type = q.get("type")
-        select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
+        for q in staged_questions
+    ]
+    model_name = dbt_model_name(f"stg_form_{model_name_slug}")
+    kept = fold_to_column_budget(columns, fixed_count=len(select_parts))
+    warn_folded(tenant, model_name, total=len(columns), kept=len(kept), raw_column="form_data")
+    select_parts.extend(column.select_sql() for column in kept)
 
     lines.append(",\n".join(select_parts))
     lines.append("FROM raw_forms")
     lines.append(f"WHERE xmlns = '{_sql_escape(form_xmlns)}'")
 
-    model_name = dbt_model_name(f"stg_form_{model_name_slug}")
     return TransformationAsset(
         name=model_name,
         description=f"Staging model for form: {localized_str(form_def.get('name')) or form_xmlns}",
@@ -361,22 +497,9 @@ def _generate_repeat_group_asset(
     ]
     # Seed with fixed column names so child question aliases that collide get a suffix.
     seen_aliases: dict[str, int] = {"form_id": 1, "repeat_index": 1}
-    staged_questions = [q for q in child_questions if _question_path(q)]
-    question_slugs = {
-        q["value"]: _leaf_slug(q["value"], kind="question", fallbacks=fallbacks)
-        for q in staged_questions
-    }
-    reserved_aliases = set(seen_aliases) | set(question_slugs.values())
-
-    for q in staged_questions:
-        value_path = q["value"]
-        leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = dbt_column_alias(
-            question_slugs[value_path], seen_aliases, reserved=reserved_aliases
-        )
-        raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
-        q_type = q.get("type")
-        select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
+    select_parts.extend(
+        repeat_child_columns(tenant, model_name, child_questions, seen_aliases, fallbacks)
+    )
 
     lines.append(",\n".join(select_parts))
     lines.append(f"FROM {{{{ ref('{parent_model}') }}}} f,")

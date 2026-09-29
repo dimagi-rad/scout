@@ -1,12 +1,37 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
+import { refreshUserTenants } from "@/api/userTenantsCache"
+import { useAppStore } from "@/store/store"
 import { ConnectionsPage } from "./ConnectionsPage"
 
 vi.mock("@/api/client", () => ({ api: { get: vi.fn() } }))
+vi.mock("@/api/userTenantsCache", () => ({ refreshUserTenants: vi.fn() }))
 
 describe("ConnectionsPage", () => {
+  beforeEach(() => vi.clearAllMocks())
+  afterEach(() => useAppStore.setState({ user: null }))
+
+  it("refreshes sources upstream and reloads connections without disconnecting", async () => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(path === "/api/auth/providers/" ? { providers: [] } : []),
+    )
+    vi.mocked(refreshUserTenants).mockResolvedValue([])
+    useAppStore.setState({
+      user: { id: "u1", email: "u@example.com", name: "U", is_staff: false, onboarding_complete: true },
+    })
+    render(<ConnectionsPage />)
+    const button = await screen.findByTestId("refresh-sources-button")
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith("/api/auth/connections/"))
+    vi.mocked(api.get).mockClear()
+
+    await act(async () => { button.click() })
+
+    expect(refreshUserTenants).toHaveBeenCalledExactlyOnceWith("u1")
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith("/api/auth/connections/"))
+  })
+
   it("waits for provider refresh before reading connection health", async () => {
     let completeRefresh!: (value: { providers: [] }) => void
     const refreshed = new Promise<{ providers: [] }>((resolve) => { completeRefresh = resolve })

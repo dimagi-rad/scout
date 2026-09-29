@@ -70,6 +70,7 @@ from apps.workspaces.services.invite_notifications import (
     notify_role_changed,
     send_pending_invite_email,
 )
+from apps.workspaces.services.load_progress import last_synced_by_tenant, workspace_ids_in_progress
 from apps.workspaces.services.member_coverage import (
     MembersLackTenant,
     add_tenant_covered_by_members,
@@ -585,6 +586,7 @@ class WorkspaceListView(APIView):
         )
         memberships = list(memberships)
         schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
+        loading_ids = workspace_ids_in_progress(m.workspace_id for m in memberships)
 
         # Surfaced per row (rather than filtering rows out) so the client can keep
         # denied workspaces addressable by URL while gating them in the UI and
@@ -618,6 +620,7 @@ class WorkspaceListView(APIView):
                     "missing_tenants": missing_tenants_payload(missing),
                     "member_count": m.member_count,
                     "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),
+                    "in_progress": m.workspace_id in loading_ids,
                     "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
                     "created_at": m.workspace.created_at.isoformat(),
                 }
@@ -748,6 +751,18 @@ class WorkspaceDetailView(APIView):
             .first()
         )
         last_synced_at = last_run_at.isoformat() if last_run_at else None
+        source_synced = last_synced_by_tenant(t.id for t in tenants)
+        sources = [
+            {
+                "tenant_id": str(t.id),
+                "tenant_name": t.canonical_name,
+                "provider": t.provider,
+                "last_synced_at": (
+                    source_synced[t.id].isoformat() if t.id in source_synced else None
+                ),
+            }
+            for t in tenants
+        ]
 
         return Response(
             {
@@ -760,6 +775,8 @@ class WorkspaceDetailView(APIView):
                 "system_prompt": "" if missing else workspace.system_prompt,
                 "missing_tenants": missing_tenants_payload(missing),
                 "schema_status": schema_status,
+                "in_progress": bool(workspace_ids_in_progress([workspace.id])),
+                "sources": sources,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
                 "created_at": workspace.created_at.isoformat(),

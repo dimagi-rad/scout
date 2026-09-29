@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { api } from "@/api/client"
+import { refreshUserTenants } from "@/api/userTenantsCache"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { oauthConnectUrl, type OAuthProvider, type OAuthProviderStatus } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
@@ -77,6 +78,8 @@ export function ConnectionsPage() {
   const fetchStoreDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const userId = useAppStore((s) => s.user?.id)
+  const [refreshingSources, setRefreshingSources] = useState(false)
   const [providers, setProviders] = useState<OAuthProvider[]>([])
   const [connections, setConnections] = useState<ApiKeyConnection[]>([])
   const [loadingProviders, setLoadingProviders] = useState(true)
@@ -187,6 +190,20 @@ export function ConnectionsPage() {
     }
   }
 
+  async function handleRefreshSources() {
+    if (!userId) return
+    setRefreshingSources(true)
+    setError(null)
+    try {
+      await refreshUserTenants(userId)
+      await Promise.all([fetchConnections(), fetchStoreDomains()])
+    } catch {
+      setError("Failed to refresh sources.")
+    } finally {
+      setRefreshingSources(false)
+    }
+  }
+
   async function handleDisconnect(providerId: string) {
     setDisconnecting(providerId)
     setError(null)
@@ -281,14 +298,25 @@ export function ConnectionsPage() {
       <section className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-medium">Connections</h2>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setDialogState({ mode: "add" })}
-            data-testid="add-connection-button"
-          >
-            Add API Connection
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleRefreshSources}
+              disabled={refreshingSources || !userId}
+              data-testid="refresh-sources-button"
+            >
+              {refreshingSources ? "Refreshing..." : "Refresh sources"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setDialogState({ mode: "add" })}
+              data-testid="add-connection-button"
+            >
+              Add API Connection
+            </Button>
+          </div>
         </div>
 
         {loadingConnections ? (

@@ -4,11 +4,11 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 
 import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
 import { useAppStore } from "@/store/store"
-import type { TenantMembership } from "@/store/domainSlice"
 import type { Thread, ThreadsStatus } from "@/store/uiSlice"
 import { Sidebar } from "./Sidebar"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
-const workspaces: TenantMembership[] = [
+const workspaces: WorkspaceListItem[] = [
   {
     id: "workspace-1",
     name: "global-operations",

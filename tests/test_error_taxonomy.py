@@ -10,6 +10,7 @@ from apps.common.errors import (
     CommCareAccessDeniedError,
     CommCareAuthError,
     CommCareTokenExpiredError,
+    CommCareUnavailableError,
     ConnectAccessDeniedError,
     ConnectAuthError,
     ConnectTokenExpiredError,
@@ -19,6 +20,7 @@ from apps.common.errors import (
     OCSAccessDeniedError,
     OCSAuthError,
     OCSTokenExpiredError,
+    OCSUnavailableError,
     UpstreamAccessDenied,
     UpstreamTokenExpired,
 )
@@ -126,6 +128,8 @@ class TestBeforeSend:
             OCSTokenExpiredError,
             OCSAccessDeniedError,
             ConnectUnavailableError,
+            CommCareUnavailableError,
+            OCSUnavailableError,
         ],
     )
     def test_loader_leaf_classes_are_dropped(self, leaf):

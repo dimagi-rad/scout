@@ -346,7 +346,10 @@ async def test_write_multi_tenant_guidance_matches_single_tenant(
     assert _MULTI_TENANT_NAMESPACE_HINT in context
     if loaded:
         assert "Data is loaded" in context
-        assert "Run materialization to rebuild the semantic catalog" in context
+        # A chat rebuilds the catalog itself; only a headless run reloads for it (#714).
+        assert ("Run materialization to rebuild the semantic catalog" in context) is not (
+            interactive
+        )
     else:
         assert "No data has been loaded yet" in context
         assert ("returns IMMEDIATELY" in context) is interactive

@@ -4,14 +4,6 @@ import { workspaceApi, workspaceHasAccess, type WorkspaceListItem } from "@/api/
 import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
 import type { AccountSessionScope } from "./accountSession"
 
-// TenantMembership kept as alias so existing imports continue to work
-export type TenantMembership = WorkspaceListItem & {
-  // Legacy compat fields, kept so referencing code still typechecks
-  provider?: string
-  tenant_id?: string
-  tenant_name?: string
-}
-
 export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 
 /**
@@ -21,7 +13,7 @@ export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 export type RevalidateResult = "fetched" | "failed" | "skipped"
 
 export interface DomainSlice {
-  domains: TenantMembership[]
+  domains: WorkspaceListItem[]
   activeDomainId: string | null
   workspaceGeneration: number
   domainsStatus: DomainsStatus
@@ -46,7 +38,7 @@ export interface DomainSlice {
 // one whose upstream access was removed — landing there would just show the
 // lost-access modal. A deep link to an orphan still works (the URL→store sync
 // adopts it); this only governs the no-URL default.
-function defaultDomainId(domains: TenantMembership[]): string | null {
+function defaultDomainId(domains: WorkspaceListItem[]): string | null {
   return (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
 }
 
@@ -54,8 +46,8 @@ function defaultDomainId(domains: TenantMembership[]): string | null {
 // now miss, and a missing role reads as writable, so move to the default. An id
 // that was never listed, such as a deep link still being checked, is kept.
 function nextActiveDomainId(
-  prev: TenantMembership[],
-  next: TenantMembership[],
+  prev: WorkspaceListItem[],
+  next: WorkspaceListItem[],
   activeId: string | null,
 ): string | null {
   if (activeId === null) return defaultDomainId(next)

@@ -495,8 +495,10 @@ async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
 
 def _expected_load_guidance(state, *, interactive, write_capable):
     if state == SchemaState.ACTIVE:
+        if write_capable and interactive:
+            return graph_base._SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
         if write_capable:
-            return graph_base._LOADED_REBUILD_GUIDANCE
+            return graph_base._HEADLESS_LOADED_REBUILD_GUIDANCE
         return graph_base._READ_ONLY_LOADED_SQL_GUIDANCE
     if not write_capable:
         return graph_base._READ_ONLY_MATERIALIZE_GUIDANCE

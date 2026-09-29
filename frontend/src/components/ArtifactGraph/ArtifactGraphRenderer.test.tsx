@@ -106,6 +106,13 @@ describe("ArtifactGraphRenderer", () => {
     )
   })
 
+  it("does not render the internal prd brief", async () => {
+    mockedPost.mockResolvedValue({ columns: ["date", "visits__count"], rows: [["2026-06-24", 12]], row_count: 1 })
+    render(<ArtifactGraphRenderer artifact={artifact()} workspaceId="workspace-1" />)
+    await waitFor(() => expect(screen.getAllByText("12").length).toBeGreaterThan(0))
+    expect(screen.queryByText("Shows visits over time.")).not.toBeInTheDocument()
+  })
+
   it("refreshes published data without resetting the selected custom period or renderer DOM", async () => {
     mockedPost.mockResolvedValue({ columns: ["date", "visits__count"], rows: [["2026-06-24", 12]], row_count: 1 })
     const graph = artifact()

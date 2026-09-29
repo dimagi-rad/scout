@@ -4,7 +4,7 @@ import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { workspaceApi } from "@/api/workspaces"
 import { type UserTenant } from "@/api/auth"
-import { getUserTenantsCached } from "@/api/userTenantsCache"
+import { getUserTenantsCached, refreshUserTenants } from "@/api/userTenantsCache"
 import { ApiError } from "@/api/client"
 import {
   Dialog,
@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { AlertTriangle, Check } from "lucide-react"
+import { AlertTriangle, Check, RefreshCw } from "lucide-react"
 import {
   SearchFilterBar,
   type FilterGroup,
@@ -48,6 +48,8 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [sourcesLoading, setSourcesLoading] = useState(true)
   const [sourcesError, setSourcesError] = useState<string | null>(null)
   const [sourcesAttempt, setSourcesAttempt] = useState(0)
+  const [sourcesRefreshing, setSourcesRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState("")
   const [providerFilter, setProviderFilter] = useState<string | null>(null)
@@ -78,6 +80,30 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       cancelled = true
     }
   }, [userId, sourcesAttempt])
+
+  async function handleRefreshSources() {
+    if (!userId) return
+    setSourcesRefreshing(true)
+    setRefreshError(null)
+    try {
+      const fresh = await refreshUserTenants(userId)
+      if (!isCurrentAccount()) return
+      setSources(fresh)
+      setSourcesError(null)
+      // A refresh can revoke sources; a selection or filter that no longer exists
+      // would be unfixable because its row and chip are gone. Pruning changes the
+      // selected set, which invalidates a prior "create anyway" (see toggleSource).
+      const freshIds = new Set(fresh.map((t) => t.tenant_uuid))
+      setSelected((prev) => new Set([...prev].filter((id) => freshIds.has(id))))
+      setDuplicateAcknowledged(false)
+      setProviderFilter((prev) => (fresh.some((t) => t.provider === prev) ? prev : null))
+    } catch (err) {
+      if (!isCurrentAccount()) return
+      setRefreshError(err instanceof ApiError ? err.message : "Failed to refresh data sources")
+    } finally {
+      if (isCurrentAccount()) setSourcesRefreshing(false)
+    }
+  }
 
   // Ensure the user's workspace list is loaded so duplicate detection has data
   // to compare against, even if the modal is opened before the list is fetched.
@@ -201,15 +227,37 @@ export function CreateWorkspaceModal({ onClose }: Props) {
             <div>
               <div className="mb-1 flex items-center justify-between">
                 <Label>Data sources</Label>
-                <span className="text-xs text-muted-foreground">
-                  {selected.size > 0
-                    ? `${selected.size} selected`
-                    : "Required"}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {selected.size > 0
+                      ? `${selected.size} selected`
+                      : "Required"}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleRefreshSources}
+                    disabled={sourcesLoading || sourcesRefreshing}
+                    data-testid="create-sources-refresh"
+                  >
+                    <RefreshCw className={sourcesRefreshing ? "animate-spin" : undefined} />
+                    {sourcesRefreshing ? "Refreshing…" : "Refresh sources"}
+                  </Button>
+                </div>
               </div>
               <p className="mb-2 text-xs text-muted-foreground">
                 Choose at least one data source for the workspace.
               </p>
+              {refreshError && (
+                <p
+                  className="mb-2 text-xs text-destructive"
+                  role="alert"
+                  data-testid="create-sources-refresh-error"
+                >
+                  {refreshError}
+                </p>
+              )}
 
               {sourcesLoading ? (
                 <p className="py-4 text-center text-sm text-muted-foreground">

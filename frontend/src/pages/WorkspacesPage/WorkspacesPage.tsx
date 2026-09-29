@@ -1,8 +1,7 @@
 import { useState, useMemo, useEffect } from "react"
 import { useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
-import { workspaceApi, type AwaitingInvite } from "@/api/workspaces"
-import type { TenantMembership } from "@/store/domainSlice"
+import { workspaceApi, type AwaitingInvite, type WorkspaceListItem } from "@/api/workspaces"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { RoleBadge } from "@/components/RoleBadge"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
@@ -34,7 +33,7 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 ]
 
 function compareWorkspaces(sort: SortKey) {
-  return (a: TenantMembership, b: TenantMembership): number => {
+  return (a: WorkspaceListItem, b: WorkspaceListItem): number => {
     if (sort === "name") {
       return (
         a.display_name.localeCompare(b.display_name, undefined, { numeric: true }) ||
@@ -70,7 +69,7 @@ function TenantList({ tenants }: { tenants: { id: string; tenant_name: string; p
   )
 }
 
-function WorkspaceRow({ workspace, onClick }: { workspace: TenantMembership; onClick: () => void }) {
+function WorkspaceRow({ workspace, onClick }: { workspace: WorkspaceListItem; onClick: () => void }) {
   const tenants = workspace.tenants ?? []
   const { Icon } = getProviderMeta(tenants[0]?.provider)
 

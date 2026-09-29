@@ -3,10 +3,10 @@ import { StrictMode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
-import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
 import { ChatPanel } from "./ChatPanel"
 import type { ThreadArtifactSummary } from "./ChatThreadSidePanel"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
 vi.mock("@/contexts/WorkspaceJobsContext", () => ({
   useWorkspaceJobs: () => ({
@@ -31,7 +31,7 @@ type DeferredArtifactRequest = {
   resolve: (response: Response) => void
 }
 
-function workspace(id: string, name: string): TenantMembership {
+function workspace(id: string, name: string): WorkspaceListItem {
   return {
     id, name, display_name: name, is_auto_created: false, role: "manage", tenants: [],
     member_count: 1, schema_status: "available", last_synced_at: null, created_at: "2026-01-01",

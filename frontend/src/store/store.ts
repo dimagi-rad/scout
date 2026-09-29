@@ -2,14 +2,13 @@ import { create, type StoreApi } from "zustand"
 import { createArtifactSlice, type ArtifactSlice } from "./artifactSlice"
 import { createAuthSlice, type AuthSlice } from "./authSlice"
 import { createUiSlice, type UiSlice } from "./uiSlice"
-import { createDictionarySlice, type DictionarySlice } from "./dictionarySlice"
 import { createDatasetSlice, type DatasetSlice } from "./datasetSlice"
 import { createKnowledgeSlice, type KnowledgeSlice } from "./knowledgeSlice"
 import { createRecipeSlice, type RecipeSlice } from "./recipeSlice"
 import { createDomainSlice, type DomainSlice } from "./domainSlice"
 import type { AccountSessionScope } from "./accountSession"
 
-export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DictionarySlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice & AccountSessionScope
+export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice & AccountSessionScope
 
 export function createAppStore() {
   let session: { snapshot: AppStore | null } | null = null
@@ -28,7 +27,6 @@ export function createAppStore() {
       accountSession: { isCurrent: () => session === owner },
       ...createArtifactSlice(...args),
       ...createUiSlice(...args),
-      ...createDictionarySlice(...args),
       ...createDatasetSlice(...args),
       ...createKnowledgeSlice(...args),
       ...createRecipeSlice(...args),
@@ -55,7 +53,6 @@ export function createAppStore() {
       threadId: crypto.randomUUID(),
       artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
       activeArtifactId: null,
-      dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, dictionaryWarning: null, selectedTable: null,
       threads: [], threadsStatus: "idle", threadsAccessLostMessage: null,
       threadsAccessRetryable: false,
       datasetCatalog: null, datasetStatus: "idle", datasetError: null,
