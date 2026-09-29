@@ -76,6 +76,20 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
     expect(useAppStore.getState().threadsAccessLostMessage).toBe(message)
   })
 
+  it("surfaces a no-sources denial without offering a verification retry", async () => {
+    const message =
+      "This workspace has no data sources, so there is nothing to load or query. " +
+      "A manager can delete it."
+    vi.spyOn(api, "get").mockRejectedValue(
+      new ApiError(403, message, { error: message, reason: "no_sources" }),
+    )
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().threadsAccessLostMessage).toBe(message)
+    expect(useAppStore.getState().threadsAccessRetryable).toBe(false)
+  })
+
   it("does not set an access-lost message for a generic outage", async () => {
     vi.spyOn(api, "get").mockRejectedValue(new Error("503 Service Unavailable"))
 

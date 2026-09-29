@@ -54,14 +54,15 @@ def test_member_without_live_tenant_lost_access(client, user):
 
 
 @pytest.mark.django_db
-def test_zero_tenant_workspace_has_access(client, user):
+def test_zero_tenant_workspace_has_no_access(client, user):
+    """The gate denies a workspace with no sources (#381); the list agrees."""
     ws = Workspace.objects.create(name="Tenantless", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
 
     client.force_login(user)
     resp = client.get("/api/workspaces/")
 
-    assert _entry(resp, ws.id)["has_access"] is True
+    assert _entry(resp, ws.id)["has_access"] is False
 
 
 @pytest.mark.django_db

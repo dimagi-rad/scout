@@ -42,6 +42,8 @@ from apps.users.services.credential_resolver import (
     aresolve_credential,
 )
 from apps.workspaces.access import (
+    NO_SOURCES,
+    NO_SOURCES_MESSAGE,
     TENANT_ACCESS_LOST,
     WorkspaceAccess,
     access_denied_body,
@@ -672,6 +674,11 @@ async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict
         error = "The requesting user can't use these data sources: " + (
             ", ".join(access.lost_tenant_names) or "one or more of this workspace's sources"
         )
+    elif access is not None and access.denied_reason == NO_SOURCES:
+        # No role change fixes this; there is nothing to load.
+        code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        error = NO_SOURCES_MESSAGE
+        results = []
     elif access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
         code = FRESHNESS_ERROR_CODES[access.denied_reason]
         error = access_denied_body(access)["error"]
@@ -2482,6 +2489,8 @@ def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
             "Connections; if their access was removed in the provider, an admin there "
             "must restore it."
         )
+    if access is not None and access.denied_reason == NO_SOURCES:
+        return NO_SOURCES_MESSAGE
     if access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
         return f"The requesting user's access could not be confirmed: {access_denied_body(access)['error']}"
     return _ROLE_DENIED_MESSAGE

@@ -70,6 +70,21 @@ describe("LostAccessModal", () => {
     expect(screen.queryByTestId("lost-access-goto-skelly")).toBeNull()
   })
 
+  it("points a workspace with no sources at deleting it, not at reconnecting (#381)", () => {
+    useAppStore.setState({
+      domains: [{ ...ws("empty", false), tenants: [] }, ws("live", true)],
+      activeDomainId: "empty",
+    })
+    renderModal()
+
+    expect(screen.getByText(/“empty” has no data sources/)).toBeInTheDocument()
+    expect(screen.getByTestId("lost-access-no-sources")).toHaveTextContent("A manager can delete it")
+    expect(screen.getByTestId("lost-access-workspace-settings")).toHaveTextContent("Leave or delete")
+    expect(screen.queryByTestId("lost-access-connections")).toBeNull()
+    expect(screen.queryByTestId("lost-access-retry-verification")).toBeNull()
+    expect(screen.queryByText(/reconnect it in Connected Accounts/)).toBeNull()
+  })
+
   it("lists accessible workspaces alphabetically by display name", () => {
     useAppStore.setState({
       domains: [ws("skelly", false), ws("zulu", true), ws("bravo", true), ws("Alpha", true)],

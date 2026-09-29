@@ -1,12 +1,15 @@
 """The single source of truth for "can this user access this workspace?".
 
 Effective access = the user is a ``WorkspaceMembership`` of the workspace AND
-(the workspace has no tenants OR the user can use EVERY one of its tenants with
-their own credential). All-of, not any-of (#380): a workspace exposes one merged
-view over all of its tenants, so a member covering only some of them would read
-the rest. A member who loses one tenant upstream therefore loses the workspace
-(manage *and* query) and regains it automatically once coverage is restored — no
-human-in-Scout reinstatement, and the membership itself is never deleted.
+the user can use EVERY one of its tenants with their own credential. A workspace
+with no tenants cannot be created (#381), so one that exists anyway is denied as
+``NO_SOURCES`` and logged rather than opened to every member.
+
+All-of, not any-of (#380): a workspace exposes one merged view over all of its
+tenants, so a member covering only some of them would read the rest. A member
+who loses one tenant upstream therefore loses the workspace (manage *and* query)
+and regains it automatically once coverage is restored — no human-in-Scout
+reinstatement, and the membership itself is never deleted.
 
 "Can use" is local credential readiness from
 ``apps.workspaces.services.credential_coverage`` rather than bare
@@ -73,6 +76,7 @@ from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 NOT_MEMBER = "not_member"
 TENANT_ACCESS_LOST = "tenant_access_lost"
 INSUFFICIENT_ROLE = "insufficient_role"
+NO_SOURCES = "no_sources"
 
 _ROLE_RANK = {
     WorkspaceRole.READ: 0,
@@ -83,11 +87,16 @@ _ROLE_RANK = {
 _GENERIC_DENIED = "Workspace not found or access denied."
 TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
 TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
+NO_SOURCES_MESSAGE = (
+    "This workspace has no data sources, so there is nothing to load or query. "
+    "A manager can delete it."
+)
 
 _PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 
-# The access_cache tag that limits the coverage-denial log to once per request.
+# The access_cache tags that limit each denial log to once per request.
 _COVERAGE_DENIAL_LOGGED = "coverage_denial_logged"
+_NO_SOURCES_LOGGED = "no_sources_logged"
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +107,9 @@ class WorkspaceAccess:
 
     ``workspace``/``membership`` are set iff access is granted. On denial they are
     ``None`` and ``denied_reason`` is one of ``NOT_MEMBER`` / ``TENANT_ACCESS_LOST`` /
-    ``INSUFFICIENT_ROLE`` or an upstream-freshness reason; for ``TENANT_ACCESS_LOST``,
-    ``missing_tenants`` lists each workspace tenant the member cannot use, with its
-    remedy.
+    ``INSUFFICIENT_ROLE`` / ``NO_SOURCES`` or an upstream-freshness reason; for
+    ``TENANT_ACCESS_LOST``, ``missing_tenants`` lists each workspace tenant the
+    member cannot use, with its remedy.
     """
 
     workspace: object | None = None
@@ -254,6 +263,8 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
             body["lost_tenants"] = list(result.lost_tenant_names)
             body["missing_tenants"] = missing_tenants_payload(result.missing_tenants)
         return body
+    if result.denied_reason == NO_SOURCES:
+        return {"error": NO_SOURCES_MESSAGE, "reason": NO_SOURCES}
     return {"error": _GENERIC_DENIED}
 
 
@@ -424,6 +435,24 @@ def _coverage_denied(user, workspace_id, missing) -> WorkspaceAccess:
     return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
 
 
+def _no_sources_denied(user, workspace_id) -> WorkspaceAccess:
+    """Deny a workspace with no sources: nothing defines who may read it (#381).
+
+    ERROR so Sentry raises it: creating one and emptying one are both refused,
+    so reaching this means a path that bypasses them exists. Deduplicated per
+    HTTP request only; the MCP server and worker open no scope, so they log
+    each resolution.
+    """
+    if access_cache.first_in_scope(user, workspace_id, _NO_SOURCES_LOGGED):
+        logger.error(
+            "workspace_access_denied_no_sources user_id=%s workspace_id=%s",
+            user.pk,
+            workspace_id,
+            extra={"user_id": user.pk, "workspace_id": str(workspace_id)},
+        )
+    return WorkspaceAccess(denied_reason=NO_SOURCES)
+
+
 def _resolve_local_access_ex(
     user, workspace_id, *, minimum_role: str, require_coverage: bool
 ) -> WorkspaceAccess:
@@ -437,8 +466,11 @@ def _resolve_local_access_ex(
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     missing = ()
     if require_coverage:
-        missing = missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
+        tenants = _workspace_tenants(wm.workspace)
+        missing = missing_workspace_tenants(user, tenants)
         access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
+        if not tenants:
+            return _no_sources_denied(user, wm.workspace_id)
     if missing:
         return _coverage_denied(user, wm.workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):
@@ -455,8 +487,11 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
         )
     except WorkspaceMembership.DoesNotExist:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
-    missing = await amissing_workspace_tenants(user, await _aworkspace_tenants(wm.workspace))
+    tenants = await _aworkspace_tenants(wm.workspace)
+    missing = await amissing_workspace_tenants(user, tenants)
     access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
+    if not tenants:
+        return _no_sources_denied(user, wm.workspace_id)
     if missing:
         return _coverage_denied(user, wm.workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):
@@ -487,7 +522,7 @@ def resolve_workspace_access_ex(
     the fix itself would be refused. The exemption applies only
     when coverage is what denied: a covered caller still goes through freshness,
     and a caller let in by the exemption skips it (it rechecks the coverage they
-    lack). With the all-of switch off there is no exemption at all.
+    lack). With the all-of switch off only a workspace with no sources is exempt.
     """
     # Only the coverage-checked decision is cached; the exemption is derived per
     # call so an exempt grant can never be served to a data path.
@@ -510,11 +545,18 @@ def resolve_workspace_access_ex(
         )
         if not result.retryable:
             access_cache.store(user, workspace_id, options, result, since=since)
-    if require_coverage or not all_of_access_enforced() or not result.missing_tenants:
+    if require_coverage or not _coverage_exempt(result):
         return result
     return _resolve_local_access_ex(
         user, workspace_id, minimum_role=minimum_role, require_coverage=False
     )
+
+
+def _coverage_exempt(result: WorkspaceAccess) -> bool:
+    # No sources is always exempt: the delete it needs is the only way out of it.
+    if result.denied_reason == NO_SOURCES:
+        return True
+    return all_of_access_enforced() and bool(result.missing_tenants)
 
 
 def _with_live_role(cached, role, user, workspace_id, minimum_role):
@@ -615,7 +657,9 @@ async def aresolve_local_access_many(
     results = {m.workspace_id: WorkspaceAccess(denied_reason=NOT_MEMBER) for m in memberships}
     for m in own:
         missing = missing_by_ws[m.workspace_id]
-        if missing:
+        if not tenants_by_ws[m.workspace_id]:
+            results[m.workspace_id] = _no_sources_denied(user, m.workspace_id)
+        elif missing:
             results[m.workspace_id] = WorkspaceAccess(
                 denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing
             )
