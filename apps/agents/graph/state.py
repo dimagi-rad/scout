@@ -131,19 +131,27 @@ UNFINISHED_TURN_DESCRIPTIONS = {
 TRUNCATED_TOOL_CALLS_NODE = "truncated_tool_calls"
 
 # A request that reliably overruns max_tokens (say, one huge artifact) would
-# otherwise retry at 16k output tokens a pass until the recursion limit.
-MAX_TRUNCATED_RETRIES = 2
+# otherwise retry at 16k output tokens a pass until the recursion limit. Two
+# truncated turns in a row means one retry.
+MAX_CONSECUTIVE_TRUNCATED_TURNS = 2
 
 
 def truncated_retries_exhausted(messages: list[BaseMessage]) -> bool:
-    """Whether this turn (since the last human message) has hit max_tokens mid-call too often."""
+    """Whether the latest model turns were cut off mid-call too many times in a row.
+
+    Only consecutive truncations count, so a run that recovered from one and
+    carried on isn't penalised for an unrelated one later.
+    """
     count = 0
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
             break
-        if truncated_tool_calls(message):
-            count += 1
-    return count >= MAX_TRUNCATED_RETRIES
+        if not isinstance(message, AIMessage):
+            continue
+        if not truncated_tool_calls(message):
+            break
+        count += 1
+    return count >= MAX_CONSECUTIVE_TRUNCATED_TURNS
 
 
 def reject_truncated_tool_calls(state: "AgentState") -> dict:

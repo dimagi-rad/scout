@@ -12,7 +12,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 from apps.agents.graph.base import MODEL_STOPPED_MESSAGES, build_agent_graph
-from apps.agents.graph.state import TRUNCATED_TOOL_CALL_MESSAGE
+from apps.agents.graph.state import (
+    TRUNCATED_TOOL_CALL_MESSAGE,
+    reject_truncated_tool_calls,
+    truncated_retries_exhausted,
+)
 from apps.agents.tools.artifact_manager_agent import _build_artifact_manager_graph
 from apps.agents.tools.canvas_manager_agent import _build_canvas_manager_graph
 
@@ -157,3 +161,32 @@ async def test_subagent_gives_up_after_repeated_truncation(prefix, tools_factory
     last = result["messages"][-1]
     assert isinstance(last, ToolMessage)
     assert last.content == TRUNCATED_TOOL_CALL_MESSAGE
+
+
+def _ok_turn(call_id: str) -> list:
+    return [
+        AIMessage(content="", tool_calls=[{"id": call_id, "name": "write", "args": {}}]),
+        ToolMessage(content="written", tool_call_id=call_id, name="write"),
+    ]
+
+
+def _rejected_turn(call_id: str) -> list:
+    truncated = _truncated(call_id)
+    return [truncated, *reject_truncated_tool_calls({"messages": [truncated]})["messages"]]
+
+
+def test_only_consecutive_truncations_exhaust_the_retries():
+    """A run that recovered from one truncation isn't stopped by a later, unrelated one."""
+    recovered = [
+        HumanMessage(content="hi"),
+        *_rejected_turn("t-1"),
+        *_ok_turn("ok-1"),
+        _truncated("t-2"),
+    ]
+    assert not truncated_retries_exhausted(recovered)
+
+    back_to_back = [HumanMessage(content="hi"), *_rejected_turn("t-1"), _truncated("t-2")]
+    assert truncated_retries_exhausted(back_to_back)
+
+    earlier_turn = [*_rejected_turn("t-0"), HumanMessage(content="again"), _truncated("t-1")]
+    assert not truncated_retries_exhausted(earlier_turn)
