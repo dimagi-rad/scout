@@ -26,7 +26,9 @@ Create a `.env` file or export environment variables. See [Configuration](config
 
 The API, MCP server, and background worker need `CUBE_API_URL`,
 `CUBE_VALIDATOR_URL`, and `CUBEJS_API_SECRET`. Set the URLs to your private Cube
-services and use the same signing secret on Scout and Cube. Cube must be able
+services and use the same signing secret on Scout and Cube. Set
+`MANAGED_DATABASE_URL` and `MCP_SHARED_SECRET` as well; the production settings
+have no fallback for either. Cube must be able
 to reach Scout's platform and managed databases. Deploy the runtime and validator
 from this repository's `cube_config/`; an unconfigured upstream Cube service is
 not a substitute. See the [Docker guide](docker.md) for the bundled services.
@@ -62,14 +64,14 @@ For production, consider running uvicorn behind a process manager like systemd o
 
 ## MCP Server
 
-The MCP server runs as a separate process and provides tool-based data access (SQL execution, table metadata) to the LangGraph agent.
+The MCP server runs as a separate process and provides the LangGraph agent's data tools: semantic queries, read-only SQL, table metadata, and materialization.
 
 ```bash
 DJANGO_SETTINGS_MODULE=config.settings.production \
   uv run python -m mcp_server --transport streamable-http
 ```
 
-By default it listens on port 8100. Set `MCP_SERVER_URL` on the backend to point to the MCP server if it runs on a different host.
+By default it listens on `127.0.0.1:8100`; pass `--host` and `--port` to change that. Set `MCP_SERVER_URL` on the backend to point to the MCP server if it runs on a different host, and set the same `MCP_SHARED_SECRET` on the MCP server, API and worker.
 
 ## Background worker
 
@@ -100,7 +102,7 @@ This produces a static build in `frontend/dist/`.
 Serve `frontend/dist/` with nginx, Caddy, or any static file server. Configure the reverse proxy to:
 
 1. Serve static files from `frontend/dist/` for the root path.
-2. Proxy `/api/*` and `/admin/*` requests to the uvicorn backend on port 8000.
+2. Proxy `/api/*`, `/accounts/*` (OAuth login and callbacks), `/admin/*`, `/health/` and `/widget.js` to the uvicorn backend on port 8000.
 3. Handle TLS termination.
 4. The MCP server (port 8100) does not need external access — only the backend connects to it.
 
@@ -134,13 +136,26 @@ server {
         proxy_read_timeout 300s;
     }
 
+    # OAuth login and callbacks
+    location /accounts/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     location /admin/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location /health/ {
+        proxy_pass http://127.0.0.1:8000;
+    }
+
+    # Embed widget script
+    location = /widget.js {
         proxy_pass http://127.0.0.1:8000;
     }
 

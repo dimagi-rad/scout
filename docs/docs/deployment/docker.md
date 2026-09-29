@@ -61,7 +61,7 @@ using the host-based Honcho setup, which already starts a worker.
 
 ## Persistent data
 
-The PostgreSQL data directory is mounted as a Docker volume to persist data across container restarts. Conversation history (stored via the PostgreSQL checkpointer) and all project configuration survive restarts.
+The PostgreSQL data directory is mounted as a Docker volume to persist data across container restarts. Conversation history (stored via the PostgreSQL checkpointer), workspace configuration, and materialized data (which the development settings keep in the same database) survive restarts.
 
 ## Health check
 
@@ -79,6 +79,8 @@ API alone does not prove that semantic queries can run.
 - Use a strong, unique `DJANGO_SECRET_KEY`.
 - Consider placing a reverse proxy (nginx, Caddy) in front for TLS termination.
 - Set `MCP_SERVER_URL` if the MCP server runs on a different host (defaults to `http://localhost:8100/mcp`).
+- Set the same `MCP_SHARED_SECRET` on the API, worker and MCP server; the production settings refuse to start without it.
+- Set `MANAGED_DATABASE_URL`; only the development settings fall back to the main database.
 - Keep PostgreSQL, MCP, Cube, and the validator on private interfaces. Do not
   publish the local-development ports publicly.
 - Run a persistent Procrastinate worker with the same database and semantic
