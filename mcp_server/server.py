@@ -232,17 +232,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             )
             return tc["result"]
 
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema=ts,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
+        last_run = await synced_runs().filter(tenant_schema=ts).afirst()
         try:
             pipeline_config = await _resolve_pipeline_config(ts, last_run)
         except PipelineResolutionError as exc:
@@ -296,17 +286,7 @@ async def describe_table(
         last_run = None
         tenant_metadata = None
         if ts is not None:
-            last_run = (
-                await MaterializationRun.objects.filter(
-                    tenant_schema=ts,
-                    state__in=[
-                        MaterializationRun.RunState.COMPLETED,
-                        MaterializationRun.RunState.PARTIAL,
-                    ],
-                )
-                .order_by("-completed_at")
-                .afirst()
-            )
+            last_run = await synced_runs().filter(tenant_schema=ts).afirst()
             tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
         try:
@@ -370,17 +350,7 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
             )
             return tc["result"]
 
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema=ts,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
+        last_run = await synced_runs().filter(tenant_schema=ts).afirst()
         try:
             pipeline_config = await _resolve_pipeline_config(ts, last_run)
         except PipelineResolutionError as exc:
@@ -1911,17 +1881,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 tc["result"] = not_provisioned
                 return tc["result"]
 
-            last_run = (
-                await MaterializationRun.objects.filter(
-                    tenant_schema=ts,
-                    state__in=[
-                        MaterializationRun.RunState.COMPLETED,
-                        MaterializationRun.RunState.PARTIAL,
-                    ],
-                )
-                .order_by("-completed_at")
-                .afirst()
-            )
+            last_run = await synced_runs().filter(tenant_schema=ts).afirst()
 
             tables = []
             if last_run:
