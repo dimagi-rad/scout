@@ -320,7 +320,8 @@ async def resolve_connect_opportunities(
             await _record_discovery_denial(observed, access_token, resp.status_code, social_account)
         raise ConnectAuthError(
             f"Connect returned {resp.status_code} while listing opportunities — the "
-            f"access token is expired, revoked, or not authorized for this API"
+            f"access token is expired, revoked, or not authorized for this API",
+            status_code=resp.status_code,
         )
     resp.raise_for_status()
 
@@ -392,7 +393,8 @@ async def resolve_ocs_chatbots(
                     )
                 raise OCSAuthError(
                     f"OCS returned {resp.status_code} while listing experiments — the "
-                    f"access token is expired, revoked, or not authorized for this team"
+                    f"access token is expired, revoked, or not authorized for this team",
+                    status_code=resp.status_code,
                 )
             resp.raise_for_status()
             payload = resp.json()

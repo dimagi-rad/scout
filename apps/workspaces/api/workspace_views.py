@@ -97,7 +97,7 @@ class Rediscovery:
 
     # A provider error or timeout: retrying may give a different answer.
     failed: bool = False
-    # Upstream refused a stored sign-in; only the user signing in again settles it.
+    # Upstream refused a stored sign-in (401); only the user signing in again settles it.
     needs_sign_in: bool = False
 
 
@@ -206,10 +206,14 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
                     ),
                     timeout=SHARE_REFRESH_TIMEOUT,
                 )
-            except _UPSTREAM_AUTH_ERRORS:
-                needs_sign_in = True
+            except _UPSTREAM_AUTH_ERRORS as refused:
+                # A 403 is upstream withholding access, which signing in again cannot
+                # change (#372): it stays a plain "not covered", neither flag set.
+                needs_sign_in = needs_sign_in or refused.status_code == 401
                 logger.info(
-                    "Share-time refresh refused upstream for target=%s provider=%s account=%s",
+                    "Share-time refresh refused upstream (HTTP %s) for target=%s "
+                    "provider=%s account=%s",
+                    refused.status_code,
                     target.id,
                     provider,
                     account.pk,

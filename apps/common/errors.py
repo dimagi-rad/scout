@@ -181,6 +181,10 @@ class ConnectAuthError(Exception):
 
     provider = "commcare_connect"
 
+    def __init__(self, message, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class ConnectTokenExpiredError(ConnectAuthError, UpstreamTokenExpired):
     """Connect returned 401 for an opportunity load."""
@@ -194,6 +198,10 @@ class OCSAuthError(Exception):
     """Raised when Open Chat Studio refuses our credential."""
 
     provider = "ocs"
+
+    def __init__(self, message, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class OCSTokenExpiredError(OCSAuthError, UpstreamTokenExpired):

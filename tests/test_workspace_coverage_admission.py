@@ -79,20 +79,22 @@ async def _no_refresh(*_args, **_kwargs):
     return workspace_views.Rediscovery()
 
 
-def _commcare_oauth(
-    user, *, token="tok-stored", refresh="refresh", expires_at=None
+def _oauth_identity(
+    user, provider="commcare", *, token="tok-stored", refresh="refresh", expires_at=None
 ) -> TenantConnection:
-    """A CommCare HQ OAuth identity as sign-in leaves it: account, token, connection."""
+    """An account-wide OAuth identity as sign-in leaves it: account, token, connection."""
     app, _ = SocialApp.objects.get_or_create(
-        provider="commcare", name="CommCare", defaults={"client_id": "cid", "secret": "sec"}
+        provider=provider, name=provider, defaults={"client_id": "cid", "secret": "sec"}
     )
-    account = SocialAccount.objects.create(user=user, provider="commcare", uid=f"cc-{user.pk}")
+    account = SocialAccount.objects.create(
+        user=user, provider=provider, uid=f"{provider}-{user.pk}"
+    )
     SocialToken.objects.create(
         account=account, app=app, token=token, token_secret=refresh, expires_at=expires_at
     )
     return TenantConnection.objects.create(
         user=user,
-        provider="commcare",
+        provider=provider,
         credential_type=TenantConnection.OAUTH,
         scope_key="",
         social_account=account,
@@ -200,7 +202,7 @@ class TestSourceAdd:
         ws = _workspace(user, t1)
         grant_tenant_access(user, t2)
         bob = _member(ws, "bob@example.com")
-        conn = _commcare_oauth(bob)
+        conn = _oauth_identity(bob)
         TenantMembership.objects.create(user=bob, tenant=t1, connection=conn)
         httpx_mock.add_response(url=COMMCARE_DOMAIN_API, status_code=401)
         client.force_login(user)
@@ -223,7 +225,7 @@ class TestSourceAdd:
         ws = _workspace(user, t1)
         grant_tenant_access(user, t2)
         bob = _member(ws, "bob@example.com")
-        conn = _commcare_oauth(bob)
+        conn = _oauth_identity(bob)
         TenantMembership.objects.create(user=bob, tenant=t1, connection=conn)
         httpx_mock.add_response(url=COMMCARE_DOMAIN_API, json=_domains(t2))
         client.force_login(user)
@@ -240,7 +242,7 @@ class TestSourceAdd:
         ws = _workspace(user, t1)
         grant_tenant_access(user, t2)
         bob = _member(ws, "bob@example.com", t1)
-        _commcare_oauth(bob, expires_at=timezone.now() + timedelta(hours=1))
+        _oauth_identity(bob, expires_at=timezone.now() + timedelta(hours=1))
         httpx_mock.add_response(url=COMMCARE_DOMAIN_API, status_code=502)
         client.force_login(user)
 
@@ -385,7 +387,7 @@ class TestDirectAdd:
         granted since their last sign-in admits them without signing in again."""
         ws = _workspace(user, t1)
         target = User.objects.create_user(email="late@example.com", password="pass")
-        _commcare_oauth(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
+        _oauth_identity(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
         httpx_mock.add_response(
             method="POST",
             url=get_token_url("commcare"),
@@ -411,7 +413,7 @@ class TestDirectAdd:
         credential; nothing is sent upstream with the expired token."""
         ws = _workspace(user, t1)
         target = User.objects.create_user(email="late@example.com", password="pass")
-        conn = _commcare_oauth(
+        conn = _oauth_identity(
             target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1)
         )
         httpx_mock.add_response(method="POST", url=get_token_url("commcare"), status_code=503)
@@ -435,7 +437,7 @@ class TestDirectAdd:
         workspace over a manager's click. Their own next sign-in settles it."""
         ws = _workspace(user, t1)
         target = User.objects.create_user(email="late@example.com", password="pass")
-        conn = _commcare_oauth(
+        conn = _oauth_identity(
             target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1)
         )
         httpx_mock.add_response(
@@ -468,7 +470,7 @@ class TestDirectAdd:
         must not leave the target less covered than using it as it stands would."""
         ws = _workspace(user, t1)
         target = User.objects.create_user(email="late@example.com", password="pass")
-        _commcare_oauth(
+        _oauth_identity(
             target,
             token="tok-stored",
             refresh=refresh,
@@ -527,6 +529,30 @@ class TestDirectAdd:
 
         assert resp.status_code == 201
         assert resp.json()["result"] == "member"
+
+
+@pytest.mark.django_db
+class TestRediscoveryOutcome:
+    @pytest.mark.parametrize("provider", ["commcare", "commcare_connect", "ocs"])
+    @pytest.mark.parametrize(("status", "needs_sign_in"), [(401, True), (403, False)])
+    def test_only_a_refused_sign_in_asks_the_user_to_sign_in(
+        self, httpx_mock, provider, status, needs_sign_in
+    ):
+        """#372: a 403 is upstream withholding access. Signing in again mints an
+        identically scoped token that is refused identically, so only a 401 may send
+        the user to sign in; a 403 is an authoritative "not covered"."""
+        target = User.objects.create_user(email="bob@example.com", password="pass")
+        if provider == "ocs":
+            ocs_team_connection(target, "team-a")
+        else:
+            _oauth_identity(target, provider, expires_at=timezone.now() + timedelta(hours=1))
+        httpx_mock.add_response(status_code=status, is_reusable=True)
+
+        outcome = async_to_sync(workspace_views._arefresh_target_for_workspace)(
+            target, [provider], renew=True
+        )
+
+        assert outcome == workspace_views.Rediscovery(failed=False, needs_sign_in=needs_sign_in)
 
 
 @pytest.mark.django_db
@@ -761,7 +787,7 @@ class TestMutationRaces:
         holding the target's row must delay the store, never discard it."""
         ws = _workspace(user, t1)
         target = User.objects.create_user(email="late@example.com", password="pass")
-        _commcare_oauth(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
+        _oauth_identity(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
         held = contextlib.ExitStack()
 
         def rotate_while_target_signs_in(_request):
