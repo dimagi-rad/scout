@@ -78,7 +78,9 @@ beforeEach(() => {
   useAppStore.setState({
     domains: [workspace("workspace-a")], activeDomainId: "workspace-a", domainsStatus: "loaded",
   })
-  vi.spyOn(authApi, "getUserTenants").mockResolvedValue([])
+  vi.spyOn(authApi, "getUserTenants").mockResolvedValue([
+    { id: "m-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null },
+  ])
 })
 
 afterEach(() => {
@@ -97,6 +99,7 @@ describe("delayed account-owned navigation", () => {
     const router = renderAccountRoute(<CreateWorkspaceModal onClose={onClose} />)
     const input = screen.getByTestId("workspace-name-input")
     fireEvent.change(input, { target: { value: "Synthetic private workspace A" } })
+    fireEvent.click(await screen.findByTestId("create-source-tenant-a"))
     fireEvent.submit(input.closest("form")!)
     expect(workspaceApi.create).toHaveBeenCalledOnce()
 
@@ -128,6 +131,7 @@ describe("delayed account-owned navigation", () => {
     const router = renderAccountRoute(<CreateWorkspaceModal onClose={onClose} />)
     const input = screen.getByTestId("workspace-name-input")
     fireEvent.change(input, { target: { value: "Synthetic current workspace" } })
+    fireEvent.click(await screen.findByTestId("create-source-tenant-a"))
     fireEvent.submit(input.closest("form")!)
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/workspaces/created-a/created-a"))
