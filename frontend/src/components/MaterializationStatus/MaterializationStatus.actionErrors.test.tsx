@@ -3,11 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { api, ApiError } from "@/api/client"
 import { jobsApi } from "@/api/jobs"
-import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
 import { MaterializationFailure } from "./MaterializationFailure"
 import { MaterializationProgressBanner } from "./MaterializationProgressBanner"
 import { job, termination, WORKSPACE_ID } from "./testFixtures"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
 const VERIFICATION_MESSAGE =
   "We couldn't verify your access to this workspace right now. Please retry shortly."
@@ -32,7 +32,7 @@ const coverageDenial = new ApiError(403, COVERAGE_MESSAGE, {
 const htmlServerError = new ApiError(500, "Internal Server Error", undefined)
 
 function renderFailure() {
-  useAppStore.setState({ domains: [{ id: WORKSPACE_ID, role: "read_write" } as TenantMembership] })
+  useAppStore.setState({ domains: [{ id: WORKSPACE_ID, role: "read_write" } as WorkspaceListItem] })
   render(
     <MaterializationFailure termination={termination} workspaceId={WORKSPACE_ID} threadId="thread-1" />,
   )

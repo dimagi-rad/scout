@@ -14,9 +14,9 @@ import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
 import { useAppStore } from "@/store/store"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
-import type { TenantMembership } from "@/store/domainSlice"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
-const workspaces: TenantMembership[] = [
+const workspaces: WorkspaceListItem[] = [
   {
     id: "workspace-1",
     name: "global-operations",

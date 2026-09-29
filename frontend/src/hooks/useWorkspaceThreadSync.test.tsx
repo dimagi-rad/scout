@@ -2,11 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes, useLocation } from "react-router-dom"
 import { api } from "@/api/client"
-import { workspaceApi } from "@/api/workspaces"
+import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { useWorkspaceThreadSync } from "@/hooks/useWorkspaceThreadSync"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
-import type { TenantMembership } from "@/store/domainSlice"
 
 // Workspace ids with EMPTY names so workspacePath yields the bare
 // `/workspaces/<id>` form (no slug) and URLs are fully predictable.
@@ -15,7 +14,7 @@ const WS_B = "22222222-2222-2222-2222-222222222222"
 const THREAD_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 const THREAD_STALE = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
-function domain(id: string, name = ""): TenantMembership {
+function domain(id: string, name = ""): WorkspaceListItem {
   return {
     id,
     name,
@@ -229,7 +228,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
     useAppStore.setState({
       domains: [], domainsStatus: "idle", activeDomainId: null, threadId: crypto.randomUUID(),
     })
-    let finishLoading!: (domains: TenantMembership[]) => void
+    let finishLoading!: (domains: WorkspaceListItem[]) => void
     vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => {
       finishLoading = resolve
     }))
@@ -288,7 +287,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
   })
 
   it("rechecks the list before dropping a deep link to a workspace it doesn't know (#355)", async () => {
-    let finishRecheck!: (domains: TenantMembership[]) => void
+    let finishRecheck!: (domains: WorkspaceListItem[]) => void
     const list = vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => {
       finishRecheck = resolve
     }))
@@ -314,7 +313,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
 
   it("stops holding the link after 5s when the recheck stalls", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    let release!: (domains: TenantMembership[]) => void
+    let release!: (domains: WorkspaceListItem[]) => void
     try {
       vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
       const WS_SLOW = "55555555-5555-5555-5555-555555555555"
@@ -350,7 +349,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
 
   it("rechecks with a new request, not one that started before the link opened (D1)", async () => {
     const WS_NEW = "33333333-3333-3333-3333-333333333333"
-    let finishOlder!: (domains: TenantMembership[]) => void
+    let finishOlder!: (domains: WorkspaceListItem[]) => void
     const list = vi.spyOn(workspaceApi, "list")
       .mockReturnValueOnce(new Promise((resolve) => { finishOlder = resolve }))
       .mockResolvedValueOnce([domain(WS_NEW, "Just Added"), domain(WS_A, "Workspace A")])
@@ -372,7 +371,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
 
   it("clears the recheck timer when the page goes away mid-recheck (D3)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    let release!: (domains: TenantMembership[]) => void
+    let release!: (domains: WorkspaceListItem[]) => void
     try {
       vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
       const router = renderPrettyChat(`/workspaces/${"66666666-6666-6666-6666-666666666666"}/chat`)
@@ -391,7 +390,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
 
   it("returns to the link when the recheck answers after the 5s fallback (D4)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    let release!: (domains: TenantMembership[]) => void
+    let release!: (domains: WorkspaceListItem[]) => void
     const WS_SLOW = "55555555-5555-5555-5555-555555555555"
     try {
       vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
@@ -421,7 +420,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
 
   it("stays on the fallback when the late answer comes long after it", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    let release!: (domains: TenantMembership[]) => void
+    let release!: (domains: WorkspaceListItem[]) => void
     const WS_STALLED = "99999999-9999-9999-9999-999999999999"
     try {
       vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
@@ -482,7 +481,7 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
 
   it("keeps a workspace picked mid-recheck instead of bouncing back to the link", async () => {
     const WS_NEW = "88888888-8888-8888-8888-888888888888"
-    let finishRecheck!: (domains: TenantMembership[]) => void
+    let finishRecheck!: (domains: WorkspaceListItem[]) => void
     vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { finishRecheck = resolve }))
     renderPrettyChat(`/workspaces/${WS_NEW}/chat`)
     await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())

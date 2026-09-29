@@ -7,8 +7,8 @@ import { api, ApiError } from "@/api/client"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
 import { router } from "@/router"
 import { useAppStore } from "@/store/store"
-import type { TenantMembership } from "@/store/domainSlice"
 import { ArtifactDetailPage } from "./ArtifactDetailPage"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
 const OWNER = "11111111-1111-1111-1111-111111111111"
 const OTHER = "22222222-2222-2222-2222-222222222222"
@@ -26,7 +26,7 @@ const detail = {
   version: 1,
 }
 
-function workspace(id: string, name: string): TenantMembership {
+function workspace(id: string, name: string): WorkspaceListItem {
   return {
     id, name, display_name: name, is_auto_created: false, role: "read",
     tenants: [], member_count: 1, schema_status: "available",
