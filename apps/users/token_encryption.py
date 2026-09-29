@@ -3,13 +3,14 @@
 The two columns belong to allauth's model, so rather than wrapping every reader
 the fields themselves are swapped for :class:`EncryptedTokenField` when the users
 app is ready. That makes the ORM the single encrypt/decrypt boundary: model
-instances, ``values()`` and ``refresh_from_db()`` all see plaintext in Python.
+instances, ``values()``, ``refresh_from_db()`` and ``.update()`` all see
+plaintext in Python and ciphertext in the database.
 
-Stored ciphertext carries :data:`CIPHERTEXT_PREFIX` so plaintext rows and
-encrypted rows can coexist and be told apart. A provider token that itself began
-with the prefix would be mistaken for ciphertext; none of Scout's providers issue
-such tokens. Reads accept both; writes are still plaintext so that every process
-running during the next deploy can already read the ciphertext it starts writing.
+Stored ciphertext carries :data:`CIPHERTEXT_PREFIX` so rows written before
+encryption (plaintext) and after it can coexist and be told apart: reads accept
+both, writes always encrypt, and ``users.0017`` encrypts the legacy rows.
+A provider token that itself began with the prefix would be mistaken for
+ciphertext; none of Scout's providers issue such tokens.
 """
 
 from __future__ import annotations
@@ -46,36 +47,63 @@ def is_encrypted(value: str | None) -> bool:
     return bool(value) and value.startswith(CIPHERTEXT_PREFIX)
 
 
+class UndecryptableToken(str):
+    """Reads as ``""`` but keeps the stored ciphertext.
+
+    Saving a row read under a wrong or missing key must not overwrite a value
+    that restoring the key would recover, e.g. the refresh secret allauth leaves
+    untouched when a reconnect returns no new one.
+    """
+
+    ciphertext: str
+
+    def __new__(cls, ciphertext: str):
+        token = super().__new__(cls, "")
+        token.ciphertext = ciphertext
+        return token
+
+
 def encrypt_token_value(value: str | None) -> str | None:
     """Encrypt *value* for storage. Empty and already-encrypted values pass through."""
+    if isinstance(value, UndecryptableToken):
+        return value.ciphertext
     if not value or is_encrypted(value):
         return value
     return CIPHERTEXT_PREFIX + _current_fernet().encrypt(value.encode()).decode()
 
 
+def decrypt_token_value_strict(value: str | None) -> str | None:
+    """Like :func:`decrypt_token_value` but raises ``InvalidToken`` on a bad ciphertext."""
+    if not is_encrypted(value):
+        return value
+    return _current_fernet().decrypt(value[len(CIPHERTEXT_PREFIX) :].encode()).decode()
+
+
 def decrypt_token_value(value: str | None) -> str | None:
     """Plaintext for a stored value; legacy plaintext rows are returned unchanged.
 
-    An undecryptable ciphertext (a rotated, missing or malformed key) reads as
-    empty so callers treat the connection as needing reconnection instead of
-    sending ciphertext upstream as a bearer token. Callers comparing credentials
-    must therefore never treat an empty value as a match.
+    An undecryptable ciphertext (a rotated, missing or malformed key) reads as an
+    empty :class:`UndecryptableToken` so callers treat the connection as needing
+    reconnection instead of sending ciphertext upstream as a bearer token.
+    Callers comparing credentials must therefore never treat an empty value as a
+    match.
     """
-    if not is_encrypted(value):
-        return value
     try:
-        return _current_fernet().decrypt(value[len(CIPHERTEXT_PREFIX) :].encode()).decode()
+        return decrypt_token_value_strict(value)
     except (InvalidToken, ValueError) as exc:
         logger.error(  # noqa: TRY400 — one traceback per row would flood Sentry
             "Failed to decrypt stored OAuth token (%s) — key rotated/misconfigured or data corrupt",
             type(exc).__name__,
         )
-        return ""
+        return UndecryptableToken(value)
 
 
 class EncryptedTokenField(models.TextField):
     def from_db_value(self, value, expression, connection):
         return decrypt_token_value(value)
+
+    def get_prep_value(self, value):
+        return encrypt_token_value(super().get_prep_value(value))
 
     def get_lookup(self, lookup_name):
         if lookup_name not in _ALLOWED_LOOKUPS:

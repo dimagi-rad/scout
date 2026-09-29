@@ -15,12 +15,17 @@ from django.test import override_settings
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services import token_refresh
 from apps.users.services.access_verification_service import _load_claim_token
 from apps.users.services.credential_resolver import (
     CredentialResolutionError,
     _aresolve_oauth_credential,
 )
 from apps.users.services.tenant_resolution import _aoauth_connection
+from apps.users.services.token_refresh import (
+    TokenRefreshStatus,
+    refresh_oauth_token_result_sync,
+)
 from apps.users.services.upstream_denial import (
     adiscovery_connection,
     arecord_upstream_denial,
@@ -35,15 +40,31 @@ from apps.users.token_encryption import (
     is_encrypted,
 )
 
+TOKEN_TABLE = SocialToken._meta.db_table
+
 
 def _store_raw(token_pk, **columns):
     """Write column values straight to the table, bypassing the ORM field."""
     assignments = ", ".join(f"{name} = %s" for name in columns)
     with db_connection.cursor() as cursor:
         cursor.execute(
-            f"UPDATE socialaccount_socialtoken SET {assignments} WHERE id = %s",
+            f"UPDATE {TOKEN_TABLE} SET {assignments} WHERE id = %s",
             [*columns.values(), token_pk],
         )
+
+
+def _raw(token_pk):
+    with db_connection.cursor() as cursor:
+        cursor.execute(f"SELECT token, token_secret FROM {TOKEN_TABLE} WHERE id = %s", [token_pk])
+        return cursor.fetchone()
+
+
+def _assert_stored_encrypted(token_pk, access, refresh):
+    stored_access, stored_refresh = _raw(token_pk)
+    for stored, plain in ((stored_access, access), (stored_refresh, refresh)):
+        assert stored.startswith(CIPHERTEXT_PREFIX)
+        assert plain not in stored
+        assert decrypt_token_value(stored) == plain
 
 
 def _encrypt_raw(token):
@@ -151,9 +172,8 @@ class TestMixedStateReads:
         token, _conn = commcare_token
         _encrypt_raw(token)
         other_account = SocialAccount.objects.create(user=user, provider="commcare", uid="legacy")
-        legacy = SocialToken.objects.create(
-            account=other_account, token="legacy-access", token_secret="legacy-refresh"
-        )
+        legacy = SocialToken.objects.create(account=other_account)
+        _store_raw(legacy.pk, token="legacy-access", token_secret="legacy-refresh")
 
         rows = dict(
             SocialToken.objects.filter(pk__in=[token.pk, legacy.pk]).values_list("pk", "token")
@@ -179,6 +199,20 @@ class TestValueComparisonsAgainstEncryptedRows:
         assert credential_is_current(conn, "plain-access", snapshot)
         assert not credential_is_current(conn, "other-access", snapshot)
         assert not credential_is_current(conn, "plain-access", (token.pk, "old", token.app_id))
+
+    def test_saving_an_undecryptable_row_keeps_its_ciphertext(self, commcare_token):
+        token, _conn = commcare_token
+        stored = _raw(token.pk)
+        with override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()):
+            loaded = SocialToken.objects.get(pk=token.pk)
+            assert (loaded.token, loaded.token_secret) == ("", "")
+            loaded.token = "reconnected-access"
+            loaded.save()
+            reconnected_access, kept_refresh = _raw(token.pk)
+        assert kept_refresh == stored[1]
+        assert decrypt_token_value(kept_refresh) == "plain-refresh"
+        assert reconnected_access != stored[0]
+        assert reconnected_access.startswith(CIPHERTEXT_PREFIX)
 
     def test_undecryptable_row_never_matches_an_empty_credential(self, user, commcare_token):
         token, conn = commcare_token
@@ -318,3 +352,94 @@ class TestValueComparisonsAgainstEncryptedRows:
         assert loaded.pk == token.pk
         assert await _load_claim_token(claim("claim-access", "rotated")) is None
         assert await _load_claim_token(claim("rotated", "claim-refresh")) is None
+
+
+@pytest.mark.django_db
+class TestWritesEncrypt:
+    def test_create_stores_ciphertext(self, commcare_token):
+        token, _conn = commcare_token
+        _assert_stored_encrypted(token.pk, "plain-access", "plain-refresh")
+
+    def test_save_stores_ciphertext(self, commcare_token):
+        token, _conn = commcare_token
+        token.token = "saved-access"
+        token.token_secret = "saved-refresh"
+        token.save()
+        _assert_stored_encrypted(token.pk, "saved-access", "saved-refresh")
+
+    def test_queryset_update_stores_ciphertext(self, commcare_token):
+        token, _conn = commcare_token
+        SocialToken.objects.filter(pk=token.pk).update(
+            token="updated-access", token_secret="updated-refresh"
+        )
+        _assert_stored_encrypted(token.pk, "updated-access", "updated-refresh")
+
+    def test_saving_a_legacy_row_encrypts_it(self, commcare_token):
+        token, _conn = commcare_token
+        _store_raw(token.pk, token="legacy-access", token_secret="legacy-refresh")
+        loaded = SocialToken.objects.get(pk=token.pk)
+        loaded.save()
+        _assert_stored_encrypted(token.pk, "legacy-access", "legacy-refresh")
+
+    def test_empty_refresh_secret_stays_empty(self, user):
+        account = SocialAccount.objects.create(user=user, provider="commcare", uid="no-refresh")
+        token = SocialToken.objects.create(account=account, token="only-access")
+        stored_access, stored_refresh = _raw(token.pk)
+        assert stored_access.startswith(CIPHERTEXT_PREFIX)
+        assert stored_refresh == ""
+
+
+@pytest.mark.django_db
+class TestRefreshRotationStoresCiphertext:
+    URL = "https://provider.example/o/token/"
+
+    def test_applied_refresh_is_encrypted_and_readable(self, commcare_token, requests_mock):
+        token, _conn = commcare_token
+        requests_mock.post(
+            self.URL,
+            json={"access_token": "rot-access", "refresh_token": "rot-refresh", "expires_in": 900},
+        )
+
+        result = refresh_oauth_token_result_sync(token, self.URL)
+
+        assert result.status == TokenRefreshStatus.APPLIED
+        assert "plain-refresh" in requests_mock.last_request.text
+        _assert_stored_encrypted(token.pk, "rot-access", "rot-refresh")
+        stored = SocialToken.objects.get(pk=token.pk)
+        assert (stored.token, stored.token_secret) == ("rot-access", "rot-refresh")
+
+    def test_rotation_by_another_writer_supersedes_stale_refresh(
+        self, commcare_token, requests_mock, monkeypatch
+    ):
+        token, _conn = commcare_token
+        original = token_refresh._persist_refresh_response
+
+        def rotate_then_persist(*args, **kwargs):
+            SocialToken.objects.filter(pk=token.pk).update(
+                token="winner-access", token_secret="winner-refresh"
+            )
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(token_refresh, "_persist_refresh_response", rotate_then_persist)
+        requests_mock.post(
+            self.URL,
+            json={"access_token": "loser-access", "refresh_token": "loser-refresh"},
+        )
+
+        result = refresh_oauth_token_result_sync(token, self.URL)
+
+        assert result.status == TokenRefreshStatus.SUPERSEDED
+        assert result.snapshot.access_token == "winner-access"
+        _assert_stored_encrypted(token.pk, "winner-access", "winner-refresh")
+
+    def test_refresh_of_legacy_plaintext_row_encrypts_it(self, commcare_token, requests_mock):
+        token, _conn = commcare_token
+        _store_raw(token.pk, token="plain-access", token_secret="plain-refresh")
+        requests_mock.post(
+            self.URL, json={"access_token": "new-access", "refresh_token": "new-refresh"}
+        )
+
+        result = refresh_oauth_token_result_sync(SocialToken.objects.get(pk=token.pk), self.URL)
+
+        assert result.status == TokenRefreshStatus.APPLIED
+        _assert_stored_encrypted(token.pk, "new-access", "new-refresh")

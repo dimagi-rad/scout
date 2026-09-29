@@ -11,9 +11,11 @@ from django.contrib.auth import login
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.messages.middleware import MessageMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
+from django.db import connection as db_connection
 from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
+from apps.users.token_encryption import CIPHERTEXT_PREFIX, decrypt_token_value
 
 
 @pytest.mark.django_db(transaction=True)
@@ -60,7 +62,13 @@ def test_existing_oauth_login_restores_after_new_token_is_stored(user, httpx_moc
     assert request.user.pk == user.pk
     assert request.session["_auth_user_id"] == str(user.pk)
     assert httpx_mock.get_request().headers["Authorization"] == "Bearer new"
-    assert SocialToken.objects.get(account=account).token == "new"
+    stored = SocialToken.objects.get(account=account)
+    assert stored.token == "new"
+    with db_connection.cursor() as cursor:
+        cursor.execute(f"SELECT token FROM {SocialToken._meta.db_table} WHERE id = %s", [stored.pk])
+        (stored_column,) = cursor.fetchone()
+    assert stored_column.startswith(CIPHERTEXT_PREFIX)
+    assert decrypt_token_value(stored_column) == "new"
     assert TenantMembership.objects.filter(pk=tm.pk).exists()
     connection.refresh_from_db()
     assert connection.upstream_denial_code == ""

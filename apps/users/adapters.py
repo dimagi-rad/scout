@@ -1,8 +1,9 @@
 """
 Custom allauth social account adapter with Fernet token encryption.
 
-Encrypts OAuth access tokens and refresh tokens before they are stored
-in the database. Uses the same DB_CREDENTIAL_KEY Fernet key used for
+Encrypts the OAuth tokens allauth keeps in the session between the provider
+redirect and the callback. The stored SocialToken rows are encrypted at rest by
+apps.users.token_encryption. Both use the DB_CREDENTIAL_KEY Fernet key used for
 project database credentials.
 """
 
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
-    """Adapter that Fernet-encrypts SocialToken fields at rest."""
+    """Adapter that Fernet-encrypts SocialToken fields in the login session."""
 
     def _get_fernet(self) -> Fernet:
         key = settings.DB_CREDENTIAL_KEY
