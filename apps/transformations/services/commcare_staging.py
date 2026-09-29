@@ -163,9 +163,12 @@ def _typed_expression(expr: str, question_type: str | None) -> str:
     return f"NULLIF({expr}, ''){cast}"
 
 
-# PostgreSQL rejects a SELECT with more than 1664 target entries and a table with
-# more than 1600 columns; staging models materialize as tables, so a big form or
-# case type failed the whole system stage (#712). Stay well under both.
+# PostgreSQL rejects a table with more than 1600 columns (and a SELECT with more
+# than 1664 entries); staging models materialize as tables, so a big form or case
+# type failed the whole system stage (#712). Only a model that cannot build folds,
+# so every model that builds today keeps its columns; a folded model drops to
+# MAX_STAGING_COLUMNS so a few added questions don't reshape it again.
+POSTGRES_MAX_TABLE_COLUMNS = 1600
 MAX_STAGING_COLUMNS = 1500
 # Labels and containers carry no answer of their own, so they fold before answers do.
 _NON_ANSWER_TYPES = frozenset({"Trigger", "Group", "FieldList", "Repeat"})
@@ -183,11 +186,14 @@ class StagedColumn:
 
 
 def exceeds_column_budget(fixed_count: int, field_count: int) -> bool:
-    return fixed_count + field_count > MAX_STAGING_COLUMNS
+    return fixed_count + field_count > POSTGRES_MAX_TABLE_COLUMNS
 
 
 def fold_to_column_budget(columns: list[StagedColumn], *, fixed_count: int) -> list[StagedColumn]:
-    """Keep at most ``MAX_STAGING_COLUMNS - fixed_count`` columns, in their original order.
+    """Return *columns* unchanged if the model fits a PostgreSQL table, else fold.
+
+    A folded model keeps ``MAX_STAGING_COLUMNS - fixed_count`` columns, in their
+    original order.
 
     Selection depends only on the metadata, never on data or run state, so load
     fingerprints and dependent views see the same model every run. Aliases are
@@ -195,9 +201,9 @@ def fold_to_column_budget(columns: list[StagedColumn], *, fixed_count: int) -> l
     without the cap. Repeated sources fold first (their data is already a
     column), then labels and containers, then the latest fields in form order.
     """
-    budget = MAX_STAGING_COLUMNS - fixed_count
-    if len(columns) <= budget:
+    if not exceeds_column_budget(fixed_count, len(columns)):
         return columns
+    budget = MAX_STAGING_COLUMNS - fixed_count
     seen_sources: set[str] = set()
     ranks: list[tuple[int, int]] = []
     for index, column in enumerate(columns):
@@ -217,13 +223,13 @@ def warn_folded(tenant, model: str, *, total: int, kept: int, raw_column: str) -
     if kept < total:
         logger.warning(
             "Staging model %s for tenant %s folded %d of %d fields into %s to stay under "
-            "PostgreSQL's column limit (max %d columns)",
+            "PostgreSQL's %d-column table limit",
             model,
             tenant.external_id,
             total - kept,
             total,
             raw_column,
-            MAX_STAGING_COLUMNS,
+            POSTGRES_MAX_TABLE_COLUMNS,
         )
 
 

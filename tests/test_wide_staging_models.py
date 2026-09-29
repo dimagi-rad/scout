@@ -15,6 +15,7 @@ import sqlglot
 
 from apps.transformations.services.commcare_staging import (
     MAX_STAGING_COLUMNS,
+    POSTGRES_MAX_TABLE_COLUMNS,
     generate_system_assets,
 )
 from apps.transformations.services.connect_staging import (
@@ -25,7 +26,6 @@ from apps.transformations.services.repeat_identity import RepeatSource, repeat_s
 from apps.users.models import Tenant
 
 POSTGRES_TARGET_LIST_LIMIT = 1664
-POSTGRES_TABLE_COLUMN_LIMIT = 1600
 WIDE = 2100
 VISIT_BASE = [
     "visit_id",
@@ -84,7 +84,7 @@ def test_wide_visit_form_fits_postgres_limits_and_keeps_raw_json(connect_tenant)
     sql = _by_name(generate_connect_assets(form_defs, connect_tenant))["stg_visits"].sql_content
     columns = _columns(sql)
 
-    assert len(columns) <= MAX_STAGING_COLUMNS < POSTGRES_TABLE_COLUMN_LIMIT
+    assert len(columns) <= MAX_STAGING_COLUMNS < POSTGRES_MAX_TABLE_COLUMNS
     assert len(columns) < POSTGRES_TARGET_LIST_LIMIT
     # Folded answers stay queryable through the raw JSON column.
     assert columns[: len(VISIT_BASE)] == VISIT_BASE
@@ -277,35 +277,60 @@ def test_small_visit_model_is_unchanged(connect_tenant):
     )
 
 
-def test_models_at_the_budget_are_not_folded(connect_tenant, commcare_tenant, caplog):
-    at_budget = MAX_STAGING_COLUMNS - len(VISIT_BASE)
-    form_defs = {"visit": {"name": "Visit", "questions": _questions(at_budget)}}
-    case_metadata = {
+def _case_metadata(count):
+    return {
         "case_types": [{"name": "patient"}],
         "app_definitions": [
             {
                 "modules": [
                     {
                         "case_type": "patient",
-                        "case_properties": [
-                            f"prop{index:04d}"
-                            for index in range(MAX_STAGING_COLUMNS - len(CASE_BASE))
-                        ],
+                        "case_properties": [f"prop{index:04d}" for index in range(count)],
                     }
                 ]
             }
         ],
     }
 
+
+def test_models_that_fit_a_table_are_not_folded(connect_tenant, commcare_tenant, caplog):
+    # A model with 1501-1600 columns builds on main; folding it would drop columns
+    # that dependent models and saved queries may already use.
+    form_defs = {
+        "visit": {
+            "name": "Visit",
+            "questions": _questions(POSTGRES_MAX_TABLE_COLUMNS - len(VISIT_BASE)),
+        }
+    }
+    case_metadata = _case_metadata(POSTGRES_MAX_TABLE_COLUMNS - len(CASE_BASE))
+
     with caplog.at_level(logging.WARNING):
         visits = _by_name(generate_connect_assets(form_defs, connect_tenant))["stg_visits"]
         case = _by_name(generate_system_assets(commcare_tenant, case_metadata))["stg_case_patient"]
 
+    assert len(_columns(visits.sql_content)) == POSTGRES_MAX_TABLE_COLUMNS
+    case_columns = _columns(case.sql_content)
+    assert len(case_columns) == POSTGRES_MAX_TABLE_COLUMNS
+    assert "properties" not in case_columns
+    assert not caplog.records
+
+
+def test_one_column_past_the_table_limit_folds_to_the_budget(connect_tenant, commcare_tenant):
+    form_defs = {
+        "visit": {
+            "name": "Visit",
+            "questions": _questions(POSTGRES_MAX_TABLE_COLUMNS - len(VISIT_BASE) + 1),
+        }
+    }
+    case_metadata = _case_metadata(POSTGRES_MAX_TABLE_COLUMNS - len(CASE_BASE) + 1)
+
+    visits = _by_name(generate_connect_assets(form_defs, connect_tenant))["stg_visits"]
+    case = _by_name(generate_system_assets(commcare_tenant, case_metadata))["stg_case_patient"]
+
     assert len(_columns(visits.sql_content)) == MAX_STAGING_COLUMNS
     case_columns = _columns(case.sql_content)
     assert len(case_columns) == MAX_STAGING_COLUMNS
-    assert "properties" not in case_columns
-    assert not caplog.records
+    assert case_columns[len(CASE_BASE)] == "properties"
 
 
 def test_folding_logs_a_warning_with_the_folded_count(connect_tenant, caplog):
