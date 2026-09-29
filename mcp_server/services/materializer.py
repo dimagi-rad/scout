@@ -81,7 +81,7 @@ from mcp_server.loaders.ocs_messages import OCSMessageLoader
 from mcp_server.loaders.ocs_metadata import OCSMetadataLoader
 from mcp_server.loaders.ocs_participants import OCSParticipantLoader
 from mcp_server.loaders.ocs_sessions import OCSSessionLoader
-from mcp_server.pipeline_registry import PipelineConfig, get_registry
+from mcp_server.pipeline_registry import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -2094,11 +2094,3 @@ def _write_connect_completed_modules(
             on_page(total, rows_total)
 
     return total
-
-
-def run_commcare_sync(tenant_membership: Any, credential: dict[str, str]) -> dict:
-    """Legacy entry point — delegates to run_pipeline with the default registry."""
-    pipeline = get_registry().get("commcare_sync")
-    if pipeline is None:
-        raise ValueError("commcare_sync pipeline not found in registry")
-    return run_pipeline(tenant_membership, credential, pipeline)
