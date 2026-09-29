@@ -300,9 +300,14 @@ The workspace's `system_prompt`, under a `## Workspace Instructions` heading. Us
 
 ### 4. Knowledge context
 
-Assembled by the `KnowledgeRetriever` from three sources:
+Assembled by the `KnowledgeRetriever` from three sources, in this order. The
+combined section is capped at 6,000 characters: longer text is cut at the cap
+and a truncation notice appended. SQL in knowledge content (fenced `sql` code blocks
+and lines starting with `SELECT`, `WITH`, `INSERT`, `UPDATE`, `DELETE`,
+`CREATE`, `DROP` or `ALTER`) is replaced with a note to use semantic members
+instead.
 
-**Knowledge entries** (all entries, ordered by title; each entry's content is free-form markdown):
+**Knowledge entries** (ordered by title; each entry's content is markdown):
 ```markdown
 ## Knowledge Base
 
@@ -328,7 +333,7 @@ Order transactions from all channels.
 - `customers`: `orders.customer_id = customers.id`
 ```
 
-**Agent learnings** (top 20 by confidence):
+**Agent learnings** (active learnings, top 20 by confidence; the confidence line appears only at 80% or above):
 ```markdown
 ## Learned Corrections
 
