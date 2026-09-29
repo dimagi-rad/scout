@@ -99,7 +99,7 @@ class TestTeamQualifiedUid:
         )
 
     def test_no_team_claim_keeps_the_bare_subject(self):
-        """An OCS deploy that doesn't emit the claim must behave exactly as before."""
+        """An OCS deploy that doesn't emit the claim still yields a stable identity."""
         assert _provider().extract_uid({"sub": "42"}) == "42"
         assert _provider().extract_uid({"sub": "42", "team": "  "}) == "42"
         assert team_slug_from_uid("42") == ""
