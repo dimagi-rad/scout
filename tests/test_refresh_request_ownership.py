@@ -927,8 +927,9 @@ def test_dispatch_and_candidate_binding_roll_back_together(
         return original_save(schema, *args, **kwargs)
 
     with patch.object(TenantSchema, "save", fail_binding_save):
-        with pytest.raises(RuntimeError, match="binding write failed"):
-            manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 500
 
     assert not TenantSchema.objects.filter(tenant=tenant, state=SchemaState.PROVISIONING).exists()
     assert ProcrastinateJob.objects.filter(task_name=REFRESH_TASK_NAME).count() == before_jobs

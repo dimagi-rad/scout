@@ -16,6 +16,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.tasks import refresh_tenant_schema
+from tests.row_locks import row_locked
 from tests.tenant_access import grant_tenant_access
 
 
@@ -352,7 +353,7 @@ def test_partial_refresh_surfaces_recovery_message_and_code(
 @pytest.mark.django_db
 def test_refresh_handles_sources_deleted_before_lock(manage_client, workspace):
     with patch("apps.workspaces.api.views.Tenant.objects.select_for_update") as lock:
-        lock.return_value.filter.return_value.order_by.return_value = []
+        lock.return_value.filter.return_value.first.return_value = None
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
     assert resp.status_code == 400
     assert resp.data == {"error": "Workspace has no associated tenant."}
@@ -386,3 +387,76 @@ def test_refresh_reports_each_refused_source(
         assert "refused-source" in resp.data["error"]
     else:
         assert resp.data["error"] == "No tenant membership found for this workspace."
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_does_not_lock_a_source_the_caller_is_not_a_member_of(
+    manage_client, workspace, tenant, user, tenant_membership_for_user, settings
+):
+    """B1: a shared tenant another workspace is loading must not stall on this request."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    foreign = Tenant.objects.create(
+        provider="commcare", external_id="foreign-source", canonical_name="foreign-source"
+    )
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=foreign)
+
+    with (
+        row_locked(lambda: Tenant.objects.select_for_update().get(id=foreign.id)),
+        patch(
+            "apps.workspaces.api.views.refresh_tenant_schema.defer",
+            return_value=MagicMock(id=801),
+        ),
+    ):
+        with connection.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '1s'")
+        try:
+            resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("RESET lock_timeout")
+
+    assert resp.status_code == 202
+    by_tenant = {t["tenant_id"]: t["status"] for t in resp.data["tenants"]}
+    assert by_tenant == {str(tenant.id): "provisioning", str(foreign.id): "no_membership"}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_one_source_failing_keeps_the_refreshes_queued_for_the_others(
+    manage_client, workspace, tenant, user, tenant_membership_for_user
+):
+    """B1: an unexpected error on one source used to roll back every queued refresh."""
+    broken = _add_source(workspace, user, "broken-source")
+
+    def defer(**kwargs):
+        schema = TenantSchema.objects.get(id=kwargs["schema_id"])
+        if schema.tenant_id == broken.id:
+            raise RuntimeError("queue unavailable")
+        return MagicMock(id=802)
+
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer", side_effect=defer):
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 202
+    assert resp.data["status"] == "partial"
+    by_tenant = {t["tenant_id"]: t for t in resp.data["tenants"]}
+    assert by_tenant[str(tenant.id)]["status"] == "provisioning"
+    assert by_tenant[str(broken.id)]["status"] == "error"
+    assert "broken-source" in resp.data["error"]
+    assert TenantSchema.objects.filter(tenant=tenant, state=SchemaState.PROVISIONING).exists()
+    # The failed source's candidate rolled back with its own transaction only.
+    assert not TenantSchema.objects.filter(tenant=broken).exists()
+
+
+@pytest.mark.django_db
+def test_a_single_source_error_is_a_server_error(
+    manage_client, workspace, tenant, tenant_membership_for_user
+):
+    with patch(
+        "apps.workspaces.api.views.refresh_tenant_schema.defer",
+        side_effect=RuntimeError("queue unavailable"),
+    ):
+        resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
+
+    assert resp.status_code == 500
+    assert resp.data == {"error": "The refresh could not be started. Try again shortly."}
+    assert not TenantSchema.objects.filter(tenant=tenant).exists()

@@ -481,6 +481,27 @@ class _RefreshOutcome:
     http_status: int
 
 
+_NO_MEMBERSHIP = (
+    "no_membership",
+    "No tenant membership found for this workspace.",
+    status.HTTP_400_BAD_REQUEST,
+)
+_QUEUE_ERROR = (
+    "error",
+    "The refresh could not be started. Try again shortly.",
+    status.HTTP_500_INTERNAL_SERVER_ERROR,
+)
+
+
+def _refresh_source(tenant) -> dict:
+    return {"tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name}
+
+
+def _refused_refresh(tenant, state, error, http_status, code=None) -> _RefreshOutcome:
+    body = {"error": error, **({"code": code} if code else {})}
+    return _RefreshOutcome({**_refresh_source(tenant), "status": state, **body}, body, http_status)
+
+
 class RefreshSchemaView(APIView):
     """
     POST /api/workspaces/<workspace_id>/refresh/
@@ -517,19 +538,31 @@ class RefreshSchemaView(APIView):
         }
 
         outcomes = []
-        with transaction.atomic():
-            # One global order, so two refreshes over overlapping sources can't deadlock.
-            locked = (
-                Tenant.objects.select_for_update()
-                .filter(id__in=[tenant.id for tenant in tenants])
-                .order_by("id")
-            )
-            for tenant in locked:
-                outcomes.append(
-                    self._queue_tenant_refresh(
-                        request, workspace, tenant, memberships.get(tenant.id), legacy_jobs
+        # One transaction per source, in ascending id order: a failure on one source
+        # can't roll back the refreshes already queued for the others, and no two
+        # Tenant row locks are ever held together.
+        for tenant in tenants:
+            membership = memberships.get(tenant.id)
+            if membership is None:
+                # Not locked: the caller can't refresh it, and holding a shared
+                # tenant's row would stall its loads for unrelated workspaces.
+                outcomes.append(_refused_refresh(tenant, *_NO_MEMBERSHIP))
+                continue
+            try:
+                with transaction.atomic():
+                    locked = Tenant.objects.select_for_update().filter(id=tenant.id).first()
+                    outcome = locked and self._queue_tenant_refresh(
+                        request, workspace, locked, membership, legacy_jobs
                     )
+            except Exception:
+                logger.exception(
+                    "Refresh of tenant %s in workspace %s could not be queued",
+                    tenant.id,
+                    workspace.id,
                 )
+                outcome = _refused_refresh(tenant, *_QUEUE_ERROR)
+            if outcome is not None:
+                outcomes.append(outcome)
 
         if not outcomes:
             return Response(
@@ -573,30 +606,24 @@ class RefreshSchemaView(APIView):
             body["code"] = ErrorCode.REFRESH_RECOVERY_REQUIRED
         if started:
             return Response(body, status=status.HTTP_202_ACCEPTED)
-        # 400 only when every source was a bad request, as the single-source path.
-        http_status = (
-            status.HTTP_400_BAD_REQUEST
-            if all(o.http_status == status.HTTP_400_BAD_REQUEST for o in outcomes)
-            else status.HTTP_409_CONFLICT
-        )
+        # 400 only when every source was a bad request, as the single-source path;
+        # a 500 wins so a client retries instead of treating the refusal as final.
+        http_statuses = {o.http_status for o in outcomes}
+        if status.HTTP_500_INTERNAL_SERVER_ERROR in http_statuses:
+            http_status = status.HTTP_500_INTERNAL_SERVER_ERROR
+        elif http_statuses == {status.HTTP_400_BAD_REQUEST}:
+            http_status = status.HTTP_400_BAD_REQUEST
+        else:
+            http_status = status.HTTP_409_CONFLICT
         return Response(body, status=http_status)
 
     @staticmethod
     def _queue_tenant_refresh(
         request, workspace, tenant, tenant_membership, legacy_jobs
     ) -> _RefreshOutcome:
-        source = {"tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name}
-
         def refused(state, error, http_status, code=None):
-            body = {"error": error, **({"code": code} if code else {})}
-            return _RefreshOutcome({**source, "status": state, **body}, body, http_status)
+            return _refused_refresh(tenant, state, error, http_status, code)
 
-        if tenant_membership is None:
-            return refused(
-                "no_membership",
-                "No tenant membership found for this workspace.",
-                status.HTTP_400_BAD_REQUEST,
-            )
         legacy = settle_finished_refresh_candidates(tenant, legacy_jobs[tenant.id])
         if legacy.recovery_needed:
             return refused(
@@ -634,7 +661,7 @@ class RefreshSchemaView(APIView):
             ]
         )
         return _RefreshOutcome(
-            {**source, "status": "provisioning", "schema_id": str(new_schema.id)},
+            {**_refresh_source(tenant), "status": "provisioning", "schema_id": str(new_schema.id)},
             {},
             status.HTTP_202_ACCEPTED,
         )
