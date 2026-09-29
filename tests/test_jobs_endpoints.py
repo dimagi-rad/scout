@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import AsyncClient
@@ -14,6 +15,7 @@ from procrastinate.manager import JobManager
 from apps.chat.models import Thread, ThreadJob
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.access import TENANT_ACCESS_LOST
 from apps.workspaces.api import jobs_cancel
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.api.jobs_views import _termination_to_dict
@@ -30,7 +32,8 @@ from apps.workspaces.tasks import (
     _resume_records,
     reconcile_stale_thread_job,
 )
-from tests.tenant_access import ausable_connection
+from tests.tenant_access import agrant_tenant_access, ausable_connection
+from tests.upstream_proofs import amake_proof_stale
 
 User = get_user_model()
 
@@ -1233,3 +1236,94 @@ async def test_cancel_thread_job_aborts_through_live_current_app_binding():
     assert tj.state == ThreadJob.State.CANCELLED
     run = await MaterializationRun.objects.aget(procrastinate_job_id=61001)
     assert run.state == MaterializationRun.RunState.CANCELLED
+
+
+# The poller serves only jobs the caller started, so it stays reachable through a
+# provider verification outage (#598's own-load rule) but still checks membership
+# and source coverage.
+
+
+async def _outage_job(workspace, user, procrastinate_job_id: int) -> ThreadJob:
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    return await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=procrastinate_job_id,
+        tool_call_id=f"tc-{procrastinate_job_id}",
+    )
+
+
+async def _poll_active_jobs(user, workspace):
+    client = AsyncClient()
+    await sync_to_async(client.force_login)(user)
+    return await client.get(f"/api/workspaces/{workspace.id}/jobs/active/")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_shows_your_own_load_during_a_verification_outage(
+    workspace, tenant, user, upstream_provider
+):
+    own = await _outage_job(workspace, user, 71001)
+    await amake_proof_stale(user, tenant)
+    upstream_provider.failure = 503
+
+    response = await _poll_active_jobs(user, workspace)
+
+    assert response.status_code == 200
+    assert [j["thread_job_id"] for j in response.json()["jobs"]] == [str(own.id)]
+    assert upstream_provider.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_never_returns_another_members_job_during_an_outage(
+    workspace, tenant, user, other_user, upstream_provider
+):
+    await WorkspaceMembership.objects.acreate(
+        workspace=workspace, user=other_user, role=WorkspaceRole.READ_WRITE
+    )
+    await agrant_tenant_access(other_user, tenant)
+    own = await _outage_job(workspace, user, 71002)
+    await _outage_job(workspace, other_user, 71003)
+    await amake_proof_stale(user, tenant)
+    upstream_provider.failure = 503
+
+    response = await _poll_active_jobs(user, workspace)
+
+    assert response.status_code == 200
+    assert [j["thread_job_id"] for j in response.json()["jobs"]] == [str(own.id)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_still_denies_a_non_member_during_an_outage(
+    workspace, tenant, user, other_user, upstream_provider
+):
+    await _outage_job(workspace, user, 71004)
+    await agrant_tenant_access(other_user, tenant)
+    await amake_proof_stale(other_user, tenant)
+    upstream_provider.failure = 503
+
+    response = await _poll_active_jobs(other_user, workspace)
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "Workspace not found or access denied."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_still_denies_a_member_who_lost_the_source_during_an_outage(
+    workspace, tenant, user, upstream_provider
+):
+    await _outage_job(workspace, user, 71005)
+    await amake_proof_stale(user, tenant)
+    await TenantMembership.objects.filter(user=user, tenant=tenant).aupdate(
+        archived_at=timezone.now()
+    )
+    upstream_provider.failure = 503
+
+    response = await _poll_active_jobs(user, workspace)
+
+    assert response.status_code == 403
+    assert response.json()["reason"] == TENANT_ACCESS_LOST
