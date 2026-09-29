@@ -489,11 +489,10 @@ def _normalize_workspace_ids(workspace_ids: list[str] | str | None) -> list[str]
 
 async def _workspace_summary(workspace: Workspace, role: str = "", active_workspace_id: str = ""):
     tenants = [tenant async for tenant in workspace.tenants.all()]
-    display_name = tenants[0].format_display_name(workspace.name) if tenants else workspace.name
     return {
         "id": str(workspace.id),
         "name": workspace.name,
-        "display_name": display_name,
+        "display_name": workspace.display_name_for(tenants),
         "role": role,
         "is_active": bool(active_workspace_id and str(workspace.id) == str(active_workspace_id)),
         "tenant_count": len(tenants),

@@ -5,6 +5,7 @@ Defines Workspace, TenantSchema, and MaterializationRun models.
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import timedelta
 
 from django.conf import settings
@@ -12,6 +13,8 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 from django_pydantic_field import SchemaField
+
+from apps.users.models import Tenant
 
 
 class SchemaState(models.TextChoices):
@@ -275,11 +278,19 @@ class Workspace(models.Model):
 
     @property
     def display_name(self) -> str:
-        """Human-facing label: the stored name formatted by the tenant's provider template."""
-        t = self.tenant
-        if t is None:
+        """Human-facing label; also the source of the URL slug (``workspacePath``)."""
+        return self.display_name_for(list(self.tenants.all()))
+
+    def display_name_for(self, tenants: Sequence[Tenant]) -> str:
+        """The label for this workspace over ``tenants``, for callers already holding them.
+
+        Only a single-source workspace is decorated by its provider template. With
+        several sources no one tenant's id describes the workspace, and picking one
+        let an unrelated source's add or rename change the label and the URL (#354).
+        """
+        if len(tenants) != 1:
             return self.name
-        return t.format_display_name(self.name)
+        return tenants[0].format_display_name(self.name)
 
     @property
     def external_tenant_id(self):

@@ -347,7 +347,7 @@ def test_list_query_count_does_not_scale_with_workspaces(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("tenant_count", [0, 1, 2])
-def test_list_display_name_uses_default_tenant_order(client, user, tenant_count):
+def test_list_display_name_decorates_only_a_single_source(client, user, tenant_count):
     workspace = Workspace.objects.create(name="Analysis", created_by=user)
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     tenants = [
@@ -361,6 +361,6 @@ def test_list_display_name_uses_default_tenant_order(client, user, tenant_count)
     expected_name = workspace.display_name
     entry = _list_entry(client, user, workspace)
     assert entry["display_name"] == expected_name
-    assert entry["display_name"] == ("Analysis (Opp 42)" if tenants else "Analysis")
+    assert entry["display_name"] == ("Analysis (Opp 42)" if tenant_count == 1 else "Analysis")
     assert {t["id"] for t in entry["tenants"]} == {str(t.pk) for t in tenants}
     assert entry["has_access"] == (not tenants)

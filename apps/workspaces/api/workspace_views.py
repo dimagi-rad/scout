@@ -378,7 +378,7 @@ class WorkspaceListView(APIView):
         memberships = (
             WorkspaceMembership.objects.filter(user=request.user)
             .select_related("workspace")
-            # display_name uses tenants.first(); Tenant's default ordering keeps it cached.
+            # display_name reads workspace.tenants; the prefetch keeps that off the per-row path.
             .prefetch_related("workspace__workspace_tenants__tenant", "workspace__tenants")
             .annotate(
                 member_count=Count("workspace__memberships", distinct=True),
@@ -487,16 +487,11 @@ class WorkspaceListView(APIView):
             }
             for tenant in selected
         ]
-        first_tenant = selected[0] if selected else None
-
-        display_name = (
-            first_tenant.format_display_name(workspace.name) if first_tenant else workspace.name
-        )
         return Response(
             {
                 "id": str(workspace.id),
                 "name": workspace.name,
-                "display_name": display_name,
+                "display_name": workspace.display_name_for(selected),
                 "is_auto_created": workspace.is_auto_created,
                 "role": WorkspaceRole.MANAGE,
                 "tenants": tenants,
@@ -561,15 +556,11 @@ class WorkspaceDetailView(APIView):
         )
         last_synced_at = last_run_at.isoformat() if last_run_at else None
 
-        first_tenant = tenants[0] if tenants else None
-        display_name = (
-            first_tenant.format_display_name(workspace.name) if first_tenant else workspace.name
-        )
         return Response(
             {
                 "id": str(workspace.id),
                 "name": workspace.name,
-                "display_name": display_name,
+                "display_name": workspace.display_name_for(tenants),
                 "is_auto_created": workspace.is_auto_created,
                 "role": membership.role,
                 # Agent configuration is workspace content, not page metadata.
