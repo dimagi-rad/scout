@@ -6,7 +6,7 @@ import type { ArtifactDetail } from "@/components/ArtifactGraph"
 import { resetReportedRenderErrorsForTests } from "@/lib/reportRenderError"
 import { ArtifactCanvas } from "./ArtifactCanvas"
 
-const scope = vi.hoisted(() => ({ setTag: vi.fn(), addEventProcessor: vi.fn() }))
+const scope = vi.hoisted(() => ({ setTag: vi.fn() }))
 
 vi.mock("@sentry/react", () => ({
   captureException: vi.fn(),
@@ -94,6 +94,26 @@ describe("ArtifactCanvas sandbox error reporting", () => {
 
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.message).toBe('Unexpected token "…" is not valid JSON')
+  })
+
+  it("takes the error class from the posted name when the stack has no header", () => {
+    const { post } = renderCanvas()
+
+    post({
+      type: "artifact-error",
+      error: {
+        title: "React Render Error",
+        name: "RangeError",
+        message: "Invalid array length",
+        details: "App@blob:null/abc:4:12\nrender@blob:null/abc:9:3",
+      },
+    })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.name).toBe("RangeError")
+    expect(reported.stack).toBe(
+      "RangeError: Invalid array length\nApp@blob:null/abc:4:12\nrender@blob:null/abc:9:3",
+    )
   })
 
   it("ignores artifact-error messages from any window but its own iframe", () => {

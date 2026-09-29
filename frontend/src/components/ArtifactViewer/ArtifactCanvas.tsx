@@ -13,9 +13,13 @@ import type { QueryDataResponse } from "./types"
 import { useArtifactDataRecovery } from "./useArtifactDataRecovery"
 import { useArtifactPrint } from "./useArtifactPrint"
 
-function errorClassFromStack(stack: unknown): string | undefined {
-  if (typeof stack !== "string") return undefined
-  return /^([A-Z][\w$]{0,60}):/.exec(stack)?.[1]
+function sandboxErrorName(name: unknown, stack: unknown): string {
+  if (typeof name === "string" && name) return name
+  if (typeof stack === "string") {
+    const fromStack = /^([A-Z][\w$]{0,60}):/m.exec(stack)?.[1]
+    if (fromStack) return fromStack
+  }
+  return "SandboxRenderError"
 }
 
 export interface ArtifactCanvasHandle {
@@ -75,11 +79,11 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
         if (event.source !== iframeRef.current?.contentWindow) return
         if (event.data?.type === "artifact-error") {
           // Only the error text leaves the page; nothing else in the message is read.
-          const { title, message, details } = event.data.error ?? {}
+          const { title, message, details, name } = event.data.error ?? {}
           reportRenderError({
             source: "sandbox",
             stage: typeof title === "string" ? title : undefined,
-            name: errorClassFromStack(details) ?? "SandboxRenderError",
+            name: sandboxErrorName(name, details),
             message: typeof message === "string" ? message : "",
             stack: typeof details === "string" ? details : undefined,
             artifactId,

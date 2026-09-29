@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { resetReportedRenderErrorsForTests } from "@/lib/reportRenderError"
 import { ErrorBoundary } from "./ErrorBoundary"
 
-const scope = vi.hoisted(() => ({ setTag: vi.fn(), addEventProcessor: vi.fn() }))
+const scope = vi.hoisted(() => ({ setTag: vi.fn() }))
 
 vi.mock("@sentry/react", () => ({
   captureException: vi.fn(),
@@ -46,22 +46,5 @@ describe("ErrorBoundary Sentry reporting", () => {
     await userEvent.click(screen.getByRole("button", { name: /try again/i }))
     expect(screen.getByText("Something went wrong")).toBeInTheDocument()
     expect(Sentry.captureException).toHaveBeenCalledTimes(1)
-  })
-
-  it("keeps console breadcrumbs, which hold the raw message, off the event", () => {
-    render(
-      <ErrorBoundary>
-        <Broken />
-      </ErrorBoundary>,
-    )
-
-    const processor = scope.addEventProcessor.mock.calls[0][0]
-    const event = processor({
-      breadcrumbs: [
-        { category: "console", message: 'Invalid time value for "2026-13-45"' },
-        { category: "navigation", message: "/artifacts/artifact-one" },
-      ],
-    })
-    expect(event.breadcrumbs).toEqual([{ category: "navigation", message: "/artifacts/artifact-one" }])
   })
 })
