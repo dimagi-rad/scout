@@ -814,6 +814,9 @@ async def materialize_workspace_core(
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
     load_intent = load_intent or {}
+    # A mid-run denial for a real access problem, even one whose sources were all
+    # passed over below: the run must never report it as a clean success.
+    determinate_denial: dict | None = None
 
     for index, tm in enumerate(memberships):
         # The wrapper checked before the first tenant. A long load can outlive a
@@ -821,6 +824,8 @@ async def materialize_workspace_core(
         if index:
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
+                if denial["error_code"] != ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE:
+                    determinate_denial = denial
                 denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
                 pending = []
                 for later in memberships[index:]:
@@ -1013,7 +1018,7 @@ async def materialize_workspace_core(
     # honesty flag callers read, and an uncovered workspace is not a success.
     attempted_succeeded = all(r.get("success") for r in tenant_results)
     failed_attempted_tenant_ids = attempted_tenant_ids - successful_attempted_tenant_ids
-    all_succeeded = attempted_succeeded and not unreachable_results
+    all_succeeded = attempted_succeeded and not unreachable_results and determinate_denial is None
 
     # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
     # leaving the workspace's own view schema ACTIVE-but-missing. Rebuild it
@@ -1139,12 +1144,25 @@ async def materialize_workspace_core(
 
     all_results = tenant_results + unreachable_results
     _set_tenant_display_names(all_results)
+    guidance_sources = all_results
+    denied = {}
+    if determinate_denial is not None:
+        # The lost source may have been handled before the recheck, so its
+        # guidance comes from the denial, not from any entry above.
+        guidance_sources = all_results + determinate_denial["tenants"]
+        denied = {
+            "denied_mid_run": {
+                "error": determinate_denial["error"],
+                "error_code": determinate_denial["error_code"],
+            }
+        }
     return {
         "tenants": all_results,
         "all_succeeded": all_succeeded,
         "view_schema": view_schema_outcome,
         "cube_schema": cube_schema_outcome,
-        "guidance": _credential_guidance(_summary_failures(all_results)),
+        "guidance": _credential_guidance(_summary_failures(guidance_sources)),
+        **denied,
     }
 
 

@@ -1010,29 +1010,56 @@ async def test_a_denial_that_concerns_a_serving_sibling_still_reports_it(
     assert result["all_succeeded"] is False
 
 
-async def test_a_sibling_skipped_because_another_source_was_lost_still_counts_as_served(
+async def test_losing_an_already_handled_source_mid_run_is_never_reported_as_success(
     workspace, tenant, user
 ):
-    """TENANT_ACCESS_LOST marks the sources the user can still use as SKIPPED:
-    nothing is wrong with them, so a serving one is passed over, not failed."""
+    """TENANT_ACCESS_LOST names the lost source UNREACHABLE and the rest SKIPPED.
+    When the lost one was handled before the recheck, the SKIPPED serving sibling
+    is still passed over (no false Cube failure), but the run must not come back
+    as a clean success: the user has to be told about the lost source."""
     await TenantSchema.objects.acreate(
         tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
     )
     await _add_sources(workspace, user, serving=["fine-sibling"], unserved=[])
     tenants = [t async for t in workspace.tenants.all()]
-    skipped = {t.external_id: ErrorCode.WORKSPACE_TENANT_SKIPPED for t in tenants}
-    denial = _denial(tenants, ErrorCode.WORKSPACE_TENANT_UNREACHABLE, skipped)
+
+    async def recheck(*_args):
+        # The source handled before this recheck had its schema touched: that is
+        # the one the user just lost; the other can still be used.
+        handled = {
+            str(t)
+            async for t in TenantSchema.objects.filter(last_accessed_at__isnull=False).values_list(
+                "tenant_id", flat=True
+            )
+        }
+        per_tenant = {
+            t.external_id: (
+                ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+                if str(t.id) in handled
+                else ErrorCode.WORKSPACE_TENANT_SKIPPED
+            )
+            for t in tenants
+        }
+        return _denial(tenants, ErrorCode.WORKSPACE_TENANT_UNREACHABLE, per_tenant)
+
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with (
-            patch(
-                "apps.workspaces.tasks._materialization_write_denial",
-                AsyncMock(return_value=denial),
-            ),
+            patch("apps.workspaces.tasks._materialization_write_denial", side_effect=recheck),
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._included_tenant_snapshot_state",
+                AsyncMock(return_value="safe"),
+            ),
+            patch("apps.workspaces.tasks.record_cube_schema_build_failure") as cube_failure,
         ):
             build.return_value.tenant_coverage = {}
             result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
 
-    assert all(entry["success"] for entry in result["tenants"])
+    # Neither source was touched by a failed load, so the Cube gate still builds.
     assert all(entry["result"] == {"status": "already_loaded"} for entry in result["tenants"])
+    cube_failure.assert_not_called()
+    # But the run was denied for a real reason, and says so.
+    assert result["all_succeeded"] is False
+    assert result["denied_mid_run"]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert result["guidance"]
