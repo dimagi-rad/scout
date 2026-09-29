@@ -554,15 +554,13 @@ async def test_retry_endpoint_dedupes_in_flight():
 
     client = AsyncClient()
     await client.alogin(email="dedupe@b.c", password="x")
-    with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
-        mock_task.defer_async = AsyncMock()
+    with patch("apps.workspaces.services.thread_job_dispatch.materialize_workspace") as mock_task:
         resp = await client.post(
             f"/api/workspaces/{ws.id}/materialize/retry/",
             data=json.dumps({"thread_id": str(thread.id)}),
             content_type="application/json",
         )
-        # No new dispatch when there's an in-flight job
-        mock_task.defer_async.assert_not_called()
+        mock_task.defer.assert_not_called()
     body = resp.json()
     assert body["status"] == "already_in_progress"
     assert body["thread_job_id"] == str(existing.id)
