@@ -273,3 +273,70 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["fresh"])
   })
 })
+
+describe("domainSlice.addedDomainIds — workspaces someone added you to (#355)", () => {
+  const ws = (id: string): TenantMembership => ({
+    id,
+    name: id,
+    display_name: id,
+    is_auto_created: false,
+    role: "read",
+    tenants: [],
+    has_access: true,
+    member_count: 2,
+    schema_status: "available",
+    last_synced_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  })
+
+  beforeEach(() => {
+    useAppStore.setState({
+      activeDomainId: "a",
+      domains: [ws("a")],
+      domainsStatus: "loaded",
+      domainsError: null,
+      addedDomainIds: [],
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("records workspaces a background refresh finds for the first time", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("new"), ws("a")])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().addedDomainIds).toEqual(["new"])
+  })
+
+  it("doesn't record the workspace you're already in, such as a deep link being checked", async () => {
+    useAppStore.setState({ activeDomainId: "linked" })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("linked")])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().addedDomainIds).toEqual([])
+  })
+
+  it("doesn't record anything from a full fetch, such as after creating a workspace yourself", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("mine"), ws("a")])
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().addedDomainIds).toEqual([])
+  })
+
+  it("forgets an added workspace once it's dismissed or opened", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("x"), ws("y"), ws("a")])
+    const actions = useAppStore.getState().domainActions
+    await actions.revalidateDomains()
+
+    actions.dismissAddedDomain("x")
+    expect(useAppStore.getState().addedDomainIds).toEqual(["y"])
+
+    actions.setActiveDomain("y")
+    expect(useAppStore.getState().addedDomainIds).toEqual([])
+  })
+})

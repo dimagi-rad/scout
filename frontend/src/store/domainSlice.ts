@@ -26,6 +26,8 @@ export interface DomainSlice {
   workspaceGeneration: number
   domainsStatus: DomainsStatus
   domainsError: string | null
+  /** Workspaces a background refresh found that weren't listed before: someone added you. */
+  addedDomainIds: string[]
   domainActions: {
     fetchDomains: () => Promise<void>
     /**
@@ -36,6 +38,7 @@ export interface DomainSlice {
     setActiveDomain: (id: string) => void
     setActiveDomainByTenantId: (provider: string, tenantId: string) => void
     ensureTenant: (provider: string, tenantId: string) => Promise<void>
+    dismissAddedDomain: (id: string) => void
   }
 }
 
@@ -71,6 +74,7 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
     workspaceGeneration: 0,
     domainsStatus: "idle",
     domainsError: null,
+    addedDomainIds: [],
     domainActions: {
       fetchDomains: async () => {
         listRequestSeq += 1
@@ -110,9 +114,20 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
             if (JSON.stringify(domains) === JSON.stringify(current.domains)) return "fetched"
+            const known = new Set(current.domains.map((d) => d.id))
+            // The active one is already open, e.g. a deep link waiting on this very refresh.
+            const added = domains
+              .map((d) => d.id)
+              .filter((id) => !known.has(id) && id !== current.activeDomainId)
             set({
               domains,
               activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
+              ...(added.length > 0 && {
+                addedDomainIds: [
+                  ...current.addedDomainIds.filter((id) => !added.includes(id)),
+                  ...added,
+                ],
+              }),
             })
             return "fetched"
           })
@@ -124,10 +139,23 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         return revalidation
       },
 
+      dismissAddedDomain: (id: string) => {
+        const { addedDomainIds } = get()
+        if (addedDomainIds.includes(id)) {
+          set({ addedDomainIds: addedDomainIds.filter((added) => added !== id) })
+        }
+      },
+
       setActiveDomain: (id: string) => {
         if (!get().accountSession.isCurrent()) return
         recordWorkspaceUse(id)
-        set({ activeDomainId: id })
+        const { addedDomainIds } = get()
+        set({
+          activeDomainId: id,
+          ...(addedDomainIds.includes(id) && {
+            addedDomainIds: addedDomainIds.filter((added) => added !== id),
+          }),
+        })
       },
 
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
