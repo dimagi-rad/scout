@@ -1,10 +1,12 @@
 """The DRF views answer a non-object body or a wrong-typed field with a 400, not a 500."""
 
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 from django.test import Client
 
+from apps.semantic.services import query as query_service
 from apps.workspaces.models import (
     TenantSchema,
     WorkspaceInvite,
@@ -165,3 +167,21 @@ class TestFieldTypes:
         resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
 
         assert resp.status_code == 403
+
+
+# transaction=True: the query service calls close_old_connections(), which closes a connection
+# still inside pytest-django's per-test atomic block and breaks every later query.
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("granularity", [["day"], {"unit": "day"}], ids=["list", "object"])
+def test_semantic_query_granularity_must_be_a_string(client, workspace, monkeypatch, granularity):
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _ws: MagicMock())
+    body = {
+        "measures": ["visits.count"],
+        "time_dimension": "visits.visit_date",
+        "granularity": granularity,
+    }
+
+    resp = _send(client, "post", f"/api/workspaces/{workspace.id}/semantic-query/", body)
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message"].startswith("Unsupported granularity")
