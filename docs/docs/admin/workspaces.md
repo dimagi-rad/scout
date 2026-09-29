@@ -32,13 +32,13 @@ Invites expire after 30 days.
 
 ### Data sources
 
-Lists the workspace's data sources. Managers can add a source they can access themselves, or remove one. Every member must be able to use every source, so Scout refuses to add a source that some existing member cannot access.
+Lists the workspace's data sources. Managers can add a source they can access themselves, or remove one as long as at least one source remains. A manager who has lost access to one of the sources can only remove that source until they regain access to the rest. Every member must be able to use every source, so Scout refuses to add a source that some existing member cannot access.
 
 ### Settings
 
 - **Workspace name**: managers can rename the workspace.
 - **System prompt**: custom instructions added to the agent's system prompt for every conversation in this workspace. Only managers can edit it.
-- **Danger zone**: managers can delete the workspace and all its threads. This cannot be undone.
+- **Danger zone**: managers can delete the workspace and all its threads. This cannot be undone. Scout refuses if this is your last workspace covering one of its data sources (create another workspace for that source first), or if the workspace has other members and you have lost access to one of its sources.
 
 ## Roles
 
