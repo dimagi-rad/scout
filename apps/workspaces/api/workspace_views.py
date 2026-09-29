@@ -64,7 +64,10 @@ from apps.workspaces.services.credential_coverage import (
 )
 from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
+    notify_invite_revoked,
     notify_member_added,
+    notify_member_removed,
+    notify_role_changed,
     send_pending_invite_email,
 )
 from apps.workspaces.services.member_coverage import (
@@ -1009,8 +1012,11 @@ class WorkspaceMemberDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        target.role = new_role
-        target.save(update_fields=["role"])
+        if target.role != new_role:
+            target.role = new_role
+            target.save(update_fields=["role"])
+            if target.user_id != request.user.id:
+                transaction.on_commit(lambda: notify_role_changed(target, request.user))
         return Response({"id": str(target.id), "role": target.role})
 
     def delete(self, request, workspace_id, membership_id):
@@ -1045,9 +1051,14 @@ class WorkspaceMemberDetailView(APIView):
             )
 
         # Delete the member's threads in this workspace
-        Thread.objects.filter(workspace=workspace, user=target.user).delete()
+        removed_user = target.user
+        Thread.objects.filter(workspace=workspace, user=removed_user).delete()
 
         target.delete()
+        if not is_self:
+            transaction.on_commit(
+                lambda: notify_member_removed(workspace, removed_user, request.user)
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1112,6 +1123,9 @@ class WorkspaceInviteDetailView(APIView):
             ).exists()
         ):
             return _invite_no_longer_live()
+        # A retry of an already-revoked invite, or one that had lapsed, is no news.
+        if revoked and not invite.is_expired:
+            transaction.on_commit(lambda: notify_invite_revoked(invite, request.user))
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

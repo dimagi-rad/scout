@@ -1,8 +1,11 @@
 """Tests for WorkspaceInvite notifications (pending email + bidirectional awaiting/accepted)."""
 
+from datetime import timedelta
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.models import (
@@ -330,3 +333,242 @@ class TestDirectAddEmail:
 
         message = _deferred_emails(mock_task)[0]["message"]
         assert message.startswith("A Scout workspace manager added you")
+
+
+class TestRoleChangeEmail:
+    """#382: a member whose role a manager changes is told."""
+
+    def _patch(self, client, workspace, membership, role):
+        return client.patch(
+            f"/api/workspaces/{workspace.id}/members/{membership.id}/",
+            {"role": role},
+            content_type="application/json",
+        )
+
+    def test_role_change_emails_the_member(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._patch(client, workspace, target, WorkspaceRole.READ_WRITE)
+
+        assert resp.status_code == 200
+        emails = _deferred_emails(mock_task)
+        assert [e["recipient_list"] for e in emails] == [["reader@example.com"]]
+        assert workspace.name in emails[0]["subject"]
+        assert "to Read-Write" in emails[0]["message"]
+        assert f"/workspaces/{workspace.id}/chat" in emails[0]["message"]
+
+    def test_email_waits_for_commit(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            self._patch(client, workspace, target, WorkspaceRole.READ_WRITE)
+
+        mock_task.defer.assert_not_called()
+        assert len(callbacks) == 1
+
+    def test_same_role_sends_nothing(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._patch(client, workspace, target, WorkspaceRole.READ)
+
+        assert resp.status_code == 200
+        mock_task.defer.assert_not_called()
+
+    def test_changing_your_own_role_sends_nothing(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        WorkspaceMembership.objects.filter(workspace=workspace, user=read_user).update(
+            role=WorkspaceRole.MANAGE
+        )
+        own = WorkspaceMembership.objects.get(workspace=workspace, user=user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._patch(client, workspace, own, WorkspaceRole.READ)
+
+        assert resp.status_code == 200
+        mock_task.defer.assert_not_called()
+
+    def test_email_less_member_is_skipped(self, workspace, user, mocker):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        nameless = User.objects.create_user(email=None, password="pass")
+        membership = WorkspaceMembership.objects.create(
+            workspace=workspace, user=nameless, role=WorkspaceRole.READ
+        )
+
+        invite_notifications.notify_role_changed(membership, user)
+
+        mock_task.defer.assert_not_called()
+
+
+class TestMemberRemovedEmail:
+    """#382: a member a manager removes is told (their threads go with them)."""
+
+    def _delete(self, client, workspace, membership):
+        return client.delete(f"/api/workspaces/{workspace.id}/members/{membership.id}/")
+
+    def test_removal_emails_the_removed_member(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, target)
+
+        assert resp.status_code == 204
+        emails = _deferred_emails(mock_task)
+        assert [e["recipient_list"] for e in emails] == [["reader@example.com"]]
+        assert workspace.name in emails[0]["subject"]
+        assert emails[0]["message"].startswith("Test User removed you")
+
+    def test_email_waits_for_commit(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            self._delete(client, workspace, target)
+
+        mock_task.defer.assert_not_called()
+        assert len(callbacks) == 1
+
+    def test_leaving_sends_nothing(
+        self, client, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        own = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(read_user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, own)
+
+        assert resp.status_code == 204
+        mock_task.defer.assert_not_called()
+
+    def test_refused_removal_sends_nothing(
+        self, client, workspace, read_user, write_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=write_user)
+        client.force_login(read_user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, target)
+
+        assert resp.status_code == 403
+        mock_task.defer.assert_not_called()
+
+    def test_composing_failure_does_not_fail_the_removal(
+        self, client, user, workspace, read_user, mocker, django_capture_on_commit_callbacks
+    ):
+        mocker.patch.object(invite_notifications, "send_email")
+        mocker.patch.object(invite_notifications, "_user_label", side_effect=RuntimeError)
+        target = WorkspaceMembership.objects.get(workspace=workspace, user=read_user)
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._delete(client, workspace, target)
+
+        assert resp.status_code == 204
+        assert not WorkspaceMembership.objects.filter(pk=target.pk).exists()
+
+    def test_email_less_member_is_skipped(self, workspace, user, mocker):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        nameless = User.objects.create_user(email=None, password="pass")
+
+        invite_notifications.notify_member_removed(workspace, nameless, user)
+
+        mock_task.defer.assert_not_called()
+
+
+class TestInviteRevokedEmail:
+    """#382: an invitee whose invite is revoked is told, since the invite or
+    awaiting-access email may have sent them off to act on it."""
+
+    @pytest.fixture
+    def invite(self, workspace, user):
+        return WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="invitee@example.com",
+            role=WorkspaceRole.READ,
+            invited_by=user,
+            status=WorkspaceInviteStatus.AWAITING_ACCESS,
+        )
+
+    def _revoke(self, client, workspace, invite):
+        return client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+
+    def test_revoke_emails_the_invitee(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._revoke(client, workspace, invite)
+
+        assert resp.status_code == 204
+        emails = _deferred_emails(mock_task)
+        assert [e["recipient_list"] for e in emails] == [["invitee@example.com"]]
+        assert workspace.name in emails[0]["subject"]
+
+    def test_email_waits_for_commit(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            self._revoke(client, workspace, invite)
+
+        mock_task.defer.assert_not_called()
+        assert len(callbacks) == 1
+
+    def test_revoking_again_sends_nothing(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        client.force_login(user)
+        with django_capture_on_commit_callbacks(execute=True):
+            self._revoke(client, workspace, invite)
+        mock_task.reset_mock()
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._revoke(client, workspace, invite)
+
+        assert resp.status_code == 204
+        mock_task.defer.assert_not_called()
+
+    def test_revoking_an_expired_invite_sends_nothing(
+        self, client, user, workspace, invite, mocker, django_capture_on_commit_callbacks
+    ):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        WorkspaceInvite.objects.filter(pk=invite.pk).update(
+            expires_at=timezone.now() - timedelta(days=1)
+        )
+        client.force_login(user)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = self._revoke(client, workspace, invite)
+
+        assert resp.status_code == 204
+        mock_task.defer.assert_not_called()

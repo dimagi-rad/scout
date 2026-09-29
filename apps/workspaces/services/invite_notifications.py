@@ -6,11 +6,13 @@ CommCare Connect opportunities, Open Chat Studio bots, and CommCare HQ projects.
 Delivery goes through the async ``send_email`` task off the request path.
 """
 
+import functools
 import logging
 
 from django.conf import settings
 
 from apps.users.tasks import send_email
+from apps.workspaces.models import WorkspaceRole
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,10 @@ def _user_label(user) -> str:
     return (user and (user.get_full_name() or user.email)) or "A Scout workspace manager"
 
 
+def _workspace_link(workspace) -> str:
+    return f"{settings.SCOUT_BASE_URL.rstrip('/')}/workspaces/{workspace.id}/chat"
+
+
 def _inviter_label(invite) -> str:
     return _user_label(invite.invited_by)
 
@@ -60,6 +66,20 @@ def _dispatch(subject, message, recipient_list):
         send_email.defer(subject=subject, message=message, recipient_list=recipient_list)
     except Exception:
         logger.exception("Failed to enqueue invite email to %s", recipient_list)
+
+
+def _post_commit_notice(fn):
+    """These run from on_commit hooks after the change has landed, so a failure while
+    composing (say, a row deleted concurrently) must not turn that request into a 500."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            logger.exception("Failed to send %s", fn.__name__)
+
+    return wrapper
 
 
 def send_pending_invite_email(invite):
@@ -121,11 +141,12 @@ def notify_invite_accepted(invite, invitee):
         )
 
 
+@_post_commit_notice
 def notify_member_added(membership, added_by):
     """Tell a user a manager added them straight to a workspace (#382): the direct
     path creates a membership with no invite, so no other notice ever reaches them."""
     workspace = membership.workspace
-    link = f"{settings.SCOUT_BASE_URL.rstrip('/')}/workspaces/{workspace.id}/chat"
+    link = _workspace_link(workspace)
     _dispatch(
         f"You've been added to '{workspace.name}' on Scout",
         (
@@ -133,4 +154,61 @@ def notify_member_added(membership, added_by):
             f"workspace on Scout.\n\nOpen it: {link}\n"
         ),
         [membership.user.email],
+    )
+
+
+# Matches the role names the members UI shows, not the model's choice labels.
+_ROLE_LABELS = {
+    WorkspaceRole.READ: "Read",
+    WorkspaceRole.READ_WRITE: "Read-Write",
+    WorkspaceRole.MANAGE: "Manager",
+}
+
+
+@_post_commit_notice
+def notify_role_changed(membership, changed_by):
+    """Tell a member a manager changed their role (#382)."""
+    workspace = membership.workspace
+    user = membership.user
+    if not user.email:
+        return
+    _dispatch(
+        f"Your role in '{workspace.name}' on Scout changed",
+        (
+            f"{_user_label(changed_by)} changed your role in the '{workspace.name}' "
+            f"workspace on Scout to {_ROLE_LABELS[membership.role]}.\n\n"
+            f"Open it: {_workspace_link(workspace)}\n"
+        ),
+        [user.email],
+    )
+
+
+@_post_commit_notice
+def notify_member_removed(workspace, user, removed_by):
+    """Tell a user a manager removed them from a workspace (#382). Removal also
+    deletes their conversations there, so the notice says so."""
+    if not user.email:
+        return
+    _dispatch(
+        f"You've been removed from '{workspace.name}' on Scout",
+        (
+            f"{_user_label(removed_by)} removed you from the '{workspace.name}' workspace "
+            f"on Scout. Your conversations in it have been deleted.\n"
+        ),
+        [user.email],
+    )
+
+
+@_post_commit_notice
+def notify_invite_revoked(invite, revoked_by):
+    """Tell an invitee their invite was withdrawn (#382): the invite and awaiting-access
+    emails may have sent them off to sign in or get upstream access."""
+    workspace_name = invite.workspace.name
+    _dispatch(
+        f"Your invite to '{workspace_name}' on Scout was withdrawn",
+        (
+            f"{_user_label(revoked_by)} withdrew your invite to the '{workspace_name}' "
+            f"workspace on Scout. You don't need to do anything.\n"
+        ),
+        [invite.email],
     )
