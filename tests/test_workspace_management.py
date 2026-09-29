@@ -5,6 +5,8 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.api import workspace_views
+from apps.workspaces.api.workspace_views import WorkspaceInviteDetailView
 from apps.workspaces.models import (
     Workspace,
     WorkspaceInvite,
@@ -542,6 +544,42 @@ class TestMemberAdd:
         assert invites.count() == 1
         assert invites.first().role == WorkspaceRole.MANAGE
 
+    def test_reinvite_does_not_revive_an_invite_accepted_mid_request(
+        self, client, user, workspace, mocker
+    ):
+        """#561 G4: login accepted the invite between the re-invite's read and write."""
+        invite = WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="ghost@example.com",
+            role=WorkspaceRole.READ,
+            status=WorkspaceInviteStatus.PENDING,
+        )
+        expiry = workspace_views.default_invite_expiry
+
+        def accept_then_expiry():
+            WorkspaceInvite.objects.filter(pk=invite.pk).update(
+                status=WorkspaceInviteStatus.ACCEPTED
+            )
+            return expiry()
+
+        mocker.patch.object(workspace_views, "default_invite_expiry", accept_then_expiry)
+        send = mocker.patch.object(workspace_views, "send_pending_invite_email")
+        client.force_login(user)
+
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ghost@example.com", "role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 409
+        assert resp.json() == {"error": "Invite is no longer live."}
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+        assert invite.role == WorkspaceRole.READ
+        assert WorkspaceInvite.objects.filter(workspace=workspace).count() == 1
+        send.assert_not_called()
+
     @pytest.mark.django_db(transaction=True)
     def test_share_time_refresh_grants_access_then_adds(
         self, client, user, workspace, tenant, mocker
@@ -756,6 +794,52 @@ class TestInviteDetail:
         assert resp.status_code == 200
         invite.refresh_from_db()
         assert invite.role == WorkspaceRole.MANAGE
+
+    def _accept_after_read(self, mocker, invite):
+        read = WorkspaceInviteDetailView._get_manager_context
+
+        def read_then_accept(view, *args):
+            result = read(view, *args)
+            WorkspaceInvite.objects.filter(pk=invite.pk).update(
+                status=WorkspaceInviteStatus.ACCEPTED
+            )
+            return result
+
+        mocker.patch.object(WorkspaceInviteDetailView, "_get_manager_context", read_then_accept)
+
+    def test_revoke_does_not_overwrite_an_invite_accepted_mid_request(
+        self, client, user, workspace, mocker
+    ):
+        """#561 G4: login accepted the invite between the revoke's read and write."""
+        invite = self._make_invite(workspace)
+        self._accept_after_read(mocker, invite)
+        client.force_login(user)
+
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+
+        assert resp.status_code == 409
+        assert resp.json() == {"error": "Invite is no longer live."}
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+
+    def test_role_change_does_not_touch_an_invite_accepted_mid_request(
+        self, client, user, workspace, mocker
+    ):
+        invite = self._make_invite(workspace)
+        self._accept_after_read(mocker, invite)
+        client.force_login(user)
+
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/invites/{invite.id}/",
+            {"role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 409
+        assert resp.json() == {"error": "Invite is no longer live."}
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+        assert invite.role == WorkspaceRole.READ
 
     def test_invalid_role_returns_400(self, client, user, workspace):
         invite = self._make_invite(workspace)

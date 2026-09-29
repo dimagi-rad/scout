@@ -244,6 +244,18 @@ def _serialize_invite(invite, result=None):
     return payload
 
 
+def _update_if_live(invite, **fields) -> bool:
+    return bool(
+        WorkspaceInvite.objects.filter(pk=invite.pk, status__in=LIVE_INVITE_STATUSES).update(
+            **fields
+        )
+    )
+
+
+def _invite_no_longer_live():
+    return Response({"error": "Invite is no longer live."}, status=status.HTTP_409_CONFLICT)
+
+
 def _upsert_invite(workspace, email, role, invited_by, new_status):
     """Create or refresh the single live invite for (workspace, email).
 
@@ -251,20 +263,29 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
     the pending↔awaiting_access status rather than violating the
     one-live-invite-per-(workspace,email) constraint. A stale (expired) live
     invite is retired to EXPIRED first so a fresh one can take its place.
+
+    Returns None when the live invite left the live set after it was read.
     """
     live = WorkspaceInvite.objects.filter(
         workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
     ).first()
+    # Conditional writes: a login may accept (or a manager revoke) the invite
+    # after the read above, and a live status must not be written back (#561 G4).
     if live and not live.is_expired:
-        live.role = role
-        live.invited_by = invited_by
-        live.status = new_status
-        live.expires_at = default_invite_expiry()
-        live.save(update_fields=["role", "invited_by", "status", "expires_at", "updated_at"])
+        fields = {
+            "role": role,
+            "invited_by": invited_by,
+            "status": new_status,
+            "expires_at": default_invite_expiry(),
+            "updated_at": timezone.now(),
+        }
+        if not _update_if_live(live, **fields):
+            return None
+        for name, value in fields.items():
+            setattr(live, name, value)
         return live
     if live and live.is_expired:
-        live.status = WorkspaceInviteStatus.EXPIRED
-        live.save(update_fields=["status", "updated_at"])
+        _update_if_live(live, status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now())
     return WorkspaceInvite.objects.create(
         workspace=workspace,
         email=email,
@@ -697,6 +718,8 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.PENDING
             )
+            if invite is None:
+                return _invite_no_longer_live()
             send_pending_invite_email(invite)
             return Response(
                 _serialize_invite(invite, result="invite_pending"),
@@ -725,6 +748,8 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.AWAITING_ACCESS
             )
+            if invite is None:
+                return _invite_no_longer_live()
             # The invitee already has a Scout account, so they never get the
             # pending-invite email; tell them directly they need upstream access.
             # The manager just performed this action, so don't email them.
@@ -899,16 +924,22 @@ class WorkspaceInviteDetailView(APIView):
         new_role = request.data.get("role")
         if new_role not in WorkspaceRole.values:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+        # Conditional: login may have accepted the invite since it was read (#561 G4).
+        if not _update_if_live(invite, role=new_role, updated_at=timezone.now()):
+            return _invite_no_longer_live()
         invite.role = new_role
-        invite.save(update_fields=["role", "updated_at"])
         return Response(_serialize_invite(invite))
 
     def delete(self, request, workspace_id, invite_id):
         _workspace, invite, err = self._get_manager_context(request, workspace_id, invite_id)
         if err:
             return err
-        invite.status = WorkspaceInviteStatus.REVOKED
-        invite.save(update_fields=["status", "updated_at"])
+        # Conditional: revoking an invite login already accepted would hide a live
+        # member behind a REVOKED row (#561 G4).
+        if not _update_if_live(
+            invite, status=WorkspaceInviteStatus.REVOKED, updated_at=timezone.now()
+        ):
+            return _invite_no_longer_live()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
