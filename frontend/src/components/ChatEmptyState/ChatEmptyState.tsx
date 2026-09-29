@@ -71,7 +71,7 @@ export function ChatEmptyPrompt({
       }
       if (e.key === "Tab" || e.key === "Enter") {
         e.preventDefault()
-        selectSlashCommand(filteredCommands[slashMenuIndex])
+        selectSlashCommand(filteredCommands[Math.min(slashMenuIndex, filteredCommands.length - 1)])
         return
       }
     }
