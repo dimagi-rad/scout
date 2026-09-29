@@ -134,9 +134,9 @@ The agent accesses workspace data through a Model Context Protocol (MCP) server 
 - **Structured semantic query execution** with row limits and timeout enforcement
 - **Read-only SQL fallback** with validated functions, schema scope, row limits, and timeouts
 - **Response envelopes** with consistent error codes, timing data, and audit logging
-- **Thread safety** with connection pooling, circuit breaker, and timeout handling
+- **Shared-secret auth**: every request must carry an `X-Scout-MCP-Secret` header matching `MCP_SHARED_SECRET`; an unset secret rejects every request
 
-The backend communicates with the MCP server via `langchain-mcp-adapters`, which exposes MCP tools as LangChain tools that the LangGraph agent can call. The MCP server URL is configured via the `MCP_SERVER_URL` environment variable (default: `http://localhost:8100/mcp`).
+The backend communicates with the MCP server via `langchain-mcp-adapters`, which exposes MCP tools as LangChain tools that the LangGraph agent can call. The client (`apps/agents/mcp_client.py`) caches the tool list and opens a circuit breaker after five consecutive connection failures. The MCP server URL is configured via the `MCP_SERVER_URL` environment variable (default: `http://localhost:8100/mcp`).
 
 All MCP tools require a `workspace_id` parameter. The agent graph injects this
 server-side so the model does not choose or override the data scope.
@@ -161,10 +161,12 @@ Run a structured query against the semantic model.
 - `measures` (list, optional): Semantic measure members such as `visits.count`
 - `dimensions` (list, optional): Semantic dimension members such as `visits.username`
 - `time_dimension` (string, optional): Semantic time dimension member
-- `granularity` (string, optional): Time bucket such as `day`, `week`, or `month`
+- `granularity` (string, optional): `day`, `week`, `month`, `quarter`, or `year`
+- `date_range` (object, optional): A preset such as `{"preset": "last_30_days"}` or inclusive `start`/`end` dates; requires `time_dimension`
+- `query_context` (object, optional): Reporting context; only `timezone` is used
 - `filters` (list, optional): Structured filters
 - `order_by` (list, optional): Structured ordering
-- `limit` (number, optional): Maximum rows
+- `limit` (number, optional): Maximum rows (default 100, clamped server-side)
 
 **Returns:**
 - `columns`: List of column names
@@ -173,7 +175,8 @@ Run a structured query against the semantic model.
 - `truncated`: Whether results hit the limit
 - `semantic_query`: Canonical semantic query spec
 - `members`: Semantic members used by the result
-- `error`: Error message if failed
+
+Results and errors use the standard MCP response envelope.
 
 Scout backend code compiles semantic query specs into trusted parameterized
 database requests. Canonical metrics must use this path, even when raw SQL
@@ -232,11 +235,11 @@ Save discovered corrections for future queries.
   - `aggregation`: Gotcha with grouping
   - `naming`: Column/table naming convention
   - `data_quality`: Known data issues
-- `business_logic`: Domain-specific rules
-- `other`: Anything else
+  - `business_logic`: Domain-specific rules
+  - `other`: Anything else
 - `tables` (list, required): Table names this applies to
 
-Learnings are automatically injected into future prompts via the knowledge retriever. Duplicate learnings increase confidence score rather than creating new records.
+Learnings are automatically injected into future prompts via the knowledge retriever. New learnings start at 50% confidence; saving a duplicate raises the existing learning's confidence by 10 points instead of creating a new record.
 
 ### save_as_recipe
 
@@ -251,11 +254,8 @@ Save conversation workflows as reusable templates.
   - `label`: Human-readable label
   - `default` (optional): Default value
   - `options` (required for select): Allowed values
-- `steps` (list, required): Step definitions, each with:
-  - `prompt_template`: Prompt with `{{variable}}` placeholders
-  - `expected_tool` (optional): Tool the agent should use
-  - `description` (optional): What this step does
-- `is_shared` (bool, optional): Whether all project members can use it
+- `prompt` (string, required): Markdown prompt template with `{{variable}}` placeholders, sent to the agent when the recipe runs
+- `is_shared` (bool, optional, default `false`): Stored on the recipe. The recipe list API returns every recipe in the workspace regardless of this flag.
 
 ### describe_table
 
@@ -264,7 +264,7 @@ Get detailed column information for a table before using the raw SQL fallback.
 **Parameters:**
 - `table_name` (string, required): Name of the table to describe
 
-**Returns:** Markdown-formatted documentation with columns, types, constraints, sample values, and any column notes from TableKnowledge.
+**Returns:** The table description and its columns (name, type, nullable, default, description) inside the standard MCP response envelope. JSONB columns carry summaries from the CommCare discover phase when available. TableKnowledge notes reach the agent through the [knowledge context](#4-knowledge-context), not this tool.
 
 ## Prompt construction
 
@@ -302,29 +302,17 @@ The workspace's `system_prompt`, under a `## Workspace Instructions` heading. Us
 
 Assembled by the `KnowledgeRetriever` from three sources:
 
-**Knowledge entries** (always included):
+**Knowledge entries** (all entries, ordered by title; each entry's content is free-form markdown):
 ```markdown
 ## Knowledge Base
 
-### MRR (Monthly Recurring Revenue)
-Definition: Sum of active subscription amounts, excluding annual contracts billed upfront.
-
-SQL:
-    SELECT SUM(amount) FROM subscriptions WHERE status = 'active'
-
-Unit: USD
-Caveats:
-- Excludes enterprise contracts billed annually.
-- Amounts are in cents.
-
 ### APAC Active Users
 In the APAC region, 'active user' means logged in within 7 days, not 30.
-Applies to: users, sessions tables.
 ```
 
 **Table knowledge** (enriched metadata):
 ```markdown
-## Table Context
+## Table Context (beyond schema)
 
 ### orders
 Order transactions from all channels.
@@ -444,7 +432,7 @@ Conversations are persisted using LangGraph's PostgreSQL checkpointer:
 
 - **Thread ID**: Unique identifier for each conversation
 - **Checkpoints**: Full state saved after each turn
-- **Connection pooling**: Max 20 connections for checkpoint operations
+- **Connection pooling**: `LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE` connections per process (default 20; 4 in development settings)
 - **No in-memory fallback**: if Postgres is unavailable, chat returns an error rather than silently dropping history
 
 To continue a conversation, pass the same `thread_id` in the config:
@@ -473,6 +461,6 @@ Queries run against the workspace's tenant or view schema, not a configured sche
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API authentication |
-| `DB_CREDENTIAL_KEY` | Fernet key for credential encryption |
-| `MAX_QUERIES_PER_MINUTE` | Rate limit (default: 60) |
-| `MAX_CONNECTIONS_PER_PROJECT` | Connection pool size (default: 5) |
+| `DB_CREDENTIAL_KEY` | Fernet key for encrypting stored OAuth tokens and API-key credentials |
+| `MCP_SERVER_URL` | MCP server endpoint (default: `http://localhost:8100/mcp`) |
+| `MCP_SHARED_SECRET` | Shared secret the agent sends to the MCP server; required in production |
