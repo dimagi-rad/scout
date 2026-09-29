@@ -267,7 +267,7 @@ export function compileCompactGraphConfig(config: CompactGraphConfig): RechartsN
           },
         },
     horizontalBars
-      ? { type: "YAxis", props: { type: "category", dataKey: xKey, width: 88 } }
+      ? { type: "YAxis", props: { type: "category", dataKey: xKey } }
       : {
           type: "YAxis",
           props: {
@@ -393,6 +393,22 @@ function buildNode(
   const props: Record<string, unknown> = {}
   for (const [name, value] of Object.entries(safeNodeProps(node.type, node.props ?? {}))) {
     props[name] = resolveProp(value)
+  }
+  // Rotated or nested-key axes keep Recharts' default tick, which handles angle and dot-paths.
+  if (
+    node.type === "YAxis" && props.type === "category" && props.width === undefined
+    && typeof props.dataKey === "string" && !props.dataKey.includes(".") && props.angle === undefined
+  ) {
+    const tickFormatter = typeof props.tickFormatter === "function"
+      ? (props.tickFormatter as (value: unknown, index: number) => string)
+      : undefined
+    const labels = state.rows.map((row, index) => {
+      const value = row[String(props.dataKey)] ?? ""
+      return tickFormatter ? String(tickFormatter(value, index)) : String(value)
+    })
+    const width = categoryAxisWidth(labels)
+    props.width = width
+    props.tick = createCategoryTick(width, tickFormatter)
   }
   const defaulted = applyDefaults(node.type, props, seriesIndex, state.palette)
   if (DATA_INJECT_TYPES.has(node.type)) {
@@ -584,6 +600,50 @@ function resolveDataProp(type: string, value: unknown, rows: Row[]): unknown {
 
 function isGraphSeries(value: GraphSeries | undefined): value is GraphSeries {
   return Boolean(value)
+}
+
+const CATEGORY_TICK_FONT_SIZE = 11
+const CATEGORY_TICK_CHAR_WIDTH = 6.2
+const CATEGORY_AXIS_PADDING = 12
+const CATEGORY_AXIS_MIN_WIDTH = 56
+export const CATEGORY_AXIS_MAX_WIDTH = 200
+
+export function categoryAxisWidth(labels: string[]): number {
+  const longest = labels.reduce((max, label) => Math.max(max, label.length), 0)
+  const estimated = Math.ceil(longest * CATEGORY_TICK_CHAR_WIDTH) + CATEGORY_AXIS_PADDING
+  return Math.min(CATEGORY_AXIS_MAX_WIDTH, Math.max(CATEGORY_AXIS_MIN_WIDTH, estimated))
+}
+
+export function truncateCategoryLabel(label: string, axisWidth: number): string {
+  const maxChars = Math.max(1, Math.floor((axisWidth - CATEGORY_AXIS_PADDING) / CATEGORY_TICK_CHAR_WIDTH))
+  return label.length > maxChars ? `${label.slice(0, Math.max(1, maxChars - 1))}\u2026` : label
+}
+
+function createCategoryTick(axisWidth: number, tickFormatter?: (value: unknown, index: number) => string) {
+  return function CategoryTick(props: {
+    x?: number
+    y?: number
+    index?: number
+    textAnchor?: "inherit" | "end" | "middle" | "start"
+    payload?: { value?: unknown }
+  }) {
+    const value = props.payload?.value ?? ""
+    const full = tickFormatter ? String(tickFormatter(value, props.index ?? 0)) : String(value)
+    return (
+      <text
+        x={props.x}
+        y={props.y}
+        dy={4}
+        textAnchor={props.textAnchor ?? "end"}
+        fontSize={CATEGORY_TICK_FONT_SIZE}
+        fill="var(--muted-foreground)"
+        data-testid="category-axis-tick"
+      >
+        <title>{full}</title>
+        {truncateCategoryLabel(full, axisWidth)}
+      </text>
+    )
+  }
 }
 
 export function formatAxisTick(value: unknown): string {
