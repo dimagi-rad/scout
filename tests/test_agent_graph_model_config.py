@@ -43,7 +43,7 @@ def test_default_llm_model_is_opus_5_5():
 
 
 @pytest.mark.asyncio
-async def test_llm_sends_no_thinking_or_forced_tool_choice():
+async def test_llm_keeps_thinking_adaptive_and_tool_choice_auto():
     """Opus 5.5 rejects thinking={"type": "disabled"} and forced tool_choice with a 400,
     so the agent must send neither and leave room in max_tokens for thinking."""
     workspace = MagicMock()
@@ -61,7 +61,7 @@ async def test_llm_sends_no_thinking_or_forced_tool_choice():
         await build_agent_graph(workspace, user)
 
     kwargs = MockChat.call_args.kwargs
-    assert "thinking" not in kwargs
+    assert kwargs["thinking"]["type"] == "adaptive"
     assert kwargs["max_tokens"] == DEFAULT_MAX_TOKENS >= 16_000
     bind_kwargs = MockChat.return_value.bind_tools.call_args.kwargs
     assert bind_kwargs.get("tool_choice") in (None, "auto")
