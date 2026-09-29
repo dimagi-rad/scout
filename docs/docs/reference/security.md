@@ -91,10 +91,14 @@ API-key connection credentials (`TenantConnection.encrypted_credential`) are
 encrypted at rest with Fernet. The key is the `DB_CREDENTIAL_KEY` environment
 variable and is never stored in the database.
 
-OAuth access and refresh tokens are stored by django-allauth in its
-`SocialToken` table as plaintext; token refresh and data loading read them
-directly. `EncryptingSocialAccountAdapter` encrypts them only in the copy
-allauth serializes into the session during login.
+OAuth access and refresh tokens, stored by django-allauth in its `SocialToken`
+table, are encrypted at rest with the same key (`apps/users/token_encryption.py`).
+The model fields encrypt on every write and decrypt on every read, so callers
+see plaintext and cannot filter on token values in SQL. Values without the
+`enc1:` prefix are legacy plaintext and are still read. Migration `users.0017`
+encrypts those rows. `EncryptingSocialAccountAdapter` also encrypts the copy
+allauth serializes into the session during login. Changing `DB_CREDENTIAL_KEY`
+makes every stored token unreadable, so OAuth users must reconnect.
 
 ## Rate limiting
 
