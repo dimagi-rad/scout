@@ -80,6 +80,22 @@ it("keeps the conflict message and the list when the refresh fails", async () =>
   expect(screen.queryByText("Server error")).not.toBeInTheDocument()
 })
 
+it("tells the manager a directly added member was emailed", async () => {
+  vi.mocked(workspaceApi.getMembers).mockReset()
+  vi.mocked(workspaceApi.getMembers).mockResolvedValueOnce({ members: [manager], invites: [] })
+  vi.mocked(workspaceApi.addMember).mockResolvedValue({ ...joined, result: "member" })
+  render(<MembersTab workspaceId="ws-1" isManager />)
+
+  await userEvent.click(await screen.findByTestId("add-member-button"))
+  await userEvent.type(screen.getByTestId("add-member-email"), "new@example.com")
+  await userEvent.click(screen.getByTestId("add-member-submit"))
+
+  expect(await screen.findByTestId("member-row-m-2")).toBeInTheDocument()
+  expect(screen.getByTestId("add-member-added-info")).toHaveTextContent(
+    "Added new@example.com. We've emailed them to let them know.",
+  )
+})
+
 it("reloads the members when a re-invite finds the invite already accepted", async () => {
   vi.mocked(workspaceApi.addMember).mockRejectedValue(
     new ApiError(409, "Invite is no longer live."),

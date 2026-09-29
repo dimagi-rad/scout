@@ -75,6 +75,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
   const [addSubmitting, setAddSubmitting] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
   const [addInfo, setAddInfo] = useState<string | null>(null)
+  const [addedInfo, setAddedInfo] = useState<string | null>(null)
 
   const addTriggerRef = useRef<HTMLButtonElement>(null)
 
@@ -173,6 +174,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
     setAddSubmitting(true)
     setAddError(null)
     setAddInfo(null)
+    setAddedInfo(null)
     try {
       const res = await workspaceApi.addMember(workspaceId, {
         email,
@@ -180,6 +182,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       })
       if (res.result === "member") {
         setMembers((prev) => [...prev, res])
+        setAddedInfo(`Added ${res.email}. We've emailed them to let them know.`)
       } else {
         const awaiting =
           res.result === "invite_awaiting_access"
@@ -313,6 +316,15 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
         </form>
       )}
 
+      {addedInfo && (
+        <p
+          role="status"
+          className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-300"
+          data-testid="add-member-added-info"
+        >
+          {addedInfo}
+        </p>
+      )}
       {addInfo && (
         <p
           className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
