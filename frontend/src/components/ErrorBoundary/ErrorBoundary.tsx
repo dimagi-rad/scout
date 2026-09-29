@@ -8,6 +8,8 @@ interface Props {
   fallback?: ReactNode
   artifactId?: string
   artifactVersion?: number
+  /** Clears a caught error when it changes, e.g. after the data is refreshed. */
+  resetKey?: string
 }
 
 interface State {
@@ -41,6 +43,12 @@ export class ErrorBoundary extends Component<Props, State> {
       artifactId: this.props.artifactId,
       artifactVersion: this.props.artifactVersion,
     })
+  }
+
+  componentDidUpdate(prevProps: Props) {
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.handleReset()
+    }
   }
 
   handleReset = () => {

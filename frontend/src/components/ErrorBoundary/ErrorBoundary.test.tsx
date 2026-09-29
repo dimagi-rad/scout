@@ -47,4 +47,26 @@ describe("ErrorBoundary Sentry reporting", () => {
     expect(screen.getByText("Something went wrong")).toBeInTheDocument()
     expect(Sentry.captureException).toHaveBeenCalledTimes(1)
   })
+
+  it("clears the caught error when resetKey changes", () => {
+    let broken = true
+    function MaybeBroken() {
+      if (broken) throw new Error("stale data")
+      return <p>Recovered chart</p>
+    }
+    const { rerender } = render(
+      <ErrorBoundary resetKey="revision-one">
+        <MaybeBroken />
+      </ErrorBoundary>,
+    )
+    expect(screen.getByText("Something went wrong")).toBeInTheDocument()
+
+    broken = false
+    rerender(
+      <ErrorBoundary resetKey="revision-two">
+        <MaybeBroken />
+      </ErrorBoundary>,
+    )
+    expect(screen.getByText("Recovered chart")).toBeInTheDocument()
+  })
 })

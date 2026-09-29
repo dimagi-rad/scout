@@ -134,7 +134,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
               />
             )}
             {dataIsReady && isGraphArtifact && (
-              <ErrorBoundary artifactId={artifactId} artifactVersion={artifactVersion}>
+              <ErrorBoundary resetKey={dataKey} artifactId={artifactId} artifactVersion={artifactVersion}>
                 <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} onDateSourcesChange={onDateSourcesChange} />
               </ErrorBoundary>
             )}
