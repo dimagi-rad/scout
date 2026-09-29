@@ -360,3 +360,35 @@ async def test_deferred_promotion_keeps_actual_load_outcome(workspace, user, mon
         assert "older data may still be included" in result["message"]
     else:
         assert "no data was loaded" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_run_denied_mid_way_is_explained_even_when_no_source_failed(
+    workspace, user, monkeypatch
+):
+    """A new-source load can pass over every source and still be denied (the user
+    lost a source already handled); the tool must say so, not "others did not"."""
+
+    async def _fake_core(workspace_id, user_id="", job_id=None):
+        return {
+            "all_succeeded": False,
+            "tenants": [
+                {"tenant": "t1", "success": True, "result": {"status": "already_loaded"}},
+                {"tenant": "t2", "success": True, "result": {"status": "already_loaded"}},
+            ],
+            "view_schema": None,
+            "denied_mid_run": {
+                "error": "The requesting user can't use these data sources: t1",
+                "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+            },
+            "guidance": [],
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+
+    assert result["status"] == "partial"
+    assert "others did not" not in result["message"]
+    assert "The requesting user can't use these data sources: t1" in result["message"]

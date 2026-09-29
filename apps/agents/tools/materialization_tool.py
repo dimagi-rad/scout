@@ -110,6 +110,14 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
                 f"{(view_schema or {}).get('error') or 'unknown error'}. Do NOT retry — "
                 "tell the user a system-side fix is required."
             )
+        elif summary.get("denied_mid_run") and not not_loaded:
+            # Every source was served or passed over, yet access changed mid-run
+            # (e.g. a source already handled was lost): say why, not "others did not".
+            status = "partial"
+            message = (
+                "The data already being served is unchanged, but this run was stopped "
+                f"because access changed: {summary['denied_mid_run']['error']}"
+            )
         elif loaded:
             status = "partial"
             message = (
