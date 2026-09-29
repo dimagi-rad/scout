@@ -101,7 +101,7 @@ class TestMCPClient:
 
     @pytest.mark.asyncio
     async def test_get_mcp_tools_omits_header_when_secret_unset(self):
-        """No header is sent when the secret is unset (dev fail-open path)."""
+        """No header is sent when the secret is unset; the server then rejects the call."""
         import apps.agents.mcp_client as mod
 
         mod.reset_circuit_breaker()
