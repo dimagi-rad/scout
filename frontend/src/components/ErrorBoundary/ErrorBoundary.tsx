@@ -31,15 +31,23 @@ export class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error }
   }
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error("ErrorBoundary caught an error:", error, errorInfo)
+  componentDidCatch(thrown: unknown, errorInfo: React.ErrorInfo) {
+    console.error("ErrorBoundary caught an error:", thrown, errorInfo)
+    // React hands over whatever was thrown. Reading fields off null would throw
+    // here and lose the report, and a non-Error may be app data, so only its
+    // type is sent, as the artifact sandbox does.
+    const error = thrown instanceof Error ? thrown : undefined
+    const nonErrorMessage =
+      typeof thrown === "string"
+        ? thrown
+        : `Non-Error exception (${thrown === null ? "null" : typeof thrown})`
     // React 19 does not rethrow errors a boundary catches, so Sentry's global
     // handlers never see them.
     reportRenderError({
       source: "boundary",
-      name: error.name,
-      message: error.message,
-      stack: error.stack,
+      name: error?.name ?? "Error",
+      message: error ? error.message : nonErrorMessage,
+      stack: error?.stack,
       artifactId: this.props.artifactId,
       artifactVersion: this.props.artifactVersion,
     })

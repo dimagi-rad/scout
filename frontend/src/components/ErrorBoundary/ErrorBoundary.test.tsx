@@ -48,6 +48,25 @@ describe("ErrorBoundary Sentry reporting", () => {
     expect(Sentry.captureException).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    [null, "Non-Error exception (null)"],
+    [{ message: "Alice", name: "Bob" }, "Non-Error exception (object)"],
+    ["boom", "boom"],
+  ])("reports a thrown %j by its type, not its fields", (value, message) => {
+    function ThrowsValue(): never {
+      throw value
+    }
+    render(
+      <ErrorBoundary>
+        <ThrowsValue />
+      </ErrorBoundary>,
+    )
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.name).toBe("Error")
+    expect(reported.message).toBe(message)
+  })
+
   it("clears the caught error when resetKey changes", () => {
     let broken = true
     function MaybeBroken() {
