@@ -3127,7 +3127,7 @@ ORPHANED_VIEW_BUILD_ERROR = (
 
 
 _VIEW_BUILD_TASK_NAMES = (rebuild_workspace_view_schema.name, materialize_workspace.name)
-_STARTED_JOB_STATUSES = ("doing", "aborting")
+_STARTED_JOB_STATUSES = list(_PROCRASTINATE_INFLIGHT_STATUSES - {"todo"})
 
 
 def _settle_orphaned_view_build(view_schema_id, stalled_before) -> WorkspaceViewSchema | None:
@@ -3149,14 +3149,16 @@ def _settle_orphaned_view_build(view_schema_id, stalled_before) -> WorkspaceView
         )
         if vs is None:
             return None
-        # Unlike find_legacy_refresh_jobs, this args scan may run under W: it
-        # happens only for a stranded row and reads only unfinished jobs.
+        # Unlike find_legacy_refresh_jobs, this unindexed full args scan may run
+        # under W because it runs only when a row is stranded, normally never.
+        # The recovery check stays live only while
+        # expire_stale_workspace_data_recoveries keeps settling dead recoveries.
         live_owner = (
             ProcrastinateJob.objects.filter(
                 task_name__in=_VIEW_BUILD_TASK_NAMES,
                 args__workspace_id=str(vs.workspace_id),
             )
-            .exclude(status__in=_MATERIALIZATION_TERMINAL_STATUSES)
+            .exclude(status__in=list(_MATERIALIZATION_TERMINAL_STATUSES))
             .filter(
                 ~Q(status__in=_STARTED_JOB_STATUSES) | Q(worker__last_heartbeat__gte=stalled_before)
             )
