@@ -18,8 +18,9 @@ interface Props {
  * server-composed error_summary and a Retry button.
  *
  * Retry is guarded by useRetryableAction so a rapid double-click cannot fire
- * two dispatches, and a final denial disables it with the server's reason. After the POST returns, the polling hook will
- * surface the new active job and the parent re-renders the progress card.
+ * two dispatches, and a final denial disables it with the server's reason.
+ * After the POST returns, the polling hook will surface the new active job and
+ * the parent re-renders the progress card.
  */
 export function MaterializationFailure({
   termination,
@@ -104,8 +105,10 @@ export function MaterializationFailure({
             <span>
               {retry.state === "pending"
                 ? "Retrying..."
-                : retry.state === "error"
-                  ? "Retry failed"
+                : retry.failure
+                  ? retry.failure.retryable
+                    ? "Retry failed"
+                    : "Can't retry"
                   : "Retry"}
             </span>
           </button>

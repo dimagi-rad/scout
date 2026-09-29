@@ -79,6 +79,7 @@ describe("MaterializationFailure retry errors", () => {
       COVERAGE_MESSAGE,
     )
     expect(screen.getByTestId("materialization-retry-btn")).toBeDisabled()
+    expect(screen.getByTestId("materialization-retry-btn")).toHaveTextContent("Can't retry")
 
     // A focus without leaving first must not erase the unread denial.
     act(() => {
@@ -133,6 +134,7 @@ describe("MaterializationProgressBanner cancel errors", () => {
       COVERAGE_MESSAGE,
     )
     expect(screen.getByTestId("materialization-banner-stop-btn")).toBeDisabled()
+    expect(screen.getByTestId("materialization-banner-stop-btn")).toHaveTextContent("Can't stop")
   })
 
   it("falls back to the generic text for a non-JSON 500 and keeps Stop", async () => {
