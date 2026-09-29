@@ -1008,3 +1008,31 @@ async def test_a_denial_that_concerns_a_serving_sibling_still_reports_it(
     outcomes = sorted(entry["success"] for entry in result["tenants"])
     assert outcomes == [False, True]
     assert result["all_succeeded"] is False
+
+
+async def test_a_sibling_skipped_because_another_source_was_lost_still_counts_as_served(
+    workspace, tenant, user
+):
+    """TENANT_ACCESS_LOST marks the sources the user can still use as SKIPPED:
+    nothing is wrong with them, so a serving one is passed over, not failed."""
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    await _add_sources(workspace, user, serving=["fine-sibling"], unserved=[])
+    tenants = [t async for t in workspace.tenants.all()]
+    skipped = {t.external_id: ErrorCode.WORKSPACE_TENANT_SKIPPED for t in tenants}
+    denial = _denial(tenants, ErrorCode.WORKSPACE_TENANT_UNREACHABLE, skipped)
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(return_value=denial),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
+
+    assert all(entry["success"] for entry in result["tenants"])
+    assert all(entry["result"] == {"status": "already_loaded"} for entry in result["tenants"])

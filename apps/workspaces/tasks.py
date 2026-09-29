@@ -699,18 +699,24 @@ _SOURCE_ADDED_DURING_LOAD = (
 )
 
 
+_DENIAL_CODES_SAFE_TO_SKIP = frozenset(
+    {ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE, ErrorCode.WORKSPACE_TENANT_SKIPPED}
+)
+
+
 async def _skippable_despite_denial(tm, denied_by_tenant, locked_tenant_ids) -> bool:
     """Whether a new-source load may pass over this source after a mid-run denial.
 
     Only when the loop would have reached its served check (within the held
-    locks, membership still live) and the denial is a transient verification
-    outage. A denial that names a real access problem is what the run must
-    report, so it is never upgraded to success.
+    locks, membership still live) and the denial says nothing is wrong with this
+    source: a transient verification outage, or SKIPPED because a different
+    source was lost. A denial naming a real access problem with this source is
+    what the run must report, so it is never upgraded to success.
     """
     if locked_tenant_ids is not None and str(tm.tenant_id) not in locked_tenant_ids:
         return False
     entry = denied_by_tenant.get(str(tm.tenant_id)) or {}
-    if entry.get("error_code") != ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE:
+    if entry.get("error_code") not in _DENIAL_CODES_SAFE_TO_SKIP:
         return False
     return await TenantMembership.objects.filter(id=tm.id, archived_at__isnull=True).aexists()
 
