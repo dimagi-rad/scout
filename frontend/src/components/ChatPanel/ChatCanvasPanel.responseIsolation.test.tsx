@@ -332,6 +332,18 @@ describe("Canvas read and mutation ordering", () => {
 describe("Canvas for read-only members", () => {
   afterEach(() => useAppStore.setState({ domains: [] }))
 
+  it("gives a read-write member the per-entry actions", async () => {
+    useAppStore.setState({
+      domains: [{ id: "workspace-a", role: "read_write" } as TenantMembership],
+    })
+    vi.mocked(api.get).mockResolvedValueOnce(projection("thread-a", "A draft"))
+    render(panel("workspace-a", "thread-a"))
+
+    await screen.findByText("A draft")
+    expect(screen.getByTestId("canvas-revert-shared_dataset")).toBeEnabled()
+    expect(screen.getByTestId("canvas-remove-shared_dataset")).toBeEnabled()
+  })
+
   it("replaces Save all with a read-only hint", async () => {
     useAppStore.setState({
       domains: [{ id: "workspace-a", role: "read" } as TenantMembership],

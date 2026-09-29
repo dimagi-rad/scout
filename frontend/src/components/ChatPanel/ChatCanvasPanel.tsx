@@ -50,8 +50,9 @@ interface ChatCanvasPanelProps {
 type LoadStatus = "idle" | "loading" | "loaded" | "error"
 
 // A read member downgraded after drafting still has entries on their canvas;
-// every per-entry action posts to the write-gated apply endpoint.
-const CanvasCanWriteContext = createContext(true)
+// every per-entry action posts to the write-gated apply endpoint. Defaults to
+// false: a missing provider is a wiring bug, and hiding the actions surfaces it.
+const CanvasCanWriteContext = createContext(false)
 
 export function ChatCanvasPanel({ workspaceId, threadId, className }: ChatCanvasPanelProps) {
   const params = useParams<{ threadId?: string }>()
