@@ -1361,6 +1361,36 @@ def test_read_member_get_of_manifest_less_story_writes_nothing(workspace, member
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("granularity", [["day"], {"unit": "day"}], ids=["list", "object"])
+@pytest.mark.parametrize("endpoint", ["data", "query-data"])
+def test_manifest_less_story_with_non_string_granularity_does_not_500(
+    workspace, member_user, endpoint, granularity
+):
+    doc = graph_doc()
+    doc["blocks"][1]["config"]["queries"]["visits_by_day"]["granularity"] = granularity
+    artifact = Artifact.objects.create(
+        workspace=workspace,
+        created_by=member_user,
+        title="Legacy",
+        artifact_type=ArtifactType.STORY,
+        data={"story_doc": doc},
+    )
+    client = Client()
+    client.force_login(member_user)
+
+    with (
+        patch("apps.artifacts.views.run_semantic_query", new=AsyncMock(return_value={})),
+        patch(
+            "apps.artifacts.views._current_artifact_data_state",
+            new=AsyncMock(return_value={"queryable": True, "status": "ready"}),
+        ),
+    ):
+        response = client.get(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/{endpoint}/")
+
+    assert response.status_code == 200, response.content
+
+
+@pytest.mark.django_db(transaction=True)
 def test_recovery_post_persists_the_missing_manifest(workspace, member_user):
     artifact = _manifest_less_story(workspace, member_user)
     client = Client()
