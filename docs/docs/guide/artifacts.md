@@ -33,7 +33,7 @@ The artifact viewer has two actions:
 - **View Data** shows the rows behind each of the story's queries.
 - **Export PDF** opens your browser's print dialog for the artifact, where you can save it as a PDF.
 
-If an artifact's data is unavailable, for example because the data model changed or a data load is incomplete, the viewer shows a banner explaining why and, where possible, a button to rebuild or restore the data.
+If an artifact's data is unavailable, for example because the data model changed or a data load is incomplete, the viewer shows a banner explaining why and, for **Read/Write** and **Manage** members, a button to rebuild or restore the data where possible.
 
 ## Changing artifacts
 
