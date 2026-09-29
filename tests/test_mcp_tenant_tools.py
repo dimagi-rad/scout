@@ -1269,6 +1269,7 @@ async def _run(
 ):
     """A run on the tenant's schema; ``loaded_by`` makes it that workspace's load candidate."""
     if loaded_by is not None:
+        assert schema_state == SchemaState.ACTIVE, "a load candidate is always PROVISIONING"
         schema = await TenantSchema.objects.acreate(
             tenant=tenant,
             schema_name=f"c_{tenant.external_id}_{job_id}",
@@ -1416,7 +1417,7 @@ async def test_schema_status_reports_waiting_on_another_workspaces_load_apart(us
         thread=thread,
         job_type=ThreadJob.JobType.MATERIALIZATION,
         procrastinate_job_id=60,
-        state=ThreadJob.State.RUNNING,
+        state=ThreadJob.State.PENDING,
     )
     await _run(loaded, MaterializationRun.RunState.COMPLETED, 60)
     await _run(shared, MaterializationRun.RunState.LOADING, 61, loaded_by=sibling)
@@ -1516,3 +1517,23 @@ async def test_schema_status_shows_a_zero_row_counter(user):
     in_flight = await _schema_status(workspace)
 
     assert "(0 of 400 rows)" in in_flight["message"]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_schema_status_ignores_a_sibling_load_once_our_load_is_resuming(user):
+    """G5: a RUNNING ThreadJob is the chat resume, after our materialization ended."""
+    workspace = await Workspace.objects.acreate(name="Resuming sharer", created_by=user)
+    sibling = await Workspace.objects.acreate(name="Loading sharer", created_by=user)
+    await _tenant_in(workspace, "alpha")
+    shared = await _tenant_in(workspace, "bravo")
+    await WorkspaceTenant.objects.acreate(workspace=sibling, tenant=shared)
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=110,
+        state=ThreadJob.State.RUNNING,
+    )
+    await _run(shared, MaterializationRun.RunState.LOADING, 111, loaded_by=sibling)
+
+    assert await _schema_status(workspace) is None

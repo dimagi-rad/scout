@@ -1775,9 +1775,11 @@ async def _load_in_progress(workspace: Workspace) -> dict | None:
     if sibling_tenant_ids:
         pending_job_ids = {
             job_id
-            async for job_id in workspace_jobs.filter(
-                state__in=list(ThreadJob.ACTIVE_STATES)
-            ).values_list("procrastinate_job_id", flat=True)
+            # PENDING only: the resume claims a ThreadJob as RUNNING after the
+            # materialization has already finished.
+            async for job_id in workspace_jobs.filter(state=ThreadJob.State.PENDING).values_list(
+                "procrastinate_job_id", flat=True
+            )
         }
     job_ids = {run.procrastinate_job_id for run in own} - {None}
     latest: dict = {}
