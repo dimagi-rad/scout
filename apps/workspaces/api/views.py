@@ -25,6 +25,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     resolve_pipeline_config,
 )
+from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.status import aggregate_source_state
@@ -181,21 +182,11 @@ def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names:
     request (arch #254, finding 10#2). Surfaces only ``completed`` sources whose
     physical table is present, plus dbt models that physically exist.
     """
-    run = (
-        MaterializationRun.objects.filter(
-            tenant_schema=tenant_schema,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        )
-        .order_by("-completed_at")
-        .first()
-    )
+    run = synced_runs().filter(tenant_schema=tenant_schema).first()
     if run is None:
         return []
 
-    materialized_at = run.completed_at.isoformat() if run.completed_at else None
+    materialized_at = run.completed_at.isoformat()
     sources_result = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
