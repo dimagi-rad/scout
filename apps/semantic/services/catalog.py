@@ -919,6 +919,18 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
     ).select_related("from_dataset", "to_dataset"):
         outgoing_by_dataset.setdefault(relationship.from_dataset_id, []).append(relationship)
         incoming_by_dataset.setdefault(relationship.to_dataset_id, []).append(relationship)
+    unpublished = {
+        diagnostic["relationship"]
+        for diagnostic in model.diagnostics or []
+        if isinstance(diagnostic, dict) and diagnostic.get("relationship")
+    }
+
+    def relationship_entry(relationship: SemanticRelationship, direction: str) -> dict[str, Any]:
+        entry = {**serialize_relationship(relationship), "direction": direction}
+        if relationship.name in unpublished:
+            # The Cube build dropped this join, so cross-cube queries through it fail.
+            entry["published"] = False
+        return entry
 
     datasets = []
     for dataset in (
@@ -940,12 +952,8 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
             _serialize_field(f) for f in fields if f.field_type == SemanticField.FieldType.MEASURE
         ]
         relationships = [
-            {**serialize_relationship(r), "direction": "outgoing"}
-            for r in outgoing_by_dataset.get(dataset.id, [])
-        ] + [
-            {**serialize_relationship(r), "direction": "incoming"}
-            for r in incoming_by_dataset.get(dataset.id, [])
-        ]
+            relationship_entry(r, "outgoing") for r in outgoing_by_dataset.get(dataset.id, [])
+        ] + [relationship_entry(r, "incoming") for r in incoming_by_dataset.get(dataset.id, [])]
         datasets.append(
             {
                 "id": str(dataset.id),
