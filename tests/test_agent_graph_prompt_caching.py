@@ -141,7 +141,6 @@ async def test_agent_node_applies_cache_control_breakpoints():
         "messages": [HumanMessage(content="hi")],
         "workspace_id": "ws-cc",
         "user_id": "u3",
-        "user_role": "analyst",
         "thread_id": "t1",
     }
     await graph.ainvoke(state, {"recursion_limit": 5})
@@ -202,7 +201,6 @@ async def test_agent_node_prunes_history():
         "messages": history,
         "workspace_id": "ws-prune",
         "user_id": "u",
-        "user_role": "analyst",
         "thread_id": "t",
     }
     await graph.ainvoke(state, {"recursion_limit": 5})

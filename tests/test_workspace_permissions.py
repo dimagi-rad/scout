@@ -15,18 +15,6 @@ def auth_client(client, user):
     return client
 
 
-@pytest.fixture
-def read_client(client, read_user):
-    client.force_login(read_user)
-    return client
-
-
-@pytest.fixture
-def write_client(client, write_user):
-    client.force_login(write_user)
-    return client
-
-
 # --- Workspace list ---
 
 

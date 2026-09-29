@@ -164,7 +164,6 @@ class TestAgentNodeGuard:
                 ],
                 "workspace_id": str(workspace.id),
                 "user_id": str(user.id),
-                "user_role": "analyst",
             }
 
             await agent.ainvoke(orphan_state)

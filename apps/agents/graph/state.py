@@ -59,7 +59,6 @@ class AgentState(TypedDict):
     workspace_id: str
 
     user_id: str
-    user_role: str  # viewer | analyst | admin
 
     # Injected into MCP tool calls that associate background jobs (ThreadJob)
     thread_id: str
