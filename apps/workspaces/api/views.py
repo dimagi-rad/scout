@@ -16,7 +16,6 @@ from apps.common.localized import localized_str
 from apps.knowledge.models import TableKnowledge
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
-    MaterializationRun,
     SchemaState,
     TenantSchema,
     WorkspaceRole,
@@ -26,6 +25,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     resolve_pipeline_config,
 )
+from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.status import (
@@ -186,21 +186,11 @@ def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names:
     request (arch #254, finding 10#2). Surfaces only ``completed`` sources whose
     physical table is present, plus dbt models that physically exist.
     """
-    run = (
-        MaterializationRun.objects.filter(
-            tenant_schema=tenant_schema,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        )
-        .order_by("-completed_at")
-        .first()
-    )
+    run = synced_runs().filter(tenant_schema=tenant_schema).first()
     if run is None:
         return []
 
-    materialized_at = run.completed_at.isoformat() if run.completed_at else None
+    materialized_at = run.completed_at.isoformat()
     sources_result = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
@@ -405,17 +395,7 @@ class DataDictionaryView(APIView):
         return self._get_from_pipeline(workspace, tenant_schema)
 
     def _get_from_pipeline(self, workspace, tenant_schema):
-        last_run = (
-            MaterializationRun.objects.filter(
-                tenant_schema=tenant_schema,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .first()
-        )
+        last_run = synced_runs().filter(tenant_schema=tenant_schema).first()
 
         try:
             pipeline_config = resolve_pipeline_config(tenant_schema, last_run)
@@ -468,13 +448,8 @@ class DataDictionaryView(APIView):
                 entry["annotation"] = annotation
             enriched_tables[qualified_name] = entry
 
-        generated_at = last_run.completed_at if last_run else None
-        return Response(
-            {
-                "tables": enriched_tables,
-                "generated_at": generated_at.isoformat() if generated_at else None,
-            }
-        )
+        generated_at = last_run.completed_at.isoformat() if last_run else None
+        return Response({"tables": enriched_tables, "generated_at": generated_at})
 
 
 @dataclass(frozen=True)
@@ -796,17 +771,7 @@ class TableDetailView(APIView):
         if table_name.startswith("stg_"):
             return None
 
-        last_run = (
-            MaterializationRun.objects.filter(
-                tenant_schema=tenant_schema,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .first()
-        )
+        last_run = synced_runs().filter(tenant_schema=tenant_schema).first()
         pipeline_config = resolve_pipeline_config(tenant_schema, last_run)
 
         live_table_names = _live_tables_in_schema_sync(schema_name)

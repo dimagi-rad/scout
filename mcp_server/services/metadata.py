@@ -16,7 +16,8 @@ from django.db import models
 
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
-from apps.workspaces.models import MaterializationRun, SchemaState, WorkspaceViewSchema
+from apps.workspaces.models import SchemaState, WorkspaceViewSchema
+from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.view_sources import (
     parse_view_sources,
     validate_published_views,
@@ -60,21 +61,11 @@ async def pipeline_list_tables(
     materialization time — not a live count. The agent must not surface
     this number to users as an answer; see ``base_system.py`` for the rule.
     """
-    run = (
-        await MaterializationRun.objects.filter(
-            tenant_schema=tenant_schema,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        )
-        .order_by("-completed_at")
-        .afirst()
-    )
+    run = await synced_runs().filter(tenant_schema=tenant_schema).afirst()
     if run is None:
         return []
 
-    materialized_at = run.completed_at.isoformat() if run.completed_at else None
+    materialized_at = run.completed_at.isoformat()
     sources_result: dict[str, Any] = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
