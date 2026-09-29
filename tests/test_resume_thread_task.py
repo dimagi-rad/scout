@@ -354,7 +354,7 @@ async def test_resume_semantic_build_failure_maps_to_failed():
     assert "semantic model failed to build" in tj.error_summary
     # Stored semantic build prose cannot distinguish a transient validator outage.
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
-    assert _termination_to_dict(tj, [])["retry_available"] is True
+    assert _termination_to_dict(tj, [], viewer_can_write=True)["retry_available"] is True
 
 
 @pytest.mark.asyncio
@@ -1328,7 +1328,7 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
     assert "view schema" in tj.error_summary.lower()
     assert "Canonical name collision" in tj.error_summary
     assert tj.failure_phase == ThreadJob.FailurePhase.QUERY_BUILD
-    assert _termination_to_dict(tj, [])["retry_available"] is False
+    assert _termination_to_dict(tj, [], viewer_can_write=True)["retry_available"] is False
 
 
 @pytest.mark.asyncio
@@ -1377,7 +1377,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     assert "re-running materialization" in tj.error_summary.lower()
     assert "account credentials" not in tj.error_summary.lower()
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
-    assert _termination_to_dict(tj, [])["retry_available"] is True
+    assert _termination_to_dict(tj, [], viewer_can_write=True)["retry_available"] is True
 
 
 @pytest.mark.asyncio
@@ -1411,7 +1411,7 @@ async def test_resume_missing_tenant_data_allows_refresh_without_cascade_marker(
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
     assert "Tenant 2" in tj.error_summary
     assert "cannot fix" not in tj.error_summary
-    assert _termination_to_dict(tj, [])["retry_available"] is True
+    assert _termination_to_dict(tj, [], viewer_can_write=True)["retry_available"] is True
 
 
 @pytest.mark.asyncio

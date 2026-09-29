@@ -53,10 +53,6 @@ BLOCKS_IMMEDIATE_RETRY = frozenset(
     }
 )
 
-# The retry endpoint requires READ_WRITE, so a role denial blocks Retry only while
-# the viewer still lacks that role: an admin may restore it after the failure.
-BLOCKS_RETRY_WITHOUT_WRITE_ROLE = frozenset({ErrorCode.WORKSPACE_ROLE_INSUFFICIENT})
-
 
 class SourceFailure(NamedTuple):
     """A failure attributed to a source, or the tenant when preflight never ran sources."""

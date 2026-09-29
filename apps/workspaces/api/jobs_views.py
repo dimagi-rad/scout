@@ -19,7 +19,6 @@ from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
 from apps.workspaces.services.failure_guidance import (
     BLOCKS_IMMEDIATE_RETRY,
-    BLOCKS_RETRY_WITHOUT_WRITE_ROLE,
     summary_failures,
 )
 from apps.workspaces.workspace_resolver import aresolve_workspace
@@ -79,12 +78,14 @@ def _needs_materialization_retry_check(job: ThreadJob) -> bool:
 
 
 def _termination_to_dict(
-    job: ThreadJob, run_results: list[dict], *, viewer_can_write: bool = False
+    job: ThreadJob, run_results: list[dict], *, viewer_can_write: bool
 ) -> dict:
     """Serialize a terminal ThreadJob for the ``recent_terminations`` payload.
 
     Retry stays available if it can recover any source or a failed follow-up.
-    Completed jobs still clear stale failure cards in the frontend.
+    Completed jobs still clear stale failure cards in the frontend. The retry
+    endpoint requires READ_WRITE, so a viewer without it never gets Retry,
+    whatever the failure; one whose role was restored gets it back.
     """
     retry_available = job.state in {ThreadJob.State.FAILED, ThreadJob.State.CANCELLED}
     if (
@@ -94,9 +95,6 @@ def _termination_to_dict(
         retry_available = False
     elif _needs_materialization_retry_check(job):
         failures = summary_failures([*job.materialization_preflight_failures, *run_results])
-        blocking = BLOCKS_IMMEDIATE_RETRY | (
-            frozenset() if viewer_can_write else BLOCKS_RETRY_WITHOUT_WRITE_ROLE
-        )
         completed_source = any(
             isinstance(result, dict)
             and isinstance(result.get("sources"), dict)
@@ -107,7 +105,9 @@ def _termination_to_dict(
             for result in run_results
         )
         retry_available = (
-            completed_source or not failures or any(f.code not in blocking for f in failures)
+            completed_source
+            or not failures
+            or any(f.code not in BLOCKS_IMMEDIATE_RETRY for f in failures)
         )
     return {
         "thread_job_id": str(job.id),
@@ -116,7 +116,7 @@ def _termination_to_dict(
         "state": job.state,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "error_summary": job.error_summary or "",
-        "retry_available": retry_available,
+        "retry_available": retry_available and viewer_can_write,
     }
 
 
