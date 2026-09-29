@@ -20,6 +20,7 @@ from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from apps.users import signals
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.tenant_resolution import COMMCARE_DOMAIN_API
 from apps.users.services.token_refresh import get_token_url
@@ -517,6 +518,49 @@ class TestInviteResolution:
         accept_invite_if_covered(invite, member)
 
         assert WorkspaceMembership.objects.get(workspace=ws, user=member).role == "read"
+
+    def test_an_invite_revoked_mid_login_is_not_accepted(self, user, t1):
+        """#561 G4: the login loop read the invite before a manager revoked it."""
+        ws = _workspace(user, t1)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        grant_tenant_access(invitee, t1)
+        stale = self._invite(ws, invitee.email)
+        WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.REVOKED)
+
+        assert accept_invite_if_covered(stale, invitee) is None
+
+        assert WorkspaceInvite.objects.get(pk=stale.pk).status == WorkspaceInviteStatus.REVOKED
+        assert not WorkspaceMembership.objects.filter(workspace=ws, user=invitee).exists()
+
+    def test_login_does_not_revive_an_invite_revoked_mid_login(self, user, t1, t2, monkeypatch):
+        """#561 G4: an uncovered invitee's invite moves to awaiting access only if live."""
+        ws = _workspace(user, t1, t2)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        grant_tenant_access(invitee, t1)
+        invite = self._invite(ws, invitee.email)
+        accept = signals.accept_invite_if_covered
+
+        def revoke_then_accept(stale, who):
+            WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.REVOKED)
+            return accept(stale, who)
+
+        monkeypatch.setattr(signals, "accept_invite_if_covered", revoke_then_accept)
+
+        resolve_pending_invites_on_login(invitee)
+
+        assert WorkspaceInvite.objects.get(pk=invite.pk).status == WorkspaceInviteStatus.REVOKED
+
+    def test_acceptance_uses_the_role_as_it_stands_under_the_lock(self, user, t1):
+        ws = _workspace(user, t1)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        grant_tenant_access(invitee, t1)
+        stale = self._invite(ws, invitee.email, role=WorkspaceRole.READ_WRITE)
+        WorkspaceInvite.objects.filter(pk=stale.pk).update(role=WorkspaceRole.READ)
+
+        membership = accept_invite_if_covered(stale, invitee)
+
+        assert membership.role == WorkspaceRole.READ
+        assert WorkspaceInvite.objects.get(pk=stale.pk).role == WorkspaceRole.READ
 
 
 @pytest.mark.django_db

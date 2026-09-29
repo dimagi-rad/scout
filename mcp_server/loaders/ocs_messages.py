@@ -40,11 +40,17 @@ class OCSMessageLoader(OCSBaseLoader):
         # (the N+1) are unavoidable and dominate regardless.
         params = {"experiment": self.experiment_id, "page_size": OCS_MAX_PAGE_SIZE}
         session_ids: list[str] = []
+        idless = 0
         for session_page, _session_total in self._paginate(list_url, params=params):
             for session in session_page:
                 session_id = str(session.get("id") or "")
                 if session_id:
                     session_ids.append(session_id)
+                else:
+                    idless += 1
+        if idless:
+            # Match the writers' natural-key guard: skip, but never silently (#263, 02#7).
+            logger.warning("Skipped messages for %d sessions with no id", idless)
 
         # A live pagination walk can repeat a session; load one snapshot per id.
         session_ids = list(dict.fromkeys(session_ids))

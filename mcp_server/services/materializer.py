@@ -989,10 +989,11 @@ def _write_ocs_experiments(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "experiment_id", "raw_experiments")
+        if not page:
+            continue
         rows = [
             (
                 r.get("experiment_id", ""),
@@ -1041,10 +1042,11 @@ def _write_ocs_sessions(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "session_id", "raw_sessions")
+        if not page:
+            continue
         rows = [
             (
                 r.get("session_id", ""),
@@ -1161,10 +1163,11 @@ def _write_ocs_participants(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "participant_id", "raw_participants")
+        if not page:
+            continue
         rows = [
             (
                 r.get("participant_id", ""),
@@ -1376,10 +1379,11 @@ def _write_cases(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "case_id", "raw_cases")
+        if not page:
+            continue
         rows = [
             (
                 c.get("case_id"),
@@ -1444,10 +1448,11 @@ def _write_forms(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "form_id", "raw_forms")
+        if not page:
+            continue
         rows = [
             (
                 f.get("form_id", ""),
@@ -1510,6 +1515,19 @@ def _max_id(page: list[dict], field: str) -> int | None:
     ids = [r.get(field) for r in page]
     valid = [i for i in ids if isinstance(i, int)]
     return max(valid) if valid else None
+
+
+def _drop_keyless_rows(page: list[dict], key: str, table: str) -> list[dict]:
+    """Drop, and log, provider rows that arrive without their natural key.
+
+    Unfiltered, an id-less row fails the whole page on a BIGINT key, or collapses
+    with every other id-less row into one ``''`` key via ON CONFLICT on a TEXT key,
+    silently undercounting (#263, finding 02#7).
+    """
+    kept = [row for row in page if row.get(key) not in (None, "")]
+    if dropped := len(page) - len(kept):
+        logger.warning("Skipped %d %s rows with no %s", dropped, table, key)
+    return kept
 
 
 def _json_or_none(value: Any) -> str | None:
@@ -1728,10 +1746,11 @@ def _write_connect_visits(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "visit_id", "raw_visits")
+        if not page:
+            continue
         rows = [
             (
                 r.get("visit_id"),
@@ -1780,6 +1799,10 @@ def _write_connect_users(
 ) -> int:
     """Create the users table and bulk-insert all pages. Returns total row count.
 
+    Connect money columns are unconstrained NUMERIC: a fixed NUMERIC(14,2)
+    rounded sub-cent amounts and failed the page on values of 1e12 or more,
+    e.g. minor units (#263, finding 02#7).
+
     ``payment_accrued`` is NUMERIC money, ``suspended`` is BOOLEAN, all
     date/datetime fields become TIMESTAMPTZ. ``claim_limits`` is a
     ``SerializerMethodField`` that returns a list of dicts — store as JSONB.
@@ -1797,7 +1820,7 @@ def _write_connect_users(
             phone TEXT,
             date_learn_started TIMESTAMPTZ,
             user_invite_status TEXT,
-            payment_accrued NUMERIC(14, 2),
+            payment_accrued NUMERIC,
             suspended BOOLEAN,
             suspension_date TIMESTAMPTZ,
             suspension_reason TEXT,
@@ -1815,10 +1838,11 @@ def _write_connect_users(
     total = 0
     rows_total: int | None = None
     for page, page_total in pages:
-        if not page:
-            continue
         if rows_total is None and page_total is not None:
             rows_total = page_total
+        page = _drop_keyless_rows(page, "username", "raw_users")
+        if not page:
+            continue
         rows = [
             (
                 r.get("username", ""),
@@ -1879,10 +1903,10 @@ def _write_connect_completed_works(
             date_created TIMESTAMPTZ,
             saved_completed_count INTEGER,
             saved_approved_count INTEGER,
-            saved_payment_accrued NUMERIC(14, 2),
-            saved_payment_accrued_usd NUMERIC(14, 2),
-            saved_org_payment_accrued NUMERIC(14, 2),
-            saved_org_payment_accrued_usd NUMERIC(14, 2)
+            saved_payment_accrued NUMERIC,
+            saved_payment_accrued_usd NUMERIC,
+            saved_org_payment_accrued NUMERIC,
+            saved_org_payment_accrued_usd NUMERIC
         )
         """
         ).format(schema=sid)
@@ -1933,7 +1957,7 @@ def _write_connect_payments(
 ) -> int:
     """Create the payments table and bulk-insert all pages. Returns total row count.
 
-    ``amount``/``amount_usd`` become NUMERIC(14,2), ``confirmed`` becomes
+    ``amount``/``amount_usd`` become unconstrained NUMERIC, ``confirmed`` becomes
     BOOLEAN, all date/datetime fields become TIMESTAMPTZ, ``opportunity_id``
     becomes BIGINT.
     """
@@ -1949,8 +1973,8 @@ def _write_connect_payments(
             username TEXT,
             opportunity_id BIGINT,
             created_at TIMESTAMPTZ,
-            amount NUMERIC(14, 2),
-            amount_usd NUMERIC(14, 2),
+            amount NUMERIC,
+            amount_usd NUMERIC,
             date_paid TIMESTAMPTZ,
             payment_unit BIGINT,
             confirmed BOOLEAN,
@@ -2005,7 +2029,7 @@ def _write_connect_invoices(
 ) -> int:
     """Create the invoices table and bulk-insert all pages. Returns total row count.
 
-    Money fields are NUMERIC(14,2), ``date`` is DATE, ``opportunity_id`` is
+    Money fields are unconstrained NUMERIC, ``date`` is DATE, ``opportunity_id`` is
     BIGINT. ``service_delivery`` is a BooleanField (not a text label as the
     old TEXT column implied), and ``exchange_rate`` is actually a ForeignKey
     to the ExchangeRate lookup table (the PK, not the rate value) → BIGINT.
@@ -2020,8 +2044,8 @@ def _write_connect_invoices(
         CREATE TABLE {schema}.raw_invoices (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             opportunity_id BIGINT,
-            amount NUMERIC(14, 2),
-            amount_usd NUMERIC(14, 2),
+            amount NUMERIC,
+            amount_usd NUMERIC,
             date DATE,
             invoice_number TEXT,
             service_delivery BOOLEAN,

@@ -216,11 +216,16 @@ jobs:
             one concise markdown PR comment in the structured review_comment field; the workflow
             posts it after verifying this run. Keep it under 60000 characters and do not include
             HTML comments or artifact markers.
-            Search with Grep and Glob rather than shelling out.
-            Any denied tool call fails this review, so stay within the allowed tools. Run exactly
-            one command per Bash call, with no pipes, redirects, &&, ;, subshells or cd. Bash may
+            Any denied tool call fails this review, so stay within the allowed tools. Bash may
             only run git diff, log, show, rev-parse, merge-base, ls-tree, cat-file or blame, and
-            gh pr view. Use Read, not cat, for runner temp files.
+            gh pr view. Run exactly one command per Bash call, with no pipes, redirects, &&, ;,
+            subshells or cd. git grep is not permitted and will fail the review; so will find,
+            ls, cat, grep, rg, head and sed. To search file contents, use the Grep tool: it
+            searches the base worktree, so use it to locate candidates, then confirm the PR-head
+            version with git show ${{ needs.prepare.outputs.head }}:<path> (every file the PR
+            changed is in the git diff). To find files, use the Glob tool, or
+            git ls-tree -r --name-only ${{ needs.prepare.outputs.head }} for the PR-head file list.
+            Use Read, not cat, for runner temp files.
             Return structured reviewed_head, complete, blocking_findings (high/critical count)
             and review_comment. Only report complete=true after examining the requested range
             and earlier unresolved findings. Report blocking_findings=0 only when no

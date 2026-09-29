@@ -27,6 +27,7 @@ from apps.workspaces.services.pipeline_resolver import (
 )
 from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.services.status import aggregate_source_state
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from apps.workspaces.tasks import refresh_tenant_schema, settle_finished_refresh_candidates
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
@@ -695,12 +696,7 @@ class RefreshStatusView(APIView):
         statuses = [_latest_refresh_status(tenant) for tenant in tenants]
         if len(statuses) == 1:
             return Response({k: v for k, v in statuses[0].items() if k != "tenant_id"})
-        # Truthful per source. The aggregate is the most severe state any source
-        # is in, failure first, so it never contradicts the error beside it.
-        states = {entry["state"] for entry in statuses}
-        aggregate = next(
-            (state for state in _AGGREGATE_STATE_ORDER if state in states), statuses[0]["state"]
-        )
+        aggregate = aggregate_source_state(entry["state"] for entry in statuses)
         representative = max(
             (entry for entry in statuses if entry["state"] == aggregate),
             key=lambda entry: entry["started_at"] or "",
@@ -713,20 +709,6 @@ class RefreshStatusView(APIView):
                 "tenants": statuses,
             }
         )
-
-
-# Every state a source can report, most severe first. "unavailable" (never
-# loaded, e.g. just added) ranks last: it describes only that source, which
-# tenants[] reports, so it must not mask the state of sources that have data.
-_AGGREGATE_STATE_ORDER = (
-    SchemaState.FAILED,
-    SchemaState.PROVISIONING,
-    SchemaState.MATERIALIZING,
-    SchemaState.TEARDOWN,
-    SchemaState.EXPIRED,
-    SchemaState.ACTIVE,
-    "unavailable",
-)
 
 
 def _latest_refresh_status(tenant) -> dict:

@@ -1,28 +1,26 @@
 # Recipes
 
-Recipes are reusable analysis workflows. They let you save a sequence of prompts with variables, so anyone on the team can re-run common analyses without writing prompts from scratch.
+A recipe is a saved, reusable analysis: a prompt template with variables. Anyone in the workspace can re-run it with different values instead of rewriting the prompt.
 
-## Concepts
-
-A recipe consists of:
+## What a recipe contains
 
 - **Name and description** -- what the recipe does.
-- **Variables** -- parameters that change between runs (e.g., date range, region, limit).
-- **Steps** -- ordered prompt templates with `{{variable}}` placeholders.
+- **Prompt** -- a markdown prompt template with `{{variable}}` placeholders.
+- **Variables** -- the values that change between runs, such as a date range or region.
 
-## Variable types
+## Variables
 
-Variables are defined with a type, label, and optional default value:
+Each variable has a `name`, a `type`, a `label`, and an optional `default`. The supported types are:
 
-| Type | Description |
-|------|-------------|
-| `string` | Free-form text |
-| `number` | Numeric value |
-| `date` | Date value |
-| `boolean` | True/false |
-| `select` | Choose from a predefined list of options |
+| Type | Accepted values |
+|------|-----------------|
+| `string` | Any text |
+| `number` | Any value that parses as a number |
+| `date` | A date in `YYYY-MM-DD` format |
+| `boolean` | `true`/`false`, `1`/`0`, or `yes`/`no` |
+| `select` | One of the variable's `options` (required for this type) |
 
-Example variable definition:
+A variable without a default must be given a value when the recipe runs. Example definition:
 
 ```json
 {
@@ -34,53 +32,58 @@ Example variable definition:
 }
 ```
 
-## Steps
-
-Each step has a prompt template with `{{variable}}` placeholders that get replaced with actual values at run time:
+At run time each `{{name}}` placeholder in the prompt is replaced with the variable's value:
 
 ```
 Show me the top {{limit}} customers from the {{region}} region
 for the period {{start_date}} to {{end_date}}.
 ```
 
-Steps also have an optional `expected_tool` field (e.g., `semantic_query`) that indicates what tool the agent should use.
-
 ## Creating a recipe
 
-The easiest way to create a recipe is with the `/save-recipe` slash command. After an analysis conversation, type:
+Recipes are created by the agent during a conversation. After an analysis, type:
 
 ```
 /save-recipe
 ```
 
-The agent will review the conversation, extract the key steps, identify values that should become variables, and save it as a recipe. You can also add instructions to guide the extraction:
+The agent reviews the conversation, writes a prompt template, turns the values worth changing into variables, and saves the recipe with its `save_as_recipe` tool. You can add instructions after the command:
 
 ```
 /save-recipe focus on the monthly revenue breakdown, make the date range a variable
 ```
 
-Alternatively, you can ask the agent in plain language to save a recipe -- it has access to the `save_as_recipe` tool.
+You can also ask in plain language ("save this as a recipe"). The agent rejects a recipe whose prompt uses a `{{placeholder}}` that isn't defined as a variable.
 
-Recipes can also be created and managed from the **Recipes** page in the sidebar.
+Saving a recipe requires the **Read-Write** or **Manager** workspace role. For **Read** members the `/save-recipe` command is hidden and the agent does not have the `save_as_recipe` tool.
+
+## Managing recipes
+
+The **Recipes** page in the sidebar lists the workspace's recipes. Members with write access can edit a recipe's name, description, and prompt, and delete recipes. Variables are shown read-only in the UI. There is no button to create a recipe from scratch on this page.
 
 ## Running a recipe
 
-When you run a recipe, you provide values for each variable. The system:
+Click **Run** on a recipe, fill in the variables, and click **Run Recipe**. Any workspace member, including **Read** members, can run a recipe.
 
-1. Validates the variable values against the recipe's definitions.
-2. Renders each step's prompt template by substituting the variable values.
-3. Sends each step to the agent in sequence.
-4. Records the results of each step, including the response and any tools used.
+When a run starts, Scout:
 
-## Run tracking
+1. Validates the values against the variable definitions (and fills in defaults). Invalid values are rejected before anything runs.
+2. Substitutes the values into the prompt.
+3. Queues the run as a background job, which sends the rendered prompt to the agent as a single non-interactive request.
 
-Each recipe run is tracked with:
+The agent in a run has the same tool access as the member who started it. A **Read** member's run cannot save recipes, save learnings, or refresh data.
+
+## Run history
+
+Each run records:
 
 - The variable values used.
-- The status (pending, running, completed, failed).
-- Results from each step.
-- Timing information.
+- Its status: `pending`, `running`, `completed`, or `failed`.
+- The rendered prompt, the agent's response, the tools it used, and any artifacts it created.
+- Start and completion times.
 
-## Sharing recipes
+The Recipes page polls while a run is pending or running, so results appear without reloading.
 
-Recipes can be shared with all project members by setting the `is_shared` flag. Shared recipes are visible to everyone in the project. Unshared recipes are only visible to the creator.
+## Visibility
+
+Recipes and runs belong to the workspace, and every member of the workspace can see all of them. The **Share with workspace** checkbox on a recipe or run (labelled **Project** in a recipe's run history) sets a flag but does not change who can see it.
