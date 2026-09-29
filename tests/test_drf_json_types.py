@@ -1,8 +1,12 @@
 """The DRF views answer a non-object body or a wrong-typed field with a 400, not a 500."""
 
+import uuid
+from unittest.mock import MagicMock, patch
+
 import pytest
 from django.test import Client
 
+from apps.semantic.services import query as query_service
 from apps.workspaces.models import (
     TenantSchema,
     WorkspaceInvite,
@@ -139,11 +143,56 @@ class TestFieldTypes:
         assert resp.status_code == 400
         assert resp.json()["error"] == "workspace_id must be a string."
 
-    def test_trigger_malformed_workspace_id_is_forbidden_like_an_unknown_one(
-        self, client, tenant, tenant_membership, active_schema
+    @pytest.mark.parametrize(
+        "workspace_id,status",
+        [(["x"], 400), ({"a": 1}, 400), ("nope", 403), (str(uuid.uuid4()), 403)],
+        ids=["list", "object", "malformed", "unknown"],
+    )
+    def test_rejected_trigger_does_not_reset_the_schema_ttl(
+        self, client, tenant, tenant_membership, active_schema, workspace_id, status
     ):
-        body = {"tenant_id": str(tenant.id), "workspace_id": "nope"}
+        body = {"tenant_id": str(tenant.id), "workspace_id": workspace_id}
 
         resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
 
-        assert resp.status_code == 403
+        assert resp.status_code == status
+        active_schema.refresh_from_db()
+        assert active_schema.last_accessed_at is None
+
+    @pytest.mark.parametrize("with_workspace", [False, True], ids=["no_workspace", "workspace"])
+    def test_accepted_trigger_resets_the_schema_ttl(
+        self, client, tenant, workspace, active_schema, with_workspace
+    ):
+        body = {"tenant_id": str(tenant.id)}
+        if with_workspace:
+            body["workspace_id"] = str(workspace.id)
+
+        with (
+            patch("apps.transformations.views.run_transformation_pipeline") as run,
+            patch("apps.transformations.views.TransformationRunSerializer") as serializer,
+        ):
+            serializer.return_value.data = {}
+            resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
+
+        assert resp.status_code == 201
+        assert run.call_args.kwargs["workspace"] == (workspace if with_workspace else None)
+        active_schema.refresh_from_db()
+        assert active_schema.last_accessed_at is not None
+
+
+# transaction=True: the query service calls close_old_connections(), which closes a connection
+# still inside pytest-django's per-test atomic block and breaks every later query.
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("granularity", [["day"], {"unit": "day"}], ids=["list", "object"])
+def test_semantic_query_granularity_must_be_a_string(client, workspace, monkeypatch, granularity):
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _ws: MagicMock())
+    body = {
+        "measures": ["visits.count"],
+        "time_dimension": "visits.visit_date",
+        "granularity": granularity,
+    }
+
+    resp = _send(client, "post", f"/api/workspaces/{workspace.id}/semantic-query/", body)
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message"].startswith("Unsupported granularity")

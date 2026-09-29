@@ -146,7 +146,6 @@ class TransformationRunViewSet(viewsets.ReadOnlyModelViewSet):
                 {"error": "No active schema for this tenant"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        ts.touch()
 
         workspace = None
         workspace_id = request.data.get("workspace_id")
@@ -166,6 +165,9 @@ class TransformationRunViewSet(viewsets.ReadOnlyModelViewSet):
                 workspace = None
             if not workspace:
                 raise PermissionDenied("Workspace not found or you are not a member.")
+
+        # Only a request that will actually run resets the schema's inactivity TTL.
+        ts.touch()
 
         # NOTE (arch #235, 04#6): this runs the dbt pipeline INLINE in the request
         # thread, serialized only by an in-process threading.Lock in dbt_runner —

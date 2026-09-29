@@ -594,7 +594,9 @@ def query_diagnostics(
             )
         )
     granularity = query.get("granularity")
-    if granularity is not None and granularity not in ALLOWED_GRANULARITIES:
+    if granularity is not None and (
+        not isinstance(granularity, str) or granularity not in ALLOWED_GRANULARITIES
+    ):
         diagnostics.append(
             problem(
                 f"{path}.granularity is unsupported", block_id=block_id, code="query_granularity"
