@@ -2,13 +2,24 @@
 Pytest configuration and fixtures for Scout tests.
 """
 
+import sys
+
 import pytest
 from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant, TenantMembership
 from tests.pipeline_doubles import no_candidate_ddl  # noqa: F401 (registers the fixture)
+from tests.production_settings import PRODUCTION_SETTINGS, load_production_settings
 from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_connection
 from tests.upstream_proofs import ProviderStub
+
+
+@pytest.fixture
+def production_settings(monkeypatch):
+    """Production settings loaded with the MCP secret their startup check requires."""
+    monkeypatch.setenv("MCP_SHARED_SECRET", "test-secret")
+    yield load_production_settings()
+    sys.modules.pop(PRODUCTION_SETTINGS, None)
 
 
 @pytest.fixture

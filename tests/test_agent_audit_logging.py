@@ -16,23 +16,18 @@ logger, and the emitted line carries the real workspace id.
 
 from __future__ import annotations
 
-import importlib
 import logging
 
 import pytest
 
-import config.settings.production as prod
 from apps.chat import stream
 
 
-def test_production_logging_routes_agent_audit_logger():
+def test_production_logging_routes_agent_audit_logger(production_settings):
     """Production LOGGING must configure ``scout.agent.audit`` at INFO so the
     agent tool-call audit trail is actually emitted (not swallowed by root
     WARNING)."""
-    # Reload so we read the module's declared LOGGING regardless of which
-    # settings module the test session booted under.
-    importlib.reload(prod)
-    loggers = prod.LOGGING["loggers"]
+    loggers = production_settings.LOGGING["loggers"]
 
     assert "scout.agent.audit" in loggers, (
         "production LOGGING must declare the 'scout.agent.audit' logger; "
@@ -43,10 +38,9 @@ def test_production_logging_routes_agent_audit_logger():
     assert cfg["handlers"], "audit logger needs a handler to emit anywhere"
 
 
-def test_production_logging_routes_mcp_audit_logger():
+def test_production_logging_routes_mcp_audit_logger(production_settings):
     """The MCP-side audit logger must likewise be routed in production."""
-    importlib.reload(prod)
-    loggers = prod.LOGGING["loggers"]
+    loggers = production_settings.LOGGING["loggers"]
     assert "mcp_server.audit" in loggers or loggers.get("mcp_server", {}).get("level") == "INFO", (
         "mcp_server.audit must be emitted in production (its parent 'mcp_server' "
         "logger is INFO, but propagate must reach a handler)"
