@@ -105,3 +105,39 @@ async def test_fallback_message_streams_to_the_chat():
 
     text = [e["delta"] for e in events if e["type"] == "text-delta"]
     assert text == [MODEL_STOPPED_MESSAGES["refusal"]]
+
+
+@pytest.mark.asyncio
+async def test_fallback_after_partial_answer_streams_as_its_own_text_part():
+    """After a max_tokens cut, the fallback must not run on from the partial text."""
+    agent = MagicMock()
+
+    async def fake_events(*args, **kwargs):
+        yield {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": MagicMock(content=[{"type": "text", "text": "The top three are"}])},
+        }
+        yield {
+            "event": "on_chain_end",
+            "name": "model_stopped",
+            "data": {
+                "output": {"messages": [AIMessage(content=MODEL_STOPPED_MESSAGES["max_tokens"])]}
+            },
+        }
+
+    agent.astream_events = fake_events
+
+    events = []
+    async for sse in langgraph_to_ui_stream(agent, {}, {}):
+        for line in sse.strip().split("\n"):
+            if line.strip().startswith("data: "):
+                events.append(json.loads(line.strip()[6:]))
+
+    starts = [e["id"] for e in events if e["type"] == "text-start"]
+    assert len(starts) == 2
+    assert starts[0] != starts[1]
+    deltas = {e["id"]: e["delta"] for e in events if e["type"] == "text-delta"}
+    assert deltas == {
+        starts[0]: "The top three are",
+        starts[1]: MODEL_STOPPED_MESSAGES["max_tokens"],
+    }

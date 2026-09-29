@@ -495,11 +495,11 @@ async def langgraph_to_ui_stream(
             elif event_type == "on_chain_end" and event.get("name") in FIXED_MESSAGE_NODES:
                 # A terminal fixed-message node (``escalate``, ``model_stopped``)
                 # returns a hardcoded AIMessage rather than calling the LLM, so it
-                # emits no on_chat_model_stream
-                # event and its message was never turned into a live text-delta —
-                # the panic-loop recovery affordance only appeared after reload
-                # (06#1). Translate the node's output into a streamed text part so
-                # the user sees it during the turn.
+                # emits no on_chat_model_stream event and its message was never
+                # turned into a live text-delta — the panic-loop recovery
+                # affordance only appeared after reload (06#1). Translate the
+                # node's output into its own streamed text part, as on reload,
+                # so it doesn't run on from a cut-off answer.
                 output = event.get("data", {}).get("output") or {}
                 esc_messages = output.get("messages", []) if isinstance(output, dict) else []
                 esc_text = "".join(
@@ -512,9 +512,11 @@ async def langgraph_to_ui_stream(
                         yield _sse({"type": "reasoning-end", "id": reasoning_id})
                         reasoning_started = False
                         reasoning_id = f"reasoning-{uuid.uuid4().hex[:8]}"
-                    if not text_started:
-                        yield _sse({"type": "text-start", "id": text_id})
-                        text_started = True
+                    if text_started:
+                        yield _sse({"type": "text-end", "id": text_id})
+                        text_id = f"text-{uuid.uuid4().hex[:8]}"
+                    yield _sse({"type": "text-start", "id": text_id})
+                    text_started = True
                     yield _sse({"type": "text-delta", "id": text_id, "delta": esc_text})
 
     except (asyncio.CancelledError, GeneratorExit):
