@@ -81,5 +81,12 @@ jobs:
         run: bun run test
         working-directory: frontend
 
+      # Mirrors the Dockerfile.frontend build: `tsc -b` type-checks the app,
+      # which neither ESLint nor vitest does, so a type error could ship past a
+      # green CI and only break the production image build.
+      - name: Build frontend (type-check + vite build)
+        run: bun run build
+        working-directory: frontend
+
   test:
     uses: ./.github/workflows/test.yml
