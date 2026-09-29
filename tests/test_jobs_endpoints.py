@@ -568,6 +568,34 @@ async def test_retry_endpoint_dedupes_in_flight():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_retry_endpoint_without_a_thread_does_not_wait_for_a_thread_job():
+    """No ThreadJob is created without a thread, so notifying one would only sleep
+    through the backoff and then log a missing-ThreadJob error."""
+    user = await User.objects.acreate_user(email="nothread@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+
+    client = AsyncClient()
+    await client.alogin(email="nothread@b.c", password="x")
+    with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
+        mock_task.defer_async = AsyncMock(return_value=5007)
+        resp = await client.post(
+            f"/api/workspaces/{ws.id}/materialize/retry/",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+    assert resp.status_code == 200, resp.content
+    assert resp.json() == {"status": "started", "procrastinate_job_id": 5007}
+    mock_task.defer_async.assert_awaited_once()
+    assert mock_task.defer_async.await_args.kwargs["notify_thread"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_retry_endpoint_rejects_cross_user_thread():
     """The supplied thread_id must belong to the caller in the workspace."""
     me = await User.objects.acreate_user(email="r-me@b.c", password="x")

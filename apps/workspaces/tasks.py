@@ -1305,9 +1305,9 @@ async def materialize_workspace(
     The actual work lives in ``materialize_workspace_core`` so headless callers
     (recipes) can reuse it without the fire-and-resume machinery.
     ``notify_thread=False`` is for dispatches no chat thread waits on (adding a
-    source), which have no ThreadJob to resume. ``only_unserved`` loads every
-    workspace source that serves nothing (typically the one just added) and
-    republishes the views; if the run stops before publishing, a plain view
+    source, a retry sent without a thread), which have no ThreadJob to resume.
+    ``only_unserved`` loads every workspace source that serves nothing (typically
+    the one just added) and republishes the views; if the run stops before publishing, a plain view
     rebuild is queued instead so the views reflect the sources that do serve.
     """
     job_id = context.job.id
