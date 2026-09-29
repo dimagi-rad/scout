@@ -225,8 +225,9 @@ Artifacts are saved outputs, usually story dashboards created by the agent
   role. Read-write members can edit titles and descriptions, soft-delete and
   undelete through the API.
 - Soft-deleted artifacts are hidden from every list, including thread artifact
-  lists. The `purge_deleted_artifacts` management command permanently deletes
-  artifacts soft-deleted more than 30 days ago; it is not scheduled.
+  lists. With `--confirm`, the `purge_deleted_artifacts` management command
+  permanently deletes artifacts soft-deleted more than 30 days ago (without it,
+  it only reports them). It is not scheduled.
 - Artifacts have no share links of their own, but a shared thread exposes its
   linked artifacts.
 - If an artifact's data isn't available (for example, the schema expired), the
