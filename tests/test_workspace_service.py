@@ -13,6 +13,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.tenant_coverage import coverage_complete, coverage_warning
 from apps.workspaces.services.workspace_service import (
+    LastWorkspaceTenant,
     add_workspace_tenant,
     remove_workspace_tenant,
     touch_workspace_schemas,
@@ -298,3 +299,31 @@ async def test_touch_multitenant_touches_tenant_schemas_without_view_schema(
     await ts2.arefresh_from_db()
     assert ts1.last_accessed_at >= before
     assert ts2.last_accessed_at >= before
+
+
+@pytest.mark.django_db
+def test_remove_last_tenant_raises_last_workspace_tenant(workspace, tenant):
+    wt = WorkspaceTenant.objects.get(workspace=workspace, tenant=tenant)
+
+    with pytest.raises(LastWorkspaceTenant):
+        remove_workspace_tenant(workspace, wt)
+
+    assert WorkspaceTenant.objects.filter(id=wt.id).exists()
+
+
+@pytest.mark.django_db
+def test_removal_that_lost_a_race_is_not_a_last_source_removal(
+    workspace, tenant, tenant2, tenant_membership2
+):
+    """Two removals of the same source: the loser must not read the survivor as the last."""
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    stale = WorkspaceTenant.objects.get(workspace=workspace, tenant=tenant)
+    WorkspaceTenant.objects.filter(id=stale.id).delete()
+
+    with patch(
+        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+    ) as mock_rebuild:
+        remove_workspace_tenant(workspace, stale)
+
+    assert list(workspace.workspace_tenants.values_list("tenant_id", flat=True)) == [tenant2.id]
+    mock_rebuild.assert_not_called()

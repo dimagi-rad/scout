@@ -84,6 +84,7 @@ from apps.workspaces.services.status import (
     workspace_schema_status,
 )
 from apps.workspaces.services.workspace_service import (
+    LastWorkspaceTenant,
     load_new_workspace,
     remove_workspace_tenant,
 )
@@ -510,6 +511,53 @@ def _schema_status_for_workspaces(workspaces):
     return statuses
 
 
+def _workspace_delete_refusal(user, workspace, *, last_source=False) -> Response | None:
+    """Why the manager ``user`` may not delete ``workspace``, or None if they may.
+
+    Shared by workspace delete and removing its last source (#381), which is the
+    same destruction and must be refused in the same cases.
+    """
+    # Deleting destroys every member's content, so without coverage it is a
+    # remediation only for a workspace nobody else is in.
+    missing = {t.tenant_id for t in missing_tenants_for_member(user, workspace)}
+    if missing and workspace.memberships.exclude(user=user).exists():
+        return Response(
+            {
+                "error": "You can't delete a shared workspace while you're missing one "
+                "of its sources. "
+                + (
+                    "Make another member a manager and leave instead."
+                    if last_source
+                    else "Remove that source, or make another member a manager and leave."
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # Check this is not the user's last workspace covering any tenant. A source
+    # they can no longer use isn't "covered" by keeping this workspace, and
+    # counting it would trap them in a workspace they can't open.
+    tenant_ids = [
+        tid
+        for tid in workspace.workspace_tenants.values_list("tenant_id", flat=True)
+        if str(tid) not in missing
+    ]
+    for tid in tenant_ids:
+        other_workspaces = Workspace.objects.filter(
+            workspace_tenants__tenant_id=tid,
+            memberships__user=user,
+        ).exclude(id=workspace.id)
+        if not other_workspaces.exists():
+            return Response(
+                {
+                    "error": "Cannot delete your last workspace covering a tenant. "
+                    "Create another workspace for that tenant first."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    return None
+
+
 class WorkspaceListView(APIView):
     """
     GET  /api/workspaces/  — list workspaces the authenticated user is a member of.
@@ -771,41 +819,8 @@ class WorkspaceDetailView(APIView):
                 {"error": "Only workspace managers can delete a workspace."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        # Deleting destroys every member's content, so without coverage it is a
-        # remediation only for a workspace nobody else is in.
-        missing = {t.tenant_id for t in missing_tenants_for_member(request.user, workspace)}
-        if missing and workspace.memberships.exclude(user=request.user).exists():
-            return Response(
-                {
-                    "error": "You can't delete a shared workspace while you're missing one "
-                    "of its sources. Remove that source, or make another member a "
-                    "manager and leave."
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        # Check this is not the user's last workspace covering any tenant. A source
-        # they can no longer use isn't "covered" by keeping this workspace, and
-        # counting it would trap them in a workspace they can't open.
-        tenant_ids = [
-            tid
-            for tid in workspace.workspace_tenants.values_list("tenant_id", flat=True)
-            if str(tid) not in missing
-        ]
-        for tid in tenant_ids:
-            other_workspaces = Workspace.objects.filter(
-                workspace_tenants__tenant_id=tid,
-                memberships__user=request.user,
-            ).exclude(id=workspace.id)
-            if not other_workspaces.exists():
-                return Response(
-                    {
-                        "error": "Cannot delete your last workspace covering a tenant. "
-                        "Create another workspace for that tenant first."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
+        if refusal := _workspace_delete_refusal(request.user, workspace):
+            return refusal
         workspace.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1192,7 +1207,8 @@ class MyInvitesView(APIView):
 class WorkspaceTenantView(APIView):
     """
     POST   /api/workspaces/<workspace_id>/tenants/         — add tenant (manage only)
-    DELETE /api/workspaces/<workspace_id>/tenants/<wt_id>/ — remove tenant (manage only)
+    DELETE /api/workspaces/<workspace_id>/tenants/<wt_id>/ — remove tenant (manage only);
+        the last one deletes the workspace, see ``_delete_for_last_source``
     """
 
     permission_classes = [IsAuthenticated]
@@ -1325,6 +1341,35 @@ class WorkspaceTenantView(APIView):
 
         try:
             remove_workspace_tenant(workspace, wt)
-        except ValidationError as e:
-            return Response({"error": e.message}, status=status.HTTP_400_BAD_REQUEST)
+        except LastWorkspaceTenant:
+            return _delete_for_last_source(request, workspace)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+LAST_SOURCE_PREFIX = "Removing the last data source deletes the workspace. "
+
+
+def _delete_for_last_source(request, workspace) -> Response:
+    """Delete ``workspace`` because its last source is being removed (#381).
+
+    A workspace never exists without a source, so this is a workspace delete and
+    goes through the same refusals. It needs an explicit
+    ``?confirm_delete_workspace=true``: without it the caller gets a 409 to show
+    the manager what will be lost before anything is destroyed.
+    """
+    if refusal := _workspace_delete_refusal(request.user, workspace, last_source=True):
+        refusal.data["error"] = LAST_SOURCE_PREFIX + refusal.data["error"]
+        return refusal
+    if request.query_params.get("confirm_delete_workspace") != "true":
+        return Response(
+            {
+                "error": LAST_SOURCE_PREFIX
+                + "Its conversations and data will be deleted for every member.",
+                "requires_confirmation": "delete_workspace",
+                "workspace_name": workspace.name,
+                "member_count": workspace.memberships.count(),
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    workspace.delete()
+    return Response({"workspace_deleted": True}, status=status.HTTP_200_OK)

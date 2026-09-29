@@ -1,8 +1,10 @@
 import pytest
 from rest_framework.test import APIClient
 
-from apps.users.models import Tenant
+from apps.chat.models import Thread
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
+    Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
@@ -88,12 +90,106 @@ def test_remove_tenant_from_workspace(api_client, user, workspace, tenant2, tena
     assert not WorkspaceTenant.objects.filter(id=wt.id).exists()
 
 
-def test_cannot_remove_last_tenant_from_workspace(api_client, user, workspace, tenant):
+@pytest.fixture
+def sibling_workspace(db, user, tenant):
+    """Another workspace of ``user``'s over ``tenant``, so deleting ``workspace`` is
+    not refused as their last one covering it."""
+    ws = Workspace.objects.create(name="Sibling", created_by=user)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    return ws
+
+
+def _last_source_url(workspace, tenant, *, confirm=False):
     wt = WorkspaceTenant.objects.get(workspace=workspace, tenant=tenant)
+    suffix = "?confirm_delete_workspace=true" if confirm else ""
+    return f"/api/workspaces/{workspace.id}/tenants/{wt.id}/{suffix}"
+
+
+def test_removing_last_source_asks_to_confirm_deleting_the_workspace(
+    api_client, user, workspace, tenant, sibling_workspace
+):
+    Thread.objects.create(workspace=workspace, user=user)
     api_client.force_login(user)
-    resp = api_client.delete(f"/api/workspaces/{workspace.id}/tenants/{wt.id}/")
+
+    resp = api_client.delete(_last_source_url(workspace, tenant))
+
+    assert resp.status_code == 409, resp.data
+    assert resp.data["requires_confirmation"] == "delete_workspace"
+    assert resp.data["member_count"] == 1
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+    assert Thread.objects.filter(workspace=workspace).exists()
+
+
+def test_removing_last_source_with_confirmation_deletes_the_workspace(
+    api_client, user, workspace, tenant, sibling_workspace
+):
+    Thread.objects.create(workspace=workspace, user=user)
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data == {"workspace_deleted": True}
+    assert not Workspace.objects.filter(id=workspace.id).exists()
+    assert not Thread.objects.filter(workspace_id=workspace.id).exists()
+    assert WorkspaceTenant.objects.filter(workspace=sibling_workspace, tenant=tenant).exists()
+
+
+def test_non_manager_cannot_remove_last_source_even_confirmed(
+    api_client, workspace, tenant, write_user
+):
+    api_client.force_login(write_user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 403
+    assert resp.data["error"] == "Only workspace managers can remove tenants."
+    assert Workspace.objects.filter(id=workspace.id).exists()
+    assert WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
+
+
+def test_removing_last_source_keeps_the_last_workspace_covering_it(
+    api_client, user, workspace, tenant
+):
+    """Workspace delete's guard applies, and is checked before asking to confirm."""
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
     assert resp.status_code == 400
-    assert "last" in resp.data["error"].lower()
+    assert resp.data["error"].startswith("Removing the last data source deletes the workspace.")
+    assert "last workspace covering a tenant" in resp.data["error"]
+    assert Workspace.objects.filter(id=workspace.id).exists()
+
+
+def test_removing_a_missing_last_source_of_a_shared_workspace_is_refused(
+    settings, api_client, user, workspace, tenant, read_user
+):
+    """Workspace delete's refusal for a manager missing a source of a shared workspace."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
+    TenantMembership.objects.filter(user=user, tenant=tenant).delete()
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 403
+    assert "shared workspace" in resp.data["error"]
+    assert Workspace.objects.filter(id=workspace.id).exists()
+
+
+def test_removing_a_missing_last_source_of_an_unshared_workspace_deletes_it(
+    settings, api_client, user, workspace, tenant
+):
+    """The source they lack doesn't count as covered, so this is not their last one."""
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
+    TenantMembership.objects.filter(user=user, tenant=tenant).delete()
+    api_client.force_login(user)
+
+    resp = api_client.delete(_last_source_url(workspace, tenant, confirm=True))
+
+    assert resp.status_code == 200, resp.data
+    assert not Workspace.objects.filter(id=workspace.id).exists()
 
 
 def test_add_tenant_refused_when_member_lacks_a_workspace_tenant(

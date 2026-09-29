@@ -26,6 +26,10 @@ from apps.workspaces.tasks import (
 )
 
 
+class LastWorkspaceTenant(ValidationError):
+    """Removing this tenant would leave the workspace with no sources (#381)."""
+
+
 def _invalidate_on_commit(workspace) -> None:
     # Not before commit: a resolution on another connection would read the old
     # tenant set under the new generation and cache it.
@@ -178,7 +182,9 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
     Both ``defer`` calls are transaction-safe — the procrastinate row is only
     visible to workers after commit.
 
-    Raises ValidationError if wt is the last tenant in the workspace.
+    Raises LastWorkspaceTenant if wt is the last tenant in the workspace: a
+    workspace never exists without a source, so the caller deletes the whole
+    workspace instead (#381).
     """
     with transaction.atomic():
         # Lock tenant rows before counting so concurrent removals can't both pass
@@ -187,8 +193,12 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         tenant_ids = list(
             workspace.workspace_tenants.select_for_update().values_list("id", flat=True)
         )
+        if wt.id not in tenant_ids:
+            # A concurrent removal won the lock. Counting what is left would read
+            # this as a last-source removal and delete a workspace that still has one.
+            return
         if len(tenant_ids) <= 1:
-            raise ValidationError("Cannot remove the last tenant from a workspace.")
+            raise LastWorkspaceTenant("Cannot remove the last tenant from a workspace.")
         wt.delete()
         _invalidate_on_commit(workspace)
         remaining = len(tenant_ids) - 1
