@@ -454,10 +454,21 @@ class WorkspaceDetailView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        name = request.data.get("name", "").strip()
+        name = request.data.get("name", "")
+        if not isinstance(name, str):
+            return Response(
+                {"error": "name must be a string."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        system_prompt = request.data.get("system_prompt")
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            return Response(
+                {"error": "system_prompt must be a string."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        name = name.strip()
         if name:
             workspace.name = name
-        system_prompt = request.data.get("system_prompt")
         if system_prompt is not None:
             if len(system_prompt) > 10_000:
                 return Response(
