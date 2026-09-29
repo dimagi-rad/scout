@@ -172,14 +172,15 @@ def test_adding_an_unloaded_source_marks_a_retired_view_schema_wanted_again(
     assert vs.state == SchemaState.PROVISIONING
 
 
+@pytest.mark.parametrize(
+    "state", [SchemaState.ACTIVE, SchemaState.PROVISIONING, SchemaState.FAILED]
+)
 @pytest.mark.django_db
 def test_remove_tenant_dispatches_view_schema_teardown_when_count_drops_to_one(
-    workspace, tenant2, tenant_membership2
+    workspace, tenant2, tenant_membership2, state
 ):
     wt = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
-    vs = WorkspaceViewSchema.objects.create(
-        workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
-    )
+    vs = WorkspaceViewSchema.objects.create(workspace=workspace, schema_name="ws_test", state=state)
 
     with (
         patch(
