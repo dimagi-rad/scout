@@ -106,7 +106,7 @@ async def test_multi_tenant_workspace_returns_none_tm_even_with_tenant_membershi
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_workspace_not_found_returns_none():
-    """Returns (None, None) when the workspace doesn't exist or user lacks WorkspaceMembership."""
+    """No workspace or tenant membership when the workspace is missing or not joined."""
     user = await User.objects.acreate_user(email="resolve-missing@example.com", password="pass")
 
     access, tm, _is_multi_tenant = await _resolve_chat_access(user, uuid.uuid4())
