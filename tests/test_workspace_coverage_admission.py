@@ -589,14 +589,25 @@ class TestDirectAdd:
 
 @pytest.mark.django_db
 class TestRediscoveryOutcome:
-    @pytest.mark.parametrize("provider", ["commcare", "commcare_connect", "ocs"])
-    @pytest.mark.parametrize(("status", "needs_sign_in"), [(401, True), (403, False)])
+    @pytest.mark.parametrize(
+        ("provider", "status", "expected"),
+        [
+            ("commcare", 401, workspace_views.Rediscovery(needs_sign_in=True)),
+            ("commcare_connect", 401, workspace_views.Rediscovery(needs_sign_in=True)),
+            ("ocs", 401, workspace_views.Rediscovery(needs_sign_in=True)),
+            ("commcare", 403, workspace_views.Rediscovery()),
+            ("ocs", 403, workspace_views.Rediscovery()),
+            # Connect's export list can refuse a user who still holds the opportunity.
+            ("commcare_connect", 403, workspace_views.Rediscovery(failed=True)),
+        ],
+    )
     def test_only_a_refused_sign_in_asks_the_user_to_sign_in(
-        self, httpx_mock, provider, status, needs_sign_in
+        self, httpx_mock, provider, status, expected
     ):
         """#372: a 403 is upstream withholding access. Signing in again mints an
         identically scoped token that is refused identically, so only a 401 may send
-        the user to sign in; a 403 is an authoritative "not covered"."""
+        the user to sign in. A CommCare or OCS 403 is an authoritative "not covered";
+        Connect's is inconclusive, so it reads as a check that couldn't finish."""
         target = User.objects.create_user(email="bob@example.com", password="pass")
         if provider == "ocs":
             ocs_team_connection(target, "team-a")
@@ -608,7 +619,7 @@ class TestRediscoveryOutcome:
             target, [provider], renew=True
         )
 
-        assert outcome == workspace_views.Rediscovery(failed=False, needs_sign_in=needs_sign_in)
+        assert outcome == expected
 
     def test_a_slow_upstream_cannot_hold_a_direct_add_past_its_budget(
         self, monkeypatch, httpx_mock

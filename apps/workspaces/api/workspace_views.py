@@ -240,7 +240,12 @@ async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> R
             except _UPSTREAM_AUTH_ERRORS as refused:
                 # A 403 is upstream withholding access, which signing in again cannot
                 # change (#372): it stays a plain "not covered", neither flag set.
+                # Connect's export-list 403 is the exception: it can refuse a user who
+                # still holds the opportunity (see tenant_resolution), so it proves
+                # nothing and reads as a check that couldn't finish.
                 needs_sign_in = needs_sign_in or refused.status_code == 401
+                if provider == "commcare_connect" and refused.status_code == 403:
+                    failed = True
                 logger.info(
                     "Share-time refresh refused upstream (HTTP %s) for target=%s "
                     "provider=%s account=%s",
