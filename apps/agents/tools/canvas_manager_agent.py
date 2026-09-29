@@ -28,7 +28,9 @@ from pydantic import BaseModel, Field
 
 from apps.agents.graph.state import (
     TRUNCATED_TOOL_CALLS_NODE,
+    UNFINISHED_TURN_DESCRIPTIONS,
     AgentState,
+    model_cut_off_reason,
     reject_truncated_tool_calls,
     truncated_retries_exhausted,
     truncated_tool_calls,
@@ -277,6 +279,14 @@ def create_canvas_manager_tool(
                     if isinstance(maybe_messages, list):
                         # Node outputs can contain only the newest AI message, not the history.
                         messages = add_messages(messages, maybe_messages)
+            if reason := model_cut_off_reason(messages):
+                return await _failure_result(
+                    forwarder,
+                    messages,
+                    "MODEL_STOPPED",
+                    bool(unfinished_commits),
+                    detail=UNFINISHED_TURN_DESCRIPTIONS[reason],
+                )
             result = _summarize_result(messages)
             failed = result["status"] in {"blocked", "error"}
             await forwarder.status(
@@ -441,11 +451,15 @@ async def _failure_result(
     messages: list[Any],
     error_code: str,
     commit_unconfirmed: bool,
+    detail: str | None = None,
 ) -> dict[str, Any]:
     result = _summarize_result(messages)
-    reason = (
-        "reached its step limit" if error_code == "STEP_LIMIT_REACHED" else "stopped unexpectedly"
-    )
+    if detail:
+        reason = f"stopped because {detail}"
+    elif error_code == "STEP_LIMIT_REACHED":
+        reason = "reached its step limit"
+    else:
+        reason = "stopped unexpectedly"
     message = f"Canvas Manager {reason} before completing the task. "
     if result["committed"]:
         message += "Some changes were committed and were not rolled back. "

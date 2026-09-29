@@ -96,6 +96,27 @@ def unfinished_turn_reason(message: BaseMessage) -> str | None:
     return None
 
 
+def model_cut_off_reason(messages: list[BaseMessage]) -> str | None:
+    """``refusal`` or ``max_tokens`` when the model stopped a subagent run itself.
+
+    Subagents use this rather than ``unfinished_turn_reason``: they report
+    their outcome from tool results, so a text-free final turn can still be a
+    success. The subagent callers rebuild ``messages`` from stream events, where
+    the input HumanMessage can land last, so the run's final model or tool
+    message is looked up rather than taken from the end.
+    """
+    final = next((m for m in reversed(messages) if isinstance(m, AIMessage | ToolMessage)), None)
+    reason = unfinished_turn_reason(final) if final is not None else None
+    return reason if reason in ("refusal", "max_tokens") else None
+
+
+UNFINISHED_TURN_DESCRIPTIONS = {
+    "refusal": "the model declined the request",
+    "max_tokens": "the model ran out of output tokens",
+    "empty": "the model returned no answer",
+}
+
+
 TRUNCATED_TOOL_CALLS_NODE = "truncated_tool_calls"
 
 # A request that reliably overruns max_tokens (say, one huge artifact) would

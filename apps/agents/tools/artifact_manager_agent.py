@@ -25,7 +25,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 from apps.agents.graph.state import (
     TRUNCATED_TOOL_CALLS_NODE,
+    UNFINISHED_TURN_DESCRIPTIONS,
     AgentState,
+    model_cut_off_reason,
     reject_truncated_tool_calls,
     truncated_retries_exhausted,
     truncated_tool_calls,
@@ -314,6 +316,15 @@ def create_artifact_manager_tool(
                     maybe_messages = output.get("messages")
                     if isinstance(maybe_messages, list):
                         messages = maybe_messages
+            if reason := model_cut_off_reason(messages):
+                return await _artifact_manager_failure_result(
+                    parent_tool_call_id,
+                    trace,
+                    messages,
+                    final_text,
+                    "Artifact Manager stopped before completion: "
+                    f"{UNFINISHED_TURN_DESCRIPTIONS[reason]}.",
+                )
             if messages:
                 final_text = _extract_final_text(messages)
             result = _summarize_result(messages, final_text)
