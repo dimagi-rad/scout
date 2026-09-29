@@ -6,6 +6,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 
 | Variable | Description |
 |----------|-------------|
+| `DJANGO_SETTINGS_MODULE` | Settings module: `config.settings.development`, `config.settings.production`, `config.settings.connectlabs` (production settings served under the `/scout` path prefix), or `config.settings.test`. There is no default; `manage.py`, the ASGI/WSGI apps and the MCP server refuse to start without it. `DEBUG` is fixed by the module (on in development, off otherwise). |
 | `DJANGO_SECRET_KEY` | Django secret key for cryptographic signing. Must be unique and secret in production. |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude. The agent can't run without it. |
 | `DB_CREDENTIAL_KEY` | Fernet key for encrypting stored data-source credentials (API keys and OAuth tokens) at rest. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
@@ -22,7 +23,6 @@ Scout is configured via environment variables, typically set in a `.env` file in
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DJANGO_SETTINGS_MODULE` | `config.settings.development` | Settings module to use: `config.settings.development`, `config.settings.production`, `config.settings.connectlabs` (production settings served under the `/scout` path prefix), or `config.settings.test`. `DEBUG` is fixed by the module (on in development, off otherwise). |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated list of allowed host headers. |
 | `DEPLOY_ENVIRONMENT` | `production` for the production settings, otherwise `development` | Environment label used by Sentry, Task Badger and the CommCare Connect host. Set `staging` for a staging deployment that uses the production settings. |
 | `SCOUT_BASE_URL` | `http://localhost:5173` | Public URL of the Scout frontend, used for links in emails sent from the background worker. |
