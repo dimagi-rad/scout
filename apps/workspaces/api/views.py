@@ -481,23 +481,12 @@ class _RefreshOutcome:
     http_status: int
 
 
-_NO_MEMBERSHIP = (
-    "no_membership",
-    "No tenant membership found for this workspace.",
-    status.HTTP_400_BAD_REQUEST,
-)
-_QUEUE_ERROR = (
-    "error",
-    "The refresh could not be started. Try again shortly.",
-    status.HTTP_500_INTERNAL_SERVER_ERROR,
-)
-
-
 def _refresh_source(tenant) -> dict:
     return {"tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name}
 
 
-def _refused_refresh(tenant, state, error, http_status, code=None) -> _RefreshOutcome:
+def _unstarted_refresh(tenant, state, error, http_status, code=None) -> _RefreshOutcome:
+    """The outcome of a source whose refresh was not queued, refused or failed."""
     body = {"error": error, **({"code": code} if code else {})}
     return _RefreshOutcome({**_refresh_source(tenant), "status": state, **body}, body, http_status)
 
@@ -546,23 +535,40 @@ class RefreshSchemaView(APIView):
             if membership is None:
                 # Not locked: the caller can't refresh it, and holding a shared
                 # tenant's row would stall its loads for unrelated workspaces.
-                outcomes.append(_refused_refresh(tenant, *_NO_MEMBERSHIP))
+                outcomes.append(
+                    _unstarted_refresh(
+                        tenant,
+                        state="no_membership",
+                        error="No tenant membership found for this workspace.",
+                        http_status=status.HTTP_400_BAD_REQUEST,
+                    )
+                )
                 continue
             try:
                 with transaction.atomic():
                     locked = Tenant.objects.select_for_update().filter(id=tenant.id).first()
-                    outcome = locked and self._queue_tenant_refresh(
+                    if locked is None:
+                        # Deleted since the list was read; there is nothing to refresh,
+                        # as when the old single transaction's lock query skipped it.
+                        continue
+                    outcome = self._queue_tenant_refresh(
                         request, workspace, locked, membership, legacy_jobs
                     )
+            # Deliberately broad: this is the bulkhead that keeps one source's failure,
+            # whatever it is, from undoing the others (B1). It is logged at error.
             except Exception:
                 logger.exception(
                     "Refresh of tenant %s in workspace %s could not be queued",
                     tenant.id,
                     workspace.id,
                 )
-                outcome = _refused_refresh(tenant, *_QUEUE_ERROR)
-            if outcome is not None:
-                outcomes.append(outcome)
+                outcome = _unstarted_refresh(
+                    tenant,
+                    state="error",
+                    error="The refresh could not be started because of a server error.",
+                    http_status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            outcomes.append(outcome)
 
         if not outcomes:
             return Response(
@@ -606,8 +612,10 @@ class RefreshSchemaView(APIView):
             body["code"] = ErrorCode.REFRESH_RECOVERY_REQUIRED
         if started:
             return Response(body, status=status.HTTP_202_ACCEPTED)
-        # 400 only when every source was a bad request, as the single-source path;
-        # a 500 wins so a client retries instead of treating the refusal as final.
+        # 400 only when every source was a bad request, as the single-source path.
+        # When nothing started, a server error on any source outranks the refusals:
+        # the refusal alone would misstate why nothing ran. (Once something started
+        # the response is a 202 "partial", and tenants[] carries each "error".)
         http_statuses = {o.http_status for o in outcomes}
         if status.HTTP_500_INTERNAL_SERVER_ERROR in http_statuses:
             http_status = status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -622,7 +630,7 @@ class RefreshSchemaView(APIView):
         request, workspace, tenant, tenant_membership, legacy_jobs
     ) -> _RefreshOutcome:
         def refused(state, error, http_status, code=None):
-            return _refused_refresh(tenant, state, error, http_status, code)
+            return _unstarted_refresh(tenant, state, error, http_status, code)
 
         legacy = settle_finished_refresh_candidates(tenant, legacy_jobs[tenant.id])
         if legacy.recovery_needed:

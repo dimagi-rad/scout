@@ -391,7 +391,7 @@ def test_refresh_reports_each_refused_source(
 
 @pytest.mark.django_db(transaction=True)
 def test_refresh_does_not_lock_a_source_the_caller_is_not_a_member_of(
-    manage_client, workspace, tenant, user, tenant_membership_for_user, settings
+    manage_client, workspace, tenant, tenant_membership_for_user, settings
 ):
     """B1: a shared tenant another workspace is loading must not stall on this request."""
     settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
@@ -458,7 +458,7 @@ def test_a_single_source_error_is_a_server_error(
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
 
     assert resp.status_code == 500
-    assert resp.data == {"error": "The refresh could not be started. Try again shortly."}
+    assert resp.data == {"error": "The refresh could not be started because of a server error."}
     assert not TenantSchema.objects.filter(tenant=tenant).exists()
 
 
