@@ -217,6 +217,19 @@ class TestWorkspaceRename:
         assert workspace.name == original_name
         assert workspace.system_prompt == original_prompt
 
+    def test_name_too_long_returns_400(self, client, user, workspace):
+        original_name = workspace.name
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/",
+            {"name": "x" * 256},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "name must be 255 characters or fewer."
+        workspace.refresh_from_db()
+        assert workspace.name == original_name
+
     def test_system_prompt_at_limit_is_accepted(self, client, user, workspace):
         client.force_login(user)
         resp = client.patch(

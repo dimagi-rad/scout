@@ -467,6 +467,12 @@ class WorkspaceDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         name = name.strip()
+        name_limit = Workspace._meta.get_field("name").max_length
+        if len(name) > name_limit:
+            return Response(
+                {"error": f"name must be {name_limit} characters or fewer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if name:
             workspace.name = name
         if system_prompt is not None:
