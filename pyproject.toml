@@ -31,7 +31,7 @@ dependencies = [
     # Security / HTML sanitization
     "bleach>=6.0",
     # Task Queue
-    "procrastinate[django]>=0.28",
+    "procrastinate[django]>=3.10,<4",
     # Shared cache backend for cross-worker rate limiting (arch #254, 06#2);
     # used by django.core.cache.backends.redis.RedisCache when REDIS_URL is set.
     "redis>=5.0",
