@@ -73,3 +73,17 @@ it("preserves keyboard submission from the workspace name", async () => {
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
   expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", [])
 })
+
+it("lists data sources alphabetically, whatever order the server sends", async () => {
+  // The server orders by -last_selected_at, which puts never-selected (NULL) rows first (#357).
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    { id: "m-z", tenant_uuid: "tenant-z", provider: "commcare", tenant_id: "z", tenant_name: "Zulu", last_selected_at: "2026-09-01T00:00:00Z" },
+    { id: "m-b", tenant_uuid: "tenant-b", provider: "ocs", tenant_id: "b", tenant_name: "bravo", last_selected_at: null },
+    { id: "m-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null },
+  ])
+  render(<MemoryRouter><CreateWorkspaceModal onClose={vi.fn()} /></MemoryRouter>)
+  await screen.findByTestId("create-source-tenant-a")
+  const order = [...screen.getByTestId("create-sources-list").querySelectorAll("[data-testid^='create-source-']")]
+    .map((el) => el.getAttribute("data-testid"))
+  expect(order).toEqual(["create-source-tenant-a", "create-source-tenant-b", "create-source-tenant-z"])
+})
