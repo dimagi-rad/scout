@@ -8,18 +8,25 @@ workspace creation validates every requested source.
 """
 
 import asyncio
+import contextlib
 import threading
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
+import httpx
 import pytest
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.users.models import Tenant, TenantMembership
+from apps.users import signals
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.tenant_resolution import COMMCARE_DOMAIN_API
+from apps.users.services.token_refresh import INTERACTIVE_DB_DEADLINE, get_token_url
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.api import workspace_views
 from apps.workspaces.models import (
@@ -39,7 +46,7 @@ from apps.workspaces.services.member_coverage import (
     add_tenant_covered_by_members,
     admit_covered_member,
 )
-from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked
+from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked, user_row
 from tests.tenant_access import grant_tenant_access, ocs_team_connection
 
 User = get_user_model()
@@ -70,7 +77,38 @@ def _member(ws, email, *tenants, role=WorkspaceRole.READ):
 
 
 async def _no_refresh(*_args, **_kwargs):
-    return False
+    return workspace_views.Rediscovery()
+
+
+def _oauth_identity(
+    user, provider="commcare", *, token="tok-stored", refresh="refresh", expires_at=None
+) -> TenantConnection:
+    """An account-wide OAuth identity as sign-in leaves it: account, token, connection."""
+    app, _ = SocialApp.objects.get_or_create(
+        provider=provider, name=provider, defaults={"client_id": "cid", "secret": "sec"}
+    )
+    account = SocialAccount.objects.create(
+        user=user, provider=provider, uid=f"{provider}-{user.pk}"
+    )
+    SocialToken.objects.create(
+        account=account, app=app, token=token, token_secret=refresh, expires_at=expires_at
+    )
+    return TenantConnection.objects.create(
+        user=user,
+        provider=provider,
+        credential_type=TenantConnection.OAUTH,
+        scope_key="",
+        social_account=account,
+    )
+
+
+def _domains(*tenants):
+    return {
+        "objects": [
+            {"domain_name": t.external_id, "project_name": t.canonical_name} for t in tenants
+        ],
+        "meta": {"next": None},
+    }
 
 
 @pytest.fixture
@@ -156,6 +194,68 @@ class TestSourceAdd:
         assert resp.json()["recheck_complete"] is False
         assert "retrying may help" in resp.json()["error"]
 
+    def test_a_bystanders_rejected_sign_in_leaves_their_access_alone(
+        self, client, user, httpx_mock, t1, t2
+    ):
+        """G1: rediscovery replays other members' stored tokens. A stale one drawing a
+        401 is not this request's to act on: only the member's own sign-in may
+        archive their access, so they are asked to sign in and nothing is revoked."""
+        ws = _workspace(user, t1)
+        grant_tenant_access(user, t2)
+        bob = _member(ws, "bob@example.com")
+        conn = _oauth_identity(bob)
+        TenantMembership.objects.create(user=bob, tenant=t1, connection=conn)
+        httpx_mock.add_response(url=COMMCARE_DOMAIN_API, status_code=401)
+        client.force_login(user)
+
+        resp = self._post(client, ws, t2)
+
+        assert TenantMembership.objects.filter(user=bob, tenant=t1).exists()
+        conn.refresh_from_db()
+        assert conn.upstream_denied_at is None
+        assert resp.status_code == 409
+        body = resp.json()
+        assert [(m["email"], m["needs_sign_in"]) for m in body["members"]] == [
+            ("bob@example.com", True)
+        ]
+        assert "sign in to Scout again" in body["error"]
+        assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
+
+    def test_a_bystanders_rediscovery_only_ever_adds_access(self, client, user, httpx_mock, t1, t2):
+        """G1: a listing that omits a tenant is the member's own sign-in's to act on."""
+        ws = _workspace(user, t1)
+        grant_tenant_access(user, t2)
+        bob = _member(ws, "bob@example.com")
+        conn = _oauth_identity(bob)
+        TenantMembership.objects.create(user=bob, tenant=t1, connection=conn)
+        httpx_mock.add_response(url=COMMCARE_DOMAIN_API, json=_domains(t2))
+        client.force_login(user)
+
+        resp = self._post(client, ws, t2)
+
+        assert resp.status_code == 202
+        assert WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
+        assert TenantMembership.objects.filter(user=bob, tenant=t1).exists()
+        assert TenantMembership.objects.filter(user=bob, tenant=t2).exists()
+
+    def test_a_provider_error_during_rediscovery_is_reported_as_retryable(
+        self, client, user, httpx_mock, t1, t2
+    ):
+        """G3: resolve errors were swallowed, so a 502 read as a complete recheck."""
+        ws = _workspace(user, t1)
+        grant_tenant_access(user, t2)
+        bob = _member(ws, "bob@example.com", t1)
+        _oauth_identity(bob, expires_at=timezone.now() + timedelta(hours=1))
+        httpx_mock.add_response(url=COMMCARE_DOMAIN_API, status_code=502)
+        client.force_login(user)
+
+        resp = self._post(client, ws, t2)
+
+        assert resp.status_code == 409
+        assert resp.json()["recheck_complete"] is False
+        assert "retrying may help" in resp.json()["error"]
+        assert resp.json()["members"][0]["needs_sign_in"] is False
+
     def test_refused_when_another_member_cannot_use_it(self, client, user, t1, t2):
         ws = _workspace(user, t1)
         _member(ws, "brian@example.com", t1)
@@ -186,7 +286,7 @@ class TestSourceAdd:
 
         async def _grant(target, _providers, **_kwargs):
             await sync_to_async(grant_tenant_access)(target, t2)
-            return True
+            return workspace_views.Rediscovery()
 
         with patch(REFRESH, side_effect=_grant):
             resp = self._post(client, ws, t2)
@@ -262,8 +362,8 @@ class TestDirectAdd:
         assert resp.json()["result"] == "invite_awaiting_access"
         assert not WorkspaceMembership.objects.filter(workspace=ws, user=target).exists()
         assert refresh.call_args.args[1] == ["commcare"]
-        # The target's tokens are used as they are, never renewed on their behalf.
-        assert refresh.call_args.kwargs == {}
+        # The named target's own expired tokens are renewed (G2).
+        assert refresh.call_args.kwargs == {"renew": True}
 
     @pytest.mark.parametrize(
         ("strict", "expected"), [(False, "member"), (True, "invite_awaiting_access")]
@@ -282,6 +382,151 @@ class TestDirectAdd:
             resp = self._add(client, ws, target.email)
 
         assert resp.json()["result"] == expected
+
+    def test_an_expired_but_renewable_target_token_is_renewed_and_rediscovered(
+        self, client, user, httpx_mock, t1
+    ):
+        """G2: the named target's own expired token is renewed, so upstream access
+        granted since their last sign-in admits them without signing in again."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        _oauth_identity(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
+        httpx_mock.add_response(
+            method="POST",
+            url=get_token_url("commcare"),
+            json={"access_token": "tok-new", "refresh_token": "refresh-2", "expires_in": 900},
+        )
+        httpx_mock.add_response(
+            url=COMMCARE_DOMAIN_API,
+            match_headers={"Authorization": "Bearer tok-new"},
+            json=_domains(t1),
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.status_code == 201
+        assert resp.json()["result"] == "member"
+        assert SocialToken.objects.get(account__user=target).token == "tok-new"
+
+    def test_a_target_whose_renewal_is_down_is_not_marked_for_reconnect(
+        self, client, user, httpx_mock, t1
+    ):
+        """G2: a transient refresh failure (#596) awaits access without condemning the
+        credential; nothing is sent upstream with the expired token."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        conn = _oauth_identity(
+            target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        httpx_mock.add_response(method="POST", url=get_token_url("commcare"), status_code=503)
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.json()["result"] == "invite_awaiting_access"
+        conn.refresh_from_db()
+        assert conn.oauth_refresh_failure_fingerprint == ""
+        assert conn.upstream_denied_at is None
+
+    @pytest.mark.parametrize(
+        ("status", "error"), [(400, "invalid_grant"), (401, "invalid_client"), (400, "other")]
+    )
+    def test_a_refused_renewal_marks_nothing_on_the_targets_credential(
+        self, client, user, httpx_mock, t1, status, error
+    ):
+        """G1: the target did not start this request, so a refused renewal must not
+        mark their credential for reconnect; that would lock them out of every
+        workspace over a manager's click. Their own next sign-in settles it."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        conn = _oauth_identity(
+            target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        httpx_mock.add_response(
+            method="POST", url=get_token_url("commcare"), status_code=status, json={"error": error}
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.json()["result"] == "invite_awaiting_access"
+        conn.refresh_from_db()
+        assert conn.oauth_refresh_failure_fingerprint == ""
+        assert conn.upstream_denied_at is None
+
+    @pytest.mark.parametrize(
+        ("refresh", "renewal", "result"),
+        [
+            # Admission's own gate counts an unrenewable token this close to expiry
+            # as expired; rediscovery still records what it can reach.
+            ("", None, "invite_awaiting_access"),
+            ("refresh", (503, "temporarily_unavailable"), "member"),
+            ("refresh", (400, "invalid_grant"), "member"),
+        ],
+        ids=["cannot-renew", "renewal-down", "renewal-refused"],
+    )
+    def test_a_target_token_that_is_not_renewed_is_used_while_it_lasts(
+        self, client, user, httpx_mock, t1, refresh, renewal, result
+    ):
+        """G2: a token inside the refresh buffer still works. Failing to renew it
+        must not leave the target less covered than using it as it stands would."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        _oauth_identity(
+            target,
+            token="tok-stored",
+            refresh=refresh,
+            expires_at=timezone.now() + timedelta(minutes=2),
+        )
+        if renewal:
+            status, error = renewal
+            httpx_mock.add_response(
+                method="POST",
+                url=get_token_url("commcare"),
+                status_code=status,
+                json={"error": error},
+            )
+        httpx_mock.add_response(
+            url=COMMCARE_DOMAIN_API,
+            match_headers={"Authorization": "Bearer tok-stored"},
+            json=_domains(t1),
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.status_code == 201
+        assert TenantMembership.objects.filter(user=target, tenant=t1).exists()
+        assert resp.json()["result"] == result
+
+    @pytest.mark.parametrize(
+        ("status", "recheck_complete", "needs_sign_in"),
+        [(200, True, False), (502, False, False), (401, True, True)],
+    )
+    def test_an_awaiting_invite_says_whether_retrying_or_signing_in_may_help(
+        self, client, user, httpx_mock, t1, status, recheck_complete, needs_sign_in
+    ):
+        """The manager just typed this person's email: a provider error means retry,
+        a refused sign-in means the person must sign in, and neither means they lack
+        upstream access."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        _oauth_identity(target, expires_at=timezone.now() + timedelta(hours=1))
+        httpx_mock.add_response(
+            url=COMMCARE_DOMAIN_API,
+            status_code=status,
+            json=_domains() if status == 200 else {},
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["result"] == "invite_awaiting_access"
+        assert body["recheck_complete"] is recheck_complete
+        assert body["needs_sign_in"] is needs_sign_in
 
     def test_full_coverage_target_becomes_a_member(self, client, user, t1, t2):
         ws = _workspace(user, t1, t2)
@@ -315,6 +560,53 @@ class TestDirectAdd:
 
         assert resp.status_code == 201
         assert resp.json()["result"] == "member"
+
+
+@pytest.mark.django_db
+class TestRediscoveryOutcome:
+    @pytest.mark.parametrize("provider", ["commcare", "commcare_connect", "ocs"])
+    @pytest.mark.parametrize(("status", "needs_sign_in"), [(401, True), (403, False)])
+    def test_only_a_refused_sign_in_asks_the_user_to_sign_in(
+        self, httpx_mock, provider, status, needs_sign_in
+    ):
+        """#372: a 403 is upstream withholding access. Signing in again mints an
+        identically scoped token that is refused identically, so only a 401 may send
+        the user to sign in; a 403 is an authoritative "not covered"."""
+        target = User.objects.create_user(email="bob@example.com", password="pass")
+        if provider == "ocs":
+            ocs_team_connection(target, "team-a")
+        else:
+            _oauth_identity(target, provider, expires_at=timezone.now() + timedelta(hours=1))
+        httpx_mock.add_response(status_code=status, is_reusable=True)
+
+        outcome = async_to_sync(workspace_views._arefresh_target_for_workspace)(
+            target, [provider], renew=True
+        )
+
+        assert outcome == workspace_views.Rediscovery(failed=False, needs_sign_in=needs_sign_in)
+
+    def test_a_slow_upstream_cannot_hold_a_direct_add_past_its_budget(
+        self, monkeypatch, httpx_mock
+    ):
+        """The renew pass runs on the sync request thread, so it shares one budget
+        rather than spending a full timeout per provider and identity."""
+        monkeypatch.setattr(workspace_views, "TARGET_REFRESH_BUDGET", 0.3)
+        target = User.objects.create_user(email="bob@example.com", password="pass")
+        _oauth_identity(target, expires_at=timezone.now() + timedelta(hours=1))
+
+        async def slow_listing(_request):
+            await asyncio.sleep(1)
+            return httpx.Response(200, json=_domains())
+
+        httpx_mock.add_callback(slow_listing, url=COMMCARE_DOMAIN_API)
+        started = time.monotonic()
+
+        outcome = async_to_sync(workspace_views._arefresh_target_for_workspace)(
+            target, ["commcare"], renew=True
+        )
+
+        assert time.monotonic() - started < 1
+        assert outcome == workspace_views.Rediscovery(failed=True)
 
 
 @pytest.mark.django_db
@@ -357,6 +649,73 @@ class TestInviteResolution:
         accept_invite_if_covered(invite, member)
 
         assert WorkspaceMembership.objects.get(workspace=ws, user=member).role == "read"
+
+    def test_an_invite_revoked_mid_login_is_not_accepted(self, user, t1):
+        """#561 G4: the login loop read the invite before a manager revoked it."""
+        ws = _workspace(user, t1)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        grant_tenant_access(invitee, t1)
+        stale = self._invite(ws, invitee.email)
+        WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.REVOKED)
+
+        assert accept_invite_if_covered(stale, invitee) is None
+
+        assert WorkspaceInvite.objects.get(pk=stale.pk).status == WorkspaceInviteStatus.REVOKED
+        assert not WorkspaceMembership.objects.filter(workspace=ws, user=invitee).exists()
+
+    def test_login_does_not_revive_an_invite_revoked_mid_login(
+        self, user, t1, t2, monkeypatch, mocker
+    ):
+        """#561 G4: an uncovered invitee's invite moves to awaiting access only if live."""
+        ws = _workspace(user, t1, t2)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        grant_tenant_access(invitee, t1)
+        invite = self._invite(ws, invitee.email)
+        accept = signals.accept_invite_if_covered
+
+        def revoke_then_accept(stale, who):
+            WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.REVOKED)
+            return accept(stale, who)
+
+        monkeypatch.setattr(signals, "accept_invite_if_covered", revoke_then_accept)
+        notify = mocker.patch.object(signals, "notify_awaiting_access")
+
+        resolve_pending_invites_on_login(invitee)
+
+        assert WorkspaceInvite.objects.get(pk=invite.pk).status == WorkspaceInviteStatus.REVOKED
+        notify.assert_not_called()
+
+    def test_login_does_not_expire_an_invite_revoked_mid_login(self, user, t1, monkeypatch):
+        """#561 G4: a revoke between the login loop's read and its expiry write stands."""
+        ws = _workspace(user, t1)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invite = self._invite(ws, invitee.email)
+        WorkspaceInvite.objects.filter(pk=invite.pk).update(
+            expires_at=timezone.now() - timedelta(days=1)
+        )
+        is_expired = WorkspaceInvite.is_expired
+
+        def revoke_then_check(stale):
+            WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.REVOKED)
+            return is_expired.fget(stale)
+
+        monkeypatch.setattr(WorkspaceInvite, "is_expired", property(revoke_then_check))
+
+        resolve_pending_invites_on_login(invitee)
+
+        assert WorkspaceInvite.objects.get(pk=invite.pk).status == WorkspaceInviteStatus.REVOKED
+
+    def test_acceptance_uses_the_role_as_it_stands_under_the_lock(self, user, t1):
+        ws = _workspace(user, t1)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        grant_tenant_access(invitee, t1)
+        stale = self._invite(ws, invitee.email, role=WorkspaceRole.READ_WRITE)
+        WorkspaceInvite.objects.filter(pk=stale.pk).update(role=WorkspaceRole.READ)
+
+        membership = accept_invite_if_covered(stale, invitee)
+
+        assert membership.role == WorkspaceRole.READ
+        assert WorkspaceInvite.objects.get(pk=stale.pk).role == WorkspaceRole.READ
 
 
 @pytest.mark.django_db
@@ -497,6 +856,45 @@ class TestMutationRaces:
             add_tenant_covered_by_members(ws, t2)
 
         assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
+
+    def test_renewing_a_busy_targets_token_keeps_their_rotated_grant(
+        self, client, user, httpx_mock, t1
+    ):
+        """G2: once the provider rotates the target's grant, failing to store it loses
+        it for good, and it is the target's grant, not the manager's. A sign-in
+        holding the target's row must delay the store, never discard it."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        _oauth_identity(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
+        held = contextlib.ExitStack()
+
+        def rotate_while_target_signs_in(_request):
+            held.enter_context(
+                row_locked(user_row(target.pk), release_after=INTERACTIVE_DB_DEADLINE + 1)
+            )
+            return httpx.Response(
+                200, json={"access_token": "tok-new", "refresh_token": "refresh-2"}
+            )
+
+        httpx_mock.add_callback(
+            rotate_while_target_signs_in, method="POST", url=get_token_url("commcare")
+        )
+        httpx_mock.add_response(
+            url=COMMCARE_DOMAIN_API,
+            match_headers={"Authorization": "Bearer tok-new"},
+            json=_domains(t1),
+        )
+        client.force_login(user)
+
+        with held:
+            resp = client.post(
+                f"/api/workspaces/{ws.id}/members/",
+                {"email": target.email, "role": "read"},
+                format="json",
+            )
+
+        assert resp.json()["result"] == "member"
+        assert SocialToken.objects.get(account__user=target).token_secret == "refresh-2"
 
 
 @pytest.mark.django_db

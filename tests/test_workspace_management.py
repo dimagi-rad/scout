@@ -1,11 +1,17 @@
 """Tests for workspace management API RBAC invariants (Task 3.1–3.3)."""
 
+from datetime import timedelta
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.api import workspace_views
+from apps.workspaces.api.workspace_views import Rediscovery, WorkspaceInviteDetailView
 from apps.workspaces.models import (
+    LIVE_INVITE_STATUSES,
     Workspace,
     WorkspaceInvite,
     WorkspaceInviteStatus,
@@ -542,6 +548,108 @@ class TestMemberAdd:
         assert invites.count() == 1
         assert invites.first().role == WorkspaceRole.MANAGE
 
+    def _expired_invite(self, workspace):
+        return WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="ghost@example.com",
+            role=WorkspaceRole.READ,
+            status=WorkspaceInviteStatus.PENDING,
+            expires_at=timezone.now() - timedelta(days=1),
+        )
+
+    def _reinvite(self, client, workspace):
+        return client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ghost@example.com", "role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+
+    def test_reinvite_racing_another_for_an_expired_invite_is_a_conflict(
+        self, client, user, workspace, monkeypatch
+    ):
+        """Another re-invite created the live successor after this one retired the old row."""
+        self._expired_invite(workspace)
+        retire = workspace_views._update_if_live
+
+        def retire_then_successor(invite, **fields):
+            retired = retire(invite, **fields)
+            WorkspaceInvite.objects.create(
+                workspace=workspace,
+                email="ghost@example.com",
+                role=WorkspaceRole.READ,
+                status=WorkspaceInviteStatus.PENDING,
+            )
+            return retired
+
+        monkeypatch.setattr(workspace_views, "_update_if_live", retire_then_successor)
+        client.force_login(user)
+
+        resp = self._reinvite(client, workspace)
+
+        assert resp.status_code == 409
+        live = WorkspaceInvite.objects.get(
+            workspace=workspace, email="ghost@example.com", status__in=LIVE_INVITE_STATUSES
+        )
+        assert live.role == WorkspaceRole.READ
+
+    def test_reinvite_replaces_an_expired_invite_login_retired_mid_request(
+        self, client, user, workspace, monkeypatch
+    ):
+        """Login expired the same row first; no live invite is left, so this one is created."""
+        stale = self._expired_invite(workspace)
+        is_expired = WorkspaceInvite.is_expired
+
+        def login_retires_then_check(invite):
+            WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.EXPIRED)
+            return is_expired.fget(invite)
+
+        monkeypatch.setattr(WorkspaceInvite, "is_expired", property(login_retires_then_check))
+        client.force_login(user)
+
+        resp = self._reinvite(client, workspace)
+
+        assert resp.status_code == 201, resp.json()
+        live = WorkspaceInvite.objects.get(
+            workspace=workspace, email="ghost@example.com", status__in=LIVE_INVITE_STATUSES
+        )
+        assert live.role == WorkspaceRole.MANAGE
+
+    def test_reinvite_does_not_revive_an_invite_accepted_mid_request(
+        self, client, user, workspace, mocker
+    ):
+        """#561 G4: login accepted the invite between the re-invite's read and write."""
+        invite = WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="ghost@example.com",
+            role=WorkspaceRole.READ,
+            status=WorkspaceInviteStatus.PENDING,
+        )
+        expiry = workspace_views.default_invite_expiry
+
+        def accept_then_expiry():
+            WorkspaceInvite.objects.filter(pk=invite.pk).update(
+                status=WorkspaceInviteStatus.ACCEPTED
+            )
+            return expiry()
+
+        mocker.patch.object(workspace_views, "default_invite_expiry", accept_then_expiry)
+        send = mocker.patch.object(workspace_views, "send_pending_invite_email")
+        client.force_login(user)
+
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ghost@example.com", "role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 409
+        assert resp.json() == {"error": "Invite is no longer live."}
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+        assert invite.role == WorkspaceRole.READ
+        assert WorkspaceInvite.objects.filter(workspace=workspace).count() == 1
+        send.assert_not_called()
+
     @pytest.mark.django_db(transaction=True)
     def test_share_time_refresh_grants_access_then_adds(
         self, client, user, workspace, tenant, mocker
@@ -557,7 +665,7 @@ class TestMemberAdd:
                 tenant=tenant,
                 connection=await ausable_connection(target, tenant.provider),
             )
-            return True
+            return Rediscovery()
 
         mocker.patch(
             "apps.workspaces.api.workspace_views._arefresh_target_for_workspace", new=fake_refresh
@@ -578,7 +686,7 @@ class TestMemberAdd:
         User.objects.create_user(email="noaccess@example.com", password="pass")
 
         async def fake_refresh(target, providers, **_kwargs):
-            return True  # a token existed, but no new membership resulted
+            return Rediscovery()  # a token existed, but no new membership resulted
 
         mocker.patch(
             "apps.workspaces.api.workspace_views._arefresh_target_for_workspace", new=fake_refresh
@@ -591,6 +699,8 @@ class TestMemberAdd:
         )
         assert resp.status_code == 201, resp.json()
         assert resp.json()["result"] == "invite_awaiting_access"
+        assert resp.json()["recheck_complete"] is True
+        assert resp.json()["needs_sign_in"] is False
 
     def test_non_manager_cannot_add_members(self, client, workspace, tenant, db):
         writer = User.objects.create_user(email="wr@example.com", password="pass")
@@ -745,6 +855,16 @@ class TestInviteDetail:
         invite.refresh_from_db()
         assert invite.status == WorkspaceInviteStatus.REVOKED
 
+    def test_revoking_an_already_revoked_invite_succeeds(self, client, user, workspace):
+        """A retry after a dropped 204 finds the invite already in the requested state."""
+        invite = self._make_invite(workspace)
+        WorkspaceInvite.objects.filter(pk=invite.pk).update(status=WorkspaceInviteStatus.REVOKED)
+        client.force_login(user)
+
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+
+        assert resp.status_code == 204
+
     def test_manager_can_change_invite_role(self, client, user, workspace):
         invite = self._make_invite(workspace)
         client.force_login(user)
@@ -756,6 +876,52 @@ class TestInviteDetail:
         assert resp.status_code == 200
         invite.refresh_from_db()
         assert invite.role == WorkspaceRole.MANAGE
+
+    def _accept_after_read(self, mocker, invite):
+        read = WorkspaceInviteDetailView._get_manager_context
+
+        def read_then_accept(view, *args):
+            result = read(view, *args)
+            WorkspaceInvite.objects.filter(pk=invite.pk).update(
+                status=WorkspaceInviteStatus.ACCEPTED
+            )
+            return result
+
+        mocker.patch.object(WorkspaceInviteDetailView, "_get_manager_context", read_then_accept)
+
+    def test_revoke_does_not_overwrite_an_invite_accepted_mid_request(
+        self, client, user, workspace, mocker
+    ):
+        """#561 G4: login accepted the invite between the revoke's read and write."""
+        invite = self._make_invite(workspace)
+        self._accept_after_read(mocker, invite)
+        client.force_login(user)
+
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+
+        assert resp.status_code == 409
+        assert resp.json() == {"error": "Invite is no longer live."}
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+
+    def test_role_change_does_not_touch_an_invite_accepted_mid_request(
+        self, client, user, workspace, mocker
+    ):
+        invite = self._make_invite(workspace)
+        self._accept_after_read(mocker, invite)
+        client.force_login(user)
+
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/invites/{invite.id}/",
+            {"role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 409
+        assert resp.json() == {"error": "Invite is no longer live."}
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.ACCEPTED
+        assert invite.role == WorkspaceRole.READ
 
     def test_invalid_role_returns_400(self, client, user, workspace):
         invite = self._make_invite(workspace)

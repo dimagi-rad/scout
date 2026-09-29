@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Collection
 from typing import Any
 
 from apps.semantic.services.date_context import (
@@ -326,6 +327,11 @@ def problem(
     return item
 
 
+def _is_choice(value: Any, choices: Collection[str]) -> bool:
+    """Membership for a string enum; a stored list or object is a miss, not a TypeError."""
+    return isinstance(value, str) and value in choices
+
+
 def story_doc_from_artifact_data(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {"schema_version": CURRENT_SCHEMA_VERSION, "blocks": []}
@@ -387,7 +393,7 @@ def validate_doc(doc: Any) -> list[dict[str, Any]]:
                 problem(f'Duplicate block id "{block_id}"', block_id=block_id, code="duplicate_id")
             )
             continue
-        if block_type not in KNOWN_BLOCK_TYPES:
+        if not _is_choice(block_type, KNOWN_BLOCK_TYPES):
             diagnostics.append(
                 problem(
                     f'Unknown block type "{block_type}"',
@@ -448,7 +454,7 @@ def block_output_ports(block: dict[str, Any]) -> dict[str, str]:
             if config.get("compare"):
                 ports[f"{name}_previous"] = "rows"
         return ports
-    if block_type in {"graph", "table"}:
+    if _is_choice(block_type, {"graph", "table"}):
         return {"data": "rows"}
     return {}
 
@@ -461,7 +467,7 @@ def block_input_ports(block: dict[str, Any]) -> dict[str, tuple[str, bool]]:
         if config.get("compare"):
             ports["compare"] = ("compare_ranges", True)
         return ports
-    if block_type in {"graph", "table"}:
+    if _is_choice(block_type, {"graph", "table"}):
         data_required = not isinstance(config.get("query"), dict)
         return {
             "data": ("rows", data_required),
@@ -505,7 +511,7 @@ def collect_query_specs(doc: Any) -> list[dict[str, Any]]:
                                 "compare_bound": bool(config.get("compare")),
                             }
                         )
-        elif block_type in {"graph", "table"} and isinstance(config.get("query"), dict):
+        elif _is_choice(block_type, {"graph", "table"}) and isinstance(config.get("query"), dict):
             entries.append(
                 {
                     "query_key": f"{block_id}.data",
@@ -594,7 +600,7 @@ def query_diagnostics(
             )
         )
     granularity = query.get("granularity")
-    if granularity is not None and granularity not in ALLOWED_GRANULARITIES:
+    if granularity is not None and not _is_choice(granularity, ALLOWED_GRANULARITIES):
         diagnostics.append(
             problem(
                 f"{path}.granularity is unsupported", block_id=block_id, code="query_granularity"
@@ -684,7 +690,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
         preset = config.get(
             "default" if block_type == "date_filter" else "default_range", DEFAULT_PRESET
         )
-        if preset not in PRESETS:
+        if not _is_choice(preset, PRESETS):
             diagnostics.append(
                 problem(
                     f"Unsupported date preset {preset!r}. Use one of: {', '.join(PRESETS)}",
@@ -692,9 +698,8 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                     code="date_preset",
                 )
             )
-        if (
-            block_type == "period_selector"
-            and config.get("default_comparison", DEFAULT_COMPARISON) not in COMPARISONS
+        if block_type == "period_selector" and not _is_choice(
+            config.get("default_comparison", DEFAULT_COMPARISON), COMPARISONS
         ):
             diagnostics.append(
                 problem(
@@ -759,7 +764,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
         )
     if block_type == "graph" and "recharts" not in config:
         chart_type = config.get("chart_type", "line")
-        if chart_type not in COMPACT_CHART_TYPES:
+        if not _is_choice(chart_type, COMPACT_CHART_TYPES):
             diagnostics.append(
                 problem(
                     f'Unsupported compact chart type "{chart_type}"',
@@ -816,7 +821,7 @@ def _enum_object_diagnostics(
             )
         )
     for key, choices in allowed.items():
-        if key in value and value[key] not in choices:
+        if key in value and not _is_choice(value[key], choices):
             diagnostics.append(
                 problem(
                     f"{path}.{key} must be one of {', '.join(sorted(choices))}",
@@ -870,6 +875,8 @@ def _recharts_diagnostics(
                 code="recharts_type",
             )
         )
+        # The prop checks below key dicts and sets by type; a stored list or object would raise.
+        node_type = None
     elif node_type not in RECHARTS_COMPONENT_TYPES:
         diagnostics.append(
             problem(
@@ -883,7 +890,7 @@ def _recharts_diagnostics(
     if palette is not None and (
         not isinstance(palette, list)
         or not palette
-        or any(not isinstance(color, str) or color not in SAFE_RECHARTS_COLORS for color in palette)
+        or any(not _is_choice(color, SAFE_RECHARTS_COLORS) for color in palette)
     ):
         diagnostics.append(
             problem(
@@ -981,7 +988,7 @@ def _compact_series_color_diagnostics(
     for index, item in enumerate(series):
         if not isinstance(item, dict) or "color" not in item:
             continue
-        if item.get("color") not in SAFE_RECHARTS_COLORS:
+        if not _is_choice(item.get("color"), SAFE_RECHARTS_COLORS):
             diagnostics.append(
                 problem(
                     f"config.series[{index}].color must use a Scout chart color token",

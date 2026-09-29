@@ -9,6 +9,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.utils import timezone
 
 from apps.users.services.merge import merge_users
 from apps.users.services.oauth_scope import canonical_provider
@@ -196,16 +197,22 @@ def resolve_pending_invites_on_login(user):
     ).select_related("workspace")
     for invite in invites:
         if invite.is_expired:
-            invite.status = WorkspaceInviteStatus.EXPIRED
-            invite.save(update_fields=["status", "updated_at"])
+            # Conditional, like the awaiting-access move below: keep a revoke's audit trail.
+            WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
+                status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
+            )
             continue
 
         if accept_invite_if_covered(invite, user) is not None:
             notify_invite_accepted(invite, user)
         elif invite.status != WorkspaceInviteStatus.AWAITING_ACCESS:
-            invite.status = WorkspaceInviteStatus.AWAITING_ACCESS
-            invite.save(update_fields=["status", "updated_at"])
-            notify_awaiting_access(invite, user)
+            # Conditional: a revoke since the read above must not be overwritten (#561 G4).
+            moved = WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
+                status=WorkspaceInviteStatus.AWAITING_ACCESS, updated_at=timezone.now()
+            )
+            if moved:
+                invite.status = WorkspaceInviteStatus.AWAITING_ACCESS
+                notify_awaiting_access(invite, user)
 
 
 def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):

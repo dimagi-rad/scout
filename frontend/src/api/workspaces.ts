@@ -98,7 +98,14 @@ export interface MembersResponse {
 // `result` discriminator tells the UI which row/message to render.
 export type AddMemberResult =
   | ({ result: "member" } & WorkspaceMember)
-  | ({ result: "invite_pending" | "invite_awaiting_access" } & WorkspaceInvite)
+  | ({ result: "invite_pending" } & WorkspaceInvite)
+  | ({
+      result: "invite_awaiting_access"
+      // False when Scout couldn't finish checking their upstream access.
+      recheck_complete: boolean
+      // Upstream refused their saved sign-in.
+      needs_sign_in: boolean
+    } & WorkspaceInvite)
 
 // GET /api/invites/ — the signed-in user's own awaiting_access invites.
 export interface AwaitingInvite {

@@ -386,3 +386,45 @@ def test_connection_wide_denial_archives_alias_tenants_but_not_connect(user):
     assert memberships["commcare"].archived_at is not None
     assert memberships["commcare-custom"].archived_at is not None
     assert memberships["commcare_connect"].archived_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("provider", "scope", "resolve", "error"),
+    [
+        ("commcare_connect", "", resolve_connect_opportunities, ConnectAuthError),
+        ("ocs", "team-a", resolve_ocs_chatbots, OCSAuthError),
+    ],
+)
+async def test_discovery_the_user_did_not_start_never_revokes(
+    user, httpx_mock, provider, scope, resolve, error
+):
+    """#561 G1: a manager's add replays members' stored tokens; a 401 there is not
+    the member's own sign-in failing, so it must neither archive nor fence."""
+    account, token, conn, tm = await identity(user, provider, scope)
+    httpx_mock.add_response(status_code=401)
+    with (
+        patch(
+            "apps.users.services.tenant_resolution.adetect_team_name_from_oauth",
+            new=AsyncMock(return_value="A"),
+        ),
+        pytest.raises(error),
+    ):
+        await resolve(user, token.token, social_account=account, may_revoke=False)
+    assert await TenantMembership.objects.filter(pk=tm.pk).aexists()
+    await conn.arefresh_from_db()
+    assert conn.upstream_denied_at is None
+    assert conn.upstream_denial_code == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_discovery_the_user_did_not_start_only_adds(user, httpx_mock):
+    account, token, _conn, tm = await identity(user)
+    httpx_mock.add_response(json={"opportunities": [{"id": 2, "name": "B"}]})
+
+    await resolve_connect_opportunities(user, token.token, social_account=account, may_revoke=False)
+
+    assert await TenantMembership.objects.filter(pk=tm.pk).aexists()
+    assert await TenantMembership.objects.filter(user=user, tenant__external_id="2").aexists()

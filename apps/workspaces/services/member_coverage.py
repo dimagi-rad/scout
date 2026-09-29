@@ -26,7 +26,9 @@ from apps.workspaces.access import (
     missing_workspace_tenants,
 )
 from apps.workspaces.models import (
+    LIVE_INVITE_STATUSES,
     Workspace,
+    WorkspaceInvite,
     WorkspaceInviteStatus,
     WorkspaceMembership,
     WorkspaceTenant,
@@ -148,20 +150,34 @@ def admit_covered_member(workspace, user, *, role, invited_by):
 def accept_invite_if_covered(invite, user):
     """Turn ``invite`` into a membership once ``user`` covers every tenant.
 
-    Returns the membership, or ``None`` when coverage is still incomplete. An
-    existing membership keeps its role: accepting a stale invite never promotes.
+    Returns the membership, or ``None`` when coverage is still incomplete or the
+    invite is no longer live. An existing membership keeps its role: accepting a
+    stale invite never promotes.
     """
     with transaction.atomic():
         _lock(invite.workspace)
+        # The caller read ``invite`` before this lock; a manager may have revoked it
+        # or changed its role since (#561 G4).
+        current = (
+            WorkspaceInvite.objects.select_for_update()
+            .filter(pk=invite.pk, status__in=LIVE_INVITE_STATUSES)
+            .first()
+        )
+        if current is None:
+            return None
         if missing_for_user(user, invite.workspace):
             return None
         membership, _ = WorkspaceMembership.objects.get_or_create(
             workspace=invite.workspace,
             user=user,
-            defaults={"role": invite.role, "invited_by": invite.invited_by},
+            defaults={"role": current.role, "invited_by_id": current.invited_by_id},
         )
-        invite.status = WorkspaceInviteStatus.ACCEPTED
-        invite.resolved_at = timezone.now()
+        current.status = WorkspaceInviteStatus.ACCEPTED
+        current.resolved_at = timezone.now()
+        current.resolved_membership = membership
+        current.save(update_fields=["status", "resolved_at", "resolved_membership", "updated_at"])
+        invite.role = current.role
+        invite.status = current.status
+        invite.resolved_at = current.resolved_at
         invite.resolved_membership = membership
-        invite.save(update_fields=["status", "resolved_at", "resolved_membership", "updated_at"])
         return membership

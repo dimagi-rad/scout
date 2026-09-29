@@ -14,6 +14,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.common.http import string_field
 from apps.knowledge.models import AgentLearning, KnowledgeEntry
 from apps.knowledge.utils import parse_frontmatter, render_frontmatter
 from apps.workspaces.models import WorkspaceRole
@@ -139,7 +140,9 @@ class KnowledgeListCreateView(APIView):
         if err:
             return err
 
-        item_type = request.data.get("type")
+        item_type, err = string_field(request.data, "type")
+        if err:
+            return err
         if item_type == "learning":
             return Response(
                 {

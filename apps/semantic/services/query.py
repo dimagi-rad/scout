@@ -184,7 +184,9 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
 
     if not measures and not dimensions and not time_dimension:
         raise SemanticQueryError("Provide at least one measure, dimension, or time_dimension.")
-    if granularity and granularity not in SUPPORTED_GRANULARITIES:
+    if granularity and (
+        not isinstance(granularity, str) or granularity not in SUPPORTED_GRANULARITIES
+    ):
         raise SemanticQueryError(
             f"Unsupported granularity '{granularity}'. Use one of: {', '.join(sorted(SUPPORTED_GRANULARITIES))}."
         )

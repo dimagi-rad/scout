@@ -59,7 +59,7 @@ function InviteStatusChip({ status }: { status: WorkspaceInviteStatus }) {
   )
 }
 
-function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
+export function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
   const [members, setMembers] = useState<WorkspaceMember[]>([])
   const [invites, setInvites] = useState<WorkspaceInvite[]>([])
   const [loading, setLoading] = useState(true)
@@ -121,6 +121,20 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }
 
+  // A 409 means the list is stale: the invite was accepted or revoked elsewhere, or the
+  // invitee already joined. Refresh without load()'s loading/error states, which would
+  // replace the tab and hide the conflict message.
+  async function refreshOnConflict(err: unknown) {
+    if (!(err instanceof ApiError && err.status === 409)) return
+    try {
+      const data = await workspaceApi.getMembers(workspaceId)
+      setMembers(data.members)
+      setInvites(data.invites)
+    } catch {
+      // The stale list plus the conflict message beats replacing the tab with an error.
+    }
+  }
+
   async function handleInviteRoleChange(inviteId: string, newRole: WorkspaceMember["role"]) {
     setUpdatingId(inviteId)
     try {
@@ -130,6 +144,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       )
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to update invite role")
+      void refreshOnConflict(err)
     } finally {
       setUpdatingId(null)
     }
@@ -143,6 +158,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       setConfirmRemoveId(null)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to revoke invite")
+      void refreshOnConflict(err)
     } finally {
       setRemovingId(null)
     }
@@ -165,13 +181,21 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       if (res.result === "member") {
         setMembers((prev) => [...prev, res])
       } else {
+        const awaiting =
+          res.result === "invite_awaiting_access"
+            ? res.needs_sign_in
+              ? "Scout couldn't check their access with their saved sign-in; it unlocks once they sign in to Scout again and have access to this workspace's data source."
+              : res.recheck_complete
+                ? "They need access to this workspace's data source; it unlocks automatically once they have it."
+                : "Scout couldn't finish checking their access upstream, so adding them again may help; otherwise it unlocks automatically once they have access."
+            : null
         const { result, ...invite } = res
         // Upsert: re-inviting an outstanding invite returns the same row.
         setInvites((prev) => [...prev.filter((i) => i.id !== invite.id), invite])
         setAddInfo(
           result === "invite_pending"
             ? `Invited ${invite.email}. They'll join automatically when they sign in to Scout.`
-            : `Invited ${invite.email}. They need access to this workspace's data source; it unlocks automatically once they have it.`
+            : `Invited ${invite.email}. ${awaiting}`
         )
       }
       setAddEmail("")
@@ -181,6 +205,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       setTimeout(() => addTriggerRef.current?.focus(), 0)
     } catch (err) {
       setAddError(err instanceof ApiError ? err.message : "Failed to add member")
+      void refreshOnConflict(err)
     } finally {
       setAddSubmitting(false)
     }
@@ -297,7 +322,9 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
         </p>
       )}
       {mutationError && (
-        <p className="mb-3 text-sm text-destructive">{mutationError}</p>
+        <p className="mb-3 text-sm text-destructive" data-testid="members-mutation-error">
+          {mutationError}
+        </p>
       )}
       <div className="rounded-lg border">
         <table className="w-full text-sm">

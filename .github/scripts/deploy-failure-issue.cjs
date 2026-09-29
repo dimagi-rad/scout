@@ -35,6 +35,20 @@ async function ensureLabel({ github, context }) {
   }
 }
 
+// deploy.yml's report and the behind-main watch (deploy-behind.cjs) both write
+// here; one path keeps them from splitting reports across two issues.
+async function fileOrComment({ github, context, existing, body, comment = body }) {
+  if (existing) {
+    await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body: comment });
+    return { number: existing.number, opened: false };
+  }
+  await ensureLabel({ github, context });
+  const { data: issue } = await github.rest.issues.create({
+    ...context.repo, title: TITLE, labels: [LABEL], body,
+  });
+  return { number: issue.number, opened: true };
+}
+
 async function reportDeploy({ github, context, core, env }) {
   const result = outcome({ testResult: env.TEST_RESULT, deployResult: env.DEPLOY_RESULT });
   if (result === 'unknown') {
@@ -59,11 +73,6 @@ async function reportDeploy({ github, context, core, env }) {
   }
 
   const line = `The ${stage} stage failed for \`${sha}\` (pushed by @${context.actor}): ${runUrl}`;
-  if (existing) {
-    await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body: line });
-    core.warning(`Production deploy failed; updated #${existing.number}.`);
-    return result;
-  }
   const body = [
     line,
     '',
@@ -71,12 +80,9 @@ async function reportDeploy({ github, context, core, env }) {
     'Check the failed step first. `no space left on device` means the shared host disk is full:',
     'see DEPLOYMENT.md, "Host disk full". A successful deploy closes this issue automatically.',
   ].join('\n');
-  await ensureLabel({ github, context });
-  const { data: issue } = await github.rest.issues.create({
-    ...context.repo, title: TITLE, labels: [LABEL], body,
-  });
-  core.warning(`Production deploy failed; opened #${issue.number}.`);
+  const issue = await fileOrComment({ github, context, existing, comment: line, body });
+  core.warning(`Production deploy failed; ${issue.opened ? 'opened' : 'updated'} #${issue.number}.`);
   return result;
 }
 
-module.exports = { LABEL, TITLE, outcome, reportDeploy };
+module.exports = { LABEL, TITLE, outcome, findOpenIssue, fileOrComment, reportDeploy };

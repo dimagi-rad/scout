@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from typing import NamedTuple
 
 from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework import status
@@ -16,12 +18,26 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.chat.models import Thread
+from apps.common.errors import (
+    CommCareAuthError,
+    ConnectAuthError,
+    OCSAuthError,
+    TokenRefreshError,
+)
+from apps.common.http import string_field
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
+)
+from apps.users.services.token_refresh import (
+    WORKER_DB_DEADLINE,
+    TokenRefreshUnavailable,
+    get_token_url,
+    refresh_oauth_token,
+    token_needs_refresh,
 )
 from apps.workspaces.access import (
     missing_tenants_by_workspace,
@@ -32,7 +48,6 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
-    MaterializationRun,
     TenantSchema,
     Workspace,
     WorkspaceInvite,
@@ -57,8 +72,8 @@ from apps.workspaces.services.member_coverage import (
     missing_for_user,
     requester_gaps,
 )
+from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.status import (
-    SYNCED_RUN_STATES,
     classify_tenant_schemas,
     workspace_schema_status,
 )
@@ -69,12 +84,33 @@ logger = logging.getLogger(__name__)
 
 # Bounded so a slow upstream export can't tie up the sync DRF worker thread.
 SHARE_REFRESH_TIMEOUT = 8  # seconds
+# The whole renew pass for a directly added user, across providers and identities.
+# A renewal already under way still runs to completion (it must never be cancelled
+# mid-rotation), so this bounds what starts, not a hard wall-clock ceiling.
+TARGET_REFRESH_BUDGET = 2 * SHARE_REFRESH_TIMEOUT
 
 _PROVIDER_RESOLVERS = {
     "commcare": resolve_commcare_domains,
     "commcare_connect": resolve_connect_opportunities,
     "ocs": resolve_ocs_chatbots,
 }
+
+_UPSTREAM_AUTH_ERRORS = (CommCareAuthError, ConnectAuthError, OCSAuthError)
+
+
+@dataclass(frozen=True)
+class Rediscovery:
+    """What rediscovering one user's access with their stored sign-ins found."""
+
+    # A provider error or timeout: retrying may give a different answer.
+    failed: bool = False
+    # Upstream refused a stored sign-in (401); only the user signing in again settles it.
+    needs_sign_in: bool = False
+
+
+class MemberRecheck(NamedTuple):
+    complete: bool = True
+    needs_sign_in: frozenset = frozenset()
 
 
 async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
@@ -89,39 +125,124 @@ async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
     return [
         (token.account, token.token)
         for token in await aiter_social_tokens(user, provider)
-        if token.token and not (token.expires_at and token.expires_at <= now)
+        if _usable_as_is(token, now)
     ]
 
 
-async def _arefresh_target_for_workspace(target, providers) -> bool:
+def _usable_as_is(token, now) -> bool:
+    return bool(token.token) and not (token.expires_at and token.expires_at <= now)
+
+
+async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple], bool]:
+    """``(pairs, failed)``: *user*'s tokens, renewing any that need it.
+
+    Only for the user a request names (G2). They did not start the request, so a
+    failed renewal records nothing on their credential (G1). A token that isn't
+    renewed is used as it stands while unexpired; ``failed`` is set only when a
+    transient failure, or the ``deadline`` (event-loop time) passing before a
+    renewal starts, leaves nothing to use.
+    """
+    token_url = get_token_url(provider)
+    now = timezone.now()
+    pairs, failed = [], False
+    for token in await aiter_social_tokens(user, provider):
+        stored = (token.account, token.token) if _usable_as_is(token, now) else None
+        can_refresh = bool(token_url and token.token_secret and token.app)
+        if not can_refresh or not token_needs_refresh(token.expires_at):
+            if stored:
+                pairs.append(stored)
+            continue
+        if asyncio.get_running_loop().time() >= deadline:
+            if stored:
+                pairs.append(stored)
+            else:
+                failed = True
+            continue
+        try:
+            # Bounded by its own timeouts, never cancelled: cancelling between the
+            # provider rotating the grant and Scout storing it would lose the grant.
+            # The worker deadline for the same reason: the grant is the target's, so
+            # the manager waits out a busy row rather than the target reconnecting.
+            access_token = await refresh_oauth_token(
+                token,
+                token_url,
+                request_timeout=SHARE_REFRESH_TIMEOUT,
+                db_timeout=WORKER_DB_DEADLINE,
+                record_failure=False,
+            )
+        except TokenRefreshError as error:
+            if stored:
+                pairs.append(stored)
+            elif isinstance(error, TokenRefreshUnavailable):
+                failed = True
+            continue
+        pairs.append((token.account, access_token))
+    return pairs, failed
+
+
+async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> Rediscovery:
     """Best-effort, bounded server-side refresh of *target*'s memberships for the
-    workspace's tenant providers, using the target's OWN tokens as they stand.
+    workspace's tenant providers, using the target's OWN tokens.
 
     This is what lets a manager add someone who was granted access upstream after
     the target's last Scout login — without the target manually reconnecting.
-    Tokens are never renewed here (see ``_aunexpired_access_tokens``), so a target
-    whose only token has expired is not picked up until they sign in again.
-    Returns True if the target had a usable token for at least one provider (used
-    to distinguish "no access upstream" from "needs to reconnect" in the error).
+    ``renew`` renews expired tokens first, for the named target of an add only;
+    anyone else's tokens are used as they stand (see ``_aunexpired_access_tokens``).
+
+    Additive only (``may_revoke=False``): the target did not start this request, so
+    nothing it observes may archive their access or record a denial (#561 G1). A
+    refused sign-in is reported as ``needs_sign_in`` instead.
 
     Every identity per provider is refreshed. A target holding two OCS teams has
     a token per team, and refreshing only one would report them as not covering a
     tenant they can in fact reach — the false negative multi-token OAuth exists
     to remove (#156).
     """
-    tried = False
+    loop = asyncio.get_running_loop()
+    # The member fan-out bounds the non-renew pass as a whole; renew runs inline.
+    deadline = loop.time() + TARGET_REFRESH_BUDGET if renew else None
+    failed = needs_sign_in = False
     for provider in providers:
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
-        for account, token in await _aunexpired_access_tokens(target, provider):
-            tried = True
+        if renew:
+            pairs, renewal_failed = await _arenewed_access_tokens(target, provider, deadline)
+            failed = failed or renewal_failed
+        else:
+            pairs = await _aunexpired_access_tokens(target, provider)
+        for account, token in pairs:
+            timeout = SHARE_REFRESH_TIMEOUT
+            if deadline is not None:
+                timeout = min(timeout, deadline - loop.time())
+                if timeout <= 0:
+                    failed = True
+                    break
             try:
                 await asyncio.wait_for(
-                    resolve(target, token, social_account=account, allow_replace=False),
-                    timeout=SHARE_REFRESH_TIMEOUT,
+                    resolve(
+                        target,
+                        token,
+                        social_account=account,
+                        allow_replace=False,
+                        may_revoke=False,
+                    ),
+                    timeout=timeout,
+                )
+            except _UPSTREAM_AUTH_ERRORS as refused:
+                # A 403 is upstream withholding access, which signing in again cannot
+                # change (#372): it stays a plain "not covered", neither flag set.
+                needs_sign_in = needs_sign_in or refused.status_code == 401
+                logger.info(
+                    "Share-time refresh refused upstream (HTTP %s) for target=%s "
+                    "provider=%s account=%s",
+                    refused.status_code,
+                    target.id,
+                    provider,
+                    account.pk,
                 )
             except Exception:
+                failed = True
                 logger.warning(
                     "Share-time refresh failed for target=%s provider=%s account=%s",
                     target.id,
@@ -129,7 +250,7 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
                     account.pk,
                     exc_info=True,
                 )
-    return tried
+    return Rediscovery(failed=failed, needs_sign_in=needs_sign_in)
 
 
 # Bounds the provider fan-out and keeps queued refreshes from spending their
@@ -139,23 +260,23 @@ MEMBER_REFRESH_CONCURRENCY = 4
 MEMBER_REFRESH_BUDGET = 2 * SHARE_REFRESH_TIMEOUT
 
 
-async def _arefresh_members_for_provider(users, provider) -> bool:
+async def _arefresh_members_for_provider(users, provider) -> MemberRecheck:
     """Best-effort rediscovery with each user's own, still-valid identities.
 
     Advisory only: the locked coverage check decides, so one member's failure
-    must neither fail the request nor stop the others. Tokens are not renewed:
-    a manager's click must never mark another member's credential as failed.
-    What the rediscovery *observes* is still authoritative about that member's
-    own credential (a revocation archives it, as their next read would).
+    must neither fail the request nor stop the others. Tokens are not renewed and
+    nothing is revoked: a manager's click must never mark another member's
+    credential as failed or archive their access.
 
-    Returns False if some member's rediscovery failed or ran out of time, since
-    then retrying may give a different answer.
+    ``complete`` is False if some member's rediscovery failed or ran out of time,
+    since then retrying may give a different answer. ``needs_sign_in`` holds the
+    ids of members whose stored sign-in upstream refused.
     """
     gate = asyncio.Semaphore(MEMBER_REFRESH_CONCURRENCY)
 
     async def refresh(user):
         async with gate:
-            await _arefresh_target_for_workspace(user, [provider])
+            return await _arefresh_target_for_workspace(user, [provider])
 
     tasks = [asyncio.ensure_future(refresh(user)) for user in users]
     try:
@@ -168,19 +289,27 @@ async def _arefresh_members_for_provider(users, provider) -> bool:
             provider,
             len(users),
         )
-    complete = all(
-        task.done() and not task.cancelled() and task.exception() is None for task in tasks
-    )
+    complete = True
+    needs_sign_in = set()
     for user, task in zip(users, tasks, strict=True):
-        result = task.exception() if task.done() and not task.cancelled() else None
-        if isinstance(result, Exception):
+        if not task.done() or task.cancelled():
+            complete = False
+            continue
+        error = task.exception()
+        if error is not None:
+            complete = False
             logger.warning(
                 "Source-add refresh failed for member=%s provider=%s",
                 user.id,
                 provider,
-                exc_info=result,
+                exc_info=error,
             )
-    return complete
+            continue
+        outcome = task.result()
+        complete = complete and not outcome.failed
+        if outcome.needs_sign_in:
+            needs_sign_in.add(user.pk)
+    return MemberRecheck(complete=complete, needs_sign_in=frozenset(needs_sign_in))
 
 
 def _member_label(user) -> str:
@@ -188,13 +317,19 @@ def _member_label(user) -> str:
     return f"{name} <{user.email}>" if name else user.email
 
 
-def _members_lack_source_body(tenant, gaps, *, recheck_complete=True) -> dict:
+def _members_lack_source_body(tenant, gaps, recheck: MemberRecheck) -> dict:
     names = ", ".join(_member_label(user) for user, _missing in gaps)
     unchecked = (
         ""
-        if recheck_complete
-        else " Scout ran out of time rechecking some members upstream, so retrying may help."
+        if recheck.complete
+        else " Scout couldn't finish rechecking some members upstream, so retrying may help."
     )
+    refused = [user for user, _missing in gaps if user.pk in recheck.needs_sign_in]
+    if refused:
+        unchecked += (
+            f" Scout couldn't recheck {', '.join(_member_label(user) for user in refused)} "
+            "with their saved sign-in; they need to sign in to Scout again."
+        )
     return {
         "error": (
             f"Can't add '{tenant.canonical_name}': {names} can't use it with their own "
@@ -204,12 +339,13 @@ def _members_lack_source_body(tenant, gaps, *, recheck_complete=True) -> dict:
             + unchecked
         ),
         "reason": "members_lack_source",
-        "recheck_complete": recheck_complete,
+        "recheck_complete": recheck.complete,
         "members": [
             {
                 "user_id": str(user.id),
                 "email": user.email,
                 "name": user.get_full_name(),
+                "needs_sign_in": user.pk in recheck.needs_sign_in,
                 **missing_tenants_payload([missing])[0],
             }
             for user, missing in gaps
@@ -247,6 +383,21 @@ def _serialize_invite(invite, result=None):
     return payload
 
 
+LIVE_INVITE_CONSTRAINT = "one_live_invite_per_workspace_email"
+
+
+def _update_if_live(invite, **fields) -> bool:
+    return bool(
+        WorkspaceInvite.objects.filter(pk=invite.pk, status__in=LIVE_INVITE_STATUSES).update(
+            **fields
+        )
+    )
+
+
+def _invite_no_longer_live():
+    return Response({"error": "Invite is no longer live."}, status=status.HTTP_409_CONFLICT)
+
+
 def _upsert_invite(workspace, email, role, invited_by, new_status):
     """Create or refresh the single live invite for (workspace, email).
 
@@ -254,27 +405,46 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
     the pending↔awaiting_access status rather than violating the
     one-live-invite-per-(workspace,email) constraint. A stale (expired) live
     invite is retired to EXPIRED first so a fresh one can take its place.
+
+    Returns None when a concurrent request resolved or replaced the live invite.
     """
     live = WorkspaceInvite.objects.filter(
         workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
     ).first()
+    # Conditional writes: a login may accept (or a manager revoke) the invite
+    # after the read above, and a live status must not be written back (#561 G4).
     if live and not live.is_expired:
-        live.role = role
-        live.invited_by = invited_by
-        live.status = new_status
-        live.expires_at = default_invite_expiry()
-        live.save(update_fields=["role", "invited_by", "status", "expires_at", "updated_at"])
+        fields = {
+            "role": role,
+            "invited_by": invited_by,
+            "status": new_status,
+            "expires_at": default_invite_expiry(),
+            "updated_at": timezone.now(),
+        }
+        if not _update_if_live(live, **fields):
+            return None
+        for name, value in fields.items():
+            setattr(live, name, value)
         return live
     if live and live.is_expired:
-        live.status = WorkspaceInviteStatus.EXPIRED
-        live.save(update_fields=["status", "updated_at"])
-    return WorkspaceInvite.objects.create(
-        workspace=workspace,
-        email=email,
-        role=role,
-        invited_by=invited_by,
-        status=new_status,
-    )
+        # Best-effort: a login may have retired this row already.
+        _update_if_live(live, status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now())
+    try:
+        # Savepoint, so a lost race doesn't poison an enclosing transaction.
+        with transaction.atomic():
+            return WorkspaceInvite.objects.create(
+                workspace=workspace,
+                email=email,
+                role=role,
+                invited_by=invited_by,
+                status=new_status,
+            )
+    except IntegrityError as exc:
+        diag = getattr(exc.__cause__, "diag", None)
+        if getattr(diag, "constraint_name", None) != LIVE_INVITE_CONSTRAINT:
+            raise
+        # A concurrent re-invite created the live invite first.
+        return None
 
 
 def _schema_status_for_workspaces(workspaces):
@@ -323,16 +493,9 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # completed_at__isnull=False because Postgres sorts NULLs first under
-        # DESC — one state-bearing run without a timestamp would otherwise shadow
-        # every real one and return null.
         latest_run = (
-            MaterializationRun.objects.filter(
-                state__in=SYNCED_RUN_STATES,
-                completed_at__isnull=False,
-                tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
-            )
-            .order_by("-completed_at")
+            synced_runs()
+            .filter(tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"))
             .values("completed_at")[:1]
         )
 
@@ -498,12 +661,8 @@ class WorkspaceDetailView(APIView):
         )
 
         last_run_at = (
-            MaterializationRun.objects.filter(
-                state__in=SYNCED_RUN_STATES,
-                completed_at__isnull=False,
-                tenant_schema__tenant__in=tenants,
-            )
-            .order_by("-completed_at")
+            synced_runs()
+            .filter(tenant_schema__tenant__in=tenants)
             .values_list("completed_at", flat=True)
             .first()
         )
@@ -679,7 +838,10 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        email = (request.data.get("email") or "").strip().lower()
+        email, err = string_field(request.data, "email")
+        if err:
+            return err
+        email = email.strip().lower()
         if not email or "@" not in email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -694,6 +856,8 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.PENDING
             )
+            if invite is None:
+                return _invite_no_longer_live()
             send_pending_invite_email(invite)
             return Response(
                 _serialize_invite(invite, result="invite_pending"),
@@ -705,12 +869,15 @@ class WorkspaceMemberListView(APIView):
             workspace=workspace, user=target
         ).exists()
         gaps = () if already_member else missing_for_user(target, workspace)
+        rediscovery = Rediscovery()
         if gaps:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
-            # using their own unexpired token, then re-check.
+            # using their own token, renewed if it has expired, then re-check.
             providers = sorted({t.provider for t in gaps})
-            async_to_sync(_arefresh_target_for_workspace)(target, providers)
+            rediscovery = async_to_sync(_arefresh_target_for_workspace)(
+                target, providers, renew=True
+            )
 
         # Every member must cover every source (#381), so a target still missing
         # one after the refresh gets an invite that awaits it rather than a hard
@@ -722,12 +889,18 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.AWAITING_ACCESS
             )
+            if invite is None:
+                return _invite_no_longer_live()
             # The invitee already has a Scout account, so they never get the
             # pending-invite email; tell them directly they need upstream access.
             # The manager just performed this action, so don't email them.
             notify_awaiting_access(invite, target, notify_manager=False)
             return Response(
-                _serialize_invite(invite, result="invite_awaiting_access"),
+                {
+                    **_serialize_invite(invite, result="invite_awaiting_access"),
+                    "recheck_complete": not rediscovery.failed,
+                    "needs_sign_in": rediscovery.needs_sign_in,
+                },
                 status=status.HTTP_201_CREATED,
             )
 
@@ -896,16 +1069,29 @@ class WorkspaceInviteDetailView(APIView):
         new_role = request.data.get("role")
         if new_role not in WorkspaceRole.values:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+        # Conditional: login may have accepted the invite since it was read (#561 G4).
+        if not _update_if_live(invite, role=new_role, updated_at=timezone.now()):
+            return _invite_no_longer_live()
         invite.role = new_role
-        invite.save(update_fields=["role", "updated_at"])
         return Response(_serialize_invite(invite))
 
     def delete(self, request, workspace_id, invite_id):
         _workspace, invite, err = self._get_manager_context(request, workspace_id, invite_id)
         if err:
             return err
-        invite.status = WorkspaceInviteStatus.REVOKED
-        invite.save(update_fields=["status", "updated_at"])
+        # Conditional: revoking an invite login already accepted would hide a live
+        # member behind a REVOKED row (#561 G4).
+        revoked = _update_if_live(
+            invite, status=WorkspaceInviteStatus.REVOKED, updated_at=timezone.now()
+        )
+        # Already REVOKED is the requested state (e.g. a retry after a dropped 204).
+        if (
+            not revoked
+            and not WorkspaceInvite.objects.filter(
+                pk=invite.pk, status=WorkspaceInviteStatus.REVOKED
+            ).exists()
+        ):
+            return _invite_no_longer_live()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -997,13 +1183,15 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        tenant_id = request.data.get("tenant_id")
+        tenant_id, err = string_field(request.data, "tenant_id")
+        if err:
+            return err
         if not tenant_id:
             return Response({"error": "tenant_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             tenant = Tenant.objects.get(id=tenant_id)
-        except Tenant.DoesNotExist:
+        except (Tenant.DoesNotExist, ValidationError):
             return Response(
                 {"error": "Tenant not found or not accessible."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1033,16 +1221,16 @@ class WorkspaceTenantView(APIView):
         # so someone granted access upstream since their last login is not refused.
         already_added = WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
         lacking = [] if already_added else members_lacking_tenant(workspace, tenant)
-        recheck_complete = True
+        recheck = MemberRecheck()
         if lacking:
-            recheck_complete = async_to_sync(_arefresh_members_for_provider)(
+            recheck = async_to_sync(_arefresh_members_for_provider)(
                 [user for user, _missing in lacking], tenant.provider
             )
         try:
             wt, created = add_tenant_covered_by_members(workspace, tenant, actor_id=request.user.id)
         except MembersLackTenant as refused:
             return Response(
-                _members_lack_source_body(tenant, refused.gaps, recheck_complete=recheck_complete),
+                _members_lack_source_body(tenant, refused.gaps, recheck),
                 status=status.HTTP_409_CONFLICT,
             )
         if not created:

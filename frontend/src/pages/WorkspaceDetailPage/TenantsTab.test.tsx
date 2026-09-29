@@ -20,7 +20,6 @@ it("lists available sources alphabetically, whatever order the server sends", as
   vi.mocked(workspaceApi.getTenants).mockResolvedValue([
     { id: "wt-c", tenant_id: "tenant-c", tenant_name: "Charlie", provider: "commcare" },
   ])
-  // The server orders by -last_selected_at, which puts never-selected (NULL) rows first (#357).
   vi.mocked(getUserTenantsCached).mockResolvedValue([
     { id: "m-z", tenant_uuid: "tenant-z", provider: "commcare", tenant_id: "z", tenant_name: "Zulu", last_selected_at: "2026-09-01T00:00:00Z" },
     { id: "m-b", tenant_uuid: "tenant-b", provider: "ocs", tenant_id: "b", tenant_name: "bravo", last_selected_at: null },
