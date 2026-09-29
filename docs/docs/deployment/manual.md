@@ -71,7 +71,7 @@ DJANGO_SETTINGS_MODULE=config.settings.production \
   uv run python -m mcp_server --transport streamable-http
 ```
 
-By default it listens on `127.0.0.1:8100`; pass `--host` and `--port` to change that. Set `MCP_SERVER_URL` on the backend to point to the MCP server if it runs on a different host, and set the same `MCP_SHARED_SECRET` on the MCP server, API and worker.
+By default it listens on `127.0.0.1:8100`; pass `--host` and `--port` to change that. Set `MCP_SERVER_URL` on the backend to point to the MCP server if it runs elsewhere, and set the same `MCP_SHARED_SECRET` on the MCP server, API and worker. The server's DNS-rebinding protection accepts only a fixed set of `Host` values — loopback (`127.0.0.1`, `localhost`, `[::1]`) and the `scout-mcp-web` / `scout-staging-mcp-web` service names, on any port (`mcp_server/server.py`) — so the hostname in `MCP_SERVER_URL` must be one of them.
 
 ## Background worker
 

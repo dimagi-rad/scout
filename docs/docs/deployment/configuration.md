@@ -36,7 +36,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 
 ### Authentication
 
-OAuth client IDs and secrets live in allauth social application records. `manage.py setup_oauth_apps` creates or updates them from `COMMCARE_OAUTH_*`, `CONNECT_OAUTH_*`, `OCS_OAUTH_*`, `GOOGLE_OAUTH_*` and `GITHUB_OAUTH_*` `CLIENT_ID`/`CLIENT_SECRET` pairs; you can also manage them in Django admin.
+OAuth client IDs and secrets live in allauth social application records. `manage.py setup_oauth_apps` creates or updates them from `COMMCARE_OAUTH_*`, `CONNECT_OAUTH_*`, `OCS_OAUTH_*`, `GOOGLE_OAUTH_*` and `GITHUB_OAUTH_*` `CLIENT_ID`/`CLIENT_SECRET` pairs. When `DEPLOY_ENVIRONMENT=staging` it reads Connect's from `STAGING_CONNECT_OAUTH_*` instead. You can also manage them in Django admin.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
