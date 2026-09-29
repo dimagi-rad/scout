@@ -1189,8 +1189,8 @@ async def get_materialization_status(
     ) as tc:
         if workspace_id:
             try:
-                # Progress polling stays reachable through a verification outage, like
-                # cancel_materialization: WORKSPACE_ACCESS_DENIED would end the turn mid-load.
+                # Polling your own load stays reachable through a verification outage:
+                # WORKSPACE_ACCESS_DENIED would end the turn mid-load.
                 await _authorize_read(workspace_id, user_id, verification=None)
             except _WorkspaceAccessDenied as e:
                 tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
@@ -1283,6 +1283,23 @@ async def get_materialization_status(
             # the existence of runs in other workspaces.
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
+
+        # Same two tiers as cancel_materialization: the outage bypass above covers
+        # only the caller's own load; a run someone else started needs verified access.
+        if user_id:
+            owned = run.procrastinate_job_id is not None and (
+                await ThreadJob.objects.filter(
+                    procrastinate_job_id=run.procrastinate_job_id,
+                    thread__workspace_id=workspace_id,
+                    thread__user_id=user_id,
+                ).aexists()
+            )
+            if not owned:
+                try:
+                    await _authorize_read(workspace_id, user_id)
+                except _WorkspaceAccessDenied as e:
+                    tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
+                    return tc["result"]
 
         tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name

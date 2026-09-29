@@ -213,7 +213,29 @@ async def test_list_workspaces_reports_an_unverifiable_workspace_separately(
     assert upstream_provider.requests == []
 
 
-async def test_materialization_status_stays_reachable_during_a_verification_outage(
+async def test_status_of_your_own_load_stays_reachable_during_a_verification_outage(
+    workspace, user, tenant, upstream_provider
+):
+    run = await _status_run(tenant)
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=run.procrastinate_job_id,
+        tool_call_id="tc-own",
+    )
+    await amake_proof_stale(user, tenant)
+    upstream_provider.failure = 503
+
+    result = await server.get_materialization_status(
+        str(run.id), workspace_id=str(workspace.id), user_id=str(user.id)
+    )
+
+    assert result["success"] is True
+    assert upstream_provider.requests == []
+
+
+async def test_status_of_a_run_you_did_not_start_needs_verified_access(
     workspace, user, tenant, upstream_provider
 ):
     run = await _status_run(tenant)
@@ -224,5 +246,5 @@ async def test_materialization_status_stays_reachable_during_a_verification_outa
         str(run.id), workspace_id=str(workspace.id), user_id=str(user.id)
     )
 
-    assert result["success"] is True
-    assert upstream_provider.requests == []
+    assert result["error"]["code"] == "WORKSPACE_ACCESS_DENIED"
+    assert "t_secret_schema" not in str(result)
