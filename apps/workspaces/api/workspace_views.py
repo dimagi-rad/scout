@@ -223,6 +223,16 @@ def _members_lack_source_body(tenant, gaps, *, recheck_complete=True) -> dict:
     }
 
 
+def _name_error(name) -> str | None:
+    """Why ``name`` can't be a workspace name, or None; shared by create and rename."""
+    if not isinstance(name, str):
+        return "name must be a string."
+    name_limit = Workspace._meta.get_field("name").max_length
+    if len(name.strip()) > name_limit:
+        return f"name must be {name_limit} characters or fewer."
+    return None
+
+
 def _is_last_manager(workspace, membership):
     """Return True if membership is the sole manager of workspace."""
     if membership.role != WorkspaceRole.MANAGE:
@@ -416,11 +426,18 @@ class WorkspaceListView(APIView):
         return Response(results)
 
     def post(self, request):
-        name = request.data.get("name", "").strip()
+        name = request.data.get("name", "")
+        if error := _name_error(name):
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        name = name.strip()
         if not name:
             return Response({"error": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         tenant_ids = request.data.get("tenant_ids", [])
+        if not isinstance(tenant_ids, list):
+            return Response(
+                {"error": "tenant_ids must be a list."}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         accessible_tenant_ids = set(
             str(tid)
@@ -580,11 +597,8 @@ class WorkspaceDetailView(APIView):
             )
 
         name = request.data.get("name", "")
-        if not isinstance(name, str):
-            return Response(
-                {"error": "name must be a string."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if error := _name_error(name):
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
         system_prompt = request.data.get("system_prompt")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return Response(
@@ -592,12 +606,6 @@ class WorkspaceDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         name = name.strip()
-        name_limit = Workspace._meta.get_field("name").max_length
-        if len(name) > name_limit:
-            return Response(
-                {"error": f"name must be {name_limit} characters or fewer."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         if name:
             workspace.name = name
         if system_prompt is not None:
@@ -677,8 +685,10 @@ class WorkspaceMemberListView(APIView):
 
     def get(self, request, workspace_id):
         # The only source of the membership ids that leaving and handing over the
-        # manager role need, so reachable without coverage; but then it names only
-        # the caller, and only a manager (who can hand over) sees others' id and role.
+        # manager role need, so reachable without coverage. Uncovered, a non-manager
+        # sees only themselves; a manager also sees who the others are, since handing
+        # over blind is no escape hatch (A3). The roster is Scout's own data, not
+        # tenant data; user ids, join dates and invites stay covered-only.
         workspace, membership, err = resolve_workspace(
             request, workspace_id, require_coverage=False
         )
@@ -699,7 +709,12 @@ class WorkspaceMemberListView(APIView):
                 "created_at": m.created_at.isoformat(),
             }
             if covered or m.user_id == request.user.id
-            else {"id": str(m.id), "role": m.role}
+            else {
+                "id": str(m.id),
+                "role": m.role,
+                "email": m.user.email,
+                "name": m.user.get_full_name(),
+            }
             for m in memberships
         ]
         live_invites = WorkspaceInvite.objects.filter(

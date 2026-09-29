@@ -379,13 +379,25 @@ class TestRemediationWithoutCoverage:
     ):
         """No dead end for a shared workspace whose only manager lost everything."""
         TenantMembership.objects.filter(user=manager).update(archived_at=timezone.now())
+        other_user.first_name, other_user.last_name = "Olive", "Other"
+        other_user.save(update_fields=["first_name", "last_name"])
         _join(partial_member, other_user)
         client.force_login(manager)
-        roster = client.get(f"/api/workspaces/{partial_member.id}/members/").json()["members"]
+        body = client.get(f"/api/workspaces/{partial_member.id}/members/").json()
+        roster = body["members"]
+        assert body["invites"] == []
         mine = next(m for m in roster if m.get("user_id") == str(manager.id))
         theirs = next(m for m in roster if m is not mine)
-        # Enough to hand over, without naming anyone.
-        assert set(theirs) == {"id", "role"}
+        # A3: identity is needed to pick a successor, but nothing beyond it.
+        their_membership = WorkspaceMembership.objects.get(
+            workspace=partial_member, user=other_user
+        )
+        assert theirs == {
+            "id": str(their_membership.id),
+            "role": WorkspaceRole.READ,
+            "email": other_user.email,
+            "name": other_user.get_full_name(),
+        }
 
         promoted = client.patch(
             f"/api/workspaces/{partial_member.id}/members/{theirs['id']}/",
@@ -514,10 +526,12 @@ class TestRemediationWithoutCoverage:
         assert detail.json()["system_prompt"] == ""
         assert [t["tenant_name"] for t in detail.json()["missing_tenants"]] == ["Source Two"]
         roster = client.get(f"/api/workspaces/{partial_member.id}/members/").json()
-        # Only the caller is named; others are ids and roles, and invites are hidden.
-        named = [m for m in roster["members"] if "email" in m]
-        assert [m["user_id"] for m in named] == [str(manager.id)]
-        assert len(roster["members"]) == 2
+        # A manager sees who the others are (A3), but only the caller's own row is full.
+        full = [m for m in roster["members"] if "user_id" in m]
+        assert [m["user_id"] for m in full] == [str(manager.id)]
+        assert sorted(m["email"] for m in roster["members"]) == sorted(
+            [manager.email, other_user.email]
+        )
         assert roster["invites"] == []
 
     def test_saving_settings_never_changes_the_system_prompt_it_could_not_read(
