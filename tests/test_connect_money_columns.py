@@ -39,16 +39,15 @@ def managed_conn():
     if not url:
         pytest.skip("MANAGED_DATABASE_URL not set")
     schema = f"test_connect_money_{uuid4().hex}"
-    conn = psycopg.connect(url, autocommit=True)
-    conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    conn.autocommit = False
-    try:
-        yield conn, schema
-    finally:
-        conn.rollback()
-        conn.autocommit = True
-        conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
-        conn.close()
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        conn.autocommit = False
+        try:
+            yield conn, schema
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+            conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 @pytest.mark.parametrize(("writer", "table", "column", "base"), MONEY_COLUMNS)
