@@ -11,6 +11,7 @@ import logging
 from django.conf import settings
 
 from apps.users.tasks import send_email
+from apps.workspaces.models import WorkspaceRole
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +142,11 @@ def notify_member_added(membership, added_by):
 
 
 # Matches the role names the members UI shows, not the model's choice labels.
-_ROLE_LABELS = {"read": "Read", "read_write": "Read-Write", "manage": "Manager"}
-
-
-def _role_label(role) -> str:
-    return _ROLE_LABELS.get(role, role)
+_ROLE_LABELS = {
+    WorkspaceRole.READ: "Read",
+    WorkspaceRole.READ_WRITE: "Read-Write",
+    WorkspaceRole.MANAGE: "Manager",
+}
 
 
 def notify_role_changed(membership, changed_by):
@@ -158,7 +159,7 @@ def notify_role_changed(membership, changed_by):
         f"Your role in '{workspace.name}' on Scout changed",
         (
             f"{_user_label(changed_by)} changed your role in the '{workspace.name}' "
-            f"workspace on Scout to {_role_label(membership.role)}.\n\n"
+            f"workspace on Scout to {_ROLE_LABELS[membership.role]}.\n\n"
             f"Open it: {_workspace_link(workspace)}\n"
         ),
         [user.email],
