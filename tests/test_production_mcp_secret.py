@@ -23,3 +23,10 @@ def test_production_settings_raise_without_secret(monkeypatch, value):
 
 def test_production_settings_load_with_secret(production_settings):
     assert production_settings.MCP_SHARED_SECRET == "test-secret"
+
+
+@pytest.mark.parametrize("value", ["test-secret\n", " test-secret \r\n"])
+def test_production_settings_strip_surrounding_whitespace(monkeypatch, value):
+    """E2: secret stores often append a newline; the stripped value is what's used."""
+    monkeypatch.setenv("MCP_SHARED_SECRET", value)
+    assert load_production_settings().MCP_SHARED_SECRET == "test-secret"

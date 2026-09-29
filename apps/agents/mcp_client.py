@@ -16,7 +16,7 @@ import time
 from django.conf import settings
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from mcp_server.auth import SHARED_SECRET_HEADER
+from mcp_server.auth import SHARED_SECRET_HEADER, encode_secret
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def _build_connection() -> dict:
     conn: dict = {"transport": "streamable_http", "url": settings.MCP_SERVER_URL}
     secret = getattr(settings, "MCP_SHARED_SECRET", "")
     if secret:
-        conn["headers"] = {SHARED_SECRET_HEADER: secret}
+        conn["headers"] = {SHARED_SECRET_HEADER: encode_secret(secret)}
     return conn
 
 

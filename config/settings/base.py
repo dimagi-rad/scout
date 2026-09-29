@@ -354,8 +354,9 @@ MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 # #253, finding 01#6). Sent by the API/worker in the X-Scout-MCP-Secret header
 # and verified by mcp_server.auth.SharedSecretMiddleware, which rejects every
 # request when it is empty (#51). development.py supplies a local default and
-# production.py refuses to start without it.
-MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="")
+# production.py refuses to start without it. Stripped because secret stores often
+# append a newline, which would never match the header (finding E2).
+MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="").strip()
 
 
 def resolve_connect_api_url(deploy_environment: str) -> str:
