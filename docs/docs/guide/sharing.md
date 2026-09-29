@@ -1,62 +1,23 @@
 # Sharing
 
-Share artifacts with teammates, stakeholders, or external users via secure share links.
+Scout shares work through workspace membership. To give someone access to your analysis, add them to the workspace (see [Workspaces](../admin/workspaces.md)).
 
-## Access levels
+## What workspace members can see
 
-Each share link has an access level that controls who can view the artifact:
+| Item | Visible to |
+|------|------------|
+| **Artifacts** | Every member of the workspace, on the **Artifacts** page |
+| **Recipes and recipe runs** | Every member of the workspace, on the **Recipes** page |
+| **Knowledge entries and learnings** | Every member of the workspace, on the **Knowledge** page |
+| **Chat threads** | Only the member who started the thread |
 
-| Level | Who can view |
-|-------|-------------|
-| **Public** | Anyone with the link, no login required |
-| **Project** | Only members of the artifact's project (must be logged in) |
-| **Specific** | Only explicitly named users (must be logged in) |
+What a member can change depends on their workspace role. **Read** members can view and run things; **Read/Write** and **Manage** members can also create and edit them.
 
-The default access level is **Project**.
+## Public links
 
-## Creating a share link
+There is no share-link UI in Scout, and artifacts cannot be shared outside the workspace. Two items support public, read-only links through the API only:
 
-Create a share link via the API:
+- **Chat threads.** `PATCH /api/workspaces/<workspace_id>/threads/<thread_id>/share/` with `{"is_shared": true}` returns a `share_token`. Anyone can then read the thread's messages at `/shared/threads/<share_token>`, without logging in. Only the thread's owner can share it, and turning sharing on requires the **Read/Write** or **Manage** role. Setting `is_shared` back to `false` clears the token, so the link stops working.
+- **Recipe runs.** `PATCH /api/workspaces/<workspace_id>/recipes/<recipe_id>/runs/<run_id>/` with `{"is_public": true}` (requires **Read/Write** or **Manage**) generates a `share_token`. The run's results are then readable at `/shared/runs/<share_token>` without logging in.
 
-```
-POST /api/artifacts/<artifact_id>/share/
-```
-
-Request body:
-
-```json
-{
-  "access_level": "public",
-  "expires_at": "2026-03-01T00:00:00Z"
-}
-```
-
-The response includes a `share_token` that forms the share URL:
-
-```
-/api/artifacts/shared/<share_token>/
-```
-
-## Expiration
-
-Share links can have an optional expiration date. After expiration, the link returns a 403 error. Links without an expiration date remain active indefinitely.
-
-## Managing share links
-
-**List all share links for an artifact:**
-
-```
-GET /api/artifacts/<artifact_id>/shares/
-```
-
-**Revoke a share link:**
-
-```
-DELETE /api/artifacts/<artifact_id>/shares/<share_token>/
-```
-
-Revoking a share link immediately disables access through that link.
-
-## View tracking
-
-Each share link tracks how many times it has been viewed. This count is visible when listing share links.
+Public links have no expiry and no access levels: anyone with the link can read the content until sharing is turned off.
