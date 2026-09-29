@@ -99,7 +99,7 @@ def test_retryable_denials_are_not_cached(scope, user, workspace, monkeypatch):
     denied = WorkspaceAccess(denied_reason="verification_unavailable")
     assert denied.retryable
     monkeypatch.setattr(access_module, "_resolve_with_freshness", lambda *a, **k: denied)
-    resolve_workspace_access_ex(user, workspace.id)
+    assert resolve_workspace_access_ex(user, workspace.id) is denied
     monkeypatch.undo()
 
     assert resolve_workspace_access_ex(user, workspace.id).granted
