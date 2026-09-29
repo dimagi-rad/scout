@@ -19,6 +19,12 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.query_state import workspace_query_surface
+from apps.workspaces.services.status import (
+    SOURCE_STATE_SEVERITY,
+    aggregate_source_state,
+    derive_schema_status,
+    serving_excluded_tenant_ids,
+)
 
 LOADING = MaterializationRun.RunState.LOADING
 
@@ -127,3 +133,66 @@ async def test_prompt_and_query_surface_agree_on_serving_writers(
         assert "previously loaded data" in prompt
     else:
         assert "do not call other data tools" in prompt.lower()
+
+
+@pytest.mark.parametrize(
+    ("tenant_count", "active_count", "provisioning", "view_state", "expected"),
+    [
+        (0, 0, False, None, "unavailable"),
+        (1, 1, False, None, "available"),
+        (1, 1, True, None, "available"),
+        (1, 0, True, None, "provisioning"),
+        (1, 0, False, None, "unavailable"),
+        # The detail API counts ACTIVE rows, not tenants: two ACTIVE rows for one
+        # source miss the equality and fall through (see the #251 PR discrepancies).
+        (1, 2, False, None, "unavailable"),
+        (2, 2, False, None, "provisioning"),
+        (2, 0, False, SchemaState.ACTIVE, "available"),
+        (2, 2, True, SchemaState.FAILED, "failed"),
+        (2, 2, False, SchemaState.PROVISIONING, "provisioning"),
+        (2, 2, False, SchemaState.EXPIRED, "provisioning"),
+    ],
+)
+def test_derive_schema_status(tenant_count, active_count, provisioning, view_state, expected):
+    assert derive_schema_status(tenant_count, active_count, provisioning, view_state) == expected
+
+
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ([SchemaState.ACTIVE, SchemaState.FAILED], SchemaState.FAILED),
+        ([SchemaState.ACTIVE, "unavailable"], SchemaState.ACTIVE),
+        (["unavailable", SchemaState.PROVISIONING], SchemaState.PROVISIONING),
+        ([SchemaState.EXPIRED, SchemaState.TEARDOWN], SchemaState.TEARDOWN),
+        (["unknown", "also_unknown"], "unknown"),
+        (["unknown", "unavailable"], "unavailable"),
+    ],
+)
+def test_aggregate_source_state_picks_the_most_severe(states, expected):
+    assert aggregate_source_state(states) == expected
+
+
+def test_every_schema_state_has_a_severity():
+    assert set(SchemaState.values) | {"unavailable"} == set(SOURCE_STATE_SEVERITY)
+
+
+@pytest.mark.parametrize(
+    ("coverage", "expected"),
+    [
+        (None, set()),
+        ({"included_tenants": [], "excluded_tenants": []}, set()),
+        (
+            {"included_tenants": [{"tenant_id": "a"}], "excluded_tenants": [{"tenant_id": "b"}]},
+            {"b"},
+        ),
+        (
+            {
+                "included_tenants": [{"tenant_id": "a"}, {"tenant_id": "b"}],
+                "excluded_tenants": [{"tenant_id": "b"}],
+            },
+            set(),
+        ),
+    ],
+)
+def test_serving_excluded_tenant_ids(coverage, expected):
+    assert serving_excluded_tenant_ids(coverage) == expected

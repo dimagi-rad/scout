@@ -16,7 +16,6 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from django.conf import settings
-from django.db.models import Exists, OuterRef
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -51,6 +50,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.query_state import serving_writer_in_flight
 from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
 from mcp_server.pipeline_registry import get_registry
 
@@ -332,31 +332,7 @@ async def _fetch_semantic_model_context(
             else None
         )
         coverage = parse_coverage(serving_view.tenant_coverage) if serving_view else None
-        serving_runs = active_runs
-        if coverage is not None:
-            excluded_ids = {entry["tenant_id"] for entry in coverage["excluded_tenants"]} - {
-                entry["tenant_id"] for entry in coverage["included_tenants"]
-            }
-            # An explicitly excluded tenant has no physical dependencies in this
-            # ACTIVE view. Use actual run IDs so malformed UUID strings cannot crash a turn.
-            excluded_run_tenants = [
-                tenant_id
-                async for tenant_id in active_runs.values_list(
-                    "tenant_schema__tenant_id", flat=True
-                )
-                if str(tenant_id) in excluded_ids
-            ]
-            serving_runs = active_runs.exclude(tenant_schema__tenant_id__in=excluded_run_tenants)
-        runs_with_serving_schema = serving_runs.annotate(
-            has_serving_schema=Exists(
-                TenantSchema.objects.filter(
-                    tenant_id=OuterRef("tenant_schema__tenant_id"), state=SchemaState.ACTIVE
-                )
-            )
-        )
-        unsafe_run = await runs_with_serving_schema.exclude(
-            tenant_schema__state=SchemaState.PROVISIONING, has_serving_schema=True
-        ).aexists()
+        unsafe_run = await serving_writer_in_flight(active_runs, coverage)
         if not unsafe_run:
             try:
                 ready_context = await _semantic_catalog_context(workspace)
