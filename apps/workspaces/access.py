@@ -87,6 +87,10 @@ _ROLE_RANK = {
 _GENERIC_DENIED = "Workspace not found or access denied."
 TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
 TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
+NO_SOURCES_MESSAGE = (
+    "This workspace has no data sources, so there is nothing to load or query. "
+    "A manager can delete it."
+)
 
 _PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 
@@ -259,6 +263,8 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
             body["lost_tenants"] = list(result.lost_tenant_names)
             body["missing_tenants"] = missing_tenants_payload(result.missing_tenants)
         return body
+    if result.denied_reason == NO_SOURCES:
+        return {"error": NO_SOURCES_MESSAGE, "reason": NO_SOURCES}
     return {"error": _GENERIC_DENIED}
 
 

@@ -8,8 +8,11 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import Client
 
+from apps.workspaces import access_cache
 from apps.workspaces.access import (
     NO_SOURCES,
+    NO_SOURCES_MESSAGE,
+    access_denied_body,
     aresolve_local_access_many,
     aresolve_workspace_access_ex,
     resolve_workspace_access_ex,
@@ -20,6 +23,10 @@ User = get_user_model()
 
 LOGGER = "apps.workspaces.access"
 EVENT = "workspace_access_denied_no_sources"
+
+
+def _records(caplog):
+    return [r for r in caplog.records if r.name == LOGGER and r.getMessage().startswith(EVENT)]
 
 
 def _empty_workspace(email):
@@ -42,7 +49,7 @@ def test_member_of_a_workspace_with_no_sources_is_denied_and_logged(settings, ca
 
     assert not result.granted
     assert result.denied_reason == NO_SOURCES
-    [record] = [r for r in caplog.records if r.getMessage().startswith(EVENT)]
+    [record] = _records(caplog)
     assert record.levelno == logging.ERROR
     assert record.workspace_id == str(ws.id)
 
@@ -81,3 +88,24 @@ def test_listing_agrees_with_the_gate_for_a_workspace_with_no_sources():
     [entry] = [w for w in client.get("/api/workspaces/").json() if w["id"] == str(ws.id)]
 
     assert entry["has_access"] is False
+
+
+@pytest.fixture
+def scope():
+    scope, token = access_cache.open_scope()
+    yield scope
+    access_cache.close_scope(scope)
+    access_cache.detach_scope(token)
+
+
+@pytest.mark.django_db
+def test_no_sources_denial_logs_once_per_request(caplog, scope):
+    user, ws, _membership = _empty_workspace("nosrc-once@example.com")
+    caplog.set_level(logging.ERROR, logger=LOGGER)
+
+    # Distinct minimum roles are distinct cache entries, so both run the gate.
+    resolve_workspace_access_ex(user, ws.id)
+    result = resolve_workspace_access_ex(user, ws.id, minimum_role=WorkspaceRole.MANAGE)
+
+    assert len(_records(caplog)) == 1
+    assert access_denied_body(result) == {"error": NO_SOURCES_MESSAGE, "reason": NO_SOURCES}
