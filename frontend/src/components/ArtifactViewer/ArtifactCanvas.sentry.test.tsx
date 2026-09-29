@@ -116,6 +116,24 @@ describe("ArtifactCanvas sandbox error reporting", () => {
     )
   })
 
+  it("falls back to the stack's error class when the posted name is not an identifier", () => {
+    const { post } = renderCanvas()
+
+    post({
+      type: "artifact-error",
+      error: {
+        title: "Uncaught Error",
+        name: "X\n    at evil (a:1:1)",
+        message: "boom",
+        details: "TypeError: boom\n    at App (sandbox:1:1)",
+      },
+    })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.name).toBe("TypeError")
+    expect(reported.stack).toBe("TypeError: boom\n    at App (sandbox:1:1)")
+  })
+
   it("ignores artifact-error messages from any window but its own iframe", () => {
     const { post } = renderCanvas()
 

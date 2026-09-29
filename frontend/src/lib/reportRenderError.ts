@@ -25,6 +25,10 @@ const MAX_REPORTS_PER_SOURCE = 20
 // The header line of a V8 stack repeats the message, so it is not kept.
 const STACK_FRAME = /^\s+at\s|^[^\s]*@\S+:\d+:\d+$/
 
+// The name comes from the sandboxed artifact and heads the reported stack, so
+// anything but a plain identifier could forge frames or split Sentry grouping.
+export const SAFE_ERROR_NAME = /^[\w$.]{1,80}$/
+
 const reported = new Set<string>()
 const reportCounts = new Map<RenderErrorSource, number>()
 
@@ -37,7 +41,8 @@ function redactQuoted(text: string): string {
 }
 
 function safeText(text: string, maxLength = MAX_MESSAGE_LENGTH): string {
-  const redacted = redactQuoted(text)
+  // Collapsed so the text stays on the stack's header line and cannot pose as a frame.
+  const redacted = redactQuoted(text).replace(/\s*[\r\n]+\s*/g, " ")
   return redacted.length > maxLength ? `${redacted.slice(0, maxLength)}…` : redacted
 }
 
@@ -76,7 +81,7 @@ export function reportRenderError(report: RenderErrorReport): void {
   reported.add(key)
   reportCounts.set(report.source, count + 1)
 
-  const name = safeText(report.name || "Error", 80)
+  const name = SAFE_ERROR_NAME.test(report.name) ? report.name : "Error"
   const message = safeText(report.message || "")
   const error = new Error(message)
   error.name = name

@@ -6,14 +6,14 @@ import type { DateRange } from "@/components/ArtifactGraph/types"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { withBasePath } from "@/config"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
-import { reportRenderError } from "@/lib/reportRenderError"
+import { reportRenderError, SAFE_ERROR_NAME } from "@/lib/reportRenderError"
 import { cn } from "@/lib/utils"
 import { ArtifactDataRecovery } from "./ArtifactDataRecovery"
 import { useArtifactDataRecovery } from "./useArtifactDataRecovery"
 import { useArtifactPrint } from "./useArtifactPrint"
 
 function sandboxErrorName(name: unknown, stack: unknown): string {
-  if (typeof name === "string" && name) return name
+  if (typeof name === "string" && SAFE_ERROR_NAME.test(name)) return name
   if (typeof stack === "string") {
     const fromStack = /^([A-Z][\w$]{0,60}):/m.exec(stack)?.[1]
     if (fromStack) return fromStack

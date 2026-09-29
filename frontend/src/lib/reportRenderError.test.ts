@@ -56,6 +56,20 @@ describe("reportRenderError", () => {
     expect(scope.setTag).toHaveBeenCalledWith("render_error_stage", "Uncaught Error")
   })
 
+  it("cannot be made to report fake stack frames through the name or message", () => {
+    reportRenderError({
+      source: "sandbox",
+      name: "X\n    at evil (a:1:1)",
+      message: "first\n    at forged (b:2:2)",
+      stack: "    at App (sandbox:1:1)",
+    })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.name).toBe("Error")
+    expect(reported.message).toBe("first at forged (b:2:2)")
+    expect(reported.stack).toBe("Error: first at forged (b:2:2)\n    at App (sandbox:1:1)")
+  })
+
   it("drops console breadcrumbs, which hold raw error text", () => {
     expect(dropConsoleBreadcrumb({ category: "console", message: 'bad "Alice"' })).toBeNull()
     const navigation = { category: "navigation", message: "/artifacts/artifact-one" }
