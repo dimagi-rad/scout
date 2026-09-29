@@ -328,3 +328,20 @@ def test_failed_release_closes_the_session_only_outside_a_transaction(
     cube_schema._ValidatorSlot(0).release()
 
     assert fake.close.called is closed
+
+
+@pytest.mark.django_db(transaction=True)
+def test_schema_generation_does_not_hold_a_validator_slot(
+    workspace, model, cube_http, other_connection, monkeypatch
+):
+    real_generate = cube_schema.generate_cube_schema
+    seen = {}
+
+    def observing_generate(semantic_model):
+        seen["generate"] = _free_slots(other_connection)
+        return real_generate(semantic_model)
+
+    monkeypatch.setattr(cube_schema, "generate_cube_schema", observing_generate)
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert seen["generate"] == list(range(cube_schema.VALIDATOR_CONCURRENCY))
