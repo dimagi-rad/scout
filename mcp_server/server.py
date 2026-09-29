@@ -1684,13 +1684,102 @@ async def run_materialization(
         return tc["result"]
 
 
+def _load_source_entry(tenant, run: MaterializationRun | None) -> dict:
+    entry = {
+        "tenant_id": str(tenant.id),
+        "name": tenant.canonical_name or tenant.external_id,
+        "provider": tenant.provider,
+        "state": run.state if run is not None else "waiting",
+    }
+    if run is not None and run.state in MaterializationRun.ACTIVE_STATES:
+        progress = run.progress or {}
+        entry.update(
+            started_at=run.started_at.isoformat(),
+            step=progress.get("step"),
+            total_steps=progress.get("total_steps"),
+            table=progress.get("source"),
+            detail=progress.get("message"),
+            rows_loaded=progress.get("rows_loaded"),
+            rows_total=progress.get("rows_total"),
+            unit=progress.get("unit") or "rows",
+        )
+    return entry
+
+
+def _load_progress_message(sources: list[dict], finished: int, single_job: bool) -> str:
+    loading = [s for s in sources if s["state"] in MaterializationRun.ACTIVE_STATES]
+    if not (single_job and len(loading) == 1):
+        # Separate jobs (e.g. per-source refreshes) have no shared order to count through.
+        return f"{len(loading)} of {len(sources)} sources loading, {finished} finished."
+    current = loading[0]
+    message = f"Loading source {finished + 1} of {len(sources)} ({current['name']})"
+    if current["detail"]:
+        message += f": {current['detail']}"
+    if current["rows_loaded"] and current["rows_total"]:
+        message += f" ({current['rows_loaded']:,} of {current['rows_total']:,} {current['unit']})"
+    return message
+
+
+async def _load_in_progress(workspace: Workspace) -> dict | None:
+    """Summarize an in-flight load of this workspace's sources, or None when idle (#411).
+
+    A workspace load runs its sources one after another, one MaterializationRun
+    each under a shared procrastinate job id; that id scopes "source 2 of 3" to the
+    current load rather than to older runs.
+    """
+    tenants = [t async for t in workspace.tenants.order_by("canonical_name")]
+    tenant_ids = [t.id for t in tenants]
+    active = [
+        run
+        async for run in MaterializationRun.objects.filter(
+            tenant_schema__tenant_id__in=tenant_ids,
+            state__in=MaterializationRun.ACTIVE_STATES,
+        )
+        .select_related("tenant_schema")
+        .order_by("started_at")
+    ]
+    if not active:
+        return None
+    job_ids = {run.procrastinate_job_id for run in active} - {None}
+    latest: dict = {}
+    async for run in (
+        MaterializationRun.objects.filter(
+            tenant_schema__tenant_id__in=tenant_ids, procrastinate_job_id__in=job_ids
+        )
+        .select_related("tenant_schema")
+        .order_by("started_at")
+    ):
+        latest[run.tenant_schema.tenant_id] = run
+    for run in active:
+        latest[run.tenant_schema.tenant_id] = run
+
+    def order(tenant):
+        run = latest.get(tenant.id)
+        if run is None:
+            return (2, None)
+        return (int(run.state in MaterializationRun.ACTIVE_STATES), run.started_at)
+
+    sources = [_load_source_entry(t, latest.get(t.id)) for t in sorted(tenants, key=order)]
+    finished = sum(
+        1 for s in sources if s["state"] not in {"waiting", *MaterializationRun.ACTIVE_STATES}
+    )
+    return {
+        "sources_total": len(sources),
+        "sources_finished": finished,
+        "message": _load_progress_message(sources, finished, single_job=len(job_ids) <= 1),
+        "sources": sources,
+    }
+
+
 @mcp.tool()
 async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Check whether data has been loaded for this workspace.
 
     Returns schema existence, state, last materialization timestamp, and table
     list; exists=False if no schema has been provisioned yet. Safe to call
-    before any data has been loaded. Fails with WORKSPACE_ACCESS_DENIED when
+    before any data has been loaded. While a load is running,
+    ``load_in_progress`` reports which source it is on (e.g. "source 2 of 3")
+    and that source's step and row progress; it is null when nothing is loading. Fails with WORKSPACE_ACCESS_DENIED when
     the acting user can no longer read the workspace.
 
     Args:
@@ -1734,7 +1823,9 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             return tc["result"]
 
         query_surface = await workspace_query_surface(workspace)
+        load_in_progress = await _load_in_progress(workspace)
         not_provisioned["data"]["query_surface"] = query_surface
+        not_provisioned["data"]["load_in_progress"] = load_in_progress
         tenant_count = await workspace.tenants.acount()
 
         if tenant_count == 0:
@@ -1788,6 +1879,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                     "query_surface": query_surface,
                     "last_materialized_at": last_materialized_at,
                     "tables": tables,
+                    "load_in_progress": load_in_progress,
                 },
                 schema=ts.schema_name,
             )
@@ -1855,6 +1947,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 "last_materialized_at": last_materialized_at,
                 "tables": tables,
                 "tenant_coverage": coverage,
+                "load_in_progress": load_in_progress,
                 "data_complete": coverage_complete(coverage)
                 if vs.state == SchemaState.ACTIVE
                 else None,
