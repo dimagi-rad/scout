@@ -95,7 +95,7 @@ class TestMCPClient:
             await mod.get_mcp_tools()
 
         conn = MockCls.call_args.args[0]["scout-data"]
-        assert conn["headers"]["X-Scout-MCP-Secret"] == "s3cr3t"
+        assert conn["headers"]["X-Scout-MCP-Secret"] == b"s3cr3t"
         mod.reset_circuit_breaker()
         mod.reset_tools_cache()
 

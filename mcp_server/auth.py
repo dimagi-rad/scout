@@ -33,6 +33,15 @@ logger = logging.getLogger(__name__)
 SHARED_SECRET_HEADER = "X-Scout-MCP-Secret"  # noqa: S105 — header name, not a credential
 
 
+def encode_secret(secret: str) -> bytes:
+    """Wire bytes for the secret header, shared by client and server (finding E1).
+
+    httpx rejects non-ASCII ``str`` header values, so the client sends these bytes;
+    the server recovers them from Starlette's latin-1-decoded header and compares.
+    """
+    return secret.encode("utf-8")
+
+
 class SharedSecretMiddleware(BaseHTTPMiddleware):
     """Reject requests that do not carry the configured shared secret.
 
@@ -50,10 +59,11 @@ class SharedSecretMiddleware(BaseHTTPMiddleware):
             )
 
     async def dispatch(self, request: Request, call_next):
-        provided = request.headers.get(SHARED_SECRET_HEADER, "")
+        # Starlette decodes header bytes as latin-1, so this recovers the raw wire bytes.
+        provided = request.headers.get(SHARED_SECRET_HEADER, "").encode("latin-1")
         # Checked separately: compare_digest("", "") is True, so an empty secret
         # would otherwise admit requests that send an empty header.
-        if not self._secret or not hmac.compare_digest(provided.encode(), self._secret.encode()):
+        if not self._secret or not hmac.compare_digest(provided, encode_secret(self._secret)):
             logger.warning(
                 "Rejected MCP request without a valid shared secret (path=%s)",
                 request.url.path,
