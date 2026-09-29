@@ -235,10 +235,11 @@ class TestArtifactListView:
 
 
 def _run_sandbox_error_listeners(dispatch: str) -> list:
-    """Run the template's real window error listeners under node with a stubbed window.
+    """Run the template's real error helpers and window listeners under node.
 
-    `dispatch` calls `handlers.error(...)` / `handlers.unhandledrejection(...)`. Returns
-    the notifyParentOfError calls, with any stack replaced by the string "stack".
+    `dispatch` calls `handlers.error(...)` / `handlers.unhandledrejection(...)`, or the
+    helpers directly, pushing to `calls`. Returns the notifyParentOfError calls, and any
+    pushed rows, with any stack replaced by the string "stack".
     """
     node = shutil.which("node")
     if node is None:
@@ -455,20 +456,20 @@ class TestArtifactSandboxView:
 
     def test_sandbox_catch_sites_read_no_fields_of_a_thrown_non_error(self):
         """A render-time `throw row` or `throw null` goes through describeThrown."""
-        catch_sites = re.findall(
-            r"catch \(error\) \{\s*(.*?)\n", SANDBOX_HTML_TEMPLATE, flags=re.DOTALL
+        fields = re.compile(r"\berror\.(message|stack|name)\b")
+        # Each body runs to its closing brace, which sits at the `catch`'s own indent.
+        catch_bodies = re.findall(
+            r"\n( *)\} catch \(error\) \{(.*?)\n\1\}", SANDBOX_HTML_TEMPLATE, flags=re.DOTALL
         )
-        reads_fields = [line for line in catch_sites if "error.message" in line]
-        assert reads_fields == [
-            "this.showError('Parse Error', 'Failed to parse embedded artifact data: '"
-            " + error.message);"
-        ]
+        reads_fields = [body.strip() for _, body in catch_bodies if fields.search(body)]
+        # JSON.parse of the page's own embedded data only ever throws a SyntaxError.
+        assert len(reads_fields) == 1
+        assert reads_fields[0].startswith("this.showError('Parse Error'")
+        boundary_start = SANDBOX_HTML_TEMPLATE.index("class _ErrorBoundary")
         boundary = SANDBOX_HTML_TEMPLATE[
-            SANDBOX_HTML_TEMPLATE.index("class _ErrorBoundary") : SANDBOX_HTML_TEMPLATE.index(
-                "render() {", SANDBOX_HTML_TEMPLATE.index("class _ErrorBoundary")
-            )
+            boundary_start : SANDBOX_HTML_TEMPLATE.index("render() {", boundary_start)
         ]
-        assert "error.message" not in boundary
+        assert not fields.search(boundary)
 
         calls = _run_sandbox_error_listeners(
             "for (const thrown of [null, { message: 'Alice', name: 'Bob' }, 'boom',"
