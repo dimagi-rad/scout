@@ -167,17 +167,32 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
     ]
 
     if not validation.get("valid", False):
-        CubeSchema.objects.update_or_create(
+        # Identical content shares the serving row's filename; recording the failure on
+        # that row would demote the schema Cube is serving. The model still records it.
+        serving_identical = CubeSchema.objects.filter(
             workspace=workspace,
             semantic_model=model,
             filename=filename,
-            defaults={
-                "content": content,
-                "content_hash": content_hash,
-                "status": CubeSchema.Status.ERROR,
-                "diagnostics": diagnostics,
-            },
-        )
+            status=CubeSchema.Status.ACTIVE,
+        ).exists()
+        if serving_identical:
+            logger.warning(
+                "Revalidation of the serving Cube schema failed for workspace %s: %s",
+                workspace.id,
+                validation_diagnostics,
+            )
+        else:
+            CubeSchema.objects.update_or_create(
+                workspace=workspace,
+                semantic_model=model,
+                filename=filename,
+                defaults={
+                    "content": content,
+                    "content_hash": content_hash,
+                    "status": CubeSchema.Status.ERROR,
+                    "diagnostics": diagnostics,
+                },
+            )
         if settings.CUBE_SCHEMA_VALIDATION_REQUIRED:
             raise CubeSchemaBuildError("Generated Cube schema failed validation.")
         raise CubeSchemaBuildError(_diagnostics_message(validation_diagnostics))
