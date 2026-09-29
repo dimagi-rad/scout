@@ -17,6 +17,7 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.workspaces.services.credential_coverage import CredentialGapCode
+from tests.tenant_access import grant_tenant_access
 
 User = get_user_model()
 
@@ -87,8 +88,11 @@ def test_each_request_logs_its_own_denial(caplog):
 @pytest.mark.django_db
 def test_granted_and_non_member_decisions_are_not_logged(caplog, scope):
     user = User.objects.create_user(email="denial-log-ok@example.com", password="pass")
-    ws = Workspace.objects.create(name="No sources", created_by=user)
+    tenant = Tenant.objects.create(provider="commcare", external_id="ok", canonical_name="Ok")
+    ws = Workspace.objects.create(name="Covered", created_by=user)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.READ)
+    grant_tenant_access(user, tenant)
     outsider = User.objects.create_user(email="denial-log-out@example.com", password="pass")
     caplog.set_level(logging.INFO, logger=LOGGER)
 

@@ -32,7 +32,7 @@ from apps.workspaces.tasks import (
     _resume_records,
     reconcile_stale_thread_job,
 )
-from tests.tenant_access import agrant_tenant_access, ausable_connection
+from tests.tenant_access import acovered_source, agrant_tenant_access, ausable_connection
 from tests.upstream_proofs import amake_proof_stale
 
 User = get_user_model()
@@ -196,6 +196,7 @@ def test_viewer_without_write_role_never_gets_retry(state, phase, results):
 async def test_retry_policy_loads_run_results_and_preflight_failures_by_job():
     user = await User.objects.acreate_user(email="retry-policy@example.com", password="x")
     workspace = await Workspace.objects.acreate(name="Retry policy", created_by=user)
+    await acovered_source(workspace, user)
     await WorkspaceMembership.objects.acreate(
         workspace=workspace, user=user, role=WorkspaceRole.READ_WRITE
     )
@@ -364,6 +365,7 @@ async def test_active_jobs_includes_recent_terminations():
     can render an inline failure card once the spinner clears."""
     user = await User.objects.acreate_user(email="rt@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -403,6 +405,7 @@ async def test_recent_terminations_filtered_by_user():
     me = await User.objects.acreate_user(email="me@b.c", password="x")
     other = await User.objects.acreate_user(email="other@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=me)
+    await acovered_source(ws, me, other)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=me,
@@ -437,6 +440,7 @@ async def test_recent_terminations_filtered_by_window():
     """Terminations older than RECENT_TERMINATION_WINDOW are excluded."""
     user = await User.objects.acreate_user(email="window@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -469,6 +473,7 @@ async def test_recent_terminations_completed_state_has_no_retry():
     cleared) but ``retry_available`` is False."""
     user = await User.objects.acreate_user(email="ok@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -502,6 +507,7 @@ async def test_recent_terminations_completed_state_has_no_retry():
 async def test_retry_endpoint_dispatches_new_materialization():
     user = await User.objects.acreate_user(email="retry@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -538,6 +544,7 @@ async def test_retry_endpoint_dedupes_in_flight():
     the existing ThreadJob identity instead of dispatching a duplicate."""
     user = await User.objects.acreate_user(email="dedupe@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -573,6 +580,7 @@ async def test_retry_endpoint_without_a_thread_does_not_wait_for_a_thread_job():
     through the backoff and then log a missing-ThreadJob error."""
     user = await User.objects.acreate_user(email="nothread@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -601,6 +609,7 @@ async def test_retry_endpoint_rejects_cross_user_thread():
     me = await User.objects.acreate_user(email="r-me@b.c", password="x")
     other = await User.objects.acreate_user(email="r-other@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=me)
+    await acovered_source(ws, me, other)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=me,
@@ -628,6 +637,7 @@ async def test_retry_endpoint_rejects_cross_user_thread():
 async def test_active_jobs_empty_when_none_running():
     user = await User.objects.acreate_user(email="a@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -717,6 +727,7 @@ async def test_cancel_job_cross_user_blocked():
     owner = await User.objects.acreate_user(email="o@b.c", password="x")
     other = await User.objects.acreate_user(email="x@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=owner)
+    await acovered_source(ws, owner, other)
     # Both users are workspace members so aresolve_workspace lets them through.
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
@@ -749,6 +760,7 @@ async def test_cancel_job_cross_user_blocked():
 async def test_cancel_job_double_cancel_is_idempotent():
     user = await User.objects.acreate_user(email="a@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -989,6 +1001,7 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
 async def _make_stale_pending_job(email: str, job_id: int) -> tuple:
     user = await User.objects.acreate_user(email=email, password="x")
     ws = await Workspace.objects.acreate(name=f"W-{job_id}", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
@@ -1076,6 +1089,7 @@ async def test_active_jobs_does_not_reconcile_fresh_jobs():
     a healthy in-flight materialization."""
     user = await User.objects.acreate_user(email="fresh@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-fresh", created_by=user)
+    await acovered_source(ws, user)
     await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,

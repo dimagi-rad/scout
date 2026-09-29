@@ -15,7 +15,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from mcp_server.server import get_materialization_status, mcp
-from tests.tenant_access import agrant_tenant_access
+from tests.tenant_access import acovered_source, agrant_tenant_access
 
 User = get_user_model()
 
@@ -30,6 +30,7 @@ def test_status_tool_declares_injected_actor_context():
 async def _make_materialization_job(*, email: str, job_id: int):
     user = await User.objects.acreate_user(email=email, password="x")
     workspace = await Workspace.objects.acreate(name=f"Workspace {job_id}", created_by=user)
+    await acovered_source(workspace, user)
     await WorkspaceMembership.objects.acreate(
         workspace=workspace, user=user, role=WorkspaceRole.READ
     )
@@ -149,6 +150,8 @@ async def test_thread_job_id_is_not_found_for_another_user_or_workspace():
     )
     other_user = await User.objects.acreate_user(email="status-other@example.com", password="x")
     other_workspace = await Workspace.objects.acreate(name="Other workspace", created_by=owner)
+    await acovered_source(other_workspace, owner)
+    await agrant_tenant_access(other_user, await workspace.tenants.aget())
     # Both callers may read the workspace they ask from; only the job's scope differs.
     await WorkspaceMembership.objects.acreate(
         workspace=workspace, user=other_user, role=WorkspaceRole.READ

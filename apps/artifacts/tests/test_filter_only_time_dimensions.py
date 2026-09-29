@@ -17,6 +17,7 @@ from apps.chat.models import Thread, ThreadArtifact
 from apps.semantic.services.query import _cube_query
 from apps.users.models import User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
+from tests.tenant_access import acovered_source
 
 
 def topic_query(**overrides):
@@ -228,6 +229,7 @@ async def test_artifact_write_publishes_and_updates_valid_time_query(
     workspace = await Workspace.objects.acreate(
         name="Synthetic date-filter contract", created_by=user
     )
+    await acovered_source(workspace, user)
     await WorkspaceMembership.objects.acreate(
         workspace=workspace, user=user, role=WorkspaceRole.READ_WRITE
     )

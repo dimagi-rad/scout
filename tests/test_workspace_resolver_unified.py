@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.http import JsonResponse
 
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
+from tests.tenant_access import acovered_source
 
 User = get_user_model()
 
@@ -42,6 +43,7 @@ class TestAresolveWorkspace:
 
         user = await User.objects.acreate_user(email="async-resolve@example.com", password="pass")
         ws = await Workspace.objects.acreate(name="Async WS", created_by=user)
+        await acovered_source(ws, user)
         await WorkspaceMembership.objects.acreate(
             workspace=ws, user=user, role=WorkspaceRole.MANAGE
         )

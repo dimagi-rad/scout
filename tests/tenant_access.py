@@ -11,6 +11,7 @@ what ``proofs_are_fresh`` compares against.
 """
 
 import hashlib
+import uuid
 from datetime import timedelta
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
@@ -18,8 +19,9 @@ from cryptography.fernet import InvalidToken
 from django.utils import timezone
 
 from apps.users.adapters import decrypt_credential, encrypt_credential
-from apps.users.models import TenantConnection, TenantMembership, UpstreamAccessProof
+from apps.users.models import Tenant, TenantConnection, TenantMembership, UpstreamAccessProof
 from apps.users.services.access_verification import snapshot_credential
+from apps.workspaces.models import WorkspaceTenant
 
 USABLE_TEST_SECRET = "test-user:test-api-key"
 
@@ -130,6 +132,23 @@ async def agrant_tenant_access(user, tenant) -> TenantMembership:
     return await TenantMembership.objects.select_related("user", "tenant", "connection").aget(
         user=user, tenant=tenant
     )
+
+
+async def acovered_source(workspace, *users) -> Tenant:
+    """Give ``workspace`` a source ``users`` can all use.
+
+    A workspace with no sources is denied to everyone (#381), so a test whose
+    subject is not sources still needs one for its members to get in.
+    """
+    tenant = await Tenant.objects.acreate(
+        provider="commcare",
+        external_id=f"covered-{uuid.uuid4().hex[:12]}",
+        canonical_name="Covered",
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    for user in users:
+        await agrant_tenant_access(user, tenant)
+    return tenant
 
 
 def ocs_team_connection(user, team) -> TenantConnection:
