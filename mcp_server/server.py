@@ -1177,7 +1177,9 @@ async def get_materialization_status(
         user_id: User UUID (injected server-side by the agent graph). Required
             for ThreadJob lookups so one user cannot inspect another user's job.
             When set, the user's workspace access is rechecked and a denial
-            returns WORKSPACE_ACCESS_DENIED.
+            returns WORKSPACE_ACCESS_DENIED. Polling a load the user started stays
+            reachable through a verification outage; a run someone else started
+            needs verified access.
         thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
     async with tool_context(
@@ -1286,20 +1288,15 @@ async def get_materialization_status(
 
         # Same two tiers as cancel_materialization: the outage bypass above covers
         # only the caller's own load; a run someone else started needs verified access.
-        if user_id:
-            owned = run.procrastinate_job_id is not None and (
-                await ThreadJob.objects.filter(
-                    procrastinate_job_id=run.procrastinate_job_id,
-                    thread__workspace_id=workspace_id,
-                    thread__user_id=user_id,
-                ).aexists()
-            )
-            if not owned:
-                try:
-                    await _authorize_read(workspace_id, user_id)
-                except _WorkspaceAccessDenied as e:
-                    tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
-                    return tc["result"]
+        if user_id and not await _run_started_by(run, workspace_id, user_id):
+            try:
+                await _authorize_read(workspace_id, user_id)
+            except _WorkspaceAccessDenied as e:
+                tc["result"] = error_response(
+                    WORKSPACE_ACCESS_DENIED,
+                    f"Verified workspace access is required to read a run you did not start. {e}",
+                )
+                return tc["result"]
 
         tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
@@ -1406,14 +1403,7 @@ async def cancel_materialization(
 
         # Tenant schemas are shared, so a run started from another workspace or by
         # another user is only cancellable with verified (freshness-checked) access.
-        owned = run.procrastinate_job_id is not None and (
-            await ThreadJob.objects.filter(
-                procrastinate_job_id=run.procrastinate_job_id,
-                thread__workspace_id=workspace_id,
-                thread__user_id=user_id,
-            ).aexists()
-        )
-        if not owned:
+        if not await _run_started_by(run, workspace_id, user_id):
             verified = await _materialization_write_access(workspace_id, user_id)
             if not verified.granted:
                 # WORKSPACE_ACCESS_DENIED carries the gate's own remedy (e.g. "retry
@@ -1493,6 +1483,21 @@ async def _resolve_workspace_memberships(workspace_id, user_id):
         return None, "No tenant memberships found for this user in this workspace"
 
     return memberships, None
+
+
+async def _run_started_by(run, workspace_id, user_id) -> bool:
+    """True if ``user_id`` started ``run`` from a thread in ``workspace_id``.
+
+    Gates the verification-outage bypass on status and cancel: tenant schemas are
+    shared, so a run started elsewhere or by someone else needs verified access.
+    """
+    return run.procrastinate_job_id is not None and (
+        await ThreadJob.objects.filter(
+            procrastinate_job_id=run.procrastinate_job_id,
+            thread__workspace_id=workspace_id,
+            thread__user_id=user_id,
+        ).aexists()
+    )
 
 
 async def _run_belongs_to_workspace(run, workspace_id) -> bool:
