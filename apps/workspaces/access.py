@@ -407,7 +407,7 @@ def resolve_workspace_access_ex(
     no tenant data (remove a missing source, leave, hand the manager role to
     another member, delete a workspace nobody else is in, open its page). Without
     it a member who lost a source for good could never get out of the state, since
-    the fix itself would be refused (ACCESS-CONTRACT §5). The exemption applies only
+    the fix itself would be refused. The exemption applies only
     when coverage is what denied: a covered caller still goes through freshness,
     and a caller let in by the exemption skips it (it rechecks the coverage they
     lack). With the all-of switch off there is no exemption at all.
