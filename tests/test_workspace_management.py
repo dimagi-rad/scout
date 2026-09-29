@@ -230,6 +230,17 @@ class TestWorkspaceRename:
         workspace.refresh_from_db()
         assert workspace.name == original_name
 
+    def test_name_at_limit_is_accepted(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/",
+            {"name": "n" * 255},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        workspace.refresh_from_db()
+        assert workspace.name == "n" * 255
+
     def test_system_prompt_at_limit_is_accepted(self, client, user, workspace):
         client.force_login(user)
         resp = client.patch(
