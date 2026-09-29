@@ -190,6 +190,57 @@ class TestWorkspaceRename:
         assert resp.status_code == 400
         assert "system_prompt" in resp.json()["error"]
 
+    @pytest.mark.parametrize(
+        ("body", "field"),
+        [
+            ({"name": 5}, "name"),
+            ({"name": None}, "name"),
+            ({"name": ["x"]}, "name"),
+            ({"system_prompt": 123}, "system_prompt"),
+            ({"system_prompt": {"text": "x"}}, "system_prompt"),
+            ({"name": "Valid", "system_prompt": 123}, "system_prompt"),
+        ],
+    )
+    def test_non_string_fields_return_400_and_change_nothing(
+        self, client, user, workspace, body, field
+    ):
+        original_name, original_prompt = workspace.name, workspace.system_prompt
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/",
+            body,
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == f"{field} must be a string."
+        workspace.refresh_from_db()
+        assert workspace.name == original_name
+        assert workspace.system_prompt == original_prompt
+
+    def test_name_too_long_returns_400(self, client, user, workspace):
+        original_name = workspace.name
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/",
+            {"name": "x" * 256},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "name must be 255 characters or fewer."
+        workspace.refresh_from_db()
+        assert workspace.name == original_name
+
+    def test_name_at_limit_is_accepted(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/",
+            {"name": "n" * 255},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        workspace.refresh_from_db()
+        assert workspace.name == "n" * 255
+
     def test_system_prompt_at_limit_is_accepted(self, client, user, workspace):
         client.force_login(user)
         resp = client.patch(
