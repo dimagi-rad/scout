@@ -7,6 +7,8 @@ from django.test import Client
 
 from apps.workspaces.models import Workspace
 
+THREAD_ID = "00000000-0000-4000-8000-000000000001"
+
 
 @pytest.fixture
 def workspace_for_member(tenant_membership):
@@ -32,7 +34,7 @@ class TestTenantChatFlow:
                     "messages": [{"role": "user", "content": "Hello"}],
                     "data": {
                         "workspaceId": str(workspace_for_member.id),
-                        "threadId": "test-thread",
+                        "threadId": THREAD_ID,
                     },
                 }
             ),
@@ -55,7 +57,7 @@ class TestTenantChatFlow:
             data=json.dumps(
                 {
                     "messages": [{"role": "user", "content": "Hello"}],
-                    "data": {"threadId": "test-thread"},
+                    "data": {"threadId": THREAD_ID},
                 }
             ),
             content_type="application/json",
@@ -77,7 +79,7 @@ class TestTenantChatFlow:
                     "messages": [{"role": "user", "content": "Hello"}],
                     "data": {
                         "workspaceId": "00000000-0000-0000-0000-000000000000",
-                        "threadId": "test-thread",
+                        "threadId": THREAD_ID,
                     },
                 }
             ),
