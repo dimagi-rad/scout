@@ -75,8 +75,11 @@ class _ValidatorSlot:
                 released = cursor.fetchone()[0]
         except Exception as exc:
             # A session lock outlives the transaction; closing the session frees it.
-            logger.warning("Closing the session to release Cube validator slot %s: %s", slot, exc)
-            connection.close()
+            logger.warning("Could not release Cube validator slot %s: %s", slot, exc)
+            # Closing inside atomic() would break the rest of the promotion; the
+            # build's final close_old_connections() drops the session and the lock.
+            if not connection.in_atomic_block:
+                connection.close()
             return
         if not released:
             # The session was replaced mid-build, dropping the slot early.

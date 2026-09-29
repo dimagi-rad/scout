@@ -2,7 +2,7 @@
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import psycopg
@@ -312,3 +312,19 @@ def test_releasing_a_slot_the_session_no_longer_holds_warns(caplog):
         cube_schema._ValidatorSlot(0).release()
 
     assert "already released" in caplog.text
+
+
+@pytest.mark.parametrize(("in_atomic", "closed"), [(True, False), (False, True)])
+def test_failed_release_closes_the_session_only_outside_a_transaction(
+    monkeypatch, in_atomic, closed
+):
+    fake = SimpleNamespace(
+        cursor=Mock(side_effect=RuntimeError("session gone")),
+        in_atomic_block=in_atomic,
+        close=Mock(),
+    )
+    monkeypatch.setattr(cube_schema, "connection", fake)
+
+    cube_schema._ValidatorSlot(0).release()
+
+    assert fake.close.called is closed
