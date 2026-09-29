@@ -463,9 +463,19 @@ result = graph.invoke(state, config=config)
 | Workspace `system_prompt` | empty | Workspace instructions in the system prompt |
 | Workspace member role | — | Tools and prompt variants (see [Roles and run modes](#roles-and-run-modes)) |
 
-Thinking is always on with Opus 5.5 and can't be disabled. The agent sends no
-`thinking` or `effort` parameters, so it runs adaptive thinking at the API's default
-effort (`medium`). Thinking tokens count toward `max_tokens` and are billed as output.
+Thinking is always on with Opus 5.5 and can't be disabled. Every agent LLM gets its
+request options from `apps/agents/llm_request.py`:
+
+- **Effort:** `medium` for the main agent and `low` for the canvas and artifact
+  subagents.
+- **Thinking display:** `summarized`, so the chat's Thinking card and the model's
+  notes between tool calls have text.
+- **Thinking-block binding:** `prefix_mismatch_behavior: "drop_block"`, so a pruned
+  history or a new date line drops stale thinking blocks instead of returning a 400.
+
+Thinking tokens count toward `max_tokens` and are billed as output. If the model
+refuses, is cut off at `max_tokens`, or ends a turn without text, the `model_stopped`
+node ends the turn with a short fallback message instead of a blank reply.
 
 Row limits and query timeouts aren't configurable per workspace. They're fixed
 in code (see [Dataset discovery and query configuration](#5-dataset-discovery-and-query-configuration)).
