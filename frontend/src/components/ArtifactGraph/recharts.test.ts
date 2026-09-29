@@ -1,7 +1,15 @@
 import React from "react"
 import { describe, expect, it } from "vitest"
 
-import { buildRechartsTree, CHART_PALETTES, compileCompactGraphConfig, formatAxisTick } from "./recharts"
+import {
+  buildRechartsTree,
+  CATEGORY_AXIS_MAX_WIDTH,
+  categoryAxisWidth,
+  CHART_PALETTES,
+  compileCompactGraphConfig,
+  formatAxisTick,
+  truncateCategoryLabel,
+} from "./recharts"
 
 describe("compact Recharts visualization grammar", () => {
   it.each([
@@ -158,5 +166,37 @@ describe("compact Recharts visualization grammar", () => {
         { type: "Line", props: { dataKey: "visits_count", stroke: "var(--chart-1)" } },
       ],
     }, [{ date: "2026-08-01", visits_count: 1 }])).not.toThrow()
+  })
+})
+
+describe("horizontal bar category axis", () => {
+  function yAxisProps(rows: Array<Record<string, unknown>>) {
+    const rendered = buildRechartsTree(compileCompactGraphConfig({
+      chart_type: "bar",
+      orientation: "horizontal",
+      x_key: "name",
+      y_key: "count",
+    }), rows)
+    const axis = React.Children.toArray((rendered.props as { children: React.ReactNode }).children)
+      .find((child) => React.isValidElement(child) && (child.props as { type?: string }).type === "category")
+    return (axis as React.ReactElement<{ width: number }>).props
+  }
+
+  it("sizes the axis from the longest label", () => {
+    const short = yAxisProps([{ name: "A", count: 1 }]).width
+    const longer = yAxisProps([{ name: "Clinic Alpha", count: 1 }]).width
+    expect(longer).toBeGreaterThan(short)
+  })
+
+  it("caps the axis width for very long labels", () => {
+    expect(yAxisProps([{ name: "x".repeat(200), count: 1 }]).width).toBe(CATEGORY_AXIS_MAX_WIDTH)
+  })
+
+  it("truncates with an ellipsis only beyond the cap", () => {
+    const long = "x".repeat(80)
+    expect(truncateCategoryLabel("Clinic", categoryAxisWidth(["Clinic"]))).toBe("Clinic")
+    const truncated = truncateCategoryLabel(long, CATEGORY_AXIS_MAX_WIDTH)
+    expect(truncated.endsWith("\u2026")).toBe(true)
+    expect(truncated.length).toBeLessThan(long.length)
   })
 })

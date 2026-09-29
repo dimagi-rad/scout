@@ -104,3 +104,42 @@ export const InvalidDateControls: Story = {
     },
   },
 }
+
+export const LongCategoryLabels: Story = {
+  args: {
+    artifact: {
+      ...storyArtifact,
+      id: "long-category-labels",
+      title: "Long category labels",
+      semantic_queries: [],
+      data: { story_doc: { prd: "Internal brief that must not be shown.", blocks: [
+        { id: "title", type: "title", config: { text: "Long category labels" } },
+        {
+          id: "chart",
+          type: "graph",
+          inputs: { data: { value: [
+            { facility: "Clinic A", visits: 42 },
+            { facility: "Northern District Community Health Outreach Programme", visits: 31 },
+            { facility: "St. Mary's Referral Hospital Maternity Wing", visits: 18 },
+          ] } },
+          config: {
+            title: "Visits by facility",
+            chart_type: "bar",
+            x_key: "facility",
+            series: [{ data_key: "visits", label: "Visits" }],
+            style: { orientation: "horizontal", legend: "none" },
+            height: 260,
+          },
+        },
+      ] } },
+    },
+  },
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Horizontal bar chart whose category axis is sized from the longest label, capped, with an ellipsis and a hover tooltip carrying the full text.",
+      },
+    },
+  },
+}
