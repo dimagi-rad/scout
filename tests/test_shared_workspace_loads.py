@@ -679,6 +679,29 @@ async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(works
     assert [entry["state"] for entry in summary] == ["completed"]
 
 
+async def test_an_already_serving_tenant_is_reported_as_served_when_the_chat_resumes(
+    workspace, tenant, user
+):
+    """A new-source load passes over serving sources without a run of its own; a
+    chat it resumes must still hear that they are served (#408)."""
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user, job_id=101, load_intent=await _intent(workspace))
+        passed_over = await workspaces_tasks.materialize_workspace_core(
+            str(workspace.id), str(user.id), 202, only_unserved=True
+        )
+
+    assert passed_over["tenants"][0]["result"]["status"] == "already_loaded"
+    assert len(pipeline.calls) == 1
+    records = workspaces_tasks._resume_records(passed_over)
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        202, workspace, str(user.id), records
+    )
+
+    assert status == "completed"
+    assert [entry["state"] for entry in summary] == ["completed"]
+
+
 async def test_a_reused_run_of_a_tenant_outside_the_workspace_is_ignored(workspace, tenant, user):
     stranger = await Tenant.objects.acreate(
         provider="commcare", external_id="stranger", canonical_name="Stranger"

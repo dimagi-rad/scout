@@ -28,7 +28,9 @@ from apps.chat.models import Thread, ThreadJob
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.common.http import parse_json_object
-from apps.workspaces.access import access_denied_body
+from apps.workspaces.access import access_denied_body, role_satisfies
+from apps.workspaces.models import WorkspaceRole
+from apps.workspaces.services.thread_job_dispatch import astart_chat_load
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
 
 logger = logging.getLogger(__name__)
@@ -239,6 +241,10 @@ async def chat_view(request):
         error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
         return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
+
+    # Before the agent is built, so its prompt already sees the load as started.
+    if role_satisfies(access.membership.role, WorkspaceRole.READ_WRITE):
+        await astart_chat_load(workspace=workspace, user=user, thread_id=thread_id)
 
     # Retry once with a fresh checkpointer on connection errors.
     try:
