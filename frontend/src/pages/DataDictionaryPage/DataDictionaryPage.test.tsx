@@ -79,8 +79,8 @@ it("shows the server's reason when the dictionary itself fails to load", () => {
   state.dataDictionary = null
   state.dictionaryStatus = "error"
   state.dictionaryWarning = null
-  state.dictionaryError = "No active domain selected."
+  state.dictionaryError = "Workspace not found."
   render(<DataDictionaryPage />)
   expect(screen.getByText("Failed to load dictionary")).toBeVisible()
-  expect(screen.getByTestId("dictionary-error-message")).toHaveTextContent("No active domain selected.")
+  expect(screen.getByTestId("dictionary-error-message")).toHaveTextContent("Workspace not found.")
 })

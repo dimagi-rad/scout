@@ -249,3 +249,13 @@ it("clears refresh warnings when switching workspaces", async () => {
   switchTo("b")
   expect(state().dictionaryWarning).toBeNull()
 })
+
+it("keeps a refused refresh's server reason but hides developer error text", async () => {
+  vi.spyOn(api, "post").mockRejectedValueOnce(new ApiError(409, "A refresh is already in progress."))
+  await state().dictionaryActions.refreshSchema()
+  expect(state().dictionaryError).toBe("A refresh is already in progress.")
+
+  vi.spyOn(api, "post").mockRejectedValueOnce(new TypeError("Cannot read properties of undefined"))
+  await state().dictionaryActions.refreshSchema()
+  expect(state().dictionaryError).toBe("Failed to refresh schema")
+})
