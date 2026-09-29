@@ -157,6 +157,10 @@ export function workspaceHasAccess(ws: { has_access?: boolean }): boolean {
 
 // ── Workspace CRUD ─────────────────────────────────────────────────────────
 
+export interface RemoveTenantResult {
+  workspace_deleted: true
+}
+
 export const workspaceApi = {
   list: () => api.get<WorkspaceListItem[]>("/api/workspaces/"),
 
@@ -222,6 +226,16 @@ export const workspaceApi = {
       { tenant_id: tenantUuid },
     ),
 
-  removeTenant: (workspaceId: string, workspaceTenantId: string) =>
-    api.delete<void>(`/api/workspaces/${workspaceId}/tenants/${workspaceTenantId}/`),
+  // Removing the last source deletes the workspace; the server answers 409
+  // (requires_confirmation: "delete_workspace") unless confirmDeleteWorkspace is set.
+  removeTenant: (
+    workspaceId: string,
+    workspaceTenantId: string,
+    { confirmDeleteWorkspace = false }: { confirmDeleteWorkspace?: boolean } = {},
+  ) =>
+    api.delete<RemoveTenantResult | undefined>(
+      `/api/workspaces/${workspaceId}/tenants/${workspaceTenantId}/${
+        confirmDeleteWorkspace ? "?confirm_delete_workspace=true" : ""
+      }`,
+    ),
 }
