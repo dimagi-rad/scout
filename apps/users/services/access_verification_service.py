@@ -148,6 +148,7 @@ async def _load_claim_token(claim):
     )
     if (
         token is None
+        or not claim.request.credential
         or token.token != claim.request.credential
         or token.token_secret != refresh_token
     ):

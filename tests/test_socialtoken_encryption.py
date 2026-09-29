@@ -7,9 +7,10 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
 from cryptography.fernet import Fernet
-from django.core.exceptions import FieldError
+from django.core.exceptions import FieldError, ImproperlyConfigured
 from django.core.management import call_command
 from django.db import connection as db_connection
+from django.db import models
 from django.test import override_settings
 
 from apps.common.error_codes import ErrorCode
@@ -26,6 +27,7 @@ from apps.users.token_encryption import (
     EncryptedTokenField,
     decrypt_token_value,
     encrypt_token_value,
+    install_socialtoken_encryption,
     is_encrypted,
 )
 
@@ -92,6 +94,12 @@ class TestTokenValueCrypto:
         with override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()):
             assert decrypt_token_value(encrypted) == ""
 
+    @pytest.mark.parametrize("key", ["", "not-a-fernet-key"])
+    def test_misconfigured_key_reads_as_empty(self, key):
+        encrypted = encrypt_token_value("secret")
+        with override_settings(DB_CREDENTIAL_KEY=key):
+            assert decrypt_token_value(encrypted) == ""
+
     @override_settings(DB_CREDENTIAL_KEY="")
     def test_missing_key_raises(self):
         with pytest.raises(ValueError, match="DB_CREDENTIAL_KEY"):
@@ -102,6 +110,13 @@ class TestFieldInstallation:
     @pytest.mark.parametrize("name", ["token", "token_secret"])
     def test_socialtoken_fields_are_encrypted_fields(self, name):
         assert isinstance(SocialToken._meta.get_field(name), EncryptedTokenField)
+
+    def test_install_refuses_an_unexpected_field_type(self):
+        model = SimpleNamespace(
+            _meta=SimpleNamespace(get_field=lambda name: models.CharField(max_length=10))
+        )
+        with pytest.raises(ImproperlyConfigured, match="not TextField"):
+            install_socialtoken_encryption(model)
 
     @pytest.mark.django_db
     def test_allauth_migration_state_is_unchanged(self):
@@ -160,6 +175,25 @@ class TestValueComparisonsAgainstEncryptedRows:
         assert credential_is_current(conn, "plain-access", snapshot)
         assert not credential_is_current(conn, "other-access", snapshot)
         assert not credential_is_current(conn, "plain-access", (token.pk, "old", token.app_id))
+
+    def test_undecryptable_row_never_matches_an_empty_credential(self, user, commcare_token):
+        token, conn = commcare_token
+        _encrypt_raw(token)
+        with override_settings(DB_CREDENTIAL_KEY=Fernet.generate_key().decode()):
+            assert SocialToken.objects.get(pk=token.pk).token == ""
+            assert not credential_is_current(conn, "", (token.pk, "", token.app_id))
+            assert not credential_is_current(conn, "")
+            assert (
+                _aoauth_connection.func(
+                    user,
+                    "commcare",
+                    scope_key="",
+                    scope_label="",
+                    account=token.account,
+                    access_token="",
+                )
+                is None
+            )
 
     def test_bind_checks_current_token_against_encrypted_row(self, user, commcare_token):
         token, conn = commcare_token

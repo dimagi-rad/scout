@@ -40,7 +40,8 @@ def credential_is_current(connection, credential, token_snapshot=None):
         tokens = tokens.filter(pk=token_id, app_id=app_id)
     if connection.social_account_id:
         tokens = tokens.filter(account_id=connection.social_account_id)
-    return any(
+    # An undecryptable row reads as "", so an empty credential must never match.
+    return bool(credential) and any(
         token.token == credential
         and (token_snapshot is None or token.token_secret == refresh_secret)
         and account_scope(token.account) == connection.scope_key
@@ -135,7 +136,7 @@ async def adiscovery_connection(user, provider, access_token, account=None):
         async for token in SocialToken.objects.filter(
             account__in=provider_accounts(user.pk, provider)
         ).select_related("account"):
-            if token.token == access_token:
+            if access_token and token.token == access_token:
                 account = token.account
                 break
     connection = await TenantConnection.objects.filter(
