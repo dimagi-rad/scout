@@ -2,16 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react"
 
 import { actionFailure, type ActionFailure } from "@/hooks/useWorkspaceRole"
 
-export type ActionState = "idle" | "pending" | "error"
+type ActionState = "idle" | "pending" | "error"
 
 const FAILURE_VISIBLE_MS = 6000
 
 /**
  * State for a button that fires a write and may be refused. A retryable
  * failure shows its message briefly, then re-arms. A final denial keeps the
- * button disabled with its message until the window regains focus: its copy
- * names a fix made elsewhere (Connected Accounts, usually another tab), and
- * without a re-arm the button would stay dead after the fix.
+ * button disabled with its message until the user leaves the window and comes
+ * back: its copy names a fix made elsewhere (Connected Accounts, usually
+ * another tab), and without a re-arm the button would stay dead after the fix.
  */
 export function useRetryableAction(fallback: string, canWrite: boolean) {
   const [state, setState] = useState<ActionState>("idle")
@@ -28,8 +28,14 @@ export function useRetryableAction(fallback: string, canWrite: boolean) {
 
   useEffect(() => {
     if (!failure || failure.retryable) return
-    window.addEventListener("focus", reset)
-    return () => window.removeEventListener("focus", reset)
+    // Arm on blur, not now: a denial that lands while the tab is in the
+    // background must survive the return so the user gets to read it.
+    const armOnReturn = () => window.addEventListener("focus", reset, { once: true })
+    window.addEventListener("blur", armOnReturn)
+    return () => {
+      window.removeEventListener("blur", armOnReturn)
+      window.removeEventListener("focus", reset)
+    }
   }, [failure, reset])
 
   /** Runs `action`; resolves true on success and leaves state "pending". */
@@ -54,8 +60,8 @@ export function useRetryableAction(fallback: string, canWrite: boolean) {
 
   const settle = useCallback((ms: number) => {
     clearTimeout(timer.current)
-    timer.current = setTimeout(() => setState("idle"), ms)
-  }, [])
+    timer.current = setTimeout(reset, ms)
+  }, [reset])
 
   return {
     state,

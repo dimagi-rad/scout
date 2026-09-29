@@ -80,8 +80,15 @@ describe("MaterializationFailure retry errors", () => {
     )
     expect(screen.getByTestId("materialization-retry-btn")).toBeDisabled()
 
+    // A focus without leaving first must not erase the unread denial.
+    act(() => {
+      window.dispatchEvent(new Event("focus"))
+    })
+    expect(screen.getByTestId("materialization-retry-btn")).toBeDisabled()
+
     // e.g. after connecting the missing source in another tab
     act(() => {
+      window.dispatchEvent(new Event("blur"))
       window.dispatchEvent(new Event("focus"))
     })
     expect(screen.getByTestId("materialization-retry-btn")).toBeEnabled()

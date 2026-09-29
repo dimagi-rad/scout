@@ -64,8 +64,10 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
   const stopLabel =
     cancel.state === "pending"
       ? "Stopping…"
-      : cancel.state === "error" && cancel.failure?.retryable
-        ? "Try again"
+      : cancel.failure
+        ? cancel.failure.retryable
+          ? "Try again"
+          : "Can't stop"
         : "Stop"
 
   return (
@@ -127,6 +129,7 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
               />
             )}
           </div>
+          {/* No role="alert": the card's aria-live region already announces it. */}
           {cancel.failure && (
             <div
               className="text-xs text-red-600 dark:text-red-400 mt-1 break-words"

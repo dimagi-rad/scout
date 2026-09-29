@@ -17,8 +17,8 @@ interface Props {
  * spinner clears and the ThreadJob ended in FAILED or CANCELLED. Surfaces the
  * server-composed error_summary and a Retry button.
  *
- * Retry is guarded by local state (idle | pending) so a rapid double-click
- * cannot fire two dispatches. After the POST returns, the polling hook will
+ * Retry is guarded by useRetryableAction so a rapid double-click cannot fire
+ * two dispatches, and a final denial disables it with the server's reason. After the POST returns, the polling hook will
  * surface the new active job and the parent re-renders the progress card.
  */
 export function MaterializationFailure({
@@ -89,10 +89,10 @@ export function MaterializationFailure({
             onClick={handleRetry}
             disabled={retry.blocked}
             className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors shrink-0 ${
-              retry.state === "error"
-                ? "text-red-500 border border-red-500/40"
-                : retry.state === "pending"
-                  ? "text-muted-foreground border border-border"
+              retry.blocked
+                ? "text-muted-foreground border border-border cursor-not-allowed"
+                : retry.state === "error"
+                  ? "text-red-500 border border-red-500/40"
                   : "text-red-600 hover:bg-red-500/10 border border-red-500/30"
             }`}
             data-testid="materialization-retry-btn"
