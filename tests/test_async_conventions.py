@@ -349,7 +349,7 @@ ALLOWED_SNIPPETS = [
     "from asgiref.sync import sync_to_async\nawait sync_to_async(requests.get)('http://x')\n",
     # Non-ORM call -- dbt / arbitrary callable
     "from asgiref.sync import sync_to_async\nawait sync_to_async(runner.invoke)(['build'])\n",
-    # Non-ORM call -- close_old_connections (config/procrastinate.py pattern)
+    # Non-ORM call -- close_old_connections (mcp_server/envelope.py pattern)
     "from asgiref.sync import sync_to_async\n"
     "_acleanup = sync_to_async(close_old_connections, thread_sensitive=True)\n",
     # Non-ORM call -- client.login (tests pattern)

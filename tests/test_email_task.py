@@ -27,10 +27,3 @@ async def test_send_email_delivers_to_outbox():
     assert sent.subject == "Hello"
     assert sent.body == "Body text"
     assert sent.to == ["invitee@example.com"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db(transaction=True)
-async def test_send_email_uses_resilient_task_wrapper():
-    """Registered through config.procrastinate.task so it survives dead DB conns."""
-    assert getattr(send_email.func, "_ensures_fresh_db_connections", False) is True

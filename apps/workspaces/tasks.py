@@ -118,7 +118,7 @@ from apps.workspaces.services.refresh_requests import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
 from apps.workspaces.services.tenant_coverage import parse_coverage
-from config.procrastinate import app, task
+from config.procrastinate import app
 from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
@@ -262,7 +262,7 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     return summary
 
 
-@task(pass_context=True)
+@app.task(pass_context=True)
 async def refresh_tenant_schema(
     context,
     schema_id: str,
@@ -1162,7 +1162,7 @@ async def materialize_workspace_blocking(
     return await materialize_workspace_core(workspace_id, user_id, job_id)
 
 
-@task(pass_context=True)
+@app.task(pass_context=True)
 async def materialize_workspace(
     context,
     workspace_id: str,
@@ -1653,7 +1653,7 @@ _CANDIDATE_DROP_MAX_ATTEMPTS = 10
 _CANDIDATE_DROP_BUSY_WARNING_INTERVAL = 96  # One day of 15-minute busy checks.
 
 
-@task
+@app.task
 async def drop_abandoned_candidate(
     schema_id: str,
     attempt: int = 0,
@@ -1762,7 +1762,7 @@ _UNRESUMED_CANDIDATE_TTL = timedelta(hours=24)
 
 
 @app.periodic(cron="7,22,37,52 * * * *")
-@task
+@app.task
 async def sweep_workspace_load_candidates(timestamp: int = 0) -> dict:
     """Reclaim workspace-load candidates whose writer died or no load will resume.
 
@@ -1860,7 +1860,7 @@ async def _drop_failed_refresh_schema(schema_id) -> None:
     await asyncio.to_thread(SchemaManager().teardown, schema)
 
 
-@task
+@app.task
 async def drop_failed_refresh_schema(schema_id: str) -> None:
     """Drop the physical schema of a refresh candidate settled as FAILED."""
     await _drop_failed_refresh_schema(schema_id)
@@ -1893,7 +1893,7 @@ def _reconcile_tenant_refreshes(tenant_id) -> LegacyRefreshReconciliation:
 
 
 @app.periodic(cron="*/15 * * * *")
-@task
+@app.task
 async def reconcile_refresh_candidates(timestamp: int = 0) -> dict:
     """Settle refresh candidates whose queue job finished or whose worker died.
 
@@ -1923,7 +1923,7 @@ async def reconcile_refresh_candidates(timestamp: int = 0) -> dict:
 
 
 @app.periodic(cron="*/30 * * * *")
-@task
+@app.task
 async def expire_inactive_schemas(timestamp: int = 0) -> None:
     """Mark stale schemas for teardown and dispatch teardown tasks.
 
@@ -1993,7 +1993,7 @@ async def _defer_cube_promotion(workspace) -> dict:
     return {"ok": False, "status": "deferred", "reason": reason}
 
 
-@task
+@app.task
 @serialized_workspace_data
 async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
@@ -2149,13 +2149,13 @@ async def rebuild_workspace_semantic_model_core(workspace_id: str) -> dict:
     }
 
 
-@task
+@app.task
 async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
     """Rebuild the semantic model + Cube schema after workspace data changed shape."""
     return await rebuild_workspace_semantic_model_core(workspace_id)
 
 
-@task(pass_context=True)
+@app.task(pass_context=True)
 async def recover_workspace_data(context, recovery_id: str) -> dict:
     """Repair the least healthy layer of a workspace's artifact query surface.
 
@@ -2367,7 +2367,7 @@ def _workspace_recovery_error(result: dict, surface: dict) -> str:
     return str(surface.get("message") or "Scout could not restore this artifact's data.")[:1000]
 
 
-@task
+@app.task
 async def teardown_view_schema_task(view_schema_id: str) -> None:
     """Drop the physical PostgreSQL schema for a WorkspaceViewSchema and mark EXPIRED."""
     try:
@@ -2417,7 +2417,7 @@ _RETIRE_RETRY_MAX_SECONDS = 3600
 _RETIRE_MAX_ATTEMPTS = 30
 
 
-@task
+@app.task
 async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
     """Retire a tenant schema once nothing outside it depends on it, then mark EXPIRED.
 
@@ -2882,7 +2882,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
 
 
 @app.periodic(cron="*/15 * * * *")
-@task
+@app.task
 async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     """Flip ThreadJobs that have been active too long and whose procrastinate
     job is no longer running. Fires the resume task so the user is not stuck
@@ -3009,7 +3009,7 @@ async def reconcile_workspace_data_recovery(
 
 
 @app.periodic(cron="*/15 * * * *")
-@task
+@app.task
 async def expire_stale_workspace_data_recoveries(timestamp: int = 0) -> dict:
     """Release artifact recoveries stranded by a stopped background worker."""
     cutoff = timezone.now() - STALE_JOB_THRESHOLD
@@ -3083,7 +3083,7 @@ async def _fail_zombie_materialization_run(run: MaterializationRun, reason: str)
 
 
 @app.periodic(cron="*/15 * * * *")
-@task
+@app.task
 async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
     """Fail MaterializationRuns stuck in an ACTIVE state after a hard worker death.
 
@@ -3126,7 +3126,7 @@ JOB_RETENTION_HOURS = 24 * 7
 
 
 @app.periodic(cron="17 3 * * *")
-@task
+@app.task
 async def prune_old_procrastinate_jobs(timestamp: int = 0) -> dict:
     """Delete old finalized procrastinate jobs (and their events) so the queue
     tables don't grow without bound.
@@ -3487,7 +3487,7 @@ async def _aggregate_materialization_state(
     return status, summary
 
 
-@task(pass_context=True)
+@app.task(pass_context=True)
 async def resume_thread_after_materialization(context, thread_job_id: str) -> dict:
     """Inject a system-framed message into the LangGraph conversation and
     re-invoke the agent so it can respond to the original request with the

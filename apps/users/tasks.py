@@ -4,10 +4,10 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.mail import send_mail
 
-from config.procrastinate import task
+from config.procrastinate import app
 
 
-@task
+@app.task
 async def send_email(subject, message, recipient_list, from_email=None, html_message=None):
     """Deliver a transactional email off the request path.
 
