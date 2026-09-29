@@ -178,3 +178,12 @@ test('catalog connection acquisition and query execution have finite time budget
     assert.equal(pools[0][option], 5000);
   }
 });
+
+test('the readiness driver is time-bounded, read-only, and cannot resolve tenant tables', () => {
+  for (const ctx of [{}, { securityContext: {} }]) {
+    const driver = config.driverFactory(ctx);
+    assert.match(driver.options ?? '', /-c statement_timeout=30000(\s|$)/);
+    assert.match(driver.options ?? '', /-c default_transaction_read_only=on(\s|$)/);
+    assert.match(driver.options ?? '', /-c search_path=pg_catalog(\s|$)/);
+  }
+});

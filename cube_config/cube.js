@@ -4,6 +4,7 @@ const { createHash } = require('node:crypto');
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
 const PUBLICATION_REVISION = Symbol('scoutPublicationRevision');
 const CATALOG_QUERY_TIMEOUT_MS = 5000;
+const DRIVER_STATEMENT_TIMEOUT_MS = 30000;
 
 function sslConfigForUrl(rawUrl) {
   if (!rawUrl) {
@@ -127,14 +128,22 @@ module.exports = {
   driverFactory: ({ securityContext }) => {
     const context = workspaceContext(securityContext);
     if (!context) {
-      return { type: 'postgres', ...managedConfig };
+      // Cube's standalone /readyz runs testConnection() through this driver, so
+      // it must connect; there is no tenant role to downgrade to (#421). These are
+      // session defaults, not enforcement: the guarantee is still that no model is
+      // served for this context, and these only bound what one could reach.
+      return {
+        type: 'postgres',
+        ...managedConfig,
+        options: `-c statement_timeout=${DRIVER_STATEMENT_TIMEOUT_MS} -c default_transaction_read_only=on -c search_path=pg_catalog`,
+      };
     }
 
     const [, , schemaName, readonlyRole] = context;
     return {
       type: 'postgres',
       ...managedConfig,
-      options: `-c role=${readonlyRole} -c search_path=${schemaName},public -c statement_timeout=30000`,
+      options: `-c role=${readonlyRole} -c search_path=${schemaName},public -c statement_timeout=${DRIVER_STATEMENT_TIMEOUT_MS}`,
     };
   },
 
