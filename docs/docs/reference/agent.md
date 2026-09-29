@@ -369,8 +369,9 @@ When results are truncated, suggest adding filters or using aggregations to redu
 
 This text is fixed in the prompt. It carries no schema name, because queries
 run against the workspace's own tenant or view schema, which the tools resolve
-from state. The limits are enforced elsewhere: `semantic_query` caps its limit
-at 500 rows, and the MCP server applies a 500-row cap and a 30-second
+from state. The limits are enforced elsewhere. `semantic_query` caps its limit
+at 500 rows, and Cube's database driver sets a 30-second `statement_timeout`
+(`cube_config/cube.js`). The MCP server applies a 500-row cap and a 30-second
 `statement_timeout` to raw SQL.
 
 ### 6. Semantic Canvas
@@ -386,8 +387,10 @@ Sections 1–6 form the stable, cached prefix. For workspaces with a data
 source, a `## Data Availability` section follows it, outside the cache, because
 it changes whenever data is materialized. It
 holds the semantic catalog for the workspace's active datasets. While a refresh
-or first load is in progress, or when no catalog is available, it holds guidance
-on what to do instead, depending on the run mode and the member's role.
+runs outside the serving data, it holds the catalog with a note that results
+don't include the refresh yet. During a first load or an unsafe refresh, or when
+no catalog is available, it holds guidance on what to do instead, depending on
+the run mode and the member's role.
 Workspaces with more than one tenant also get a warning when sources are
 excluded from the active view, or when its coverage is unknown.
 
@@ -406,10 +409,10 @@ LangGraph events into the Vercel AI SDK v6 UI message stream:
 | Tool called | `{"type":"tool-input-available","toolCallId":"...","toolName":"...","input":{...}}` |
 | Tool result | `{"type":"tool-output-available","toolCallId":"...","output":"..."}` |
 | Subagent activity | `data-subagent-*` parts (status, text, reasoning, tool input/output, error) tagged with the parent `toolCallId` |
-| Escalation | The fixed escalation message, streamed as text |
+| Escalation | The escalation message for the run mode, streamed as text |
 | Transient Anthropic overload | `{"type":"data-chat-status","data":{"kind":"retryable-error",...},"transient":true}` |
 | Other failure | An apology text part, then `{"type":"error","errorText":"... Ref: <ref>"}` |
-| Agent finishes | `{"type":"finish-step"}`, `{"type":"finish"}` |
+| Agent finishes | `{"type":"finish-step"}`, `{"type":"finish","finishReason":"stop"}` |
 
 Tool inputs are redacted of the injected parameters, and tool outputs over
 100,000 characters are truncated with a marker. `artifact_manager` and
@@ -422,17 +425,18 @@ output (`frontend/src/components/ChatMessage/ChatMessage.tsx`):
 
 - An artifact ID is a string `artifact_id` or `artifact.id` in the tool
   output, parsed as JSON.
-- The `artifact_manager` card shows an open-artifact button when its output
-  carries one.
+- The subagent cards (`artifact_manager`, `canvas_manager`) show an
+  open-artifact button when their output carries one.
 - Any other tool part whose output carries one renders as an open-artifact
   button in place of the tool card.
 
 Thread-to-artifact links are stored server-side in `ThreadArtifact`.
 Artifact tools link an artifact when they create, update or inspect it
-(`apps/agents/tools/artifact_graph_tool.py`). For older threads,
-`backfill_thread_artifact_links` (`apps/chat/artifact_links.py`) links
-artifacts by conversation ID and by the same `artifact_id` and `artifact`
-keys in saved messages.
+(`apps/agents/tools/artifact_graph_tool.py`). When a thread's artifacts are
+listed, `backfill_thread_artifact_links` (`apps/chat/artifact_links.py`) also
+links artifacts by conversation ID, and by `artifact_id`, `artifact.id`,
+`previous_artifact_id` and `previous_version_id` keys found anywhere in saved
+messages. This covers threads from before tool-side linking.
 
 ## Conversation persistence
 
