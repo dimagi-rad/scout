@@ -666,9 +666,10 @@ async def test_inspector_rejects_a_body_that_is_not_a_json_object(
 ):
     if artifact_state == "story":
         live_artifact.data = {"story_doc": story()}
+        await live_artifact.asave(update_fields=["data"])
     elif artifact_state == "no_queries":
         live_artifact.semantic_queries = []
-    await live_artifact.asave(update_fields=["data", "semantic_queries"])
+        await live_artifact.asave(update_fields=["semantic_queries"])
     data_state = {"status": "stale", "queryable": artifact_state != "not_ready", "message": "x"}
     with (
         patch("apps.artifacts.views.artifact_data_state", new=AsyncMock(return_value=data_state)),
