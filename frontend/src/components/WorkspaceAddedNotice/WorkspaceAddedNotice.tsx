@@ -16,8 +16,7 @@ export function WorkspaceAddedNotice() {
     .map((id) => domains.find((d) => d.id === id))
     .filter((d) => d !== undefined)
 
-  if (added.length === 0) return null
-
+  // Stays mounted while empty: screen readers skip a live region inserted along with its content.
   return (
     <div
       className="fixed bottom-4 right-4 z-40 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"

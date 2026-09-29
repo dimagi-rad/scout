@@ -46,7 +46,7 @@ describe("WorkspaceAddedNotice (#355)", () => {
 
   it("renders nothing when no workspace was added", () => {
     renderNotice()
-    expect(screen.queryByTestId("workspace-added-notice")).toBeNull()
+    expect(screen.getByTestId("workspace-added-notice")).toBeEmptyDOMElement()
   })
 
   it("tells you about a workspace you were added to and opens it", async () => {
@@ -60,7 +60,7 @@ describe("WorkspaceAddedNotice (#355)", () => {
 
     expect(navigate).toHaveBeenCalledWith("/workspaces/malaria-study/new/chat")
     expect(useAppStore.getState().addedDomainIds).toEqual([])
-    expect(screen.queryByTestId("workspace-added-notice")).toBeNull()
+    expect(screen.getByTestId("workspace-added-notice")).toBeEmptyDOMElement()
   })
 
   it("goes away when dismissed", async () => {
@@ -70,12 +70,12 @@ describe("WorkspaceAddedNotice (#355)", () => {
     await userEvent.click(screen.getByTestId("workspace-added-notice-dismiss-new"))
 
     expect(navigate).not.toHaveBeenCalled()
-    expect(screen.queryByTestId("workspace-added-notice")).toBeNull()
+    expect(screen.getByTestId("workspace-added-notice")).toBeEmptyDOMElement()
   })
 
   it("skips the workspace you're in and ones no longer listed", () => {
     useAppStore.setState({ addedDomainIds: ["home", "gone"] })
     renderNotice()
-    expect(screen.queryByTestId("workspace-added-notice")).toBeNull()
+    expect(screen.getByTestId("workspace-added-notice")).toBeEmptyDOMElement()
   })
 })
