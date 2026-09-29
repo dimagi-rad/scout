@@ -2,13 +2,11 @@
 
 import asyncio
 import logging
+import os
 
 from django.conf import settings
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
-
-from apps.agents.memory.checkpointer import get_database_url
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +14,31 @@ _checkpointer = None
 _pool = None
 # Serialize init so concurrent cold starts don't race the half-open pool (arch #255 08#1).
 _init_lock = asyncio.Lock()
+
+
+def get_database_url() -> str:
+    """Resolve the platform Postgres URL: ``DATABASE_URL``, else Django's default DB."""
+    # DATABASE_URL first so query-string options (e.g. sslmode) survive; the
+    # DATABASES dict below would drop them.
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        return database_url
+
+    db_config = settings.DATABASES.get("default", {})
+    engine = db_config.get("ENGINE", "")
+    if "postgres" not in engine.lower():
+        raise ValueError(f"Django default database is not PostgreSQL: {engine}")
+
+    host = db_config.get("HOST", "localhost")
+    port = db_config.get("PORT", 5432)
+    name = db_config.get("NAME")
+    user = db_config.get("USER")
+    password = db_config.get("PASSWORD", "")
+    if not all([host, name, user]):
+        raise ValueError("Incomplete Django database configuration")
+
+    password_part = f":{password}" if password else ""
+    return f"postgresql://{user}{password_part}@{host}:{port}/{name}"
 
 
 def _pool_is_usable(pool) -> bool:
@@ -83,18 +106,13 @@ async def ensure_checkpointer(*, force_new: bool = False):
                 max_size,
             )
         except Exception as e:
-            if settings.DEBUG:
-                logger.warning(
-                    "PostgreSQL checkpointer unavailable, using MemorySaver (DEBUG only): %s", e
-                )
-                _checkpointer = MemorySaver()
-            else:
-                logger.error(
-                    "PostgreSQL checkpointer failed in production — conversation history "
-                    "unavailable: %s",
-                    e,
-                    exc_info=True,
-                )
-                raise
+            # No MemorySaver fallback, even under DEBUG: a cached in-memory saver
+            # silently drops every later conversation until restart (#266 07#8).
+            logger.error(
+                "PostgreSQL checkpointer failed — conversation history unavailable: %s",
+                e,
+                exc_info=True,
+            )
+            raise
 
     return _checkpointer
