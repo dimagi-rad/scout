@@ -1,4 +1,4 @@
-"""Managed-DB pools must never cross event loops (FOLLOW-UPS #3).
+"""Managed-DB pools must never cross event loops (#533).
 
 An ``AsyncConnectionPool``'s workers are tasks on the loop that opened it. When
 that loop ends the pool is not ``closed``, but nothing services it: handing it to

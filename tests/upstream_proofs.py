@@ -2,7 +2,7 @@
 
 ``ProviderStub`` answers the verification adapters' provider calls. It patches the
 httpx transport, not ``socket``: async httpx connects through the event loop, which
-a socket-level guard never sees (FOLLOW-UPS #2).
+a socket-level guard never sees (#523).
 """
 
 import asyncio

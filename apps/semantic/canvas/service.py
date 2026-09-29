@@ -4,7 +4,7 @@ All writes — UI and agent — are batches of ops. A batch is atomic: one inval
 op rejects the whole batch with a structured per-op error. Ops touch only the
 paths they name; omitting a field never clears it.
 
-Op vocabulary (see docs/canvas-design.md):
+Op vocabulary:
 
     {"op": "add_existing", "object_type": "dataset", "ref": "raw_visits"}
     {"op": "set", "target": "dataset/raw_visits/description", "value": "..."}
