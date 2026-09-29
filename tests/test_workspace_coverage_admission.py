@@ -390,6 +390,26 @@ class TestInviteResolution:
 
         assert WorkspaceInvite.objects.get(pk=invite.pk).status == WorkspaceInviteStatus.REVOKED
 
+    def test_login_does_not_expire_an_invite_revoked_mid_login(self, user, t1, monkeypatch):
+        """#561 G4: a revoke between the login loop's read and its expiry write stands."""
+        ws = _workspace(user, t1)
+        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invite = self._invite(ws, invitee.email)
+        WorkspaceInvite.objects.filter(pk=invite.pk).update(
+            expires_at=timezone.now() - timedelta(days=1)
+        )
+        is_expired = WorkspaceInvite.is_expired
+
+        def revoke_then_check(stale):
+            WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.REVOKED)
+            return is_expired.fget(stale)
+
+        monkeypatch.setattr(WorkspaceInvite, "is_expired", property(revoke_then_check))
+
+        resolve_pending_invites_on_login(invitee)
+
+        assert WorkspaceInvite.objects.get(pk=invite.pk).status == WorkspaceInviteStatus.REVOKED
+
     def test_acceptance_uses_the_role_as_it_stands_under_the_lock(self, user, t1):
         ws = _workspace(user, t1)
         invitee = User.objects.create_user(email="inv@example.com", password="pass")
