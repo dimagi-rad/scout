@@ -329,9 +329,8 @@ class TestArtifactSandboxView:
         opaque ("null") security origin: inside the frame
         window.location.origin === "null". A postMessage whose targetOrigin is a
         concrete origin string (or "null") will NOT match the parent's real
-        concrete origin, so the browser SILENTLY DROPS the message. Both
-        iframe->parent sends (artifact-query-data and artifact-error) must use
-        targetOrigin "*". This is safe because the parent (ArtifactPanel)
+        concrete origin, so the browser SILENTLY DROPS the message. The
+        iframe->parent artifact-error send must use targetOrigin "*". This is safe because the parent (ArtifactPanel)
         authenticates inbound messages by event.source === the iframe's
         contentWindow, not by origin.
         """
@@ -351,18 +350,15 @@ class TestArtifactSandboxView:
             "silently dropped by the browser."
         )
 
-        # Both message types must be posted to the parent with the "*" target.
         # The targetOrigin is the final argument on the `}, <target>);` line that
-        # closes each postMessage call; locate it from the message type marker.
-        for msg_type in ("artifact-query-data", "artifact-error"):
-            idx = content.index(f"type: '{msg_type}'")
-            close = content.index("}, ", idx)
-            # Slice the closing line up to the call terminator `);`.
-            target_arg = content[close + len("}, ") : content.index(");", close)]
-            assert target_arg == "'*'", (
-                f"iframe->parent '{msg_type}' postMessage must use targetOrigin "
-                f"'*'; found: {target_arg!r}"
-            )
+        # closes the postMessage call; locate it from the message type marker.
+        idx = content.index("type: 'artifact-error'")
+        close = content.index("}, ", idx)
+        target_arg = content[close + len("}, ") : content.index(");", close)]
+        assert target_arg == "'*'", (
+            f"iframe->parent 'artifact-error' postMessage must use targetOrigin "
+            f"'*'; found: {target_arg!r}"
+        )
 
     def test_sandbox_reports_errors_the_renderer_does_not_see(
         self, authenticated_client, artifact, workspace
@@ -383,16 +379,18 @@ class TestArtifactSandboxView:
         assert "window.addEventListener('unhandledrejection'" in content
         assert "error: { title, message, details, name }" in content
 
-    def test_sandbox_live_query_fetch_respects_script_prefix(
+    def test_sandbox_never_fetches_live_data_itself(
         self, authenticated_client, artifact, workspace
     ):
-        """The in-iframe live-query fetch must honor FORCE_SCRIPT_NAME (issue #248, 04#8b).
+        """The opaque-origin sandbox can't make credentialed API calls (#284, #376).
 
-        On the labs deployment Scout is mounted under /scout (FORCE_SCRIPT_NAME),
-        and nginx only proxies /scout/api/... A root-relative '/api/...' fetch
-        from the sandbox HTML would hit the host root and 404. The sandbox must
-        prefix the request with the request's SCRIPT_NAME.
+        Its fetch of /query-data/ was always CORS-blocked, so a live-query
+        artifact only ever showed "Data Fetch Error". CORS for the null origin
+        must not be added: it would give agent code a path back into the API.
         """
+        artifact.semantic_queries = [{"name": "q", "query": {}}]
+        artifact.save(update_fields=["semantic_queries"])
+
         response = authenticated_client.get(
             f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/",
             SCRIPT_NAME="/scout",
@@ -400,26 +398,9 @@ class TestArtifactSandboxView:
 
         assert response.status_code == 200
         content = response.content.decode()
-
-        # The injected base must be the request's script prefix...
-        assert 'const API_BASE = "/scout";' in content
-        # ...and the live-query fetch must be built from it (not a bare
-        # leading-slash path that bypasses the mount point).
-        assert "fetch(API_BASE + '/api/workspaces/'" in content
-
-    def test_sandbox_live_query_fetch_at_root_mount(
-        self, authenticated_client, artifact, workspace
-    ):
-        """With no script prefix the fetch URL stays root-relative (no double slash)."""
-        response = authenticated_client.get(
-            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
-        )
-
-        assert response.status_code == 200
-        content = response.content.decode()
-        # Empty base → fetch resolves to a clean root-relative URL at runtime.
-        assert 'const API_BASE = "";' in content
-        assert "fetch(API_BASE + '/api/workspaces/'" in content
+        assert "fetch(" not in content
+        assert "query-data" not in content
+        assert "has_live_queries" not in content
 
     def test_sandbox_csp_headers(self, authenticated_client, artifact, workspace):
         """Test that CSP headers are set correctly for security."""

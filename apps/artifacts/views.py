@@ -300,14 +300,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
     <script id="artifact-data" type="application/json" nonce="{{CSP_NONCE}}">{{ARTIFACT_DATA}}</script>
 
     <script nonce="{{CSP_NONCE}}">
-        // Base path Scout is mounted under (e.g. "/scout" on the labs deploy via
-        // FORCE_SCRIPT_NAME, "" at the root). Injected server-side so the
-        // in-iframe live-query fetch resolves under the deploy prefix instead of
-        // the host root (issue #248, 04#8b).
-        const API_BASE = "{{API_BASE}}";
-    </script>
-
-    <script nonce="{{CSP_NONCE}}">
         // Artifact rendering system
         const ArtifactRenderer = {
             container: null,
@@ -329,86 +321,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                     return;
                 }
 
-                // If the artifact has live queries, fetch fresh data from the server.
-                //
-                // KNOWN LIMITATION (pre-existing, out of scope for the postMessage
-                // fix below): this frame is sandboxed WITHOUT allow-same-origin, so
-                // its document has an opaque ("null") origin. A fetch() from a
-                // null-origin document is treated as cross-origin, so the browser
-                // requires CORS on the response; /query-data returns no
-                // Access-Control-Allow-Origin header, so the response is BLOCKED
-                // ("from origin 'null' has been blocked by CORS policy"), regardless
-                // of credentials. The artifact's embedded data is also {} for live
-                // queries (see ArtifactSandboxView), so a live-query artifact cannot
-                // self-hydrate inside the iframe and will show "Data Fetch Error".
-                // The parent ArtifactPanel still loads live data for its Data tab via
-                // its own same-origin api.get(); fixing the iframe VIEW tab needs a
-                // separate change (e.g. embed query results server-side, or add CORS)
-                // and is deliberately not attempted here.
-                if (artifact.has_live_queries) {
-                    this.showLoading('Querying database...');
-                    try {
-                        const resp = await fetch(API_BASE + '/api/workspaces/' + artifact.workspace_id + '/artifacts/' + artifact.id + '/query-data/', {
-                            credentials: 'include',
-                        });
-                        if (!resp.ok) {
-                            const err = await resp.json().catch(() => ({}));
-                            throw new Error(err.error || 'Query failed with status ' + resp.status);
-                        }
-                        const queryData = await resp.json();
-                        artifact.data = this.mergeQueryResults(queryData, artifact.data || {});
-                        // Expose raw query info for parent frame (Data tab).
-                        // targetOrigin is '*' rather than the document origin:
-                        // this frame is sandboxed WITHOUT allow-same-origin, so
-                        // its document has an opaque origin whose
-                        // window.location.origin is the string 'null'. Passing
-                        // 'null' as targetOrigin is rejected by the browser
-                        // ("Invalid target origin 'null'"), and any concrete
-                        // origin would not match the parent's, so the message
-                        // would never be delivered. '*' is safe because the
-                        // parent (ArtifactPanel) authenticates inbound messages by
-                        // event.source === this iframe's contentWindow, not origin.
-                        artifact._queryResults = queryData;
-                        window.parent.postMessage({
-                            type: 'artifact-query-data',
-                            artifactId: artifact.id,
-                            queryData: queryData,
-                        }, '*');
-                    } catch (error) {
-                        this.showError('Data Fetch Error', error.message);
-                        return;
-                    }
-                }
-
                 this.render(artifact);
-            },
-
-            mergeQueryResults(queryData, staticData) {
-                const queries = queryData.queries || [];
-                if (queries.length === 0) return staticData;
-
-                const merged = { ...staticData };
-                for (const q of queries) {
-                    if (q.error) continue;
-                    // Key by query name so the component can access data.kpis, data.monthly, etc.
-                    const rows = (q.rows || []).map(row => {
-                        const obj = {};
-                        (q.columns || []).forEach((col, i) => { obj[col] = row[i]; });
-                        return obj;
-                    });
-                    // Always expose as array so components can reliably call .map()
-                    merged[q.name] = rows;
-                }
-                return merged;
-            },
-
-            showLoading(message) {
-                const loading = document.getElementById('loading');
-                if (loading) {
-                    loading.style.display = 'flex';
-                    const span = loading.querySelector('span');
-                    if (span) span.textContent = message || 'Loading...';
-                }
             },
 
             render(artifact) {
@@ -760,12 +673,12 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
             // The parent reports these to Sentry, so they carry error text only,
             // never artifact data.
             notifyParentOfError(title, message, details = null, name = null) {
-                // targetOrigin is '*' rather than the document origin, for the
-                // same reason as artifact-query-data above: this opaque-origin
-                // sandbox frame has window.location.origin equal to the string
-                // 'null', which the browser rejects as a postMessage target, so
-                // the message would never reach the parent. The parent
-                // authenticates by event.source, so '*' leaks nothing.
+                // targetOrigin is '*' rather than the document origin: this
+                // opaque-origin sandbox frame has window.location.origin equal
+                // to the string 'null', which the browser rejects as a
+                // postMessage target, so the message would never reach the
+                // parent. The parent authenticates by event.source, so '*'
+                // leaks nothing.
                 try {
                     window.parent.postMessage({
                         type: 'artifact-error',
@@ -844,9 +757,6 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
 
         csp_nonce = secrets.token_urlsafe(16)
 
-        derive_missing_semantic_query_manifest(artifact)
-        has_live_queries = bool(artifact.semantic_queries)
-
         artifact_json = json.dumps(
             {
                 "id": str(artifact.id),
@@ -855,20 +765,13 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
                 "type": artifact.artifact_type,
                 "code": artifact.code,
                 "data": artifact.data or {},
-                "has_live_queries": has_live_queries,
                 "version": artifact.version,
             }
         )
         # Escape </script> in JSON to prevent breaking out of the script tag
         artifact_json = artifact_json.replace("</", "<\\/")
 
-        # Base prefix Scout is mounted under (FORCE_SCRIPT_NAME on the labs
-        # deploy → SCRIPT_NAME in the request meta). Trailing slash trimmed so
-        # the in-iframe fetch builds "<prefix>/api/..." without a double slash.
-        api_base = request.META.get("SCRIPT_NAME", "").rstrip("/")
-
         html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
-        html_content = html_content.replace("{{API_BASE}}", api_base)
         html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
 
         response = HttpResponse(html_content, content_type="text/html")
@@ -927,9 +830,7 @@ class ArtifactQueryDataView(View):
     """
     Executes an artifact's semantic_queries and returns results.
 
-    Legacy SQL-backed ``source_queries`` are intentionally not executed. Results
-    are returned in a format the artifact sandbox can consume directly via
-    mergeQueryResults().
+    Legacy SQL-backed ``source_queries`` are intentionally not executed.
     """
 
     async def post(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
