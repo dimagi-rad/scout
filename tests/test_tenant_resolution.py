@@ -1,5 +1,7 @@
 import pytest
 
+from apps.users.services.tenant_resolution import resolve_commcare_domains
+
 
 @pytest.mark.django_db(transaction=True)
 class TestResolveCommcareDomains:
@@ -65,3 +67,19 @@ class TestResolveCommcareDomains:
 
         with pytest.raises(CommCareAuthError):
             await resolve_commcare_domains(user, "fake-token")
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_commcare_domain_without_project_name_falls_back(user, httpx_mock):
+    httpx_mock.add_response(
+        url="https://www.commcarehq.org/api/user_domains/v1/",
+        json={
+            "meta": {"limit": 20, "offset": 0, "total_count": 1, "next": None},
+            "objects": [{"domain_name": "dimagi"}],
+        },
+    )
+
+    memberships = await resolve_commcare_domains(user, "fake-token")
+
+    assert [tm.tenant.canonical_name for tm in memberships] == ["dimagi"]

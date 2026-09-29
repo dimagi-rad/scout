@@ -17,6 +17,8 @@ archival on an unsuccessful fetch:
     CommCare user-domain and OCS team-membership lists retain scoped denial semantics.
   * Other non-2xx → raise without revoking access.
   * missing expected key in a 2xx body → raise (never treat drift as "zero tenants").
+    A per-row display name is not such a key: a missing one falls back to the
+    external id in ``Tenant.save``.
   * CommCare pagination that can't be followed → raise (no silent truncation).
 Callers (the login signal and ``tenant_list_view``) treat any raise as "skip
 refresh," so access is never revoked on an inconclusive fetch (fail-open).
