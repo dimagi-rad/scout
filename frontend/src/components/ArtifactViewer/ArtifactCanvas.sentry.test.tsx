@@ -63,7 +63,6 @@ describe("ArtifactCanvas sandbox error reporting", () => {
     expect(reported.name).toBe("TypeError")
     expect(reported.message).toBe('Cannot read properties of undefined (reading "…"')
     expect(reported.stack).toBe([
-      'TypeError: Cannot read properties of undefined (reading "…"',
       "    at App (eval at render (sandbox:1:1), <anonymous>:4:12)",
       "    at renderWithHooks (react-dom.js:10:5)",
     ].join("\n"))
@@ -112,7 +111,7 @@ describe("ArtifactCanvas sandbox error reporting", () => {
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.name).toBe("RangeError")
     expect(reported.stack).toBe(
-      "RangeError: Invalid array length\nApp@blob:null/abc:4:12\nrender@blob:null/abc:9:3",
+      "App@blob:null/abc:4:12\nrender@blob:null/abc:9:3",
     )
   })
 
@@ -131,7 +130,7 @@ describe("ArtifactCanvas sandbox error reporting", () => {
 
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.name).toBe("TypeError")
-    expect(reported.stack).toBe("TypeError: boom\n    at App (sandbox:1:1)")
+    expect(reported.stack).toBe("    at App (sandbox:1:1)")
   })
 
   it("ignores artifact-error messages from any window but its own iframe", () => {

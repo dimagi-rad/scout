@@ -67,7 +67,20 @@ describe("reportRenderError", () => {
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.name).toBe("Error")
     expect(reported.message).toBe("first at forged (b:2:2)")
-    expect(reported.stack).toBe("Error: first at forged (b:2:2)\n    at App (sandbox:1:1)")
+    expect(reported.stack).toBe("    at App (sandbox:1:1)")
+  })
+
+  it("keeps a message that looks like a frame out of the stack", () => {
+    reportRenderError({
+      source: "sandbox",
+      name: "UnhandledRejection",
+      message: "x@https://evil.example/a.js:2:2",
+      stack: "    at App (sandbox:1:1)",
+    })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.message).toBe("x@https://evil.example/a.js:2:2")
+    expect(reported.stack).toBe("    at App (sandbox:1:1)")
   })
 
   it("names a thrown non-Error, which has no name, Error", () => {

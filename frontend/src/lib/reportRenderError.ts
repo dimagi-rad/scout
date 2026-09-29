@@ -25,8 +25,8 @@ const MAX_REPORTS_PER_SOURCE = 20
 // The header line of a V8 stack repeats the message, so it is not kept.
 const STACK_FRAME = /^\s+at\s|^[^\s]*@\S+:\d+:\d+$/
 
-// The name comes from the sandboxed artifact and heads the reported stack, so
-// anything but a plain identifier could forge frames or split Sentry grouping.
+// The name comes from the sandboxed artifact and becomes the Sentry error class,
+// so anything but a plain identifier could carry text or split Sentry grouping.
 export const SAFE_ERROR_NAME = /^[\w$.]{1,80}$/
 
 const reported = new Set<string>()
@@ -90,7 +90,10 @@ export function reportRenderError(report: RenderErrorReport): void {
   const error = new Error(message)
   error.name = name
   const stack = safeStack(report.stack)
-  error.stack = stack ? `${name}: ${message}\n${stack}` : `${name}: ${message}`
+  // No "name: message" header: Sentry takes both from the error itself, and parses
+  // a header whose name doesn't end in "Error" as a frame, so artifact text there
+  // like "x@https://evil.example/a.js:2:2" would become a fake frame.
+  error.stack = stack ?? ""
 
   Sentry.withScope((scope) => {
     scope.setTag("render_error_source", report.source)
