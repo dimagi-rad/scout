@@ -433,6 +433,9 @@ test("Claude reviewer tools are an exact read-only allowlist", () => {
   // was in the prompt, so the prompt must name it and the replacement tools.
   assert.match(workflow, /git grep is not permitted and will fail the review/);
   assert.match(workflow, /To search file contents, use the Grep tool/);
+  // PR #699: the reviewer called Skill on every run, which the gate counts as a denial.
+  assert.match(workflow, /The Skill tool is not available and calling it will fail the review/);
+  assert.match(workflow, /^\s+--disallowedTools Skill$/m);
   assert.doesNotMatch(workflow, /Bash\(gh pr comment|gh pr view or comment/);
   assert.match(workflow, /never run gh pr comment/);
   const schema = JSON.parse(workflow.match(/--json-schema '([^']*)'/)[1]);

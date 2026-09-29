@@ -226,6 +226,8 @@ jobs:
             changed is in the git diff). To find files, use the Glob tool, or
             git ls-tree -r --name-only ${{ needs.prepare.outputs.head }} for the PR-head file list.
             Use Read, not cat, for runner temp files.
+            The Skill tool is not available and calling it will fail the review. Review model
+            and API changes from the diff and the repo code alone.
             Return structured reviewed_head, complete, blocking_findings (high/critical count)
             and review_comment. Only report complete=true after examining the requested range
             and earlier unresolved findings. Report blocking_findings=0 only when no
@@ -235,6 +237,7 @@ jobs:
             --max-budget-usd 10
             --json-schema '{"type":"object","properties":{"reviewed_head":{"type":"string"},"complete":{"type":"boolean"},"blocking_findings":{"type":"integer","minimum":0},"review_comment":{"type":"string","minLength":1}},"required":["reviewed_head","complete","blocking_findings","review_comment"],"additionalProperties":false}'
             --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(git ls-tree:*),Bash(git cat-file:*),Bash(git blame:*),Bash(gh pr view:*),Read,Grep,Glob"
+            --disallowedTools Skill
 
       - name: Verify Claude receipt and record completed checkpoint
         id: claude_verify
