@@ -402,6 +402,8 @@ def _coverage_denied(user, workspace_id, missing) -> WorkspaceAccess:
     INFO, not WARNING: the denial is expected, and Sentry only turns ERROR records
     into events (it still patches ``Logger.callHandlers``, so this is a breadcrumb).
     Tenant ids and gap codes only; names and credentials stay out of the log.
+    ``workspace_id`` is the membership row's, never the caller's raw value, so
+    nothing request-supplied reaches the log line.
     """
     if access_cache.first_in_scope(user, workspace_id, _COVERAGE_DENIAL_LOGGED):
         gaps = sorted(f"{t.tenant_id}:{t.gap_code}:{t.recovery}" for t in missing)
@@ -438,7 +440,7 @@ def _resolve_local_access_ex(
         missing = missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
         access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
     if missing:
-        return _coverage_denied(user, workspace_id, missing)
+        return _coverage_denied(user, wm.workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
@@ -456,7 +458,7 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
     missing = await amissing_workspace_tenants(user, await _aworkspace_tenants(wm.workspace))
     access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
     if missing:
-        return _coverage_denied(user, workspace_id, missing)
+        return _coverage_denied(user, wm.workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
