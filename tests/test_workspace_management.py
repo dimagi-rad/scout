@@ -548,11 +548,8 @@ class TestMemberAdd:
         assert invites.count() == 1
         assert invites.first().role == WorkspaceRole.MANAGE
 
-    def test_reinvite_of_an_expired_invite_replaced_mid_request_is_a_conflict(
-        self, client, user, workspace, monkeypatch
-    ):
-        """A concurrent re-invite retired the expired invite and created its live successor."""
-        stale = WorkspaceInvite.objects.create(
+    def _expired_invite(self, workspace):
+        return WorkspaceInvite.objects.create(
             workspace=workspace,
             email="ghost@example.com",
             role=WorkspaceRole.READ,
@@ -560,34 +557,62 @@ class TestMemberAdd:
             expires_at=timezone.now() - timedelta(days=1),
         )
 
-        def replace_then_expired(invite):
-            if invite.pk == stale.pk and invite.status in LIVE_INVITE_STATUSES:
-                WorkspaceInvite.objects.filter(pk=stale.pk).update(
-                    status=WorkspaceInviteStatus.EXPIRED
-                )
-                invite.status = WorkspaceInviteStatus.EXPIRED
-                WorkspaceInvite.objects.create(
-                    workspace=workspace,
-                    email="ghost@example.com",
-                    role=WorkspaceRole.READ,
-                    status=WorkspaceInviteStatus.PENDING,
-                )
-            return True
-
-        monkeypatch.setattr(WorkspaceInvite, "is_expired", property(replace_then_expired))
-        client.force_login(user)
-
-        resp = client.post(
+    def _reinvite(self, client, workspace):
+        return client.post(
             f"/api/workspaces/{workspace.id}/members/",
             {"email": "ghost@example.com", "role": WorkspaceRole.MANAGE},
             content_type="application/json",
         )
 
+    def test_reinvite_racing_another_for_an_expired_invite_is_a_conflict(
+        self, client, user, workspace, monkeypatch
+    ):
+        """Another re-invite created the live successor after this one retired the old row."""
+        self._expired_invite(workspace)
+        retire = workspace_views._update_if_live
+
+        def retire_then_successor(invite, **fields):
+            retired = retire(invite, **fields)
+            WorkspaceInvite.objects.create(
+                workspace=workspace,
+                email="ghost@example.com",
+                role=WorkspaceRole.READ,
+                status=WorkspaceInviteStatus.PENDING,
+            )
+            return retired
+
+        monkeypatch.setattr(workspace_views, "_update_if_live", retire_then_successor)
+        client.force_login(user)
+
+        resp = self._reinvite(client, workspace)
+
         assert resp.status_code == 409
-        live = WorkspaceInvite.objects.filter(
+        live = WorkspaceInvite.objects.get(
             workspace=workspace, email="ghost@example.com", status__in=LIVE_INVITE_STATUSES
         )
-        assert live.count() == 1
+        assert live.role == WorkspaceRole.READ
+
+    def test_reinvite_replaces_an_expired_invite_login_retired_mid_request(
+        self, client, user, workspace, monkeypatch
+    ):
+        """Login expired the same row first; no live invite is left, so this one is created."""
+        stale = self._expired_invite(workspace)
+        is_expired = WorkspaceInvite.is_expired
+
+        def login_retires_then_check(invite):
+            WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.EXPIRED)
+            return is_expired.fget(invite)
+
+        monkeypatch.setattr(WorkspaceInvite, "is_expired", property(login_retires_then_check))
+        client.force_login(user)
+
+        resp = self._reinvite(client, workspace)
+
+        assert resp.status_code == 201, resp.json()
+        live = WorkspaceInvite.objects.get(
+            workspace=workspace, email="ghost@example.com", status__in=LIVE_INVITE_STATUSES
+        )
+        assert live.role == WorkspaceRole.MANAGE
 
     def test_reinvite_does_not_revive_an_invite_accepted_mid_request(
         self, client, user, workspace, mocker

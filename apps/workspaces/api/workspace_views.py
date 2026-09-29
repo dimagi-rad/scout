@@ -7,7 +7,7 @@ from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework import status
@@ -244,6 +244,9 @@ def _serialize_invite(invite, result=None):
     return payload
 
 
+LIVE_INVITE_CONSTRAINT = "one_live_invite_per_workspace_email"
+
+
 def _update_if_live(invite, **fields) -> bool:
     return bool(
         WorkspaceInvite.objects.filter(pk=invite.pk, status__in=LIVE_INVITE_STATUSES).update(
@@ -264,7 +267,7 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
     one-live-invite-per-(workspace,email) constraint. A stale (expired) live
     invite is retired to EXPIRED first so a fresh one can take its place.
 
-    Returns None when the live invite left the live set after it was read.
+    Returns None when a concurrent request resolved or replaced the live invite.
     """
     live = WorkspaceInvite.objects.filter(
         workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
@@ -284,21 +287,25 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
         for name, value in fields.items():
             setattr(live, name, value)
         return live
-    if (
-        live
-        and live.is_expired
-        and not _update_if_live(
-            live, status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
-        )
-    ):
+    if live and live.is_expired:
+        # Best-effort: a login may have retired this row already.
+        _update_if_live(live, status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now())
+    try:
+        # Savepoint, so a lost race doesn't poison an enclosing transaction.
+        with transaction.atomic():
+            return WorkspaceInvite.objects.create(
+                workspace=workspace,
+                email=email,
+                role=role,
+                invited_by=invited_by,
+                status=new_status,
+            )
+    except IntegrityError as exc:
+        diag = getattr(exc.__cause__, "diag", None)
+        if getattr(diag, "constraint_name", None) != LIVE_INVITE_CONSTRAINT:
+            raise
+        # A concurrent re-invite created the live invite first.
         return None
-    return WorkspaceInvite.objects.create(
-        workspace=workspace,
-        email=email,
-        role=role,
-        invited_by=invited_by,
-        status=new_status,
-    )
 
 
 def _schema_status_for_workspaces(workspaces):
