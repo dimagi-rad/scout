@@ -1,13 +1,17 @@
 """Tests for workspace management API RBAC invariants (Task 3.1–3.3)."""
 
+from datetime import timedelta
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api import workspace_views
 from apps.workspaces.api.workspace_views import WorkspaceInviteDetailView
 from apps.workspaces.models import (
+    LIVE_INVITE_STATUSES,
     Workspace,
     WorkspaceInvite,
     WorkspaceInviteStatus,
@@ -543,6 +547,47 @@ class TestMemberAdd:
         invites = WorkspaceInvite.objects.filter(workspace=workspace, email="ghost@example.com")
         assert invites.count() == 1
         assert invites.first().role == WorkspaceRole.MANAGE
+
+    def test_reinvite_of_an_expired_invite_replaced_mid_request_is_a_conflict(
+        self, client, user, workspace, monkeypatch
+    ):
+        """A concurrent re-invite retired the expired invite and created its live successor."""
+        stale = WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="ghost@example.com",
+            role=WorkspaceRole.READ,
+            status=WorkspaceInviteStatus.PENDING,
+            expires_at=timezone.now() - timedelta(days=1),
+        )
+
+        def replace_then_expired(invite):
+            if invite.pk == stale.pk and invite.status in LIVE_INVITE_STATUSES:
+                WorkspaceInvite.objects.filter(pk=stale.pk).update(
+                    status=WorkspaceInviteStatus.EXPIRED
+                )
+                invite.status = WorkspaceInviteStatus.EXPIRED
+                WorkspaceInvite.objects.create(
+                    workspace=workspace,
+                    email="ghost@example.com",
+                    role=WorkspaceRole.READ,
+                    status=WorkspaceInviteStatus.PENDING,
+                )
+            return True
+
+        monkeypatch.setattr(WorkspaceInvite, "is_expired", property(replace_then_expired))
+        client.force_login(user)
+
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ghost@example.com", "role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 409
+        live = WorkspaceInvite.objects.filter(
+            workspace=workspace, email="ghost@example.com", status__in=LIVE_INVITE_STATUSES
+        )
+        assert live.count() == 1
 
     def test_reinvite_does_not_revive_an_invite_accepted_mid_request(
         self, client, user, workspace, mocker

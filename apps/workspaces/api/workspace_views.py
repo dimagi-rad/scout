@@ -284,8 +284,14 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
         for name, value in fields.items():
             setattr(live, name, value)
         return live
-    if live and live.is_expired:
-        _update_if_live(live, status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now())
+    if (
+        live
+        and live.is_expired
+        and not _update_if_live(
+            live, status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
+        )
+    ):
+        return None
     return WorkspaceInvite.objects.create(
         workspace=workspace,
         email=email,
