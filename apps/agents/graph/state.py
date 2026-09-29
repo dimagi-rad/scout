@@ -61,6 +61,17 @@ TRUNCATED_TOOL_CALL_MESSAGE = (
     "the change into several calls."
 )
 
+# Marks the rejection ToolMessage so code can recognise it without matching the
+# model-facing prose, which is free to change.
+REJECTED_TOOL_CALL_KWARG = "scout_rejected_tool_call"
+
+
+def is_rejected_tool_result(message: BaseMessage) -> bool:
+    """Whether this is the error result for a tool call the graph refused to run."""
+    return isinstance(message, ToolMessage) and bool(
+        message.additional_kwargs.get(REJECTED_TOOL_CALL_KWARG)
+    )
+
 
 def truncated_tool_calls(message: BaseMessage) -> list[dict]:
     """Tool calls from a turn cut off by ``max_tokens``.
@@ -85,7 +96,7 @@ def unfinished_turn_reason(message: BaseMessage) -> str | None:
     truncated tool call after the retries ran out.
     """
     if isinstance(message, ToolMessage):
-        return "max_tokens" if message.content == TRUNCATED_TOOL_CALL_MESSAGE else None
+        return "max_tokens" if is_rejected_tool_result(message) else None
     if not isinstance(message, AIMessage) or message.tool_calls:
         return None
     stop_reason = message.response_metadata.get("stop_reason")
@@ -144,6 +155,7 @@ def reject_truncated_tool_calls(state: "AgentState") -> dict:
                 tool_call_id=tc["id"],
                 name=tc.get("name") or "unknown",
                 status="error",
+                additional_kwargs={REJECTED_TOOL_CALL_KWARG: True},
             )
             for tc in truncated_tool_calls(state["messages"][-1])
             if tc.get("id")

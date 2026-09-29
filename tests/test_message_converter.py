@@ -2,6 +2,11 @@ import json
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from apps.agents.graph.state import (
+    is_rejected_tool_result,
+    reject_truncated_tool_calls,
+    unfinished_turn_reason,
+)
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.workspaces.tasks import SYSTEM_RESUME_MARKER
 
@@ -117,3 +122,35 @@ def test_artifact_manager_subagent_trace_survives_reload():
     child = next(part for part in assistant["parts"] if part["type"] == "data-subagent-tool-output")
     assert child["data"]["parentToolCallId"] == "toolu_PARENT"
     assert child["data"]["toolName"] == "artifact_write"
+
+
+def test_rejected_truncated_tool_call_is_hidden_on_reload_as_it_is_live():
+    truncated = AIMessage(
+        content=[
+            {"type": "text", "text": "Let me pull the orders."},
+            {"type": "tool_use", "id": "call-1", "name": "query", "input": {"sql": "SEL"}},
+        ],
+        tool_calls=[{"id": "call-1", "name": "query", "args": {"sql": "SEL"}}],
+        response_metadata={"stop_reason": "max_tokens"},
+    )
+    rejection = reject_truncated_tool_calls({"messages": [truncated]})["messages"]
+    msgs = [HumanMessage(content="orders?"), truncated, *rejection]
+
+    ui = langchain_messages_to_ui(msgs)
+
+    assistant = next(m for m in ui if m["role"] == "assistant")
+    assert [p["type"] for p in assistant["parts"]] == ["text"]
+
+
+def test_rejection_is_recognised_by_its_marker_not_its_wording():
+    truncated = AIMessage(
+        content="",
+        tool_calls=[{"id": "call-1", "name": "query", "args": {}}],
+        response_metadata={"stop_reason": "max_tokens"},
+    )
+    (rejection,) = reject_truncated_tool_calls({"messages": [truncated]})["messages"]
+    reworded = rejection.model_copy(update={"content": "Different wording."})
+
+    assert is_rejected_tool_result(reworded)
+    assert unfinished_turn_reason(reworded) == "max_tokens"
+    assert not is_rejected_tool_result(ToolMessage(content="ok", tool_call_id="call-2"))
