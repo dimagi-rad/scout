@@ -39,6 +39,7 @@ from apps.semantic.models import (
 )
 from apps.semantic.services.catalog import _sync_fields
 from apps.semantic.services.cube_schema import (
+    INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS,
     CubeValidatorUnavailableError,
     build_and_promote_cube_schema,
 )
@@ -113,7 +114,11 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
 
     cube_outcome: dict[str, Any]
     try:
-        cube_schema = build_and_promote_cube_schema(canvas.workspace, model=canvas.semantic_model)
+        cube_schema = build_and_promote_cube_schema(
+            canvas.workspace,
+            model=canvas.semantic_model,
+            slot_wait_seconds=INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS,
+        )
         cube_outcome = {"ok": True, "content_hash": cube_schema.content_hash}
     except CubeValidatorUnavailableError as exc:
         logger.warning(

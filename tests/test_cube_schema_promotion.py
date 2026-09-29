@@ -191,26 +191,40 @@ def _hold_validator_slots(conn, slots):
             )
 
 
+@pytest.fixture
+def keep_build_session(monkeypatch):
+    """Keep the build's session open, or closing it would free its locks for it."""
+    monkeypatch.setattr(cube_schema, "close_old_connections", lambda: None)
+
+
 @pytest.mark.django_db(transaction=True)
-def test_validation_waits_for_a_free_validator_slot(
-    workspace, model, cube_http, other_connection, monkeypatch
+def test_build_fails_over_when_every_validator_slot_stays_busy(
+    workspace, model, cube_http, other_connection
 ):
-    monkeypatch.setattr(cube_schema, "VALIDATOR_SLOT_WAIT_SECONDS", 0)
+    serving = build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="Changed")
     _hold_validator_slots(other_connection, range(cube_schema.VALIDATOR_CONCURRENCY))
 
-    with pytest.raises(CubeSchemaBuildError) as raised:
-        build_and_promote_cube_schema(workspace, model=model)
+    with pytest.raises(cube_schema.CubeValidatorBusyError) as raised:
+        build_and_promote_cube_schema(workspace, model=model, slot_wait_seconds=0)
 
     assert isinstance(raised.value, ExpectedStateError)
-    assert cube_http.calls["validate"] == 0
-
-    other_connection.close()
-    build_and_promote_cube_schema(workspace, model=model)
     assert cube_http.calls["validate"] == 1
+    serving.refresh_from_db()
+    model.refresh_from_db()
+    assert serving.status == CubeSchema.Status.ACTIVE
+    assert model.metadata["last_build"]["ok"] is False
+
+    with other_connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_unlock_all()")
+    build_and_promote_cube_schema(workspace, model=model, slot_wait_seconds=0)
+    assert cube_http.calls["validate"] == 2
 
 
 @pytest.mark.django_db(transaction=True)
-def test_validation_uses_a_free_slot_and_releases_it(workspace, model, cube_http, other_connection):
+def test_validation_uses_a_free_slot_and_releases_it(
+    workspace, model, cube_http, other_connection, keep_build_session
+):
     _hold_validator_slots(other_connection, range(cube_schema.VALIDATOR_CONCURRENCY - 1))
 
     build_and_promote_cube_schema(workspace, model=model)
@@ -225,7 +239,9 @@ def test_validation_uses_a_free_slot_and_releases_it(workspace, model, cube_http
 
 
 @pytest.mark.django_db(transaction=True)
-def test_failed_validation_releases_its_slot(workspace, model, cube_http, other_connection):
+def test_failed_validation_releases_its_slot(
+    workspace, model, cube_http, other_connection, keep_build_session
+):
     cube_http.handlers["validate"] = _read_timeout
     with pytest.raises(CubeSchemaBuildError):
         build_and_promote_cube_schema(workspace, model=model)

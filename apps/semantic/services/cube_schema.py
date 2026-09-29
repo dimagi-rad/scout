@@ -33,6 +33,8 @@ KEEP_INACTIVE_CUBE_SCHEMAS = 5
 VALIDATOR_CONCURRENCY = 2
 VALIDATOR_LOCK_CLASS = 0x53435656
 VALIDATOR_SLOT_WAIT_SECONDS = 300.0
+# A request thread (canvas commit) should fail over to the serving schema quickly.
+INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 20.0
 VALIDATOR_SLOT_POLL_SECONDS = 1.0
 
 
@@ -48,15 +50,19 @@ class CubeValidatorUnavailableError(CubeSchemaBuildError, ExpectedStateError):
     """
 
 
+class CubeValidatorBusyError(CubeValidatorUnavailableError):
+    """No validator slot freed up in time; the build never started."""
+
+
 @contextmanager
-def _validator_slot():
+def _validator_slot(wait_seconds: float):
     """Hold one of ``VALIDATOR_CONCURRENCY`` slots shared by every worker process."""
-    deadline = time.monotonic() + VALIDATOR_SLOT_WAIT_SECONDS
+    deadline = time.monotonic() + wait_seconds
     while (slot := _try_acquire_validator_slot()) is None:
         if time.monotonic() >= deadline:
-            raise CubeValidatorUnavailableError(
+            raise CubeValidatorBusyError(
                 "Cube schema validation could not start: every validator slot stayed busy "
-                f"for {VALIDATOR_SLOT_WAIT_SECONDS:.0f}s."
+                f"for {wait_seconds:.0f}s."
             )
         time.sleep(VALIDATOR_SLOT_POLL_SECONDS)
     try:
@@ -65,9 +71,9 @@ def _validator_slot():
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [VALIDATOR_LOCK_CLASS, slot])
-        except Exception:
-            logger.exception("Failed to release Cube validator slot %s", slot)
-            # A session lock outlives the transaction; only closing frees it.
+        except Exception as exc:
+            # A session lock outlives the transaction; closing the session frees it.
+            logger.warning("Closing the session to release Cube validator slot %s: %s", slot, exc)
             connection.close()
 
 
@@ -96,7 +102,12 @@ def get_active_cube_schema(workspace, *, model: SemanticModel) -> CubeSchema:
     return active
 
 
-def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = None) -> CubeSchema:
+def build_and_promote_cube_schema(
+    workspace,
+    *,
+    model: SemanticModel | None = None,
+    slot_wait_seconds: float = VALIDATOR_SLOT_WAIT_SECONDS,
+) -> CubeSchema:
     """Generate Cube YAML, validate it, and promote it if valid.
 
     A failed build must not take down a workspace that already has an ACTIVE
@@ -105,15 +116,26 @@ def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = No
     ``model.metadata["last_build"]`` so the resume task can disclose it; the
     model is flipped to ERROR only when there is no active schema to fall
     back to.
+
+    The validator slot is taken before any transaction opens, so waiting for
+    it never holds catalog row locks or leaves a session idle in transaction.
     """
     try:
         close_old_connections()
-        if model is None:
-            return _build_and_promote_refreshed_model(workspace)
         try:
-            return _build_validate_and_promote(workspace, model)
-        except Exception as exc:
-            _record_build_failure(workspace, model, exc)
+            with _validator_slot(slot_wait_seconds):
+                if model is None:
+                    return _build_and_promote_refreshed_model(workspace)
+                try:
+                    return _build_validate_and_promote(workspace, model)
+                except Exception as exc:
+                    _record_build_failure(workspace, model, exc)
+                    raise
+        except CubeValidatorBusyError as exc:
+            if model is None:
+                record_cube_schema_build_failure(workspace, str(exc))
+            else:
+                _record_build_failure(workspace, model, exc)
             raise
     finally:
         close_old_connections()
@@ -211,8 +233,7 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
     try:
-        with _validator_slot():
-            validation = async_to_sync(CubeClient().validate_schema)(content)
+        validation = async_to_sync(CubeClient().validate_schema)(content)
     except CubeServiceUnavailable as exc:
         raise CubeValidatorUnavailableError(str(exc)) from exc
     validation_diagnostics = _diagnostics_from_validation(validation)
