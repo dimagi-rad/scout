@@ -3,15 +3,6 @@ export { useAppStore, type AppStore } from "./store"
 export type { AuthSlice } from "./authSlice"
 export type { UiSlice, Thread } from "./uiSlice"
 export type {
-  Column,
-  TableAnnotations,
-  TableInfo,
-  DataDictionary,
-  TableDetail,
-  DictionaryStatus,
-  DictionarySlice,
-} from "./dictionarySlice"
-export type {
   DatasetCatalog,
   DatasetDetailStatus,
   DatasetSlice,

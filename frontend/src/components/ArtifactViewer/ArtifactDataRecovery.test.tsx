@@ -3,10 +3,10 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
-import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
 import type { ArtifactDetail } from "@/components/ArtifactGraph"
 import { ArtifactCanvas } from "./ArtifactCanvas"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
 vi.mock("@/components/ArtifactGraph", () => ({
   ArtifactGraphRenderer: () => <div data-testid="artifact-graph-renderer">Rendered graph</div>,
@@ -115,7 +115,7 @@ describe("ArtifactDataRecovery", () => {
 
   it("disables restore with an explanation for read-only members", async () => {
     useAppStore.setState({
-      domains: [{ id: WORKSPACE_ID, role: "read" } as TenantMembership],
+      domains: [{ id: WORKSPACE_ID, role: "read" } as WorkspaceListItem],
     })
     vi.spyOn(api, "get").mockResolvedValue({
       status: "needs_materialization",

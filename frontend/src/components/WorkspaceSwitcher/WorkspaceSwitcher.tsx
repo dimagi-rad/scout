@@ -2,8 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
 import { CircleAlert, Check, ChevronDown, History, Loader2, Plus, Search, Settings } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { workspaceLoadState, workspaceHasRecordedLoad, workspaceHasAccess } from "@/api/workspaces"
-import type { TenantMembership } from "@/store/domainSlice"
+import { workspaceLoadState, workspaceHasRecordedLoad, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
@@ -30,16 +29,16 @@ const SEGMENT_MIN_WORKSPACES = 12 // hide segmented controls for small accounts
 
 type SegmentKey = "recent" | "all" | string // string => a provider id
 
-function firstProvider(ws: TenantMembership): string | undefined {
+function firstProvider(ws: WorkspaceListItem): string | undefined {
   return ws.tenants?.[0]?.provider
 }
 
-function hasProvider(ws: TenantMembership, provider: string): boolean {
+function hasProvider(ws: WorkspaceListItem, provider: string): boolean {
   return (ws.tenants ?? []).some((t) => t.provider === provider)
 }
 
 interface RowProps {
-  ws: TenantMembership
+  ws: WorkspaceListItem
   active: boolean
   highlighted: boolean
   onSelect: () => void
@@ -51,7 +50,7 @@ interface RowProps {
  * Load history is not a green query-readiness signal. Preserve recorded setup
  * progress/problems, and leave current availability checks to artifact open.
  */
-function DataIndicator({ ws }: { ws: TenantMembership }) {
+function DataIndicator({ ws }: { ws: WorkspaceListItem }) {
   const state = workspaceLoadState(ws)
   const setupLabel =
     state === "loading"
@@ -153,7 +152,7 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }
 
 /** A workspace the user has lost upstream access to: shown for context but
  *  not selectable — the only way in is the lost-access modal's guidance. */
-function LostAccessRow({ ws }: { ws: TenantMembership }) {
+function LostAccessRow({ ws }: { ws: WorkspaceListItem }) {
   const { Icon } = getProviderMeta(firstProvider(ws))
   return (
     <div
@@ -230,19 +229,19 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     const byId = new Map(accessible.map((d) => [d.id, d]))
     return recentIds
       .map((id) => byId.get(id))
-      .filter((d): d is TenantMembership => d != null)
+      .filter((d): d is WorkspaceListItem => d != null)
       .slice(0, RECENT_LIMIT)
   }, [accessible, recentIds])
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
-    const matchesSearch = (ws: TenantMembership) =>
+    const matchesSearch = (ws: WorkspaceListItem) =>
       !q ||
       ws.display_name.toLowerCase().includes(q) ||
       (ws.tenants ?? []).some((t) => t.tenant_name.toLowerCase().includes(q))
 
     // When searching, ignore the Recent segment and search across everything.
-    let base: TenantMembership[]
+    let base: WorkspaceListItem[]
     if (q) {
       base = accessible
     } else if (segment === "recent") {
@@ -303,7 +302,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     setSearch("")
   }
 
-  function select(ws: TenantMembership) {
+  function select(ws: WorkspaceListItem) {
     setActiveDomain(ws.id)
     newThread()
     close()
@@ -323,7 +322,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     }
   }
 
-  function manage(ws: TenantMembership) {
+  function manage(ws: WorkspaceListItem) {
     close()
     navigate(`${pathPrefix}${workspacePath(ws)}`)
   }

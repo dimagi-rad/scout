@@ -3,10 +3,10 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api, ApiError } from "@/api/client"
-import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import type { CanvasCommitReport, CanvasProjection } from "./canvasApi"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
 vi.mock("@/api/client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/api/client")>()
@@ -334,7 +334,7 @@ describe("Canvas role gating", () => {
 
   it("gives a read-write member the per-entry actions", async () => {
     useAppStore.setState({
-      domains: [{ id: "workspace-a", role: "read_write" } as TenantMembership],
+      domains: [{ id: "workspace-a", role: "read_write" } as WorkspaceListItem],
     })
     vi.mocked(api.get).mockResolvedValueOnce(projection("thread-a", "A draft"))
     render(panel("workspace-a", "thread-a"))
@@ -346,7 +346,7 @@ describe("Canvas role gating", () => {
 
   it("replaces Save all with a read-only hint", async () => {
     useAppStore.setState({
-      domains: [{ id: "workspace-a", role: "read" } as TenantMembership],
+      domains: [{ id: "workspace-a", role: "read" } as WorkspaceListItem],
     })
     vi.mocked(api.get).mockResolvedValueOnce(projection("thread-a", "A draft"))
     render(panel("workspace-a", "thread-a"))

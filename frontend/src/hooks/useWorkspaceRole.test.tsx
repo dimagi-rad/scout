@@ -2,7 +2,6 @@ import { act, renderHook } from "@testing-library/react"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { ApiError } from "@/api/client"
-import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
 import {
   actionFailure,
@@ -10,9 +9,10 @@ import {
   useWorkspaceRole,
   writeErrorMessage,
 } from "./useWorkspaceRole"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
-function workspace(id: string, role: TenantMembership["role"]) {
-  return { id, role } as TenantMembership
+function workspace(id: string, role: WorkspaceListItem["role"]) {
+  return { id, role } as WorkspaceListItem
 }
 
 afterEach(() => useAppStore.setState({ domains: [], activeDomainId: null }))

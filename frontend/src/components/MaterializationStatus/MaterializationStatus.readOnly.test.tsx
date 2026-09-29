@@ -1,14 +1,14 @@
 import { render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it } from "vitest"
 
-import type { TenantMembership } from "@/store/domainSlice"
 import { useAppStore } from "@/store/store"
 import { MaterializationFailure } from "./MaterializationFailure"
 import { MaterializationProgressBanner } from "./MaterializationProgressBanner"
 import { job, termination, WORKSPACE_ID } from "./testFixtures"
+import type { WorkspaceListItem } from "@/api/workspaces"
 
-function asRole(role: TenantMembership["role"]) {
-  useAppStore.setState({ domains: [{ id: WORKSPACE_ID, role } as TenantMembership] })
+function asRole(role: WorkspaceListItem["role"]) {
+  useAppStore.setState({ domains: [{ id: WORKSPACE_ID, role } as WorkspaceListItem] })
 }
 
 afterEach(() => useAppStore.setState({ domains: [] }))

@@ -4,7 +4,6 @@ import { workspaceApi } from "@/api/workspaces"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { createAppStore, type AppStore } from "./store"
 import type { User } from "./authSlice"
-import type { TableAnnotations } from "./dictionarySlice"
 
 const user = (id: string): User => ({
   id, email: `${id}@example.invalid`, name: id, is_staff: false, onboarding_complete: true,
@@ -40,8 +39,6 @@ function seedPrivateState(store: ReturnType<typeof createAppStore>, suffix = "a"
     threadsStatus: "loaded", threadsAccessLostMessage: id,
     artifacts: [{ id, title: id } as AppStore["artifacts"][number]],
     artifactsStatus: "loaded", artifactsError: id, artifactSearch: id,
-    dataDictionary: { schemas: { [id]: {} } }, dictionaryStatus: "loaded", dictionaryError: id, dictionaryWarning: id,
-    selectedTable: { schema: id, table: id, columns: [], annotations: null, sourceMetadata: null },
     datasetCatalog: { datasets: [] } as unknown as AppStore["datasetCatalog"],
     datasetStatus: "loaded", datasetError: id,
     selectedDataset: { name: id } as AppStore["selectedDataset"],
@@ -172,7 +169,6 @@ describe("account-owned store isolation", () => {
       domains: [], domainsStatus: "idle", domainsError: null,
       activeArtifactId: null, threads: [], threadsStatus: "idle", threadsAccessLostMessage: null,
       artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
-      dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, dictionaryWarning: null, selectedTable: null,
       datasetCatalog: null, datasetStatus: "idle", datasetError: null,
       selectedDataset: null, selectedDatasetStatus: "idle", selectedDatasetError: null,
       knowledgeItems: [], knowledgeStatus: "idle", knowledgeError: null, knowledgePagination: null,
@@ -238,7 +234,6 @@ describe("account-owned store isolation", () => {
 
 const reads = [
   { name: "artifacts", start: (s: AppStore) => s.artifactActions.fetchArtifacts(), response: { results: [] } },
-  { name: "dictionary", start: (s: AppStore) => s.dictionaryActions.fetchDictionary(), response: { schemas: {} } },
   { name: "datasets", start: (s: AppStore) => s.datasetActions.fetchDatasets(), response: { datasets: [] } },
   { name: "knowledge", start: (s: AppStore) => s.knowledgeActions.fetchKnowledge(), response: { results: [], pagination: null } },
   { name: "recipes", start: (s: AppStore) => s.recipeActions.fetchRecipes(), response: [] },
@@ -326,22 +321,6 @@ describe("old-session response fencing", () => {
 
     expect(currentFetch).not.toHaveBeenCalled()
     expect(store.getState()).toBe(before)
-  })
-
-  it("prevents a late mutation from modifying B's dictionary objects in place", async () => {
-    const store = signedIn()
-    const pending = deferred<unknown>()
-    vi.spyOn(api, "put").mockReturnValueOnce(pending.promise)
-    const update = store.getState().dictionaryActions.updateAnnotations("public", "items", {})
-    await loginAs(store, USER_B)
-    const annotations = { description: "B-owned" } as TableAnnotations
-    const dictionary = { schemas: { public: { items: { annotations } } } } as unknown as NonNullable<AppStore["dataDictionary"]>
-    store.setState({ dataDictionary: dictionary })
-
-    pending.resolve({ description: "A-owned" })
-    await update
-
-    expect(dictionary.schemas.public.items.annotations).toBe(annotations)
   })
 
   it("does not invalidate another store instance's requests", async () => {

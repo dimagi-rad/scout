@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
-import { workspaceApi } from "@/api/workspaces"
-import type { TenantMembership } from "@/store/domainSlice"
+import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 
 describe("domainSlice.setActiveDomain — threadId leak guard (00c423d)", () => {
@@ -130,7 +129,7 @@ describe("domainSlice.fetchDomains — default pick skips lost-access workspaces
 })
 
 describe("domainSlice.revalidateDomains — silent background refresh (#355)", () => {
-  const ws = (id: string): TenantMembership => ({
+  const ws = (id: string): WorkspaceListItem => ({
     id,
     name: id,
     display_name: id,
@@ -153,7 +152,7 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
   })
 
   it("adds new workspaces without ever passing through loading", async () => {
-    let resolve!: (value: TenantMembership[]) => void
+    let resolve!: (value: WorkspaceListItem[]) => void
     vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((r) => { resolve = r }))
     const statuses: string[] = []
     const unsubscribe = useAppStore.subscribe((s) => statuses.push(s.domainsStatus))
@@ -241,7 +240,7 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
   })
 
   it("makes a fresh request rather than joining one that started before it (D1)", async () => {
-    let resolveOlder!: (value: TenantMembership[]) => void
+    let resolveOlder!: (value: WorkspaceListItem[]) => void
     const list = vi.spyOn(workspaceApi, "list")
       .mockReturnValueOnce(new Promise((r) => { resolveOlder = r }))
       .mockResolvedValueOnce([ws("granted"), ws("a")])
@@ -258,7 +257,7 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
   })
 
   it("drops its result when a full fetch starts after it", async () => {
-    let resolveStale!: (value: TenantMembership[]) => void
+    let resolveStale!: (value: WorkspaceListItem[]) => void
     vi.spyOn(workspaceApi, "list")
       .mockReturnValueOnce(new Promise((r) => { resolveStale = r }))
       .mockResolvedValueOnce([ws("fresh")])
@@ -275,7 +274,7 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
 })
 
 describe("domainSlice.addedDomainIds — workspaces someone added you to (#355)", () => {
-  const ws = (id: string): TenantMembership => ({
+  const ws = (id: string): WorkspaceListItem => ({
     id,
     name: id,
     display_name: id,
