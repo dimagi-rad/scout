@@ -70,14 +70,13 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
-  const currentUrlWorkspaceIdRef = useRef(urlWorkspaceId)
+  const currentUrlRef = useRef({ workspaceId: urlWorkspaceId, threadId: urlThreadId ?? null })
   useEffect(() => {
-    currentUrlWorkspaceIdRef.current = urlWorkspaceId
-  }, [urlWorkspaceId])
+    currentUrlRef.current = { workspaceId: urlWorkspaceId, threadId: urlThreadId ?? null }
+  }, [urlWorkspaceId, urlThreadId])
 
   useEffect(() => {
     if (!awaitingUrlWorkspace || !urlWorkspaceId) return
-    const linkThreadId = urlThreadId ?? null
     const heldActiveDomainId = useAppStore.getState().activeDomainId
     let settled = false
     const giveUp = () => {
@@ -86,12 +85,22 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
       unsubscribe()
       setRecheckedWorkspaceId(urlWorkspaceId)
     }
-    let fallback: { activeDomainId: string | null; threadId: string } | null = null
+    let fallback: {
+      activeDomainId: string | null
+      threadId: string
+      linkThreadId: string | null
+      at: number
+    } | null = null
     // The API client has no timeout; a stalled request must not freeze store → URL sync.
     const timer = setTimeout(() => {
       if (settled) return
       const { activeDomainId: fallbackDomainId, threadId: fallbackThreadId } = useAppStore.getState()
-      fallback = { activeDomainId: fallbackDomainId, threadId: fallbackThreadId }
+      fallback = {
+        activeDomainId: fallbackDomainId,
+        threadId: fallbackThreadId,
+        linkThreadId: currentUrlRef.current.threadId,
+        at: Date.now(),
+      }
       giveUp()
     }, URL_WORKSPACE_RECHECK_TIMEOUT_MS)
     // Picking another workspace mid-recheck is a decision; a late result must not bounce it back.
@@ -99,24 +108,26 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
       if (!settled && s.activeDomainId !== heldActiveDomainId) giveUp()
     })
 
-    void revalidateDomains({ fresh: true }).then((fetched) => {
-      // Skipped for a full load, which drops the hold and re-runs this effect when it lands.
-      if (!fetched || !mountedRef.current) return
+    void revalidateDomains({ fresh: true }).then((result) => {
+      // A skip means a full load owns the list: it drops the hold and re-runs this effect
+      // when it lands. A failure has no answer to act on, so the timeout decides.
+      if (result !== "fetched" || !mountedRef.current) return
       if (!settled) {
         giveUp()
         return
       }
       // The recheck timed out but the late answer has the workspace: return to the
-      // link, unless the user has moved on from the fallback since.
-      if (!fallback) return
+      // link, unless the user has moved on from the fallback since. Only shortly after
+      // the fallback, so a stalled answer can't yank someone out of a thread they're using.
+      if (!fallback || Date.now() - fallback.at > URL_WORKSPACE_RECHECK_TIMEOUT_MS) return
       const s = useAppStore.getState()
       if (
         s.domains.some((d) => d.id === urlWorkspaceId) &&
         s.activeDomainId === fallback.activeDomainId &&
         s.threadId === fallback.threadId &&
-        currentUrlWorkspaceIdRef.current === fallback.activeDomainId
+        currentUrlRef.current.workspaceId === fallback.activeDomainId
       ) {
-        navigate(chatUrl(urlWorkspaceId, linkThreadId, s.domains), { replace: true })
+        navigate(chatUrl(urlWorkspaceId, fallback.linkThreadId, s.domains), { replace: true })
       }
     })
     return () => {

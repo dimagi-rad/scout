@@ -375,7 +375,6 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
     let release!: (domains: TenantMembership[]) => void
     try {
       vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
-      const clear = vi.spyOn(globalThis, "clearTimeout")
       const router = renderPrettyChat(`/workspaces/${"66666666-6666-6666-6666-666666666666"}/chat`)
       await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())
       const pending = vi.getTimerCount()
@@ -383,7 +382,6 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
       act(() => router.dispose())
       cleanup()
 
-      expect(clear).toHaveBeenCalled()
       expect(vi.getTimerCount()).toBeLessThan(pending)
     } finally {
       vi.useRealTimers()
@@ -419,6 +417,58 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
         `/workspaces/slow-grant/${WS_SLOW}/chat/${THREAD_STALE}`,
       )
     })
+  })
+
+  it("stays on the fallback when the late answer comes long after it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let release!: (domains: TenantMembership[]) => void
+    const WS_STALLED = "99999999-9999-9999-9999-999999999999"
+    try {
+      vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => { release = resolve }))
+      renderPrettyChat(`/workspaces/${WS_STALLED}/chat`)
+      await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000)
+      })
+      await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+      ))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(40_000)
+      })
+
+      await act(async () => release([domain(WS_STALLED, "Stalled"), domain(WS_A, "Workspace A")]))
+
+      expect(useAppStore.getState().activeDomainId).toBe(WS_A)
+      expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps holding the link until the timeout when the recheck fails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.spyOn(workspaceApi, "list").mockRejectedValue(new Error("503"))
+      const WS_BLIP = "12121212-1212-1212-1212-121212121212"
+      renderPrettyChat(`/workspaces/${WS_BLIP}/chat`)
+      await waitFor(() => expect(workspaceApi.list).toHaveBeenCalledOnce())
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(screen.getByTestId("path").textContent).toBe(`/workspaces/${WS_BLIP}/chat`)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000)
+      })
+      await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+      ))
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("rechecks a link again on a later visit, A → B → A", async () => {

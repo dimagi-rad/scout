@@ -14,6 +14,9 @@ export type TenantMembership = WorkspaceListItem & {
 
 export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 
+/** "skipped": no request, because the list isn't loaded (an initial or retried full load owns it). */
+export type RevalidateResult = "fetched" | "failed" | "skipped"
+
 export interface DomainSlice {
   domains: TenantMembership[]
   activeDomainId: string | null
@@ -24,10 +27,9 @@ export interface DomainSlice {
     fetchDomains: () => Promise<void>
     /**
      * Background refresh: never shows loading or error, and keeps state when nothing changed.
-     * Resolves false when it skipped the request because a full load owns the list.
      * `fresh` never joins a request that started before the call.
      */
-    revalidateDomains: (options?: { fresh?: boolean }) => Promise<boolean>
+    revalidateDomains: (options?: { fresh?: boolean }) => Promise<RevalidateResult>
     setActiveDomain: (id: string) => void
     setActiveDomainByTenantId: (provider: string, tenantId: string) => void
     ensureTenant: (provider: string, tenantId: string) => Promise<void>
@@ -45,7 +47,7 @@ function defaultDomainId(domains: TenantMembership[]): string | null {
 // Dropped from the list (deleted, or you were removed): every lookup of it would
 // now miss, and a missing role reads as writable, so move to the default. An id
 // that was never listed, such as a deep link still being checked, is kept.
-export function nextActiveDomainId(
+function nextActiveDomainId(
   prev: TenantMembership[],
   next: TenantMembership[],
   activeId: string | null,
@@ -58,7 +60,7 @@ export function nextActiveDomainId(
 export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => {
   // Bumped by every list request, so a background result never overwrites a newer foreground one.
   let listRequestSeq = 0
-  let revalidation: Promise<void> | null = null
+  let revalidation: Promise<RevalidateResult> | null = null
 
   return {
     domains: [],
@@ -89,10 +91,10 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
 
       revalidateDomains: async ({ fresh = false } = {}) => {
         // An initial or retried load shows its own state; don't race it.
-        if (get().domainsStatus !== "loaded") return false
+        if (get().domainsStatus !== "loaded") return "skipped"
         if (revalidation) {
-          await revalidation
-          if (!fresh) return true
+          const joined = await revalidation
+          if (!fresh) return joined
           // That request may predate what the caller is waiting for (a grant, #355).
           return get().domainActions.revalidateDomains()
         }
@@ -100,24 +102,23 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         const seq = listRequestSeq
         revalidation = workspaceApi
           .list()
-          .then((domains) => {
-            if (seq !== listRequestSeq) return
+          .then((domains): RevalidateResult => {
+            if (seq !== listRequestSeq) return "fetched"
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
-            if (JSON.stringify(domains) === JSON.stringify(current.domains)) return
+            if (JSON.stringify(domains) === JSON.stringify(current.domains)) return "fetched"
             set({
               domains,
               activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
             })
+            return "fetched"
           })
-          .catch(() => {
-            // The list on screen is still usable, so a failed background refresh stays silent.
-          })
+          // The list on screen is still usable, so a failed background refresh stays silent.
+          .catch((): RevalidateResult => "failed")
           .finally(() => {
             revalidation = null
           })
-        await revalidation
-        return true
+        return revalidation
       },
 
       setActiveDomain: (id: string) => {

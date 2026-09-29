@@ -229,9 +229,15 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a")])
     const actions = useAppStore.getState().domainActions
 
-    expect(await actions.revalidateDomains()).toBe(true)
+    expect(await actions.revalidateDomains()).toBe("fetched")
     useAppStore.setState({ domainsStatus: "loading" })
-    expect(await actions.revalidateDomains()).toBe(false)
+    expect(await actions.revalidateDomains()).toBe("skipped")
+  })
+
+  it("reports a failed refresh as failed, not fetched", async () => {
+    vi.spyOn(workspaceApi, "list").mockRejectedValue(new Error("503"))
+
+    expect(await useAppStore.getState().domainActions.revalidateDomains()).toBe("failed")
   })
 
   it("makes a fresh request rather than joining one that started before it (D1)", async () => {
@@ -245,7 +251,7 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     const fresh = actions.revalidateDomains({ fresh: true })
     resolveOlder([ws("a")])
 
-    expect(await fresh).toBe(true)
+    expect(await fresh).toBe("fetched")
     await older
     expect(list).toHaveBeenCalledTimes(2)
     expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["granted", "a"])
