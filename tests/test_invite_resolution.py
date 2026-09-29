@@ -7,7 +7,6 @@ from allauth.account.models import EmailAddress
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from apps.users.models import TenantMembership
 from apps.users.signals import (
     resolve_pending_invites_on_login,
     resolve_tenant_on_social_login,
@@ -19,6 +18,7 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
 )
+from tests.tenant_access import grant_tenant_access
 
 User = get_user_model()
 
@@ -35,7 +35,7 @@ def _invite(workspace, email="invitee@example.com", status=WorkspaceInviteStatus
 
 
 def _grant_live_tenant(user, tenant):
-    TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+    grant_tenant_access(user, tenant)
 
 
 @pytest.mark.django_db

@@ -9,7 +9,6 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from django.utils import timezone
 
 from apps.users.services.merge import merge_users
 from apps.users.services.oauth_scope import canonical_provider
@@ -18,7 +17,6 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.workspaces.access import _live_tenant_ids, _shares_live_tenant
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
     WorkspaceInvite,
@@ -29,6 +27,7 @@ from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     notify_invite_accepted,
 )
+from apps.workspaces.services.member_coverage import accept_invite_if_covered
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,6 @@ def auto_create_workspace_on_membership(sender, instance, created, **kwargs):
         return
     from apps.workspaces.models import (
         Workspace,
-        WorkspaceMembership,
         WorkspaceRole,
         WorkspaceTenant,
     )
@@ -179,7 +177,7 @@ def resolve_pending_invites_on_login(user):
 
     An invite is pure pre-authorization — it carries no data access (Root Cause
     A's access.py is the sole gate). This flips it into a real WorkspaceMembership
-    only once the user has live upstream access for the workspace's tenant(s), and
+    only once the user can use EVERY one of the workspace's tenants (#381), and
     matches strictly on VERIFIED emails so an unverified address can't claim one.
     """
     emails = {
@@ -202,18 +200,7 @@ def resolve_pending_invites_on_login(user):
             invite.save(update_fields=["status", "updated_at"])
             continue
 
-        if _shares_live_tenant(user, _live_tenant_ids(invite.workspace)):
-            membership, _ = WorkspaceMembership.objects.get_or_create(
-                workspace=invite.workspace,
-                user=user,
-                defaults={"role": invite.role, "invited_by": invite.invited_by},
-            )
-            invite.status = WorkspaceInviteStatus.ACCEPTED
-            invite.resolved_at = timezone.now()
-            invite.resolved_membership = membership
-            invite.save(
-                update_fields=["status", "resolved_at", "resolved_membership", "updated_at"]
-            )
+        if accept_invite_if_covered(invite, user) is not None:
             notify_invite_accepted(invite, user)
         elif invite.status != WorkspaceInviteStatus.AWAITING_ACCESS:
             invite.status = WorkspaceInviteStatus.AWAITING_ACCESS
