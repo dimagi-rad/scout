@@ -8,7 +8,6 @@ and reverts the schema, the siblings it moved off are put back onto it. Only the
 (which writes the sentinel into the candidate) and the Cube build are stubbed.
 """
 
-import contextlib
 import os
 import uuid
 from datetime import timedelta
@@ -21,7 +20,7 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from apps.common.identifiers import readonly_role_name, view_name
+from apps.common.identifiers import view_name
 from apps.users.models import Tenant
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
@@ -33,6 +32,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from tests.managed_sentinels import drop_owned, read_as_readonly, write_sentinel
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import grant_tenant_access
 
@@ -45,56 +45,11 @@ pytestmark = [
 ]
 
 
-def _exec(sql, *params):
-    with get_managed_db_connection() as conn:
-        conn.execute(sql, params or None)
-
-
-def _write_sentinel(schema_name: str, value: str) -> None:
-    ident = psycopg.sql.Identifier(schema_name)
-    _exec(psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(ident))
-    _exec(psycopg.sql.SQL("DROP TABLE IF EXISTS {}.raw_cases").format(ident))
-    _exec(psycopg.sql.SQL("CREATE TABLE {}.raw_cases (value text)").format(ident))
-    _exec(
-        psycopg.sql.SQL("INSERT INTO {}.raw_cases VALUES ({})").format(
-            ident, psycopg.sql.Literal(value)
-        )
-    )
-
-
-def _read(view_schema: str, relation: str) -> list[str]:
-    with get_managed_db_connection() as conn:
-        conn.execute(
-            psycopg.sql.SQL("SET ROLE {}").format(
-                psycopg.sql.Identifier(readonly_role_name(view_schema))
-            )
-        )
-        rows = conn.execute(
-            psycopg.sql.SQL("SELECT value FROM {}.{}").format(
-                psycopg.sql.Identifier(view_schema), psycopg.sql.Identifier(relation)
-            )
-        ).fetchall()
-    return [row[0] for row in rows]
-
-
 @pytest.fixture
 def owned_names():
     names: list[str] = []
     yield names
-    manager = SchemaManager()
-    with get_managed_db_connection() as conn:
-        cursor = conn.cursor()
-        for name in names:
-            with contextlib.suppress(Exception):
-                cursor.execute(
-                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                        psycopg.sql.Identifier(name)
-                    )
-                )
-        for name in names:
-            with contextlib.suppress(Exception):
-                manager._drop_readonly_role(cursor, name)
-                manager._drop_dbt_role(cursor, name)
+    drop_owned(names)
 
 
 def _setup(owned_names):
@@ -111,7 +66,7 @@ def _setup(owned_names):
         with get_managed_db_connection() as conn:
             conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
             SchemaManager()._create_readonly_role(conn.cursor(), schema)
-        _write_sentinel(schema, f"{key}1")
+        write_sentinel(schema, f"{key}1")
         TenantSchema.objects.create(tenant=tenant, schema_name=schema, state=SchemaState.ACTIVE)
         tenants[key] = tenant
     workspaces = {}
@@ -138,10 +93,12 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
     def fetch(membership, credential, pipeline, job_id, target_schema=None):
         owned_names.append(target_schema.schema_name)
         if membership.tenant_id == tenants["s"].id:
-            during_load.append((_read(view_a, shared_view), _read(view_b, shared_view)))
-            _write_sentinel(target_schema.schema_name, "s2")
+            during_load.append(
+                (read_as_readonly(view_a, shared_view), read_as_readonly(view_b, shared_view))
+            )
+            write_sentinel(target_schema.schema_name, "s2")
         else:
-            _write_sentinel(target_schema.schema_name, "a2")
+            write_sentinel(target_schema.schema_name, "a2")
         return completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
 
     with (
@@ -170,8 +127,8 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
     await old_shared.arefresh_from_db()
     assert old_shared.state == SchemaState.TEARDOWN
     # A published and rebuilt against the new schema; B still reads last-good.
-    assert await sync_to_async(_read)(view_a, shared_view) == ["s2"]
-    assert await sync_to_async(_read)(view_b, shared_view) == ["s1"]
+    assert await sync_to_async(read_as_readonly)(view_a, shared_view) == ["s2"]
+    assert await sync_to_async(read_as_readonly)(view_b, shared_view) == ["s1"]
 
     with patch("apps.workspaces.tasks.teardown_schema.configure") as retry:
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -184,7 +141,7 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
         return_value=MagicMock(id="cube", content_hash="hash"),
     ):
         await workspaces_tasks.rebuild_workspace_view_schema.func(str(workspaces["B"].id))
-    assert await sync_to_async(_read)(view_b, shared_view) == ["s2"]
+    assert await sync_to_async(read_as_readonly)(view_b, shared_view) == ["s2"]
 
     await workspaces_tasks.teardown_schema(schema_id=str(old_shared.id), attempt=1)
     await old_shared.arefresh_from_db()
@@ -217,7 +174,7 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
         for ws in workspaces.values():
             await workspaces_tasks.rebuild_workspace_view_schema.func(str(ws.id))
     with pytest.raises(psycopg.errors.UndefinedTable):
-        await sync_to_async(_read)(view_schemas["A"], shared_view)
+        await sync_to_async(read_as_readonly)(view_schemas["A"], shared_view)
 
     deferred = AsyncMock()
     with (
@@ -236,4 +193,4 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
         for workspace_id in rebuilt:
             await workspaces_tasks.rebuild_workspace_view_schema.func(workspace_id)
     for view_schema in view_schemas.values():
-        assert await sync_to_async(_read)(view_schema, shared_view) == ["s1"]
+        assert await sync_to_async(read_as_readonly)(view_schema, shared_view) == ["s1"]

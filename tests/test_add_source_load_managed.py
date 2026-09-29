@@ -7,7 +7,6 @@ new one missing; the load then fetches it and republishes the views and Cube wit
 it. Only the provider fetch (which writes a sentinel) and the Cube build are stubbed.
 """
 
-import contextlib
 import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,7 +18,7 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
-from apps.common.identifiers import readonly_role_name, view_name
+from apps.common.identifiers import view_name
 from apps.users.models import Tenant
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
@@ -32,6 +31,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from tests.managed_sentinels import drop_owned, read_as_readonly, write_sentinel
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import grant_tenant_access
 
@@ -44,56 +44,11 @@ pytestmark = [
 ]
 
 
-def _exec(sql):
-    with get_managed_db_connection() as conn:
-        conn.execute(sql)
-
-
-def _write_sentinel(schema_name: str, value: str) -> None:
-    ident = psycopg.sql.Identifier(schema_name)
-    _exec(psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(ident))
-    _exec(psycopg.sql.SQL("DROP TABLE IF EXISTS {}.raw_cases").format(ident))
-    _exec(psycopg.sql.SQL("CREATE TABLE {}.raw_cases (value text)").format(ident))
-    _exec(
-        psycopg.sql.SQL("INSERT INTO {}.raw_cases VALUES ({})").format(
-            ident, psycopg.sql.Literal(value)
-        )
-    )
-
-
-def _read(view_schema: str, relation: str) -> list[str]:
-    with get_managed_db_connection() as conn:
-        conn.execute(
-            psycopg.sql.SQL("SET ROLE {}").format(
-                psycopg.sql.Identifier(readonly_role_name(view_schema))
-            )
-        )
-        rows = conn.execute(
-            psycopg.sql.SQL("SELECT value FROM {}.{}").format(
-                psycopg.sql.Identifier(view_schema), psycopg.sql.Identifier(relation)
-            )
-        ).fetchall()
-    return [row[0] for row in rows]
-
-
 @pytest.fixture
 def owned_names():
     names: list[str] = []
     yield names
-    manager = SchemaManager()
-    with get_managed_db_connection() as conn:
-        cursor = conn.cursor()
-        for name in names:
-            with contextlib.suppress(Exception):
-                cursor.execute(
-                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                        psycopg.sql.Identifier(name)
-                    )
-                )
-        for name in names:
-            with contextlib.suppress(Exception):
-                manager._drop_readonly_role(cursor, name)
-                manager._drop_dbt_role(cursor, name)
+    drop_owned(names)
 
 
 def _setup(owned_names):
@@ -114,7 +69,7 @@ def _setup(owned_names):
         with get_managed_db_connection() as conn:
             conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
             SchemaManager()._create_readonly_role(conn.cursor(), schema)
-        _write_sentinel(schema, f"{key}1")
+        write_sentinel(schema, f"{key}1")
         TenantSchema.objects.create(
             tenant=tenants[key], schema_name=schema, state=SchemaState.ACTIVE
         )
@@ -171,16 +126,16 @@ async def test_adding_an_unloaded_source_loads_it_and_republishes_the_views(owne
     assert vs.state == SchemaState.ACTIVE
     assert _coverage_ids(vs, "included_tenants") == serving
     assert _coverage_ids(vs, "excluded_tenants") == [str(tenants["new"].id)]
-    assert await sync_to_async(_read)(view_schema, relation["a"]) == ["a1"]
+    assert await sync_to_async(read_as_readonly)(view_schema, relation["a"]) == ["a1"]
     with pytest.raises(psycopg.errors.UndefinedTable):
-        await sync_to_async(_read)(view_schema, relation["new"])
+        await sync_to_async(read_as_readonly)(view_schema, relation["new"])
 
     fetched = []
 
     def fetch(membership, credential, pipeline, job_id, target_schema=None):
         owned_names.append(target_schema.schema_name)
         fetched.append(membership.tenant_id)
-        _write_sentinel(target_schema.schema_name, "new1")
+        write_sentinel(target_schema.schema_name, "new1")
         return completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
 
     cube.reset_mock()
@@ -212,6 +167,6 @@ async def test_adding_an_unloaded_source_loads_it_and_republishes_the_views(owne
     assert vs.state == SchemaState.ACTIVE
     assert _coverage_ids(vs, "included_tenants") == sorted([*serving, str(tenants["new"].id)])
     assert vs.tenant_coverage["excluded_tenants"] == []
-    assert await sync_to_async(_read)(view_schema, relation["new"]) == ["new1"]
-    assert await sync_to_async(_read)(view_schema, relation["a"]) == ["a1"]
-    assert await sync_to_async(_read)(view_schema, relation["b"]) == ["b1"]
+    assert await sync_to_async(read_as_readonly)(view_schema, relation["new"]) == ["new1"]
+    assert await sync_to_async(read_as_readonly)(view_schema, relation["a"]) == ["a1"]
+    assert await sync_to_async(read_as_readonly)(view_schema, relation["b"]) == ["b1"]
