@@ -32,7 +32,6 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
-    SchemaState,
     TenantSchema,
     Workspace,
     WorkspaceInvite,
@@ -58,7 +57,10 @@ from apps.workspaces.services.member_coverage import (
     requester_gaps,
 )
 from apps.workspaces.services.query_state import synced_runs
-from apps.workspaces.services.status import derive_schema_status
+from apps.workspaces.services.status import (
+    classify_tenant_schemas,
+    workspace_schema_status,
+)
 from apps.workspaces.services.workspace_service import remove_workspace_tenant
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -287,17 +289,11 @@ def _schema_status_for_workspaces(workspaces):
     # All tenant ids across these workspaces.
     tenant_ids = {wt.tenant_id for w in workspaces for wt in w.workspace_tenants.all()}
 
-    # Per-tenant schema states (one bulk query).
-    active_tenants = set()
-    provisioning_tenants = set()
-    if tenant_ids:
-        for tenant_id, state in TenantSchema.objects.filter(tenant_id__in=tenant_ids).values_list(
-            "tenant_id", "state"
-        ):
-            if state == SchemaState.ACTIVE:
-                active_tenants.add(tenant_id)
-            elif state in (SchemaState.PROVISIONING, SchemaState.MATERIALIZING):
-                provisioning_tenants.add(tenant_id)
+    active_tenants, provisioning_tenants = classify_tenant_schemas(
+        TenantSchema.objects.filter(tenant_id__in=tenant_ids).values_list("tenant_id", "state")
+        if tenant_ids
+        else ()
+    )
 
     # Multi-tenant workspaces' view schema states (one bulk query).
     view_states = dict(
@@ -308,14 +304,11 @@ def _schema_status_for_workspaces(workspaces):
 
     statuses = {}
     for w in workspaces:
-        ws_tenant_ids = [wt.tenant_id for wt in w.workspace_tenants.all()]
-        active_count = sum(1 for tid in ws_tenant_ids if tid in active_tenants)
-        provisioning = any(tid in provisioning_tenants for tid in ws_tenant_ids)
-        statuses[w.id] = derive_schema_status(
-            tenant_count=len(ws_tenant_ids),
-            active_count=active_count,
-            provisioning=provisioning,
-            view_schema_state=view_states.get(w.id),
+        statuses[w.id] = workspace_schema_status(
+            [wt.tenant_id for wt in w.workspace_tenants.all()],
+            active_tenants,
+            provisioning_tenants,
+            view_states.get(w.id),
         )
     return statuses
 
@@ -482,14 +475,6 @@ class WorkspaceDetailView(APIView):
         missing = missing_tenants_for_member(request.user, workspace)
 
         tenants = list(workspace.tenants.all())
-        active_schemas = TenantSchema.objects.filter(
-            tenant__in=tenants, state=SchemaState.ACTIVE
-        ).count()
-        provisioning = TenantSchema.objects.filter(
-            tenant__in=tenants,
-            state__in=[SchemaState.PROVISIONING, SchemaState.MATERIALIZING],
-        ).exists()
-
         view_schema_state = None
         if len(tenants) > 1:
             try:
@@ -497,11 +482,11 @@ class WorkspaceDetailView(APIView):
             except WorkspaceViewSchema.DoesNotExist:
                 view_schema_state = None
 
-        schema_status = derive_schema_status(
-            tenant_count=len(tenants),
-            active_count=active_schemas,
-            provisioning=provisioning,
-            view_schema_state=view_schema_state,
+        active, provisioning = classify_tenant_schemas(
+            TenantSchema.objects.filter(tenant__in=tenants).values_list("tenant_id", "state")
+        )
+        schema_status = workspace_schema_status(
+            [tenant.id for tenant in tenants], active, provisioning, view_schema_state
         )
 
         last_run_at = (
