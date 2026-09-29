@@ -17,6 +17,15 @@ interface State {
   error: Error | null
 }
 
+// React hands a boundary whatever was thrown. A non-Error may be app data, so a
+// string is kept as the message, as an Error's would be, and anything else is
+// described only by its type, as in the artifact sandbox.
+function nonErrorMessage(thrown: unknown): string {
+  return typeof thrown === "string"
+    ? thrown
+    : `Non-Error exception (${thrown === null ? "null" : typeof thrown})`
+}
+
 /**
  * Error boundary component that catches JavaScript errors in child components.
  * Displays a fallback UI instead of crashing the entire app.
@@ -27,19 +36,25 @@ export class ErrorBoundary extends Component<Props, State> {
     this.state = { hasError: false, error: null }
   }
 
-  static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error }
+  static getDerivedStateFromError(thrown: unknown): State {
+    // The fallback renders error.message, which for a thrown object may not be text.
+    return {
+      hasError: true,
+      error: thrown instanceof Error ? thrown : new Error(nonErrorMessage(thrown)),
+    }
   }
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error("ErrorBoundary caught an error:", error, errorInfo)
+  componentDidCatch(thrown: unknown, errorInfo: React.ErrorInfo) {
+    console.error("ErrorBoundary caught an error:", thrown, errorInfo)
+    // Not the state's normalised error: its stack would be this boundary's.
+    const error = thrown instanceof Error ? thrown : undefined
     // React 19 does not rethrow errors a boundary catches, so Sentry's global
     // handlers never see them.
     reportRenderError({
       source: "boundary",
-      name: error.name,
-      message: error.message,
-      stack: error.stack,
+      name: error?.name ?? "Error",
+      message: error ? error.message : nonErrorMessage(thrown),
+      stack: error?.stack,
       artifactId: this.props.artifactId,
       artifactVersion: this.props.artifactVersion,
     })

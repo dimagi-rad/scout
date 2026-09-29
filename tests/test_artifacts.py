@@ -4,6 +4,10 @@ Comprehensive tests for Phase 3 (Frontend & Artifacts) of the Scout data agent p
 Tests artifact models, views, access control and versioning.
 """
 
+import json
+import re
+import shutil
+import subprocess
 import uuid
 
 import pytest
@@ -230,6 +234,35 @@ class TestArtifactListView:
         assert [item["id"] for item in response.json()["results"]] == [str(artifact.id)]
 
 
+def _run_sandbox_error_listeners(dispatch: str) -> list:
+    """Run the template's real error helpers and window listeners under node.
+
+    `dispatch` calls `handlers.error(...)` / `handlers.unhandledrejection(...)`, or the
+    helpers directly, pushing to `calls`. Returns the notifyParentOfError calls, and any
+    pushed rows, with any stack replaced by the string "stack".
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    start = SANDBOX_HTML_TEMPLATE.index("function nonErrorMessage(")
+    last = SANDBOX_HTML_TEMPLATE.index("window.addEventListener('unhandledrejection'")
+    end = SANDBOX_HTML_TEMPLATE.index("\n        });", last) + len("\n        });")
+    harness = (
+        "const handlers = {}; const calls = [];\n"
+        "const window = { addEventListener: (type, fn) => { handlers[type] = fn } };\n"
+        "const ArtifactRenderer = { notifyParentOfError: (...args) => calls.push(args) };\n"
+        f"{SANDBOX_HTML_TEMPLATE[start:end]}\n"
+        f"{dispatch}"
+        "const stackless = calls.map(([t, m, s, n]) => [t, m, s && 'stack', n]);\n"
+        "console.log(JSON.stringify(stackless));\n"
+    )
+    result = subprocess.run(  # noqa: S603 - node from PATH runs a fixed harness
+        [node, "-e", harness], capture_output=True, text=True, check=False, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 # ============================================================================
 # 4. TestArtifactSandboxView
 # ============================================================================
@@ -385,6 +418,73 @@ class TestArtifactSandboxView:
         assert "window.addEventListener('error'" in content
         assert "window.addEventListener('unhandledrejection'" in content
         assert "error: { title, message, details, name }" in content
+
+    def test_sandbox_reports_non_error_rejections_without_their_value(self):
+        """`Promise.reject("query timed out")` must reach Sentry, but a rejected row must not."""
+        calls = _run_sandbox_error_listeners(
+            "const reasons = ['query timed out', { rows: [{ patient: 'Alice' }] }, 42, null,"
+            " new TypeError('bad')];\n"
+            "for (const reason of reasons) handlers.unhandledrejection({ reason });\n"
+        )
+
+        assert calls == [
+            ["Unhandled Rejection", "query timed out", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "Non-Error rejection (object)", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "Non-Error rejection (number)", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "Non-Error rejection (null)", None, "UnhandledRejection"],
+            ["Unhandled Rejection", "bad", "stack", "TypeError"],
+        ]
+
+    def test_sandbox_reads_no_fields_of_a_thrown_non_error(self):
+        """`throw row` must forward neither the row's fields nor its stringified value."""
+        calls = _run_sandbox_error_listeners(
+            "handlers.error({ error: { message: 'Alice', name: 'Bob' },"
+            " message: 'Uncaught [object Object]' });\n"
+            "handlers.error({ error: ['Alice', 'Bob'], message: 'Uncaught Alice,Bob' });\n"
+            "handlers.error({ error: 'query timed out', message: 'Uncaught query timed out' });\n"
+            "handlers.error({ error: null, message: 'Script error.' });\n"
+            "handlers.error({ error: new RangeError('bad'), message: 'Uncaught RangeError: bad' });\n"
+        )
+
+        assert calls == [
+            ["Uncaught Error", "Non-Error exception (object)", None, None],
+            ["Uncaught Error", "Non-Error exception (object)", None, None],
+            ["Uncaught Error", "query timed out", None, None],
+            ["Uncaught Error", "Script error.", None, None],
+            ["Uncaught Error", "bad", "stack", "RangeError"],
+        ]
+
+    def test_sandbox_catch_sites_read_no_fields_of_a_thrown_non_error(self):
+        """A render-time `throw row` or `throw null` goes through describeThrown."""
+        fields = re.compile(r"\berror\.(message|stack|name)\b")
+        # Each body runs to its closing brace, which sits at the `catch`'s own indent.
+        catch_bodies = re.findall(
+            r"\n( *)\} catch \(error\) \{(.*?)\n\1\}", SANDBOX_HTML_TEMPLATE, flags=re.DOTALL
+        )
+        reads_fields = [body.strip() for _, body in catch_bodies if fields.search(body)]
+        # JSON.parse of the page's own embedded data only ever throws a SyntaxError.
+        assert len(reads_fields) == 1
+        assert reads_fields[0].startswith("this.showError('Parse Error'")
+        boundary_start = SANDBOX_HTML_TEMPLATE.index("class _ErrorBoundary")
+        boundary = SANDBOX_HTML_TEMPLATE[
+            boundary_start : SANDBOX_HTML_TEMPLATE.index("render() {", boundary_start)
+        ]
+        assert not fields.search(boundary)
+
+        calls = _run_sandbox_error_listeners(
+            "for (const thrown of [null, { message: 'Alice', name: 'Bob' }, 'boom',"
+            " new TypeError('bad')]) {\n"
+            "  const d = describeThrown(thrown);\n"
+            "  calls.push(['describe', d.message, d.stack, d.name]);\n"
+            "}\n"
+        )
+
+        assert calls == [
+            ["describe", "Non-Error exception (null)", None, None],
+            ["describe", "Non-Error exception (object)", None, None],
+            ["describe", "boom", None, None],
+            ["describe", "bad", "stack", "TypeError"],
+        ]
 
     def test_sandbox_never_fetches_live_data_itself(
         self, authenticated_client, artifact, workspace

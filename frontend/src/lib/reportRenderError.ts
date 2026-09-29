@@ -25,6 +25,13 @@ const MAX_REPORTS_PER_SOURCE = 20
 // The header line of a V8 stack repeats the message, so it is not kept.
 const STACK_FRAME = /^\s+at\s|^[^\s]*@\S+:\d+:\d+$/
 
+// The name comes from the sandboxed artifact and becomes the Sentry error class,
+// so anything but a plain identifier could carry text or split Sentry grouping.
+export const SAFE_ERROR_NAME = /^[\w$.]{1,80}$/
+
+// Sentry's parser skips any line matching /\S*Error: /.
+const STACK_HEADER = "Error: render error"
+
 const reported = new Set<string>()
 const reportCounts = new Map<RenderErrorSource, number>()
 
@@ -37,7 +44,9 @@ function redactQuoted(text: string): string {
 }
 
 function safeText(text: string, maxLength = MAX_MESSAGE_LENGTH): string {
-  const redacted = redactQuoted(text)
+  // Collapsed before redaction so a quoted value broken across lines is still
+  // dropped, and so the text cannot pose as a stack frame of its own.
+  const redacted = redactQuoted(text.replace(/\s*[\r\n\v\f\u2028\u2029]+\s*/g, " "))
   return redacted.length > maxLength ? `${redacted.slice(0, maxLength)}…` : redacted
 }
 
@@ -63,19 +72,33 @@ export function dropConsoleBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null
  */
 export function reportRenderError(report: RenderErrorReport): void {
   // Keyed on the raw text so crashes that redact to the same message stay distinct.
-  const key = [report.source, report.artifactId, report.artifactVersion, report.name, report.message]
-    .join("|")
+  const key = [
+    report.source,
+    report.artifactId,
+    report.artifactVersion,
+    report.stage,
+    report.name,
+    report.message,
+  ].join("|")
   const count = reportCounts.get(report.source) ?? 0
   if (reported.has(key) || count >= MAX_REPORTS_PER_SOURCE) return
   reported.add(key)
   reportCounts.set(report.source, count + 1)
 
-  const name = safeText(report.name || "Error", 80)
+  // A boundary gets the raw thrown value, so `name` can be undefined, which
+  // RegExp.test would read as the valid identifier "undefined".
+  const name =
+    typeof report.name === "string" && SAFE_ERROR_NAME.test(report.name) ? report.name : "Error"
   const message = safeText(report.message || "")
   const error = new Error(message)
   error.name = name
   const stack = safeStack(report.stack)
-  error.stack = stack ? `${name}: ${message}\n${stack}` : `${name}: ${message}`
+  // The header is fixed text, not "name: message": Sentry takes both from the error
+  // itself, and parses a header whose name doesn't end in "Error" as a frame, so
+  // artifact text there like "x@https://evil.example/a.js:2:2" would become a fake
+  // frame. A header is still needed because Sentry drops the first stack line of a
+  // "Minified React error", which would otherwise be a real frame.
+  error.stack = stack ? `${STACK_HEADER}\n${stack}` : ""
 
   Sentry.withScope((scope) => {
     scope.setTag("render_error_source", report.source)
