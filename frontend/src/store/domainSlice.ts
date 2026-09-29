@@ -22,76 +22,111 @@ export interface DomainSlice {
   domainsError: string | null
   domainActions: {
     fetchDomains: () => Promise<void>
+    /** Background refresh: never shows loading or error, and keeps state when nothing changed. */
+    revalidateDomains: () => Promise<void>
     setActiveDomain: (id: string) => void
     setActiveDomainByTenantId: (provider: string, tenantId: string) => void
     ensureTenant: (provider: string, tenantId: string) => Promise<void>
   }
 }
 
-export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => ({
-  domains: [],
-  activeDomainId: null,
-  workspaceGeneration: 0,
-  domainsStatus: "idle",
-  domainsError: null,
-  domainActions: {
-    fetchDomains: async () => {
-      set({ domainsStatus: "loading", domainsError: null })
-      try {
-        const domains = await workspaceApi.list()
-        const activeDomainId = get().activeDomainId
-        // Default to the first workspace the user can still access, never an
-        // orphaned one whose upstream access was removed — landing there would
-        // just show the lost-access modal. A deep link to an orphan still works
-        // (the URL→store sync adopts it); this only governs the no-URL default.
-        const defaultId =
-          (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
-        set({
-          domains,
-          domainsStatus: "loaded",
-          domainsError: null,
-          activeDomainId: activeDomainId ?? defaultId,
-        })
-      } catch (error) {
-        set({
-          domainsStatus: "error",
-          domainsError: error instanceof Error ? error.message : "Failed to load domains",
-        })
-      }
-    },
+// Default to the first workspace the user can still access, never an orphaned
+// one whose upstream access was removed — landing there would just show the
+// lost-access modal. A deep link to an orphan still works (the URL→store sync
+// adopts it); this only governs the no-URL default.
+function defaultDomainId(domains: TenantMembership[]): string | null {
+  return (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
+}
 
-    setActiveDomain: (id: string) => {
-      if (!get().accountSession.isCurrent()) return
-      recordWorkspaceUse(id)
-      set({ activeDomainId: id })
-    },
+export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => {
+  // Bumped by every list request, so a background result never overwrites a newer foreground one.
+  let listRequestSeq = 0
+  let revalidation: Promise<void> | null = null
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    setActiveDomainByTenantId: (_provider: string, _tenantId: string) => {
-      // No-op: workspace-based API doesn't need tenant selection
-    },
-
-    ensureTenant: async (provider: string, tenantId: string) => {
-      try {
-        const result = await api.post<{ workspace_id?: string }>("/api/auth/tenants/ensure/", {
-          provider,
-          tenant_id: tenantId,
-        })
-        // Set before fetchDomains so it's preserved as the active id
-        if (result.workspace_id) {
-          set({ activeDomainId: result.workspace_id })
+  return {
+    domains: [],
+    activeDomainId: null,
+    workspaceGeneration: 0,
+    domainsStatus: "idle",
+    domainsError: null,
+    domainActions: {
+      fetchDomains: async () => {
+        listRequestSeq += 1
+        set({ domainsStatus: "loading", domainsError: null })
+        try {
+          const domains = await workspaceApi.list()
+          const activeDomainId = get().activeDomainId
+          set({
+            domains,
+            domainsStatus: "loaded",
+            domainsError: null,
+            activeDomainId: activeDomainId ?? defaultDomainId(domains),
+          })
+        } catch (error) {
+          set({
+            domainsStatus: "error",
+            domainsError: error instanceof Error ? error.message : "Failed to load domains",
+          })
         }
-        await get().domainActions.fetchDomains()
-      } catch (error) {
-        // Surface an error state rather than leaving the user on an empty
-        // data-sources page that reads as "no opportunities" (07#6).
-        console.error("[Scout] Failed to ensure tenant:", error)
-        set({
-          domainsStatus: "error",
-          domainsError:
-            error instanceof Error ? error.message : "Failed to set up your workspace",
-        })
-      }
+      },
+
+      revalidateDomains: () => {
+        // An initial or retried load shows its own state; don't race it.
+        if (get().domainsStatus !== "loaded") return Promise.resolve()
+        if (revalidation) return revalidation
+        listRequestSeq += 1
+        const seq = listRequestSeq
+        revalidation = workspaceApi
+          .list()
+          .then((domains) => {
+            if (seq !== listRequestSeq) return
+            const current = get()
+            // A new array re-runs every subscriber (#355); publish only real changes.
+            if (JSON.stringify(domains) === JSON.stringify(current.domains)) return
+            set({ domains, activeDomainId: current.activeDomainId ?? defaultDomainId(domains) })
+          })
+          .catch(() => {
+            // The list on screen is still usable, so a failed background refresh stays silent.
+          })
+          .finally(() => {
+            revalidation = null
+          })
+        return revalidation
+      },
+
+      setActiveDomain: (id: string) => {
+        if (!get().accountSession.isCurrent()) return
+        recordWorkspaceUse(id)
+        set({ activeDomainId: id })
+      },
+
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      setActiveDomainByTenantId: (_provider: string, _tenantId: string) => {
+        // No-op: workspace-based API doesn't need tenant selection
+      },
+
+      ensureTenant: async (provider: string, tenantId: string) => {
+        try {
+          const result = await api.post<{ workspace_id?: string }>("/api/auth/tenants/ensure/", {
+            provider,
+            tenant_id: tenantId,
+          })
+          // Set before fetchDomains so it's preserved as the active id
+          if (result.workspace_id) {
+            set({ activeDomainId: result.workspace_id })
+          }
+          await get().domainActions.fetchDomains()
+        } catch (error) {
+          // Surface an error state rather than leaving the user on an empty
+          // data-sources page that reads as "no opportunities" (07#6).
+          console.error("[Scout] Failed to ensure tenant:", error)
+          set({
+            domainsStatus: "error",
+            domainsError:
+              error instanceof Error ? error.message : "Failed to set up your workspace",
+          })
+        }
+      },
     },
-  },
-})
+  }
+}
