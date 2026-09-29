@@ -17,6 +17,7 @@ from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
 )
+from apps.workspaces.services.schema_manager import RETIRED_VIEW_STATES
 from apps.workspaces.services.tenant_coverage import coverage_entry, parse_coverage
 from apps.workspaces.tasks import (
     materialize_workspace,
@@ -60,6 +61,11 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 )
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
             else:
+                # A retired row serves nothing, and the rebuild below skips it
+                # unless it is marked as wanted again.
+                WorkspaceViewSchema.objects.filter(
+                    workspace=workspace, state__in=RETIRED_VIEW_STATES
+                ).update(state=SchemaState.PROVISIONING)
                 _record_pending_source(workspace, tenant)
                 # Queued first: both take the workspace lock W, and the load holds
                 # it for its whole run, so on a worker with more than one slot a
@@ -86,9 +92,12 @@ def _record_pending_source(workspace, tenant) -> None:
     every source, so answers would omit this one without a warning.
     """
     entry = coverage_entry(tenant)
-    for vs in WorkspaceViewSchema.objects.select_for_update().filter(
-        workspace=workspace, state=SchemaState.ACTIVE
-    ):
+    # Locks rows in every state: a rebuild publishing a non-ACTIVE row as ACTIVE
+    # holds this lock while it reads the workspace's sources, so one side always
+    # sees the other (SchemaManager._name_sources_added_since).
+    for vs in WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace):
+        if vs.state != SchemaState.ACTIVE:
+            continue
         if vs.tenant_coverage in (None, {}):
             coverage = _legacy_coverage(workspace, excluding=tenant)
         else:
