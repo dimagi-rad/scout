@@ -117,10 +117,9 @@ def _aoauth_connection(
                 return None
         if access_token is not None:
             if account is not None:
-                current_token = (
-                    SocialToken.objects.select_for_update()
-                    .filter(account=account, token=access_token)
-                    .exists()
+                current_token = bool(access_token) and any(
+                    token.token == access_token
+                    for token in SocialToken.objects.select_for_update().filter(account=account)
                 )
             else:
                 current_token = not (conn and conn.social_account_id) or credential_is_current(

@@ -31,17 +31,22 @@ def credential_is_current(connection, credential, token_snapshot=None):
         return True  # The caller's encrypted credential snapshot is checked under the lock.
     tokens = (
         SocialToken.objects.select_for_update(of=("self",))
-        .filter(
-            account__in=provider_accounts(connection.user_id, connection.provider), token=credential
-        )
+        .filter(account__in=provider_accounts(connection.user_id, connection.provider))
         .select_related("account")
     )
+    refresh_secret = None
     if token_snapshot is not None:
         token_id, refresh_secret, app_id = token_snapshot
-        tokens = tokens.filter(pk=token_id, token_secret=refresh_secret, app_id=app_id)
+        tokens = tokens.filter(pk=token_id, app_id=app_id)
     if connection.social_account_id:
         tokens = tokens.filter(account_id=connection.social_account_id)
-    return any(account_scope(token.account) == connection.scope_key for token in tokens)
+    # An undecryptable row reads as "", so an empty credential must never match.
+    return bool(credential) and any(
+        token.token == credential
+        and (token_snapshot is None or token.token_secret == refresh_secret)
+        and account_scope(token.account) == connection.scope_key
+        for token in tokens
+    )
 
 
 def record_upstream_denial(connection, *, credential, code, tenant_id=None, token_snapshot=None):
@@ -128,14 +133,12 @@ arecord_upstream_denial = sync_to_async(record_upstream_denial)
 async def adiscovery_connection(user, provider, access_token, account=None):
     """Snapshot the scope before discovery, including a binding it may replace."""
     if account is None:
-        token = (
-            await SocialToken.objects.filter(
-                account__in=provider_accounts(user.pk, provider), token=access_token
-            )
-            .select_related("account")
-            .afirst()
-        )
-        account = token.account if token is not None else None
+        async for token in SocialToken.objects.filter(
+            account__in=provider_accounts(user.pk, provider)
+        ).select_related("account"):
+            if access_token and token.token == access_token:
+                account = token.account
+                break
     connection = await TenantConnection.objects.filter(
         user=user,
         provider=provider,

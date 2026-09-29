@@ -255,6 +255,11 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
             )
             raise CredentialResolutionError(e.code, message) from e
 
+    # An undecryptable stored token reads as "" (token_encryption); ask for a
+    # reconnect rather than sending an empty bearer upstream.
+    if not token_value:
+        raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider))
+
     cred: dict = {"type": "oauth", "value": token_value}
     if can_refresh:
         cred["refresh"] = _make_token_refresher(token_obj, token_url, cred)

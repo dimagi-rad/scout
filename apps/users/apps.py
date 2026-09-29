@@ -1,5 +1,7 @@
 from django.apps import AppConfig
 
+from apps.users.token_encryption import install_socialtoken_encryption
+
 
 class UsersConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
@@ -7,6 +9,8 @@ class UsersConfig(AppConfig):
     verbose_name = "Users"
 
     def ready(self):
+        install_socialtoken_encryption(self.apps.get_model("socialaccount", "SocialToken"))
+
         from allauth.socialaccount.signals import (
             pre_social_login,
             social_account_added,
