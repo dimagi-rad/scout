@@ -124,7 +124,7 @@ def generate_csp_with_nonce(nonce: str) -> str:
         "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src data: blob:; "
         "font-src https://cdn.jsdelivr.net; "
-        "connect-src 'self' https://cdn.jsdelivr.net;"
+        "connect-src https://cdn.jsdelivr.net;"
     )
 
 

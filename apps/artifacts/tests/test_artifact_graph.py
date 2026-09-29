@@ -840,7 +840,9 @@ async def test_semantic_query_dependency_api_does_not_create_cache(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_graph_manager_creates_story_and_generic_tool_rejects_story(workspace, member_user):
+async def test_graph_manager_creates_story_and_exposes_overview_and_dependencies(
+    workspace, member_user
+):
     graph_tool = next(
         item
         for item in create_artifact_graph_tools(workspace, member_user, "thread")

@@ -330,9 +330,9 @@ class TestArtifactSandboxView:
         window.location.origin === "null". A postMessage whose targetOrigin is a
         concrete origin string (or "null") will NOT match the parent's real
         concrete origin, so the browser SILENTLY DROPS the message. The
-        iframe->parent artifact-error send must use targetOrigin "*". This is safe because the parent (ArtifactPanel)
-        authenticates inbound messages by event.source === the iframe's
-        contentWindow, not by origin.
+        iframe->parent artifact-error send must use targetOrigin "*". This is
+        safe because the parent (ArtifactCanvas) authenticates inbound messages
+        by event.source === the iframe's contentWindow, not by origin.
         """
         response = authenticated_client.get(
             f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
@@ -392,15 +392,20 @@ class TestArtifactSandboxView:
         artifact.save(update_fields=["semantic_queries"])
 
         response = authenticated_client.get(
-            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/",
-            SCRIPT_NAME="/scout",
+            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
         )
 
         assert response.status_code == 200
         content = response.content.decode()
-        assert "fetch(" not in content
         assert "query-data" not in content
         assert "has_live_queries" not in content
+        # Defence in depth: the frame's CSP doesn't allow the app's own origin.
+        connect_src = next(
+            d.strip()
+            for d in response["Content-Security-Policy"].split(";")
+            if d.strip().startswith("connect-src")
+        )
+        assert connect_src == "connect-src https://cdn.jsdelivr.net"
 
     def test_sandbox_csp_headers(self, authenticated_client, artifact, workspace):
         """Test that CSP headers are set correctly for security."""
@@ -419,7 +424,7 @@ class TestArtifactSandboxView:
         assert "'unsafe-inline'" in csp  # Required for Babel transpilation
         assert "'unsafe-eval'" in csp  # Required for JSX transpilation
         assert "https://cdn.jsdelivr.net" in csp
-        assert "connect-src" in csp  # Network access restricted to CDN only
+        assert "connect-src https://cdn.jsdelivr.net;" in csp
         assert "img-src data: blob:" in csp
 
 
