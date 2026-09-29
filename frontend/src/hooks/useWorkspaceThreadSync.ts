@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
@@ -30,6 +30,7 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
   const domainsStatus = useAppStore((s) => s.domainsStatus)
   const domains = useAppStore((s) => s.domains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const revalidateDomains = useAppStore((s) => s.domainActions.revalidateDomains)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
 
   // Canonical pretty chat URL; degrades to the bare `/workspaces/<uuid>/chat`
@@ -45,6 +46,24 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     workspaceId: null,
     threadId: null,
   })
+
+  // A deep link to a workspace missing from the list may be one you were added
+  // to after the list loaded (#355). Refetch once before giving up on it, and
+  // hold store → URL meanwhile so the default workspace doesn't replace the link.
+  const [recheckedWorkspaceId, setRecheckedWorkspaceId] = useState<string | null>(null)
+  const recheckRequestedRef = useRef<string | null>(null)
+  const awaitingUrlWorkspace =
+    !!urlWorkspaceId &&
+    domainsStatus === "loaded" &&
+    !domains.some((d) => d.id === urlWorkspaceId) &&
+    recheckedWorkspaceId !== urlWorkspaceId
+
+  useEffect(() => {
+    if (!awaitingUrlWorkspace || !urlWorkspaceId) return
+    if (recheckRequestedRef.current === urlWorkspaceId) return
+    recheckRequestedRef.current = urlWorkspaceId
+    void revalidateDomains().finally(() => setRecheckedWorkspaceId(urlWorkspaceId))
+  }, [awaitingUrlWorkspace, urlWorkspaceId, revalidateDomains])
 
   // Direction 1: URL → store
   useEffect(() => {
@@ -82,7 +101,7 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
 
   // Direction 2: store → URL
   useEffect(() => {
-    if (!activeDomainId) return
+    if (!activeDomainId || awaitingUrlWorkspace) return
     // URL adoption above updates Zustand synchronously. Skip only the old
     // render, not the next render that carries the adopted workspace/thread.
     const current = useAppStore.getState()
@@ -103,7 +122,7 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     // A bare URL or newly loaded workspace can need reconciliation even when
     // the store identity did not change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDomainId, threadId, urlWorkspaceId, urlThreadId, domainsStatus, domains])
+  }, [activeDomainId, threadId, urlWorkspaceId, urlThreadId, domainsStatus, domains, awaitingUrlWorkspace])
 
   // Canonicalize the address bar: rewrite a bare/non-pretty chat URL to the slug
   // form once the workspace resolves. Loop guard: only rewrite when on a chat

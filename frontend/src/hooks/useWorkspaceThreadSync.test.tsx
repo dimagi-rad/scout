@@ -287,6 +287,44 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
     expect(useAppStore.getState().threadId).toBe(THREAD_A)
   })
 
+  it("rechecks the list before dropping a deep link to a workspace it doesn't know (#355)", async () => {
+    let finishRecheck!: (domains: TenantMembership[]) => void
+    const list = vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => {
+      finishRecheck = resolve
+    }))
+    const WS_NEW = "33333333-3333-3333-3333-333333333333"
+    renderPrettyChat(`/workspaces/${WS_NEW}/chat/${THREAD_STALE}`)
+
+    await waitFor(() => expect(list).toHaveBeenCalledOnce())
+    // Still on the link while the recheck is in flight, not bounced to the default.
+    expect(screen.getByTestId("path").textContent).toBe(`/workspaces/${WS_NEW}/chat/${THREAD_STALE}`)
+    expect(useAppStore.getState().domainsStatus).toBe("loaded")
+
+    await act(async () => {
+      finishRecheck([domain(WS_NEW, "Just Added"), domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B")])
+    })
+    await waitFor(() => {
+      expect(useAppStore.getState().activeDomainId).toBe(WS_NEW)
+      expect(useAppStore.getState().threadId).toBe(THREAD_STALE)
+      expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/just-added/${WS_NEW}/chat/${THREAD_STALE}`,
+      )
+    })
+  })
+
+  it("falls back to the active workspace when the recheck doesn't find the link's workspace", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([
+      domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B"),
+    ])
+    const WS_GONE = "44444444-4444-4444-4444-444444444444"
+    renderPrettyChat(`/workspaces/${WS_GONE}/chat`)
+
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    ))
+    expect(useAppStore.getState().activeDomainId).toBe(WS_A)
+  })
+
   it("restores the current thread when navigation removes only the URL thread", async () => {
     const router = renderPrettyChat(`/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`)
     await act(() => router.navigate(`/workspaces/workspace-a/${WS_A}/chat`))
