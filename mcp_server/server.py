@@ -1673,6 +1673,14 @@ async def run_materialization(
 _FINISHED_RUN_STATES = frozenset(
     {MaterializationRun.RunState.COMPLETED, MaterializationRun.RunState.PARTIAL}
 )
+# Ended without landing data; a load moves on to its next source after these.
+_FAILED_RUN_STATES = frozenset(
+    {
+        MaterializationRun.RunState.FAILED,
+        MaterializationRun.RunState.CANCELLED,
+        MaterializationRun.RunState.STALE,
+    }
+)
 _LOADING_ELSEWHERE = "loading_in_other_workspace"
 
 
@@ -1813,9 +1821,8 @@ async def _load_in_progress(workspace: Workspace) -> dict | None:
         _load_source_entry(t, latest.get(t.id), elsewhere=t.id in elsewhere)
         for t in sorted(tenants, key=order)
     ]
-    unfinished = {"waiting", _LOADING_ELSEWHERE, *MaterializationRun.ACTIVE_STATES}
     finished = sum(1 for s in sources if s["state"] in _FINISHED_RUN_STATES)
-    failed = sum(1 for s in sources if s["state"] not in unfinished | _FINISHED_RUN_STATES)
+    failed = sum(1 for s in sources if s["state"] in _FAILED_RUN_STATES)
     # Only a workspace load walks every source in order; a refresh touches one.
     sequenced = len(job_ids) <= 1 and all(loads)
     return {
