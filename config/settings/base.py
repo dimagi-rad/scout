@@ -94,6 +94,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First, so its per-request cache scope lives in the ASGI request task.
+    "config.middleware.workspace_access_cache.WorkspaceAccessCacheMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",

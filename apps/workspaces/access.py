@@ -42,6 +42,7 @@ from django.core.cache import cache
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import PROVIDER_CHOICES, TenantMembership
+from apps.workspaces import access_cache
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_EXPIRED,
@@ -401,7 +402,9 @@ def resolve_workspace_access_ex(
 
     ``verification`` selects the upstream-freshness budget for protected data;
     ``None`` is the recovery-metadata mode, which needs membership but must stay
-    reachable while upstream verification is failing.
+    reachable while upstream verification is failing. Repeats within one request
+    reuse the decision (``access_cache``), except a retryable freshness denial,
+    which must be free to succeed on the very next check.
 
     ``require_coverage=False`` is only for the few remediation actions that read
     no tenant data (remove a missing source, leave, hand the manager role to
@@ -412,9 +415,16 @@ def resolve_workspace_access_ex(
     and a caller let in by the exemption skips it (it rechecks the coverage they
     lack). With the all-of switch off there is no exemption at all.
     """
-    result = _resolve_with_freshness(
-        user, workspace_id, minimum_role=minimum_role, verification=verification
-    )
+    # Only the coverage-checked decision is cached; the exemption is derived per
+    # call so an exempt grant can never be served to a data path.
+    options = (minimum_role, verification)
+    result = access_cache.lookup(user, workspace_id, options)
+    if result is None:
+        result = _resolve_with_freshness(
+            user, workspace_id, minimum_role=minimum_role, verification=verification
+        )
+        if not result.retryable:
+            access_cache.store(user, workspace_id, options, result)
     if require_coverage or not all_of_access_enforced() or not result.missing_tenants:
         return result
     return _resolve_local_access_ex(
@@ -455,6 +465,20 @@ async def aresolve_workspace_access_ex(
     No ``require_coverage`` here: the remediation actions it exists for are all
     sync DRF views, and async callers are data paths that must always check it.
     """
+    options = (minimum_role, verification)
+    cached = access_cache.lookup(user, workspace_id, options)
+    if cached is None:
+        cached = await _aresolve_workspace_access_ex(
+            user, workspace_id, minimum_role=minimum_role, verification=verification
+        )
+        if not cached.retryable:
+            access_cache.store(user, workspace_id, options, cached)
+    return cached
+
+
+async def _aresolve_workspace_access_ex(
+    user, workspace_id, *, minimum_role: str, verification: VerificationBudget | None
+) -> WorkspaceAccess:
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
     if verification is None or not result.granted or not freshness_enforced():
         return result
