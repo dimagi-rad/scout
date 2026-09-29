@@ -160,7 +160,8 @@ async def _arefresh_members_for_provider(users, provider) -> bool:
     What the rediscovery *observes* is still authoritative about that member's
     own credential (a revocation archives it, as their next read would).
 
-    Returns False if the time budget cut some members' rediscovery short.
+    Returns False if some member's rediscovery failed or ran out of time, since
+    then retrying may give a different answer.
     """
     gate = asyncio.Semaphore(MEMBER_REFRESH_CONCURRENCY)
 
@@ -179,7 +180,9 @@ async def _arefresh_members_for_provider(users, provider) -> bool:
             provider,
             len(users),
         )
-    complete = all(task.done() and not task.cancelled() for task in tasks)
+    complete = all(
+        task.done() and not task.cancelled() and task.exception() is None for task in tasks
+    )
     for user, task in zip(users, tasks, strict=True):
         result = task.exception() if task.done() and not task.cancelled() else None
         if isinstance(result, Exception):

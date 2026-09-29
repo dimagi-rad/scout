@@ -136,6 +136,8 @@ class TestSourceAdd:
         assert resp.status_code == 409
         assert resp.json()["reason"] == "members_lack_source"
         assert refresh.call_count == 2  # one failure does not stop the others
+        assert resp.json()["recheck_complete"] is False
+        assert "retrying may help" in resp.json()["error"]
 
     def test_a_truncated_recheck_is_reported_as_such(self, client, monkeypatch, user, t1, t2):
         ws = _workspace(user, t1)
