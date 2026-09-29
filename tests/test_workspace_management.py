@@ -4,7 +4,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
-from apps.users.models import TenantMembership
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
     WorkspaceInvite,
@@ -12,7 +12,7 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
 )
-from tests.tenant_access import ausable_connection, usable_connection
+from tests.tenant_access import ausable_connection, grant_tenant_access, usable_connection
 
 User = get_user_model()
 
@@ -30,8 +30,6 @@ def manage_user(db, workspace):
 
 @pytest.fixture
 def second_tenant(db):
-    from apps.users.models import Tenant
-
     return Tenant.objects.create(
         provider="commcare", external_id="other-domain", canonical_name="Other Domain"
     )
@@ -108,6 +106,43 @@ class TestWorkspaceCreate:
         assert WorkspaceMembership.objects.filter(
             workspace_id=resp.json()["id"], user=user, role=WorkspaceRole.MANAGE
         ).exists()
+
+    def test_multi_source_create_labels_workspace_by_its_own_name(self, client, user):
+        bots = [
+            Tenant.objects.create(provider="ocs", external_id=bot_id, canonical_name=name)
+            for bot_id, name in [("bot-b", "Bravo"), ("bot-a", "Alpha")]
+        ]
+        for bot in bots:
+            grant_tenant_access(user, bot)
+        client.force_login(user)
+
+        resp = client.post(
+            "/api/workspaces/",
+            {"name": "Demo", "tenant_ids": [str(bot.id) for bot in bots]},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["display_name"] == "Demo"
+        ws_id = resp.json()["id"]
+        detail = client.get(f"/api/workspaces/{ws_id}/")
+        assert detail.json()["display_name"] == "Demo"
+        listed = next(w for w in client.get("/api/workspaces/").json() if w["id"] == ws_id)
+        assert listed["display_name"] == "Demo"
+
+    def test_single_source_create_keeps_the_decorated_label(self, client, user):
+        bot = Tenant.objects.create(provider="ocs", external_id="bot-a", canonical_name="Alpha")
+        grant_tenant_access(user, bot)
+        client.force_login(user)
+
+        resp = client.post(
+            "/api/workspaces/",
+            {"name": "Demo", "tenant_ids": [str(bot.id)]},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["display_name"] == "Demo (Bot bot-a)"
 
     def test_cannot_create_workspace_for_inaccessible_tenant(self, client, user, second_tenant, db):
         client.force_login(user)

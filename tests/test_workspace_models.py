@@ -98,3 +98,28 @@ def test_display_name_with_unknown_provider_falls_back_to_name(user):
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
 
     assert ws.display_name == "Mystery"
+
+
+def _ocs_bot(bot_id, name):
+    return Tenant.objects.create(provider="ocs", external_id=bot_id, canonical_name=name)
+
+
+@pytest.mark.django_db
+def test_display_name_for_single_bot_workspace_keeps_bot_id(user):
+    """The single-source label (and the URL slug built from it) is unchanged by #354."""
+    ws = Workspace.objects.create(name="Demo", created_by=user)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-b", "Bravo"))
+
+    assert ws.display_name == "Demo (Bot bot-b)"
+
+
+@pytest.mark.django_db
+def test_display_name_for_multi_bot_workspace_names_no_single_bot(user):
+    ws = Workspace.objects.create(name="Demo", created_by=user)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-b", "Bravo"))
+    WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-c", "Charlie"))
+    assert ws.display_name == "Demo"
+
+    # Tenants order by canonical_name, so an alphabetically-earlier bot used to take over.
+    WorkspaceTenant.objects.create(workspace=ws, tenant=_ocs_bot("bot-a", "Alpha"))
+    assert ws.display_name == "Demo"
