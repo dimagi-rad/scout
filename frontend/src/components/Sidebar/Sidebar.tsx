@@ -159,7 +159,7 @@ export function Sidebar() {
       lastRevalidatedAtRef.current = now
       // Fresh: a request from before you came back can't show a workspace added meanwhile.
       void revalidateDomains({ fresh: true }).then((result) => {
-        // A skip sent no request, so it mustn't use up the window for a real return.
+        // A skip left the list to another load, so it mustn't use up the window for a real return.
         if (result === "skipped" && lastRevalidatedAtRef.current === now) {
           lastRevalidatedAtRef.current = previous
         }

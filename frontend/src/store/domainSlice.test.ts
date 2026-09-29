@@ -267,7 +267,8 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     const stale = actions.revalidateDomains()
     await actions.fetchDomains()
     resolveStale([ws("stale")])
-    await stale
+    // Its answer was thrown away, so callers mustn't act on it as the current list.
+    expect(await stale).toBe("skipped")
 
     expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["fresh"])
   })

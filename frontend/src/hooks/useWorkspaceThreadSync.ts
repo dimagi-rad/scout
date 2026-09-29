@@ -109,9 +109,9 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     })
 
     void revalidateDomains({ fresh: true }).then((result) => {
-      // A skip means a full load owns the list: it drops the hold and re-runs this effect
-      // when it lands. A failure has no answer to act on, so the timeout decides.
-      if (result !== "fetched" || !mountedRef.current) return
+      // A skip means another load owns the list and will answer instead. A failure has
+      // nothing coming, so it falls through and gives up now rather than at the timeout.
+      if (result === "skipped" || !mountedRef.current) return
       if (!settled) {
         giveUp()
         return

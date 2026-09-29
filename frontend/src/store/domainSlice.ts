@@ -14,7 +14,10 @@ export type TenantMembership = WorkspaceListItem & {
 
 export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 
-/** "skipped": no request, because the list isn't loaded (an initial or retried full load owns it). */
+/**
+ * "skipped": something else owns the list, so this call didn't update it: the list isn't
+ * loaded (an initial or retried full load is running), or a newer request superseded it.
+ */
 export type RevalidateResult = "fetched" | "failed" | "skipped"
 
 export interface DomainSlice {
@@ -103,7 +106,7 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         revalidation = workspaceApi
           .list()
           .then((domains): RevalidateResult => {
-            if (seq !== listRequestSeq) return "fetched"
+            if (seq !== listRequestSeq) return "skipped"
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
             if (JSON.stringify(domains) === JSON.stringify(current.domains)) return "fetched"
