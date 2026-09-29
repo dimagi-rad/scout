@@ -18,6 +18,7 @@ from apps.agents.graph.base import (
 )
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -27,8 +28,8 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services import thread_job_dispatch
-from apps.workspaces.services.load_activity import MATERIALIZE_TASK_NAME
+from apps.workspaces.services import load_activity, thread_job_dispatch
+from apps.workspaces.services.load_activity import MATERIALIZE_TASK_NAME, athread_awaits_load
 from apps.workspaces.services.thread_job_dispatch import astart_chat_load
 from apps.workspaces.tasks import materialize_workspace
 from tests.tenant_access import ausable_connection
@@ -122,6 +123,20 @@ def test_the_queue_lookup_names_the_real_task():
     assert materialize_workspace.name == MATERIALIZE_TASK_NAME
 
 
+def test_the_queue_lookup_treats_stalled_jobs_as_the_worker_janitor_does():
+    stalled = workspaces_tasks.MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
+    assert load_activity._STALLED_AFTER.total_seconds() == stalled
+    assert (
+        set(load_activity._QUEUED_OR_RUNNING) == workspaces_tasks._PROCRASTINATE_INFLIGHT_STATUSES
+    )
+    assert list(load_activity._STARTED) == workspaces_tasks._STARTED_JOB_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_a_synthetic_conversation_id_awaits_no_load():
+    assert await athread_awaits_load("recipe-run-7") is False
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("agent_layer", "queued_jobs")
@@ -136,6 +151,8 @@ class TestChatStartsTheLoad:
         assert len(jobs) == 1
         assert jobs[0].args["user_id"] == str(chatter.id)
         assert jobs[0].args["load_intent"] == {str(tenant.id): 1}
+        assert jobs[0].args["only_unserved"] is True
+        assert jobs[0].scheduled_at is not None
         tj = await ThreadJob.objects.aget(procrastinate_job_id=jobs[0].id)
         assert str(tj.thread_id) == thread_id
         assert tj.job_type == ThreadJob.JobType.MATERIALIZATION
@@ -246,6 +263,21 @@ class TestPromptWhileTheLoadIsQueued:
 
         assert _LOAD_STARTED_FOR_THIS_CHAT_GUIDANCE in context
         assert "No data has been loaded yet" not in context
+
+    async def test_data_already_serving_is_not_hidden_behind_a_queued_load(self):
+        ws, tenant = await _workspace("serving")
+        await _member(ws, tenant, "chatter-serving@b.c")
+        await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="t_serving", state=SchemaState.ACTIVE
+        )
+        await materialize_workspace.defer_async(
+            workspace_id=str(ws.id), user_id="", notify_thread=False
+        )
+
+        context = await _fetch_semantic_model_context(ws, write_capable=True)
+
+        assert _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE not in context
+        assert "Data is loaded" in context
 
     async def test_another_chat_is_told_a_load_is_in_progress(self):
         ws, tenant = await _workspace("other")

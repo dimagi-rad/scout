@@ -366,7 +366,7 @@ async def _fetch_semantic_model_context(
             guidance = _pipeline_unresolved_guidance(
                 unresolved, loaded=load_state == _LOADED, write_capable=write_capable
             )
-        elif await aworkspace_load_pending(workspace.id):
+        elif load_state != _LOADED and await aworkspace_load_pending(workspace.id):
             # Queued but not yet started, so no run above says so (#408).
             guidance = await _load_in_progress_guidance(interactive, write_capable, conversation_id)
         else:

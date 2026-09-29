@@ -4,6 +4,7 @@ Kept free of ``apps.workspaces.tasks`` so the agent prompt can ask too: the task
 module imports the agent graph.
 """
 
+import uuid
 from datetime import timedelta
 
 from django.db.models import Q
@@ -73,6 +74,11 @@ async def aworkspace_load_pending(workspace_id) -> bool:
 
 async def athread_awaits_load(thread_id) -> bool:
     """Whether this chat has a load queued for it that will resume it when done."""
+    try:
+        thread_id = uuid.UUID(str(thread_id))
+    except ValueError:
+        # Synthetic ids (a recipe run's) name no Thread, so nothing is bound to them.
+        return False
     return await ThreadJob.objects.filter(
         thread_id=thread_id,
         job_type=ThreadJob.JobType.MATERIALIZATION,
