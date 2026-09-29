@@ -22,7 +22,7 @@ from apps.users.token_encryption import (
     encrypt_token_value,
 )
 
-BATCH_SIZE = 500
+BATCH_SIZE = 100
 FIELDS = ("token", "token_secret")
 
 

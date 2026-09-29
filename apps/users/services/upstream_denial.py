@@ -33,6 +33,8 @@ def credential_is_current(connection, credential, token_snapshot=None):
         SocialToken.objects.select_for_update(of=("self",))
         .filter(account__in=provider_accounts(connection.user_id, connection.provider))
         .select_related("account")
+        # pk order matches users.0017's batch locks, so the two cannot deadlock.
+        .order_by("pk")
     )
     refresh_secret = None
     if token_snapshot is not None:
