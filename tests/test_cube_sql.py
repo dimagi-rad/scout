@@ -312,6 +312,27 @@ def test_relationship_to_hidden_dataset_is_reported_as_unpublished(workspace):
 
 
 @pytest.mark.django_db
+def test_relationship_between_unpublished_datasets_names_each_once(workspace):
+    model = _stale_relationship_catalog(workspace)
+    visits = model.datasets.get(name="visits")
+    SemanticDataset.objects.filter(name="users").update(is_visible=False)
+    SemanticDataset.objects.filter(name="visits").update(source_kind="custom", metadata={})
+    SemanticRelationship.objects.create(
+        workspace=workspace,
+        name="visits_to_visits",
+        from_dataset=visits,
+        to_dataset=visits,
+        relationship_type="one_to_one",
+        join_expression="{visits.id} = {visits.id}",
+    )
+
+    messages = {d["relationship"]: d["message"] for d in generate_cube_schema(model)["diagnostics"]}
+
+    assert "datasets 'visits' and 'users' are hidden" in messages["visits_to_users"]
+    assert "dataset 'visits' is hidden" in messages["visits_to_visits"]
+
+
+@pytest.mark.django_db
 def test_relationship_between_hidden_datasets_is_not_reported(workspace):
     model = _stale_relationship_catalog(workspace)
     SemanticDataset.objects.filter(name__in=["visits", "users"]).update(is_visible=False)

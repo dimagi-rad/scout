@@ -70,7 +70,9 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
 
     for relationship in relationships:
         endpoints = (relationship.from_dataset, relationship.to_dataset)
-        missing = [dataset for dataset in endpoints if dataset.id not in visible_ids]
+        missing = list(
+            {dataset.id: dataset for dataset in endpoints if dataset.id not in visible_ids}.values()
+        )
         if missing:
             # Catalog refresh hides the dataset of a vanished source table. The
             # catalog lists a relationship under its visible endpoints only, so
