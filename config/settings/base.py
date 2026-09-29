@@ -408,10 +408,6 @@ REDIS_URL = env("REDIS_URL", default="")
 CACHES = _build_caches(REDIS_URL)
 
 
-MAX_CONNECTIONS_PER_PROJECT = env.int("MAX_CONNECTIONS_PER_PROJECT", default=5)
-MAX_QUERIES_PER_MINUTE = env.int("MAX_QUERIES_PER_MINUTE", default=60)
-
-
 CSRF_COOKIE_NAME = "csrftoken_scout"
 CSRF_COOKIE_HTTPONLY = False  # SPA must read the CSRF cookie via JavaScript
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])

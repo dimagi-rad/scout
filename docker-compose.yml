@@ -93,7 +93,6 @@ services:
       - MCP_SERVER_URL=http://mcp-server:8100/mcp
       # Must match the mcp-server's value above so the API can authenticate.
       - MCP_SHARED_SECRET=${MCP_SHARED_SECRET:-}
-      - MAX_CONNECTIONS_PER_PROJECT=5
       - CUBE_API_URL=http://cube:4000
       - CUBE_VALIDATOR_URL=http://cube:4010
       - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:-dev-cube-secret-change-me}
