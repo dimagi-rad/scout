@@ -70,6 +70,17 @@ describe("reportRenderError", () => {
     expect(reported.stack).toBe("Error: first at forged (b:2:2)\n    at App (sandbox:1:1)")
   })
 
+  it("redacts a quoted value that is broken across lines", () => {
+    reportRenderError({
+      source: "sandbox",
+      name: "Error",
+      message: 'invalid input syntax for type integer: "Alice\nBob"\u2028next',
+    })
+
+    const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
+    expect(reported.message).toBe('invalid input syntax for type integer: "…" next')
+  })
+
   it("drops console breadcrumbs, which hold raw error text", () => {
     expect(dropConsoleBreadcrumb({ category: "console", message: 'bad "Alice"' })).toBeNull()
     const navigation = { category: "navigation", message: "/artifacts/artifact-one" }

@@ -41,8 +41,9 @@ function redactQuoted(text: string): string {
 }
 
 function safeText(text: string, maxLength = MAX_MESSAGE_LENGTH): string {
-  // Collapsed so the text stays on the stack's header line and cannot pose as a frame.
-  const redacted = redactQuoted(text).replace(/\s*[\r\n]+\s*/g, " ")
+  // Collapsed before redaction so a quoted value broken across lines is still
+  // dropped, and so the text cannot pose as a stack frame of its own.
+  const redacted = redactQuoted(text.replace(/\s*[\r\n\v\f\u2028\u2029]+\s*/g, " "))
   return redacted.length > maxLength ? `${redacted.slice(0, maxLength)}…` : redacted
 }
 
