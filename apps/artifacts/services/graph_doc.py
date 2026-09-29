@@ -1145,7 +1145,7 @@ def _key_contract_warnings(block_map: dict[str, dict[str, Any]]) -> list[dict[st
     diagnostics: list[dict[str, Any]] = []
     for block in block_map.values():
         block_type = block.get("type")
-        if not _is_choice(block_type, {"graph", "table", "stat"}):
+        if block_type not in {"graph", "table", "stat"}:
             continue
         config = block.get("config") or {}
         query = None

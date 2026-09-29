@@ -1434,6 +1434,9 @@ WRONG_TYPED_FIELDS = {
     "recharts_type": (_set_recharts_type, "recharts_type"),
     "granularity": (_set_granularity, "query_granularity"),
 }
+# query-data resolves date bindings first and rejects these with its handled 400, as it
+# would an unsupported preset string.
+UNRESOLVABLE_DATE_BINDING_FIELDS = {"block_type", "date_default"}
 WRONG_TYPED_VALUES = pytest.mark.parametrize(
     "value", [["line"], {"kind": "line"}], ids=["list", "object"]
 )
@@ -1480,8 +1483,8 @@ def test_stored_story_with_a_wrong_typed_enum_value_still_reads(
     ):
         response = client.get(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/{endpoint}/")
 
-    # query-data resolves date bindings and answers an unresolvable doc with a handled 400.
-    if endpoint == "query-data" and response.status_code == 400:
+    if endpoint == "query-data" and field in UNRESOLVABLE_DATE_BINDING_FIELDS:
+        assert response.status_code == 400, response.content
         assert response.json()["error"].startswith("Invalid artifact date context")
     else:
         assert response.status_code == 200, response.content
