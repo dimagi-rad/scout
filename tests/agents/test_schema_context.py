@@ -434,3 +434,43 @@ async def test_excluded_source_loading_does_not_block_serving_view(
         assert "do not call other data tools" not in result.lower()
     else:
         assert "do not call other data tools" in result.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize("write_capable", [True, False])
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("loaded", [False, True])
+async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
+    workspace, tenant, interactive, write_capable, multi, loaded
+):
+    """F2: a re-run fails PIPELINE_UNRESOLVED for a provider with no pipeline, so
+    telling the agent to (re-)run materialization only wastes a job every turn."""
+    unresolvable = tenant
+    if multi:
+        unresolvable = await Tenant.objects.acreate(
+            provider="retired_provider", external_id="retired", canonical_name="Retired"
+        )
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=unresolvable)
+        if loaded:
+            await WorkspaceViewSchema.objects.acreate(
+                workspace=workspace, schema_name="ws_view", state=SchemaState.ACTIVE
+            )
+    else:
+        await Tenant.objects.filter(id=tenant.id).aupdate(provider="retired_provider")
+        if loaded:
+            await TenantSchema.objects.acreate(
+                tenant=tenant, schema_name="loaded", state=SchemaState.ACTIVE
+            )
+
+    context = await _fetch_semantic_model_context(
+        workspace, interactive=interactive, write_capable=write_capable
+    )
+
+    assert "administrator" in context
+    assert "Run materialization to rebuild" not in context
+    assert "Call `run_materialization`" not in context
+    assert "No data has been loaded yet" not in context
+    if not write_capable:
+        assert "run_materialization" not in context

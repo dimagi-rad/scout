@@ -51,6 +51,11 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    select_pipeline_config,
+)
 from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
 
 if TYPE_CHECKING:
@@ -380,6 +385,9 @@ async def _fetch_semantic_model_context(
     try:
         return await _semantic_catalog_context(workspace)
     except SemanticCatalogUnavailable:
+        unresolved = await _unresolved_pipeline_providers(workspace)
+        if unresolved:
+            return _pipeline_unresolved_guidance(unresolved, write_capable=write_capable)
         tenant_count = await workspace.tenants.acount()
         if tenant_count == 1:
             tenant = await workspace.tenants.afirst()
@@ -433,6 +441,34 @@ async def _fetch_semantic_model_context(
         return (
             _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else _INTERACTIVE_MATERIALIZE_GUIDANCE
         )
+
+
+async def _unresolved_pipeline_providers(workspace) -> list[str]:
+    """Providers of this workspace whose load would fail ``PIPELINE_UNRESOLVED``.
+
+    Resolved by provider alone because that is how a load picks its pipeline.
+    """
+    unresolved = []
+    async for provider in workspace.tenants.values_list("provider", flat=True).distinct():
+        try:
+            select_pipeline_config(provider=provider)
+        except PipelineResolutionError:
+            # The agent no longer triggers the failing run, so this is the only record.
+            logger.exception("Pipeline resolution failed for the agent prompt")
+            unresolved.append(provider)
+    return sorted(unresolved)
+
+
+def _pipeline_unresolved_guidance(providers: list[str], *, write_capable: bool) -> str:
+    """Mode-agnostic: no retry or wait fixes a missing pipeline definition (F2)."""
+    avoid = "`run_materialization` or other data tools" if write_capable else "data tools"
+    return (
+        "This workspace's data cannot be loaded or described: Scout has no "
+        f"materialization pipeline for provider {', '.join(providers)}, which is a "
+        f"configuration problem on Scout's side. Do NOT call {avoid}; they fail the "
+        "same way. Tell the user to "
+        f"{CREDENTIAL_GUIDANCE[ErrorCode.PIPELINE_UNRESOLVED]} Then stop."
+    )
 
 
 # No `pipeline=` arg: run_materialization's LLM-facing schema is empty (all params
