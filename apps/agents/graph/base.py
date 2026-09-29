@@ -23,11 +23,14 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from apps.agents.graph.state import (
+    TRUNCATED_TOOL_CALLS_NODE,
     AgentState,
     all_tool_calls,
     prune_messages,
     reject_truncated_tool_calls,
+    truncated_retries_exhausted,
     truncated_tool_calls,
+    unfinished_turn_reason,
 )
 from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
 from apps.agents.prompts.artifact_prompt import (
@@ -261,18 +264,6 @@ MODEL_STOPPED_MESSAGES = {
 # Graph nodes that end a turn with a fixed AIMessage instead of an LLM call, so
 # the chat stream must emit their text itself.
 FIXED_MESSAGE_NODES = frozenset({"escalate", "model_stopped"})
-
-
-def _unfinished_turn_reason(message: Any) -> str | None:
-    """Why a final (tool-call-free) model turn left the user without an answer."""
-    if not isinstance(message, AIMessage) or message.tool_calls:
-        return None
-    stop_reason = message.response_metadata.get("stop_reason")
-    if stop_reason in ("refusal", "max_tokens"):
-        return stop_reason
-    if not message.text.strip():
-        return "empty"
-    return None
 
 
 def _should_escalate(messages: list) -> bool:
@@ -934,17 +925,17 @@ async def build_agent_graph(
 
         last_message = messages[-1]
         if truncated_tool_calls(last_message):
-            return "truncated_tool_calls"
+            return TRUNCATED_TOOL_CALLS_NODE
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
-        if _unfinished_turn_reason(last_message) is not None:
+        if unfinished_turn_reason(last_message) is not None:
             return "model_stopped"
 
         return END
 
     def model_stopped_node(state: AgentState) -> dict[str, Any]:
         """Terminal node: tell the user the model stopped instead of leaving a blank reply."""
-        reason = _unfinished_turn_reason(state["messages"][-1]) or "empty"
+        reason = unfinished_turn_reason(state["messages"][-1]) or "empty"
         logger.warning(
             "agent graph: model turn ended without an answer (reason=%s, workspace=%s)",
             reason,
@@ -1001,7 +992,7 @@ async def build_agent_graph(
     graph.add_node("tools", tool_node)
     graph.add_node("escalate", escalation_node)
     graph.add_node("model_stopped", model_stopped_node)
-    graph.add_node("truncated_tool_calls", reject_truncated_tool_calls)
+    graph.add_node(TRUNCATED_TOOL_CALLS_NODE, reject_truncated_tool_calls)
 
     graph.set_entry_point("agent")
 
@@ -1010,7 +1001,7 @@ async def build_agent_graph(
         should_continue,
         {
             "tools": "tools",
-            "truncated_tool_calls": "truncated_tool_calls",
+            TRUNCATED_TOOL_CALLS_NODE: TRUNCATED_TOOL_CALLS_NODE,
             "model_stopped": "model_stopped",
             END: END,
         },
@@ -1027,7 +1018,13 @@ async def build_agent_graph(
     )
     graph.add_edge("escalate", END)
     graph.add_edge("model_stopped", END)
-    graph.add_edge("truncated_tool_calls", "agent")
+    graph.add_conditional_edges(
+        TRUNCATED_TOOL_CALLS_NODE,
+        lambda state: (
+            "model_stopped" if truncated_retries_exhausted(state["messages"]) else "agent"
+        ),
+        {"agent": "agent", "model_stopped": "model_stopped"},
+    )
 
     compiled = graph.compile(checkpointer=checkpointer)
 

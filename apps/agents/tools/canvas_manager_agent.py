@@ -27,8 +27,10 @@ from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
 from apps.agents.graph.state import (
+    TRUNCATED_TOOL_CALLS_NODE,
     AgentState,
     reject_truncated_tool_calls,
+    truncated_retries_exhausted,
     truncated_tool_calls,
 )
 from apps.agents.llm_request import SUBAGENT_EFFORT, chat_model_kwargs
@@ -345,7 +347,7 @@ def _build_canvas_manager_graph(
             return END
         last_message = messages[-1]
         if truncated_tool_calls(last_message):
-            return "truncated_tool_calls"
+            return TRUNCATED_TOOL_CALLS_NODE
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
         return END
@@ -353,15 +355,19 @@ def _build_canvas_manager_graph(
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
-    graph.add_node("truncated_tool_calls", reject_truncated_tool_calls)
+    graph.add_node(TRUNCATED_TOOL_CALLS_NODE, reject_truncated_tool_calls)
     graph.set_entry_point("agent")
     graph.add_conditional_edges(
         "agent",
         should_continue,
-        {"tools": "tools", "truncated_tool_calls": "truncated_tool_calls", END: END},
+        {"tools": "tools", TRUNCATED_TOOL_CALLS_NODE: TRUNCATED_TOOL_CALLS_NODE, END: END},
     )
     graph.add_edge("tools", "agent")
-    graph.add_edge("truncated_tool_calls", "agent")
+    graph.add_conditional_edges(
+        TRUNCATED_TOOL_CALLS_NODE,
+        lambda state: END if truncated_retries_exhausted(state["messages"]) else "agent",
+        {"agent": "agent", END: END},
+    )
     return graph.compile()
 
 

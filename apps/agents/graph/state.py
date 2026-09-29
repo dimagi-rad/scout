@@ -7,7 +7,7 @@ graph. All fields are JSON-serializable for Postgres checkpoint persistence.
 
 from typing import Annotated
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
@@ -75,6 +75,43 @@ def truncated_tool_calls(message: BaseMessage) -> list[dict]:
     if message.response_metadata.get("stop_reason") != "max_tokens":
         return []
     return all_tool_calls(message)
+
+
+def unfinished_turn_reason(message: BaseMessage) -> str | None:
+    """Why the latest turn left the user without an answer, or None if it didn't.
+
+    Covers a final (tool-call-free) model turn that was refused, cut off at
+    ``max_tokens`` or has no text, and a turn that ended on a rejected
+    truncated tool call after the retries ran out.
+    """
+    if isinstance(message, ToolMessage):
+        return "max_tokens" if message.content == TRUNCATED_TOOL_CALL_MESSAGE else None
+    if not isinstance(message, AIMessage) or message.tool_calls:
+        return None
+    stop_reason = message.response_metadata.get("stop_reason")
+    if stop_reason in ("refusal", "max_tokens"):
+        return stop_reason
+    if not message.text.strip():
+        return "empty"
+    return None
+
+
+TRUNCATED_TOOL_CALLS_NODE = "truncated_tool_calls"
+
+# A request that reliably overruns max_tokens (say, one huge artifact) would
+# otherwise retry at 16k output tokens a pass until the recursion limit.
+MAX_TRUNCATED_RETRIES = 2
+
+
+def truncated_retries_exhausted(messages: list[BaseMessage]) -> bool:
+    """Whether this turn (since the last human message) has hit max_tokens mid-call too often."""
+    count = 0
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if truncated_tool_calls(message):
+            count += 1
+    return count >= MAX_TRUNCATED_RETRIES
 
 
 def reject_truncated_tool_calls(state: "AgentState") -> dict:
