@@ -18,7 +18,7 @@ from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
 from apps.transformations.models import TransformationAsset, TransformationScope
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
@@ -499,11 +499,25 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
     assert len(await _active_schemas(new_source)) == 1
 
 
-_DENIAL = {
-    "tenants": [],
-    "error": "Verification unavailable",
-    "error_code": "verification_unavailable",
-}
+def _denial(workspace_tenants, code=ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE, per_tenant=None):
+    """The shape _materialization_write_denial returns: one not-run entry per tenant."""
+    per_tenant = per_tenant or {}
+    return {
+        "status": "denied",
+        "error": "Access could not be verified",
+        "error_code": code,
+        "tenants": [
+            workspaces_tasks._preflight_failure(
+                t, "Access could not be verified", per_tenant.get(t.external_id, code)
+            )
+            for t in workspace_tenants
+        ],
+    }
+
+
+async def _deny_after_first_tenant(workspace, **kwargs):
+    tenants = [t async for t in workspace.tenants.all()]
+    return AsyncMock(return_value=_denial(tenants, **kwargs))
 
 
 async def _run_new_source_load_denied_after_first_tenant(workspace, user):
@@ -549,7 +563,7 @@ async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, 
         with (
             patch(
                 "apps.workspaces.tasks._materialization_write_denial",
-                AsyncMock(return_value=_DENIAL),
+                await _deny_after_first_tenant(workspace),
             ),
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
@@ -586,7 +600,7 @@ async def test_a_transient_denial_never_fails_siblings_the_new_source_load_would
         with (
             patch(
                 "apps.workspaces.tasks._materialization_write_denial",
-                AsyncMock(return_value=_DENIAL),
+                await _deny_after_first_tenant(workspace),
             ),
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
@@ -954,3 +968,43 @@ async def test_an_abort_during_failure_cleanup_still_stops_the_run():
     finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.parametrize("cause", ["access_lost", "membership_archived"])
+async def test_a_denial_that_concerns_a_serving_sibling_still_reports_it(
+    workspace, tenant, user, cause
+):
+    """Only a transient denial for a source the load would merely skip is passed
+    over. A sibling the user lost access to, or whose membership went away, keeps
+    its failure: that is exactly what the denial is there to surface."""
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name=f"serving_{tenant.id.hex}", state=SchemaState.ACTIVE
+    )
+    await _add_sources(workspace, user, serving=["lost-sibling"], unserved=[])
+    tenants = [t async for t in workspace.tenants.all()]
+    if cause == "access_lost":
+        lost = {t.external_id: ErrorCode.WORKSPACE_TENANT_UNREACHABLE for t in tenants}
+        denial = _denial(tenants, ErrorCode.WORKSPACE_TENANT_UNREACHABLE, lost)
+    else:
+        denial = _denial(tenants)
+
+    async def recheck(*_args):
+        if cause == "membership_archived":
+            # Revoked upstream during the run: the pending source's membership is gone.
+            await TenantMembership.objects.filter(user=user).aupdate(archived_at=timezone.now())
+        return denial
+
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch("apps.workspaces.tasks._materialization_write_denial", side_effect=recheck),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
+
+    # The first source was handled before the recheck; the other one is the one
+    # the denial concerns, and it must stay a failure.
+    outcomes = sorted(entry["success"] for entry in result["tenants"])
+    assert outcomes == [False, True]
+    assert result["all_succeeded"] is False

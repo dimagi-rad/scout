@@ -699,6 +699,22 @@ _SOURCE_ADDED_DURING_LOAD = (
 )
 
 
+async def _skippable_despite_denial(tm, denied_by_tenant, locked_tenant_ids) -> bool:
+    """Whether a new-source load may pass over this source after a mid-run denial.
+
+    Only when the loop would have reached its served check (within the held
+    locks, membership still live) and the denial is a transient verification
+    outage. A denial that names a real access problem is what the run must
+    report, so it is never upgraded to success.
+    """
+    if locked_tenant_ids is not None and str(tm.tenant_id) not in locked_tenant_ids:
+        return False
+    entry = denied_by_tenant.get(str(tm.tenant_id)) or {}
+    if entry.get("error_code") != ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE:
+        return False
+    return await TenantMembership.objects.filter(id=tm.id, archived_at__isnull=True).aexists()
+
+
 async def _served_schema(tm):
     return await TenantSchema.objects.filter(
         tenant_id=tm.tenant_id, state=SchemaState.ACTIVE
@@ -799,18 +815,22 @@ async def materialize_workspace_core(
         if index:
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
+                denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
                 pending = []
                 for later in memberships[index:]:
-                    # A new-source load would have skipped a serving sibling, not
-                    # loaded it: reporting it denied would fail the Cube gate over
-                    # data this run never touched.
-                    served = await _served_schema(later) if only_unserved else None
+                    served = (
+                        await _served_schema(later)
+                        if only_unserved
+                        and await _skippable_despite_denial(
+                            later, denied_by_tenant, locked_tenant_ids
+                        )
+                        else None
+                    )
                     if served is not None:
                         tenant_results.append(await _already_loaded(later, served))
                     else:
                         pending.append(later)
                 attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
-                denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
                 tenant_results.extend(
                     denied_by_tenant.get(str(later.tenant_id))
                     or _preflight_failure(later.tenant, denial["error"], denial["error_code"])
@@ -818,7 +838,8 @@ async def materialize_workspace_core(
                 )
                 # Only source loads stop here. The derived view and Cube rebuilds below
                 # read already-published tenant data and keep other members' views
-                # consistent; the Cube gate treats these skipped tenants as failed.
+                # consistent; the Cube gate treats the pending (denied) tenants as
+                # failed, while serving siblings passed over above count as served.
                 break
             # The workspace can stay accessible through another tenant after this
             # recheck archived this one, so the membership itself must still be live.
