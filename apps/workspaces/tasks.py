@@ -2466,11 +2466,30 @@ async def teardown_schema(schema_id: str, attempt: int = 0) -> None:
         )
         await _retry_retirement(schema, [], attempt, str(exc.__cause__ or exc))
         return
+    except Exception:
+        if schema.state == SchemaState.ACTIVE:
+            # The failed drop reverted the row to ACTIVE, but siblings that rebuilt
+            # while it was TEARDOWN left this tenant out of their views. Enqueued
+            # here because T has been released by now.
+            await _rebuild_reverted_dependents(schema)
+        raise
     if retired:
         # Dependent view schemas that still list this tenant in their coverage
         # are reconciled after T is released: rebuilt against a surviving
         # ACTIVE schema, or failed truthfully when pure TTL expiry left no data.
         await _reconcile_dependent_view_schemas_after_teardown(schema)
+
+
+async def _rebuild_reverted_dependents(schema) -> None:
+    """Put a reverted schema's tenant back into its dependents' views."""
+    try:
+        await _rebuild_dependent_view_schemas([schema.tenant_id])
+    except Exception:
+        # Must not mask the retirement failure the caller is about to re-raise.
+        logger.exception(
+            "teardown_schema: failed to queue dependent rebuilds after reverting schema %s",
+            schema.id,
+        )
 
 
 class _RetirementNotStarted(Exception):
@@ -2549,8 +2568,18 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
                 return False
             # Nothing else serves this tenant and the physical schema still exists —
             # revert to ACTIVE rather than stranding readable data in TEARDOWN.
+            # Touching last_accessed_at gives it a full TTL before the sweep retries;
+            # otherwise a drop that keeps failing would flip sibling views off and
+            # back on every sweep. The cost: a transient failure now waits a TTL too.
+            logger.warning(
+                "teardown_schema: reverting schema %s to ACTIVE after a failed drop — "
+                "last_accessed_at=%s reset to now",
+                schema.id,
+                schema.last_accessed_at.isoformat() if schema.last_accessed_at else None,
+            )
             schema.state = SchemaState.ACTIVE
-            await schema.asave(update_fields=["state"])
+            schema.last_accessed_at = timezone.now()
+            await schema.asave(update_fields=["state", "last_accessed_at"])
             raise
 
         # Destructive op must leave a forensic trace (arch #257, finding 08#9).
