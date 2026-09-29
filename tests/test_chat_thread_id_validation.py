@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import OperationalError
 from django.test import AsyncClient
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -52,7 +53,8 @@ async def _member(email, ws, tenant):
     await TenantMembership.objects.acreate(
         user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
     )
-    client = AsyncClient()
+    # Propagated view errors become a 500 response, as in production.
+    client = AsyncClient(raise_request_exception=False)
     await client.alogin(email=email, password="x")
     return user, client
 
@@ -139,9 +141,10 @@ async def test_two_users_sharing_a_non_uuid_thread_id_never_share_checkpoint_sta
     _, client_a = await _member("user-a@b.c", ws, tenant)
     _, client_b = await _member("user-b@b.c", ws, tenant)
 
-    await _post(client_a, ws, "same-id", "user A's private question")
+    resp_a = await _post(client_a, ws, "same-id", "user A's private question")
     resp_b = await _post(client_b, ws, "same-id", "user B's question")
 
+    assert resp_a.status_code == 400
     assert resp_b.status_code == 400
     assert "user A's private question" not in await _checkpointed_texts(checkpointer, "same-id")
     assert _stored_thread_ids(checkpointer) == set()
@@ -209,3 +212,23 @@ async def test_canonical_thread_id_is_the_checkpointer_key(checkpointer):
     assert resp.status_code == 200
     assert _stored_thread_ids(checkpointer) == {thread_id}
     assert (await Thread.objects.aget(id=thread_id)).user_id == user.pk
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_failed_thread_upsert_never_reaches_the_agent(checkpointer):
+    ws, tenant = await _shared_workspace("upsert-fail")
+    _, client = await _member("upsert-fail@b.c", ws, tenant)
+
+    with (
+        patch(
+            "apps.chat.views._upsert_thread",
+            side_effect=OperationalError("server closed the connection unexpectedly"),
+        ),
+        patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mcp_tools,
+    ):
+        resp = await _post(client, ws, str(uuid.uuid4()), "hi")
+
+    assert resp.status_code == 500
+    mcp_tools.assert_not_called()
+    assert _stored_thread_ids(checkpointer) == set()

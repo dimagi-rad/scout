@@ -43,29 +43,43 @@ def _short_thread_title(title: str) -> str:
     return clean
 
 
-async def _upsert_thread(thread_id, user, history_title: str = "", *, workspace) -> Thread:
+class ForeignThreadError(Exception):
+    def __init__(self, thread: Thread):
+        super().__init__(f"Thread {thread.id} belongs to another user or workspace")
+        self.thread = thread
+
+
+async def _upsert_thread(
+    thread_id, user, history_title: str = "", *, workspace, existing: Thread | None = None
+) -> Thread:
     """Create the Thread row if absent and bump updated_at on every turn.
 
-    Returns the row so the caller can re-check ownership: a row another user
-    created between the caller's lookup and this call is returned untouched,
-    never adopted.
+    Raises ``ForeignThreadError``, without touching the row, when it belongs to
+    another user or workspace — including a row created by someone else after the
+    caller's lookup missed. Raising (rather than returning a verdict) means a
+    caller that forgets to handle it still fails closed.
 
     The explicit ``updated_at`` bump is load-bearing: without it the sidebar's
     "newer than last_viewed" indicator and ``-updated_at`` ordering freeze at
     the creation timestamp.
     """
-    thread, created = await Thread.objects.aget_or_create(
-        id=thread_id,
-        defaults={
-            "user": user,
-            "workspace": workspace,
-            "title": _short_thread_title(history_title),
-            "title_is_custom": False,
-        },
+    thread, created = (
+        (existing, False)
+        if existing is not None
+        else await Thread.objects.aget_or_create(
+            id=thread_id,
+            defaults={
+                "user": user,
+                "workspace": workspace,
+                "title": _short_thread_title(history_title),
+                "title_is_custom": False,
+            },
+        )
     )
-    if not created and not _is_foreign_thread(thread, user, workspace):
-        thread.updated_at = timezone.now()
-        await Thread.objects.filter(pk=thread.pk).aupdate(updated_at=thread.updated_at)
+    if _is_foreign_thread(thread, user, workspace):
+        raise ForeignThreadError(thread)
+    if not created:
+        await Thread.objects.filter(pk=thread.pk).aupdate(updated_at=timezone.now())
     return thread
 
 
@@ -216,11 +230,13 @@ async def chat_view(request):
         )
 
     # The Thread row is the only authorization for this checkpointer key, so a
-    # failed upsert must not fall through to the agent, and a row another user
-    # created since the lookup above must be rejected, not joined.
-    thread = await _upsert_thread(thread_id, user, user_content, workspace=workspace)
-    if _is_foreign_thread(thread, user, workspace):
-        return _foreign_thread_response(thread, user, workspace)
+    # failed upsert must propagate rather than fall through to the agent.
+    try:
+        await _upsert_thread(
+            thread_id, user, user_content, workspace=workspace, existing=existing_thread
+        )
+    except ForeignThreadError as e:
+        return _foreign_thread_response(e.thread, user, workspace)
 
     # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
