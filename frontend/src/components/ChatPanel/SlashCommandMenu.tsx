@@ -1,17 +1,16 @@
 import type { SlashCommand } from "./slashCommands"
-import { SLASH_COMMANDS } from "./slashCommands"
+import { matchSlashCommands } from "./slashCommands"
 
 interface SlashCommandMenuProps {
   query: string
   onSelect: (cmd: SlashCommand) => void
   visible: boolean
   selectedIndex: number
+  canWrite?: boolean
 }
 
-export function SlashCommandMenu({ query, onSelect, visible, selectedIndex }: SlashCommandMenuProps) {
-  const filtered = SLASH_COMMANDS.filter((cmd) =>
-    cmd.name.startsWith(query),
-  )
+export function SlashCommandMenu({ query, onSelect, visible, selectedIndex, canWrite = true }: SlashCommandMenuProps) {
+  const filtered = matchSlashCommands(query, canWrite)
 
   if (!visible || filtered.length === 0) return null
 

@@ -4,7 +4,8 @@ import { Send, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { SLASH_COMMANDS, resolveSlashCommand } from "./slashCommands"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { matchSlashCommands, resolveSlashCommand, type SlashCommand } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
 
 interface ChatComposerProps {
@@ -25,15 +26,14 @@ export function ChatComposer({
   placeholder = "Ask about your data...",
 }: ChatComposerProps) {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
+  const { canWrite } = useWorkspaceRole()
 
   const showSlashMenu =
     !isStreaming && input.startsWith("/") && !input.slice(1).includes(" ")
   const slashQuery = showSlashMenu ? input.slice(1) : ""
-  const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
-    cmd.name.startsWith(slashQuery),
-  )
+  const filteredCommands = matchSlashCommands(slashQuery, canWrite)
 
-  function selectSlashCommand(cmd: typeof SLASH_COMMANDS[number]) {
+  function selectSlashCommand(cmd: SlashCommand) {
     setInput(`/${cmd.name} `)
     setSlashMenuIndex(0)
   }
@@ -82,6 +82,7 @@ export function ChatComposer({
         onSelect={selectSlashCommand}
         visible={showSlashMenu}
         selectedIndex={slashMenuIndex}
+        canWrite={canWrite}
       />
       <Input
         data-testid="chat-input"

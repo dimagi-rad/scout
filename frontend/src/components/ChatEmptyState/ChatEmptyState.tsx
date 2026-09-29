@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { formatRelativeTime } from "@/lib/relativeTime"
 import { cn } from "@/lib/utils"
-import { SLASH_COMMANDS, resolveSlashCommand } from "@/components/ChatPanel/slashCommands"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { matchSlashCommands, resolveSlashCommand } from "@/components/ChatPanel/slashCommands"
 import type { SlashCommand } from "@/components/ChatPanel/slashCommands"
 import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
 import { getStarterQuestions } from "./starterQuestions"
@@ -28,15 +29,14 @@ export function ChatEmptyPrompt({
   className,
 }: ChatEmptyPromptProps) {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
+  const { canWrite } = useWorkspaceRole()
 
   // Slash command menu state — mirrors ChatPanel's active-thread input so
   // slash commands work identically here.
   const showSlashMenu =
     !disabled && input.startsWith("/") && !input.slice(1).includes(" ")
   const slashQuery = showSlashMenu ? input.slice(1) : ""
-  const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
-    cmd.name.startsWith(slashQuery),
-  )
+  const filteredCommands = matchSlashCommands(slashQuery, canWrite)
 
   function selectSlashCommand(cmd: SlashCommand) {
     setInput(`/${cmd.name} `)
@@ -90,6 +90,7 @@ export function ChatEmptyPrompt({
           onSelect={selectSlashCommand}
           visible={showSlashMenu}
           selectedIndex={slashMenuIndex}
+          canWrite={canWrite}
         />
         <Textarea
           data-testid="chat-input-prominent"

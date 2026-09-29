@@ -1,6 +1,8 @@
 export interface SlashCommand {
   name: string
   description: string
+  /** Hidden from read-only members; the server and agent deny it for them anyway. */
+  requiresWrite: boolean
   buildPrompt: (args: string) => string
 }
 
@@ -8,6 +10,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "save-recipe",
     description: "Save this conversation as a reusable recipe",
+    requiresWrite: true,
     buildPrompt: (args) => {
       const base =
         "Create a reusable recipe from this conversation using the save_as_recipe tool. " +
@@ -20,6 +23,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "refresh-data",
     description: "Pull the latest data from connected accounts",
+    requiresWrite: true,
     buildPrompt: (args) => {
       const base =
         "Refresh data from the workspace's connected accounts. " +
@@ -36,6 +40,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     },
   },
 ]
+
+/** Commands the menu offers for a typed prefix, given the member's role. */
+export function matchSlashCommands(query: string, canWrite: boolean): SlashCommand[] {
+  return SLASH_COMMANDS.filter(
+    (cmd) => cmd.name.startsWith(query) && (canWrite || !cmd.requiresWrite),
+  )
+}
 
 /**
  * Resolve raw input text into the prompt that should actually be sent.
