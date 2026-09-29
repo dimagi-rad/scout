@@ -307,7 +307,7 @@ class SchemaManager:
 
         Returns a PROVISIONING record with a unique schema name. The caller
         is responsible for creating the physical schema and dispatching the
-        Celery task (refresh_tenant_schema) to run the materialization.
+        Procrastinate task (refresh_tenant_schema) to run the materialization.
         """
         schema_name = refresh_schema_name(
             tenant.provider, tenant.external_id, token=uuid.uuid4().hex[:8]
