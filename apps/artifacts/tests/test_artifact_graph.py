@@ -1444,8 +1444,10 @@ def test_backfill_command_apply_persists_legacy_manifests_once(workspace, member
         workspace=workspace, created_by=member_user, title="Chart", artifact_type=ArtifactType.REACT
     )
 
-    call_command("backfill_story_manifests", "--apply", stdout=StringIO())
+    applied = StringIO()
+    call_command("backfill_story_manifests", "--apply", stdout=applied)
 
+    assert "Backfilled 1 stories (1 now show live data)" in applied.getvalue()
     legacy.refresh_from_db()
     assert [q["name"] for q in legacy.semantic_queries] == ["q.visits_by_day"]
     assert list(
@@ -1457,7 +1459,10 @@ def test_backfill_command_apply_persists_legacy_manifests_once(workspace, member
 
     rerun = StringIO()
     call_command("backfill_story_manifests", "--apply", stdout=rerun)
-    assert "Backfilled 0 stories, 0 already done or deleted, 0 failed." in rerun.getvalue()
+    assert (
+        "Backfilled 0 stories (0 now show live data), 0 already done or deleted, 0 failed."
+        in rerun.getvalue()
+    )
 
 
 @pytest.mark.django_db(transaction=True)

@@ -50,6 +50,7 @@ class Command(BaseCommand):
             return
 
         done = 0
+        live = 0
         skipped = 0
         failed = 0
         for artifact_id in artifact_ids:
@@ -68,9 +69,14 @@ class Command(BaseCommand):
                 skipped += 1
                 continue
             done += 1
+            # Only valid queries reach semantic_queries, which drives the list's badge.
+            live += bool(artifact.semantic_queries)
             self.stdout.write(f"  Backfilled story {artifact_id}")
 
-        summary = f"Backfilled {done} stories, {skipped} already done or deleted, {failed} failed."
+        summary = (
+            f"Backfilled {done} stories ({live} now show live data), "
+            f"{skipped} already done or deleted, {failed} failed."
+        )
         if failed:
             raise CommandError(summary)
         self.stdout.write(self.style.SUCCESS(summary))
