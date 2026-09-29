@@ -9,7 +9,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 | `DJANGO_SETTINGS_MODULE` | Settings module: `config.settings.development`, `config.settings.production`, `config.settings.connectlabs` (production settings served under the `/scout` path prefix), or `config.settings.test`. There is no default; `manage.py`, the ASGI/WSGI apps and the MCP server refuse to start without it. `DEBUG` is fixed by the module (on in development, off otherwise). |
 | `DJANGO_SECRET_KEY` | Django secret key for cryptographic signing. Must be unique and secret in production. |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude. The agent can't run without it. |
-| `DB_CREDENTIAL_KEY` | Fernet key for encrypting stored data-source credentials (API keys and OAuth tokens) at rest. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `DB_CREDENTIAL_KEY` | Fernet key for encrypting API-key credentials at rest. OAuth tokens are stored by allauth without this encryption; the key only covers the copy kept in the session during login. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `DATABASE_URL` | PostgreSQL connection URL for Scout's own database. Example: `postgresql://user:pass@localhost/scout` |
 | `CUBE_API_URL` | Cube semantic query API. Host development: `http://localhost:4000`; use the private service URL in production. |
 | `CUBE_VALIDATOR_URL` | Cube schema validator. Host development: `http://localhost:4010`; use the private service URL in production. |

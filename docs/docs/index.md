@@ -28,4 +28,4 @@ Scout is an AI-powered data agent platform that lets teams query their data usin
 
 ## Design
 
-**[Core design specification](reference/design.md)** — The authoritative reference for Scout's data model and behaviour: tenants, workspaces, user roles & permissions, invitations, threads, artifacts, recipes, multi-tenancy, account deletion, and the audit log.
+**[Core design](reference/design.md)** — How tenants, workspaces, roles and permissions, invitations, threads, artifacts, recipes and multi-tenant workspaces behave.
