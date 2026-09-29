@@ -824,12 +824,15 @@ class WorkspaceMemberListView(APIView):
             workspace=workspace, user=target
         ).exists()
         gaps = () if already_member else missing_for_user(target, workspace)
+        rediscovery = Rediscovery()
         if gaps:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
             # using their own token, renewed if it has expired, then re-check.
             providers = sorted({t.provider for t in gaps})
-            async_to_sync(_arefresh_target_for_workspace)(target, providers, renew=True)
+            rediscovery = async_to_sync(_arefresh_target_for_workspace)(
+                target, providers, renew=True
+            )
 
         # Every member must cover every source (#381), so a target still missing
         # one after the refresh gets an invite that awaits it rather than a hard
@@ -846,7 +849,11 @@ class WorkspaceMemberListView(APIView):
             # The manager just performed this action, so don't email them.
             notify_awaiting_access(invite, target, notify_manager=False)
             return Response(
-                _serialize_invite(invite, result="invite_awaiting_access"),
+                {
+                    **_serialize_invite(invite, result="invite_awaiting_access"),
+                    "recheck_complete": not rediscovery.failed,
+                    "needs_sign_in": rediscovery.needs_sign_in,
+                },
                 status=status.HTTP_201_CREATED,
             )
 

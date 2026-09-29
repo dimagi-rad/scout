@@ -497,6 +497,34 @@ class TestDirectAdd:
         assert TenantMembership.objects.filter(user=target, tenant=t1).exists()
         assert resp.json()["result"] == result
 
+    @pytest.mark.parametrize(
+        ("status", "recheck_complete", "needs_sign_in"),
+        [(200, True, False), (502, False, False), (401, True, True)],
+    )
+    def test_an_awaiting_invite_says_whether_retrying_or_signing_in_may_help(
+        self, client, user, httpx_mock, t1, status, recheck_complete, needs_sign_in
+    ):
+        """The manager just typed this person's email: a provider error means retry,
+        a refused sign-in means the person must sign in, and neither means they lack
+        upstream access."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        _oauth_identity(target, expires_at=timezone.now() + timedelta(hours=1))
+        httpx_mock.add_response(
+            url=COMMCARE_DOMAIN_API,
+            status_code=status,
+            json=_domains() if status == 200 else {},
+        )
+        client.force_login(user)
+
+        resp = self._add(client, ws, target.email)
+
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["result"] == "invite_awaiting_access"
+        assert body["recheck_complete"] is recheck_complete
+        assert body["needs_sign_in"] is needs_sign_in
+
     def test_full_coverage_target_becomes_a_member(self, client, user, t1, t2):
         ws = _workspace(user, t1, t2)
         target = User.objects.create_user(email="full@example.com", password="pass")
