@@ -8,10 +8,12 @@ workspace creation validates every requested source.
 """
 
 import asyncio
+import contextlib
 import threading
 from datetime import timedelta
 from unittest.mock import patch
 
+import httpx
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync, sync_to_async
@@ -23,7 +25,7 @@ from rest_framework.test import APIClient
 from apps.users import signals
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.tenant_resolution import COMMCARE_DOMAIN_API
-from apps.users.services.token_refresh import get_token_url
+from apps.users.services.token_refresh import INTERACTIVE_DB_DEADLINE, get_token_url
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.api import workspace_views
 from apps.workspaces.models import (
@@ -43,7 +45,7 @@ from apps.workspaces.services.member_coverage import (
     add_tenant_covered_by_members,
     admit_covered_member,
 )
-from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked
+from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked, user_row
 from tests.tenant_access import grant_tenant_access, ocs_team_connection
 
 User = get_user_model()
@@ -750,6 +752,45 @@ class TestMutationRaces:
             add_tenant_covered_by_members(ws, t2)
 
         assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
+
+    def test_renewing_a_busy_targets_token_keeps_their_rotated_grant(
+        self, client, user, httpx_mock, t1
+    ):
+        """G2: once the provider rotates the target's grant, failing to store it loses
+        it for good, and it is the target's grant, not the manager's. A sign-in
+        holding the target's row must delay the store, never discard it."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        _commcare_oauth(target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1))
+        held = contextlib.ExitStack()
+
+        def rotate_while_target_signs_in(_request):
+            held.enter_context(
+                row_locked(user_row(target.pk), release_after=INTERACTIVE_DB_DEADLINE + 1)
+            )
+            return httpx.Response(
+                200, json={"access_token": "tok-new", "refresh_token": "refresh-2"}
+            )
+
+        httpx_mock.add_callback(
+            rotate_while_target_signs_in, method="POST", url=get_token_url("commcare")
+        )
+        httpx_mock.add_response(
+            url=COMMCARE_DOMAIN_API,
+            match_headers={"Authorization": "Bearer tok-new"},
+            json=_domains(t1),
+        )
+        client.force_login(user)
+
+        with held:
+            resp = client.post(
+                f"/api/workspaces/{ws.id}/members/",
+                {"email": target.email, "role": "read"},
+                format="json",
+            )
+
+        assert resp.json()["result"] == "member"
+        assert SocialToken.objects.get(account__user=target).token_secret == "refresh-2"
 
 
 @pytest.mark.django_db

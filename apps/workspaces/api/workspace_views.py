@@ -32,7 +32,7 @@ from apps.users.services.tenant_resolution import (
     resolve_ocs_chatbots,
 )
 from apps.users.services.token_refresh import (
-    INTERACTIVE_DB_DEADLINE,
+    WORKER_DB_DEADLINE,
     TokenRefreshUnavailable,
     get_token_url,
     refresh_oauth_token,
@@ -147,11 +147,13 @@ async def _arenewed_access_tokens(user, provider) -> tuple[list[tuple], bool]:
         try:
             # Bounded by its own timeouts, never cancelled: cancelling between the
             # provider rotating the grant and Scout storing it would lose the grant.
+            # The worker deadline for the same reason: the grant is the target's, so
+            # the manager waits out a busy row rather than the target reconnecting.
             access_token = await refresh_oauth_token(
                 token,
                 token_url,
                 request_timeout=SHARE_REFRESH_TIMEOUT,
-                db_timeout=INTERACTIVE_DB_DEADLINE,
+                db_timeout=WORKER_DB_DEADLINE,
                 record_failure=False,
             )
         except TokenRefreshError as error:
