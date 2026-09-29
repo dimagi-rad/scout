@@ -949,8 +949,10 @@ export function SettingsTab({
           data-testid="settings-access-notice"
         >
           <p>
-            The workspace name and system prompt can't be changed, and the prompt is hidden,
-            until you regain access. Still needed:
+            {isManager
+              ? "The workspace name and system prompt can't be changed, and the prompt is hidden, until you regain access."
+              : "The system prompt is hidden until you regain access."}{" "}
+            Still needed:
           </p>
           <ul className="mt-1 space-y-1">
             {missingTenants.map((t) => (

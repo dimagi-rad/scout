@@ -24,6 +24,19 @@ const workspace: WorkspaceDetail = {
   updated_at: "2026-09-01T10:00:00Z",
 }
 
+const redacted: Partial<WorkspaceDetail> = {
+  system_prompt: "",
+  missing_tenants: [
+    {
+      tenant_id: "t2",
+      tenant_name: "Source Two",
+      provider: "commcare",
+      recovery: "reconnect",
+      remedy: "reconnect CommCare in Connected Accounts",
+    },
+  ],
+}
+
 function renderTab(overrides: Partial<WorkspaceDetail> = {}) {
   render(
     <SettingsTab workspace={{ ...workspace, ...overrides }} onRename={vi.fn()} onDelete={vi.fn()} />,
@@ -72,19 +85,11 @@ describe("workspace settings saves", () => {
   })
 
   it("offers no settings edits while the server has blanked the prompt for missing sources", () => {
-    renderTab({
-      system_prompt: "",
-      missing_tenants: [
-        {
-          tenant_id: "t2",
-          tenant_name: "Source Two",
-          provider: "commcare",
-          recovery: "reconnect",
-          remedy: "reconnect CommCare in Connected Accounts",
-        },
-      ],
-    })
+    renderTab(redacted)
 
+    expect(screen.getByTestId("settings-access-notice")).toHaveTextContent(
+      "The workspace name and system prompt can't be changed",
+    )
     expect(screen.getByTestId("settings-missing-t2")).toHaveTextContent(
       "Source Two: reconnect CommCare in Connected Accounts",
     )
@@ -94,5 +99,13 @@ describe("workspace settings saves", () => {
     // Every PATCH is refused in this state, so rename is not offered either.
     expect(screen.getByTestId("settings-name-input")).toBeDisabled()
     expect(screen.queryByTestId("settings-save-name")).not.toBeInTheDocument()
+  })
+
+  it("tells a non-manager only that the prompt is hidden", () => {
+    renderTab({ ...redacted, role: "read" })
+
+    const notice = screen.getByTestId("settings-access-notice")
+    expect(notice).toHaveTextContent("The system prompt is hidden until you regain access.")
+    expect(notice).not.toHaveTextContent("can't be changed")
   })
 })
