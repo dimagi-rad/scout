@@ -121,12 +121,17 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
     }
   }
 
-  // A 409 means the invite was accepted or revoked elsewhere, or the invitee already
-  // joined; either way the list is stale.
-  function reloadOnConflict(err: unknown) {
-    if (err instanceof ApiError && err.status === 409) {
-      setConfirmRemoveId(null)
-      void load()
+  // A 409 means the list is stale: the invite was accepted or revoked elsewhere, or the
+  // invitee already joined. Refresh without load()'s loading/error states, which would
+  // replace the tab and hide the conflict message.
+  async function refreshOnConflict(err: unknown) {
+    if (!(err instanceof ApiError && err.status === 409)) return
+    try {
+      const data = await workspaceApi.getMembers(workspaceId)
+      setMembers(data.members)
+      setInvites(data.invites)
+    } catch {
+      // The stale list plus the conflict message beats replacing the tab with an error.
     }
   }
 
@@ -139,7 +144,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       )
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to update invite role")
-      reloadOnConflict(err)
+      void refreshOnConflict(err)
     } finally {
       setUpdatingId(null)
     }
@@ -153,7 +158,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       setConfirmRemoveId(null)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to revoke invite")
-      reloadOnConflict(err)
+      void refreshOnConflict(err)
     } finally {
       setRemovingId(null)
     }
@@ -192,7 +197,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       setTimeout(() => addTriggerRef.current?.focus(), 0)
     } catch (err) {
       setAddError(err instanceof ApiError ? err.message : "Failed to add member")
-      reloadOnConflict(err)
+      void refreshOnConflict(err)
     } finally {
       setAddSubmitting(false)
     }
@@ -309,7 +314,9 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
         </p>
       )}
       {mutationError && (
-        <p className="mb-3 text-sm text-destructive">{mutationError}</p>
+        <p className="mb-3 text-sm text-destructive" data-testid="members-mutation-error">
+          {mutationError}
+        </p>
       )}
       <div className="rounded-lg border">
         <table className="w-full text-sm">

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, expect, it, vi } from "vitest"
 
@@ -54,7 +54,30 @@ it("reloads the members when a revoke finds the invite already accepted", async 
 
   expect(await screen.findByTestId("member-row-m-2")).toBeInTheDocument()
   expect(screen.queryByTestId("invite-row-new@example.com")).not.toBeInTheDocument()
-  expect(screen.getByText("Invite is no longer live.")).toBeInTheDocument()
+  expect(screen.getByTestId("members-mutation-error")).toHaveTextContent(
+    "Invite is no longer live.",
+  )
+})
+
+it("keeps the conflict message and the list when the refresh fails", async () => {
+  vi.mocked(workspaceApi.getMembers).mockReset()
+  vi.mocked(workspaceApi.getMembers)
+    .mockResolvedValueOnce({ members: [manager], invites: [pendingInvite] })
+    .mockRejectedValueOnce(new ApiError(500, "Server error"))
+  vi.mocked(workspaceApi.revokeInvite).mockRejectedValue(
+    new ApiError(409, "Invite is no longer live."),
+  )
+  render(<MembersTab workspaceId="ws-1" isManager />)
+
+  await userEvent.click(await screen.findByTestId("invite-revoke-new@example.com"))
+  await userEvent.click(screen.getByTestId("confirm-revoke-invite-new@example.com"))
+
+  expect(await screen.findByTestId("members-mutation-error")).toHaveTextContent(
+    "Invite is no longer live.",
+  )
+  await waitFor(() => expect(workspaceApi.getMembers).toHaveBeenCalledTimes(2))
+  expect(screen.getByTestId("invite-row-new@example.com")).toBeInTheDocument()
+  expect(screen.queryByText("Server error")).not.toBeInTheDocument()
 })
 
 it("reloads the members when a re-invite finds the invite already accepted", async () => {
@@ -69,5 +92,5 @@ it("reloads the members when a re-invite finds the invite already accepted", asy
 
   expect(await screen.findByTestId("member-row-m-2")).toBeInTheDocument()
   expect(screen.queryByTestId("invite-row-new@example.com")).not.toBeInTheDocument()
-  expect(screen.getByText("Invite is no longer live.")).toBeInTheDocument()
+  expect(screen.getByTestId("add-member-error")).toHaveTextContent("Invite is no longer live.")
 })
