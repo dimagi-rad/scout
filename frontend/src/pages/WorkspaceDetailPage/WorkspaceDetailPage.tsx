@@ -180,6 +180,7 @@ export function MembersTab({ workspaceId, isManager }: { workspaceId: string; is
       })
       if (res.result === "member") {
         setMembers((prev) => [...prev, res])
+        setAddInfo(`Added ${res.email}. We've emailed them to let them know.`)
       } else {
         const awaiting =
           res.result === "invite_awaiting_access"
