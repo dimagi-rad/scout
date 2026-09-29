@@ -55,7 +55,7 @@ The agent reviews the conversation, writes a prompt template, turns the values w
 
 You can also ask in plain language ("save this as a recipe"). The agent rejects a recipe whose prompt uses a `{{placeholder}}` that isn't defined as a variable.
 
-Saving a recipe requires the **Read/Write** or **Manage** workspace role. For **Read** members the `/save-recipe` command is hidden and the agent does not have the `save_as_recipe` tool.
+Saving a recipe requires the **Read-Write** or **Manager** workspace role. For **Read** members the `/save-recipe` command is hidden and the agent does not have the `save_as_recipe` tool.
 
 ## Managing recipes
 

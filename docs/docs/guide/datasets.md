@@ -17,7 +17,7 @@ Use the names you see here when asking questions (see [Asking questions](asking-
 
 The agent can add custom datasets (defined by SQL over the loaded tables) and custom fields to the model. It stages these changes on the conversation's **Canvas**, which opens in a side panel in the chat. The changes take effect once they are saved, either by the agent or with **Save all** on the Canvas, which rebuilds the semantic model.
 
-Changing the model requires the **Read/Write** or **Manage** workspace role. **Read** members can view the Canvas but not save it.
+Changing the model requires the **Read-Write** or **Manager** workspace role. **Read** members can view the Canvas but not save it.
 
 ## Keeping data current
 

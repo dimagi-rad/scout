@@ -69,7 +69,7 @@ model change and the chart:
 
 The actual source table and column names must be discovered in your workspace;
 multi-chatbot workspaces may use prefixed names. Saving a dataset requires a
-Read/Write or Manage workspace role. The change is staged on the chat's Canvas
+Read-Write or Manager workspace role. The change is staged on the chat's Canvas
 and saved to the data model (see [Datasets](datasets.md#custom-datasets-and-fields));
 the Artifact Manager uses the saved semantic fields to create and validate the
 chart. A request for a chart alone does not authorize a model change.
@@ -89,7 +89,7 @@ Type `/` at the start of the chat input to see the available slash commands. The
 | `/save-recipe` | Save the current conversation as a reusable [recipe](recipes.md). Optionally add instructions, e.g. `/save-recipe make the date range a variable`. |
 | `/refresh-data` | Load the latest data from the workspace's connected accounts. The load runs in the background; the agent reports that it has started, or that a load is already running. |
 
-Both commands need the **Read/Write** or **Manage** workspace role and are hidden from **Read** members.
+Both commands need the **Read-Write** or **Manager** workspace role and are hidden from **Read** members.
 
 ## Limitations
 

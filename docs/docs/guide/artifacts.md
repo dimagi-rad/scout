@@ -22,7 +22,7 @@ Ask for a chart or dashboard in chat:
 - "Create a dashboard showing key metrics for this quarter"
 - "Build a bar chart comparing sales by region"
 
-The main agent hands artifact work to a subagent, the **Artifact Manager**, which checks the semantic queries and writes the story. Creating or changing artifacts requires the **Read/Write** or **Manage** workspace role. For **Read** members the agent can inspect existing artifacts but cannot create or change them.
+The main agent hands artifact work to a subagent, the **Artifact Manager**, which checks the semantic queries and writes the story. Creating or changing artifacts requires the **Read-Write** or **Manager** workspace role. For **Read** members the agent can inspect existing artifacts but cannot create or change them.
 
 ## Viewing artifacts
 
@@ -39,4 +39,4 @@ If an artifact's data is unavailable, for example because the data model changed
 
 To change an artifact, ask the agent ("add a filter for date range"). Each change saves a new version linked to the original, and the Artifacts page shows the latest version.
 
-On the Artifacts page, **Read/Write** and **Manage** members can also edit an artifact's title and description, or delete it.
+On the Artifacts page, **Read-Write** and **Manager** members can also edit an artifact's title and description, or delete it.
