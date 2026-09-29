@@ -27,15 +27,9 @@ class CommCareCaseLoader(CommCareBaseLoader):
     def __init__(
         self,
         domain: str,
-        credential: dict[str, str] | None = None,
-        access_token: str | None = None,
+        credential: dict[str, str],
         page_size: int = _DEFAULT_PAGE_SIZE,
     ) -> None:
-        # Support legacy ``access_token`` kwarg for backwards compatibility.
-        if credential is None and access_token is not None:
-            credential = {"type": "oauth", "value": access_token}
-        elif credential is None:
-            raise ValueError("Either credential or access_token is required")
         super().__init__(domain=domain, credential=credential)
         self.page_size = min(page_size, _DEFAULT_PAGE_SIZE)
 

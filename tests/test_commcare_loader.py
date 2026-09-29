@@ -20,7 +20,9 @@ class TestCommCareCaseLoader:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.return_value = mock_response
-            loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
+            loader = CommCareCaseLoader(
+                domain="dimagi", credential={"type": "oauth", "value": "fake-token"}
+            )
             cases = loader.load()
 
         assert len(cases) == 2
@@ -46,7 +48,9 @@ class TestCommCareCaseLoader:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.side_effect = [page1, page2]
-            loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
+            loader = CommCareCaseLoader(
+                domain="dimagi", credential={"type": "oauth", "value": "fake-token"}
+            )
             cases = loader.load()
 
         assert len(cases) == 3
