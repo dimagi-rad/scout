@@ -242,7 +242,7 @@ def _run_sandbox_error_listeners(dispatch: str) -> list:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
-    start = SANDBOX_HTML_TEMPLATE.index("window.addEventListener('error'")
+    start = SANDBOX_HTML_TEMPLATE.index("function nonErrorMessage(")
     last = SANDBOX_HTML_TEMPLATE.index("window.addEventListener('unhandledrejection'")
     end = SANDBOX_HTML_TEMPLATE.index("\n        });", last) + len("\n        });")
     harness = (
@@ -434,15 +434,21 @@ class TestArtifactSandboxView:
         ]
 
     def test_sandbox_reads_no_fields_of_a_thrown_non_error(self):
-        """`throw row` must not forward the row's `message` or `name` fields."""
+        """`throw row` must forward neither the row's fields nor its stringified value."""
         calls = _run_sandbox_error_listeners(
             "handlers.error({ error: { message: 'Alice', name: 'Bob' },"
             " message: 'Uncaught [object Object]' });\n"
+            "handlers.error({ error: ['Alice', 'Bob'], message: 'Uncaught Alice,Bob' });\n"
+            "handlers.error({ error: 'query timed out', message: 'Uncaught query timed out' });\n"
+            "handlers.error({ error: null, message: 'Script error.' });\n"
             "handlers.error({ error: new RangeError('bad'), message: 'Uncaught RangeError: bad' });\n"
         )
 
         assert calls == [
-            ["Uncaught Error", "Uncaught [object Object]", None, None],
+            ["Uncaught Error", "Non-Error exception (object)", None, None],
+            ["Uncaught Error", "Non-Error exception (object)", None, None],
+            ["Uncaught Error", "query timed out", None, None],
+            ["Uncaught Error", "Script error.", None, None],
             ["Uncaught Error", "bad", "stack", "RangeError"],
         ]
 

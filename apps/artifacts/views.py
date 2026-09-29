@@ -633,6 +633,14 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
         // Generated code can also fail outside render (event handlers, timers,
         // promises), where neither the React boundary nor showError sees it.
+        // A thrown or rejected non-Error may be a row the artifact loaded, and the
+        // browser's own "Uncaught ..." text stringifies it. A string is a message by
+        // intent, like an Error's, so it is kept; anything else is sent as its type.
+        function nonErrorMessage(value, what) {
+            return typeof value === 'string'
+                ? value
+                : `Non-Error ${what} (${value === null ? 'null' : typeof value})`;
+        }
         window.addEventListener('error', (event) => {
             const error = event.error;
             if (error instanceof Error) {
@@ -640,9 +648,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                     'Uncaught Error', error.message, error.stack, error.name);
                 return;
             }
-            // A thrown non-Error may be a row the artifact loaded, so none of its
-            // fields are read; event.message is the browser's "Uncaught ..." text.
-            ArtifactRenderer.notifyParentOfError('Uncaught Error', event.message, null, null);
+            // A cross-origin "Script error." carries a null error; its text is safe.
+            const message = error == null ? event.message : nonErrorMessage(error, 'exception');
+            ArtifactRenderer.notifyParentOfError('Uncaught Error', message, null, null);
         });
         window.addEventListener('unhandledrejection', (event) => {
             const reason = event.reason;
@@ -651,13 +659,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                     'Unhandled Rejection', reason.message, reason.stack, reason.name);
                 return;
             }
-            // A string is a thrown message, like an Error's. Any other value may
-            // be a row or result the artifact loaded, so only its type is sent.
-            const message = typeof reason === 'string'
-                ? reason
-                : `Non-Error rejection (${reason === null ? 'null' : typeof reason})`;
             ArtifactRenderer.notifyParentOfError(
-                'Unhandled Rejection', message, null, 'UnhandledRejection');
+                'Unhandled Rejection', nonErrorMessage(reason, 'rejection'), null,
+                'UnhandledRejection');
         });
 
         // Initialize when DOM is ready
