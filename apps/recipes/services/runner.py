@@ -133,13 +133,17 @@ class RecipeRunner:
 
     def _extract_response_content(self, messages: list) -> str:
         """Extract the final response content from agent messages."""
+        # ``.text`` rather than ``content``: with thinking on, the final answer
+        # arrives as a block list (thinking + text), and str() of it would store
+        # the thinking signatures as the recipe's response.
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and msg.content:
-                if hasattr(msg, "tool_calls") and msg.tool_calls and not msg.content.strip():
-                    continue
-                if msg.response_metadata.get(ESCALATION_METADATA_KEY):
-                    continue
-                return str(msg.content)
+            if not isinstance(msg, AIMessage):
+                continue
+            if msg.response_metadata.get(ESCALATION_METADATA_KEY):
+                continue
+            text = msg.text
+            if text.strip():
+                return text
 
         return ""
 

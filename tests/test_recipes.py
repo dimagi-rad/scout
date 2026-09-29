@@ -12,6 +12,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.test import AsyncClient
 from django.utils import timezone
+from langchain_core.messages import AIMessage
 
 from apps.recipes import tasks as recipe_tasks
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
@@ -708,6 +709,39 @@ class TestRecipeRunner:
         step_result = run.step_results[0]
         assert "East" in step_result["prompt"]
         assert "25" in step_result["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_recipe_runner_response_is_text_of_block_list_answer(
+        self, recipe, user, recipe_step_1
+    ):
+        """A thinking+text block-list answer is recorded as its text only."""
+        values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
+        tool_turn = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "", "signature": "sig-1"},
+                {"type": "tool_use", "id": "tc-1", "name": "query", "input": {}},
+            ],
+            tool_calls=[{"id": "tc-1", "name": "query", "args": {}}],
+        )
+        answer = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "", "signature": "sig-2"},
+                {"type": "text", "text": "Top customers: A, B."},
+            ]
+        )
+        mock_graph = Mock()
+        mock_graph.ainvoke = AsyncMock(return_value={"messages": [tool_turn, answer]})
+
+        _run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, values, user, run=_run, graph=mock_graph).execute_async()
+
+        assert run.step_results[0]["response"] == "Top customers: A, B."
 
     @pytest.mark.asyncio
     async def test_recipe_runner_handles_execution_failure(self, recipe, user, recipe_step_1):
