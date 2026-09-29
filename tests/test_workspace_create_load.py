@@ -94,12 +94,14 @@ class TestCreateQueuesLoad:
         assert defer.call_args.kwargs["only_unserved"] is True
         assert TenantLoadGeneration.objects.get(tenant=t1).requested_generation == 2
 
-    def test_a_workspace_without_sources_queues_nothing(
+    def test_a_create_without_sources_is_refused_and_queues_nothing(
         self, client, user, defer, django_capture_on_commit_callbacks
     ):
+        client.force_login(user)
         with django_capture_on_commit_callbacks(execute=True):
-            _create(client, user)
+            resp = client.post("/api/workspaces/", {"name": "New", "tenant_ids": []}, format="json")
 
+        assert resp.status_code == 400
         defer.assert_not_called()
 
     def test_a_queue_outage_does_not_fail_the_create(
