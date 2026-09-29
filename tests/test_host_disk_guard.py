@@ -356,3 +356,20 @@ def test_failed_production_deploys_open_a_tracking_issue():
         "DEPLOY_RESULT": "${{ needs.deploy.result }}",
     }
     assert "deploy-failure-issue.cjs" in script["with"]["script"]
+
+
+def test_superseded_deploy_check_fails_open():
+    # Only an explicit "true" may skip: a failed or timed-out check leaves the
+    # output empty and must still test and deploy.
+    jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "deploy.yml").read_text())["jobs"]
+    assert jobs["supersede"]["permissions"] == {"actions": "read", "contents": "read"}
+    assert jobs["test"]["needs"] == "supersede"
+    assert jobs["test"]["if"] == (
+        "${{ !cancelled() && needs.supersede.outputs.superseded != 'true' }}"
+    )
+    assert jobs["deploy"]["needs"] == "test"
+    assert jobs["deploy"]["if"] == "${{ !cancelled() && needs.test.result == 'success' }}"
+    # The rollback guard finds the live run by this job's name; a `name:` would
+    # silently disable it.
+    assert "name" not in jobs["deploy"]
+    assert "jobName: 'deploy'" in jobs["supersede"]["steps"][-1]["with"]["script"]

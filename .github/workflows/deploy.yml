@@ -19,11 +19,48 @@ permissions:
   contents: read
 
 jobs:
+  supersede:
+    # `queue: max` keeps every pending run, so a burst of merges queues one full
+    # ~22-minute test+deploy per commit. When a newer deploy of main is already
+    # queued it ships this commit too, so skip ours instead of redeploying.
+    # Also skip when a newer commit is already live, so re-running an old run
+    # cannot roll production back. Skipping touches nothing on the host, so the
+    # drain/deploy handoff with the staging destination is unchanged.
+    # Trade-off: if that newer run fails tests, this commit is not deployed either
+    # (the deploy-failure issue reports that run). If it is cancelled while
+    # pending, nothing reports it: re-run the newest skipped run instead.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      superseded: ${{ steps.check.outputs.superseded }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Skip if a newer deploy of main is queued
+        id: check
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { checkSuperseded } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/deploy-supersede.cjs`);
+            await checkSuperseded({ github, context, core, workflowId: 'deploy.yml', jobName: 'deploy' });
+
   test:
+    needs: supersede
+    # A broken check must not block deploys: run unless it positively said skip.
+    if: ${{ !cancelled() && needs.supersede.outputs.superseded != 'true' }}
     uses: ./.github/workflows/test.yml
 
   deploy:
     needs: test
+    # Explicit: the implicit success() also checks indirect ancestors
+    # (actions/runner#491), so a failed `supersede` would skip the deploy even
+    # after `test` ran and passed.
+    if: ${{ !cancelled() && needs.test.result == 'success' }}
     runs-on: ubuntu-latest
     # Bound setup/prebuild hangs too; post-drain steps have tighter limits.
     timeout-minutes: 90
