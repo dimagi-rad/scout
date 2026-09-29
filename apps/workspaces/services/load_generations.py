@@ -38,10 +38,16 @@ INTENT_KINDS = frozenset({INTENT_FULL_REFRESH, INTENT_RECONCILE_MISSING})
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 # The code whose behaviour decides what a load produces. A deploy that changes
 # any of it must not compare equal to a generation loaded before it.
+# tests/test_load_fingerprint_coverage.py fails when the load path imports a
+# module that is neither listed here nor excluded there.
 _IMPLEMENTATION_PATHS = (
     "mcp_server/services/materializer.py",
+    "mcp_server/services/dbt_runner.py",
+    "mcp_server/event_time.py",
     "mcp_server/loaders",
     "mcp_server/pipeline_registry.py",
+    "apps/common/identifiers.py",
+    "apps/common/localized.py",
     "apps/transformations/services",
     "pipelines",
 )
