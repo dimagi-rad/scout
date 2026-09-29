@@ -105,6 +105,15 @@ class PipelineConfig:
         return self.metadata_discovery is not None
 
     @property
+    def raw_table_names(self) -> frozenset[str]:
+        """Every table the raw load writes; anything else in a tenant schema is transform output."""
+        return frozenset(
+            name
+            for source in self.sources
+            for name in (source.physical_table_name, *source.auxiliary_tables)
+        )
+
+    @property
     def dbt_models(self) -> list[str]:
         return self.transforms.models if self.transforms else []
 

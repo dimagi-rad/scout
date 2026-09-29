@@ -1,6 +1,7 @@
 """Generation intent, join/bump rules, positive reuse evidence and resume eligibility."""
 
 import dataclasses
+import hashlib
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -201,40 +202,77 @@ def test_fingerprint_covers_config_assets_and_implementation(tenant, pipeline):
     )
     with_asset = pipeline_fingerprint(pipeline, tenant)
     assert with_asset != base
-    with patch.object(load_generations, "implementation_revision", return_value="deploy-b"):
+    with patch.object(load_generations, "raw_load_revision", return_value="deploy-b"):
+        assert pipeline_fingerprint(pipeline, tenant) != with_asset
+    with patch.object(load_generations, "transform_revision", return_value="deploy-b"):
         assert pipeline_fingerprint(pipeline, tenant) != with_asset
     other = get_registry().get_by_provider("ocs")
     assert pipeline_fingerprint(other, tenant) != with_asset
 
 
-def test_raw_load_fingerprint_ignores_assets_but_not_config_or_code(tenant, pipeline):
+def test_raw_load_fingerprint_ignores_transforms_but_not_config_or_raw_code(tenant, pipeline):
     base = raw_load_fingerprint(pipeline)
     TransformationAsset.objects.create(
         tenant=tenant, name="stg_extra", scope=TransformationScope.TENANT, sql_content="select 1"
     )
-    # Transforms re-run in full on resume, so assets don't decide raw rows.
+    # Transforms re-run in full on resume, so neither their assets nor their code
+    # decides raw rows.
     assert raw_load_fingerprint(pipeline) == base
-    with patch.object(load_generations, "implementation_revision", return_value="deploy-b"):
+    with patch.object(load_generations, "transform_revision", return_value="deploy-b"):
+        assert raw_load_fingerprint(pipeline) == base
+    with patch.object(load_generations, "raw_load_revision", return_value="deploy-b"):
         assert raw_load_fingerprint(pipeline) != base
     assert raw_load_fingerprint(dataclasses.replace(pipeline, version="next")) != base
 
 
-def test_a_configured_revision_is_read_every_call(settings, pipeline):
+def test_a_configured_revision_is_read_every_call_and_changes_both_halves(
+    settings, tenant, pipeline
+):
     settings.SCOUT_IMPLEMENTATION_REVISION = "deploy-a"
-    first = raw_load_fingerprint(pipeline)
+    first_raw = raw_load_fingerprint(pipeline)
+    first_full = pipeline_fingerprint(pipeline, tenant)
     settings.SCOUT_IMPLEMENTATION_REVISION = "deploy-b"
 
-    assert raw_load_fingerprint(pipeline) != first
+    # One deploy-wide value cannot say which half changed, so resume is refused too.
+    assert raw_load_fingerprint(pipeline) != first_raw
+    assert pipeline_fingerprint(pipeline, tenant) != first_full
 
 
-def test_a_missing_implementation_path_fails_loudly(monkeypatch):
-    load_generations._source_tree_revision.cache_clear()
-    monkeypatch.setattr(load_generations, "_IMPLEMENTATION_PATHS", ("no/such/path",))
-    try:
-        with pytest.raises(RuntimeError, match="no/such/path"):
-            load_generations._source_tree_revision()
-    finally:
-        load_generations._source_tree_revision.cache_clear()
+def test_the_source_tree_halves_hash_different_files():
+    raw = load_generations._source_tree_revision(load_generations._RAW_LOAD_PATHS)
+    transform = load_generations._source_tree_revision(load_generations._TRANSFORM_PATHS)
+    assert raw != transform
+    assert load_generations.raw_load_revision() == raw
+    assert load_generations.transform_revision() == transform
+
+
+def test_a_missing_implementation_path_fails_loudly():
+    with pytest.raises(RuntimeError, match="no/such/path"):
+        load_generations._source_tree_revision(("no/such/path",))
+
+
+def _legacy_digest(payload) -> str:
+    return hashlib.sha256(load_generations._canonical(payload).encode()).hexdigest()
+
+
+def test_fingerprints_stored_before_the_split_read_as_both_halves_changed(
+    settings, tenant, pipeline
+):
+    # Pre-split digests over one combined revision. A configured revision feeds
+    # old and new code the same value, so the payload shape alone must differ.
+    settings.SCOUT_IMPLEMENTATION_REVISION = "deploy-a"
+    config = load_generations._config_payload(pipeline)
+    legacy_raw = _legacy_digest({"pipeline": config, "revision": "deploy-a"})
+    legacy_full = _legacy_digest({"pipeline": config, "assets": [], "revision": "deploy-a"})
+    _failed_candidate(tenant, generation=1, config=legacy_raw)
+    _schema, run, _fingerprint = _published(tenant, pipeline, generation=1)
+    run.result["load_fingerprint"] = legacy_full
+    run.save(update_fields=["result"])
+    TenantLoadGeneration.objects.filter(tenant=tenant).update(published_fingerprint=legacy_full)
+
+    assert raw_load_fingerprint(pipeline) != legacy_raw
+    assert resumable_candidate(tenant.id, 1, raw_load_fingerprint(pipeline)) is None
+    assert reusable_generation(tenant.id, 1, pipeline_fingerprint(pipeline, tenant)) is None
 
 
 def _failed_candidate(tenant, *, generation, config, suffix="a", created_at=None):
@@ -259,6 +297,32 @@ def test_resume_only_the_same_pending_generation_with_matching_config(tenant, pi
     assert resumable_candidate(tenant.id, 3, config) is None
     assert resumable_candidate(tenant.id, 2, "changed-config") is None
     assert resumable_candidate(tenant.id, 2, "") is None
+
+
+def test_bumping_the_fingerprint_version_changes_both_digests(tenant, pipeline, monkeypatch):
+    raw, full = raw_load_fingerprint(pipeline), pipeline_fingerprint(pipeline, tenant)
+    monkeypatch.setattr(load_generations, "_FINGERPRINT_VERSION", 3)
+
+    assert raw_load_fingerprint(pipeline) != raw
+    assert pipeline_fingerprint(pipeline, tenant) != full
+
+
+def test_resume_survives_a_transform_only_deploy_but_not_a_raw_load_one(tenant, pipeline):
+    candidate = _failed_candidate(tenant, generation=2, config=raw_load_fingerprint(pipeline))
+
+    with patch.object(load_generations, "transform_revision", return_value="deploy-b"):
+        assert resumable_candidate(tenant.id, 2, raw_load_fingerprint(pipeline)) == candidate
+    with patch.object(load_generations, "raw_load_revision", return_value="deploy-b"):
+        assert resumable_candidate(tenant.id, 2, raw_load_fingerprint(pipeline)) is None
+
+
+@pytest.mark.parametrize("half", ["raw_load_revision", "transform_revision"])
+def test_a_deploy_changing_either_half_blocks_reuse_of_the_published_load(tenant, pipeline, half):
+    _schema, _run, fingerprint = _published(tenant, pipeline, generation=1)
+    assert reusable_generation(tenant.id, 1, fingerprint) is not None
+
+    with patch.object(load_generations, half, return_value="deploy-b"):
+        assert reusable_generation(tenant.id, 1, pipeline_fingerprint(pipeline, tenant)) is None
 
 
 def test_resume_never_picks_a_refresh_request_or_live_candidate(tenant, pipeline):

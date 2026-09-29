@@ -38,6 +38,7 @@ from apps.workspaces.services.data_operation import (
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     capture_load_intent,
+    pipeline_fingerprint,
 )
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import agrant_tenant_access
@@ -51,6 +52,8 @@ class _Pipeline:
 
     def __init__(self, fail_times: int = 0):
         self.calls: list[tuple] = []
+        self.fingerprints: list[str] = []
+        self.configs: list = []
         self.fail_times = fail_times
 
     def __call__(self, membership, credential, pipeline, job_id, target_schema=None):
@@ -67,7 +70,10 @@ class _Pipeline:
                     result={"sources": {}},
                 )
             raise RuntimeError("provider timed out")
-        return completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
+        result = completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
+        self.fingerprints.append(result["load_fingerprint"])
+        self.configs.append(pipeline)
+        return result
 
 
 @pytest.fixture(autouse=True)
@@ -293,7 +299,7 @@ async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old
     async with _loads(pipeline) as drop:
         await _run(workspace, user)
         with patch(
-            "apps.workspaces.services.load_generations.implementation_revision",
+            "apps.workspaces.services.load_generations.raw_load_revision",
             return_value="next-deploy",
         ):
             retried = await _run(workspace, user)
@@ -304,6 +310,31 @@ async def test_a_retry_with_changed_loader_config_starts_fresh_and_drops_the_old
     drop.assert_called_once()
     [(queued,), _] = drop.call_args
     assert queued.id == first_candidate
+
+
+async def test_a_retry_after_a_transform_only_deploy_resumes_the_failed_candidate(
+    workspace, tenant, user
+):
+    pipeline = _Pipeline(fail_times=1)
+    async with _loads(pipeline) as drop:
+        await _run(workspace, user)
+        with patch(
+            "apps.workspaces.services.load_generations.transform_revision",
+            return_value="next-deploy",
+        ):
+            retried = await _run(workspace, user)
+        before_deploy = await workspaces_tasks._to_thread_fresh_db(
+            pipeline_fingerprint, pipeline.configs[-1], tenant
+        )
+
+    assert retried["tenants"][0]["result"]["resumed"] is True
+    first_candidate, second_candidate = (call[1] for call in pipeline.calls)
+    assert first_candidate == second_candidate
+    drop.assert_not_called()
+    generation = await TenantLoadGeneration.objects.aget(tenant=tenant)
+    assert generation.published_schema_id == second_candidate
+    # The resumed run fingerprinted (and so re-ran) the new transform code.
+    assert generation.published_fingerprint == pipeline.fingerprints[-1] != before_deploy
 
 
 async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(

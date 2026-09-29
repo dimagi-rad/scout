@@ -1,10 +1,17 @@
 """The load fingerprint must hash every module that can change what a load writes.
 
-A module missing from ``_IMPLEMENTATION_PATHS`` lets a deploy that edits only that
-module reuse a published generation, or resume a FAILED candidate, built by the
-old code. This walks the static first-party imports of the materializer (the
-entry point every load runs through) and requires each module it reaches to be
-hashed or explicitly excluded below with a reason.
+A module missing from both halves of the fingerprint lets a deploy that edits only
+that module reuse a published generation, or resume a FAILED candidate, built by
+the old code. A raw-shaping module filed under the transform half is subtler: only
+the raw half gates resume, so a deploy that edits it would resume a candidate whose
+committed rows the new code would not write.
+
+So the load path is walked in two parts. The raw walk starts at the materializer
+(the entry point every load runs through) and stops at the transform entry points,
+the modules the materializer hands off to for staging assets and the dbt run. Each
+module it reaches must be in the raw half or excluded below, never in the
+transform half. The transform walk starts at the transform entry points; what it
+reaches may be in either half. A module both walks reach is held to the raw rule.
 
 Orchestration reached only from apps/workspaces/tasks.py (candidate bookkeeping,
 pipeline resolution, credentials) is out of scope: it decides when and where a
@@ -15,9 +22,18 @@ nearly every deploy.
 import ast
 import pathlib
 
-from apps.workspaces.services.load_generations import _IMPLEMENTATION_PATHS, _REPO_ROOT
+from apps.workspaces.services.load_generations import _RAW_LOAD_PATHS, _REPO_ROOT, _TRANSFORM_PATHS
 
-_ENTRY_POINT = "mcp_server.services.materializer"
+_RAW_ENTRY_POINTS = ("mcp_server.services.materializer",)
+# The materializer uses these only to regenerate staging assets (TransformationAsset
+# rows, re-generated on every run) and to run dbt after the sources are loaded.
+# Neither writes a raw table, so a resume that re-runs them loses nothing.
+_TRANSFORM_ENTRY_POINTS = (
+    "apps.transformations.services.commcare_staging",
+    "apps.transformations.services.connect_staging",
+    "apps.transformations.services.executor",
+    "apps.transformations.services.staging_identity",
+)
 _FIRST_PARTY = ("apps", "config", "mcp_server")
 
 # Modules the load path imports that cannot change the raw rows or transform
@@ -72,21 +88,36 @@ def _imported_modules(path: pathlib.Path, module: str) -> set[str]:
     return {name for name in found if name.split(".")[0] in _FIRST_PARTY}
 
 
-def _load_path_files() -> set[str]:
+def _relative(module: str) -> str | None:
+    path = _module_file(module)
+    return path.relative_to(_REPO_ROOT).as_posix() if path is not None else None
+
+
+def _walk(entry_points, *, stop_at=frozenset()) -> set[str]:
     reached: set[str] = set()
-    pending = [_ENTRY_POINT]
+    pending = list(entry_points)
     while pending:
         module = pending.pop()
-        path = _module_file(module)
-        if path is None:
-            continue
-        relative = path.relative_to(_REPO_ROOT).as_posix()
-        if relative in reached:
+        relative = _relative(module)
+        if relative is None or relative in reached or relative in stop_at:
             continue
         reached.add(relative)
         if relative not in _NOT_LOAD_SHAPING:
-            pending.extend(_imported_modules(path, module))
+            pending.extend(_imported_modules(_module_file(module), module))
     return reached
+
+
+def _raw_load_files() -> set[str]:
+    boundary = frozenset(_relative(module) for module in _TRANSFORM_ENTRY_POINTS)
+    return _walk(_RAW_ENTRY_POINTS, stop_at=boundary)
+
+
+def _transform_files() -> set[str]:
+    return _walk(_TRANSFORM_ENTRY_POINTS)
+
+
+def _load_path_files() -> set[str]:
+    return _raw_load_files() | _transform_files()
 
 
 def _has_code(relative: str) -> bool:
@@ -95,25 +126,59 @@ def _has_code(relative: str) -> bool:
     return len(tree.body) > (ast.get_docstring(tree) is not None)
 
 
-def _is_hashed(relative: str) -> bool:
-    return any(
-        relative == root or relative.startswith(f"{root.rstrip('/')}/")
-        for root in _IMPLEMENTATION_PATHS
-    )
+def _under(relative: str, roots) -> bool:
+    return any(relative == root or relative.startswith(f"{root.rstrip('/')}/") for root in roots)
 
 
-def test_every_module_on_the_load_path_is_fingerprinted_or_excluded():
-    unaccounted = sorted(
+def _unaccounted(files, allowed_roots) -> list[str]:
+    return sorted(
         path
-        for path in _load_path_files()
-        if _has_code(path) and not _is_hashed(path) and path not in _NOT_LOAD_SHAPING
+        for path in files
+        if _has_code(path) and not _under(path, allowed_roots) and path not in _NOT_LOAD_SHAPING
     )
+
+
+def test_every_module_the_raw_load_reaches_is_in_the_raw_half():
+    unaccounted = _unaccounted(_raw_load_files(), _RAW_LOAD_PATHS)
     assert not unaccounted, (
-        "These modules are imported by the load path but not hashed into the load "
-        "fingerprint. Add them to _IMPLEMENTATION_PATHS in "
+        "The raw load reaches these modules, but they are not in _RAW_LOAD_PATHS in "
+        "apps/workspaces/services/load_generations.py. Add them there (not to "
+        "_TRANSFORM_PATHS: only the raw half gates resume), or to _NOT_LOAD_SHAPING "
+        f"here with a reason if they cannot change what a load writes: {unaccounted}"
+    )
+
+
+def test_every_module_the_transforms_reach_is_fingerprinted_or_excluded():
+    unaccounted = _unaccounted(_transform_files(), (*_RAW_LOAD_PATHS, *_TRANSFORM_PATHS))
+    assert not unaccounted, (
+        "The transform phase reaches these modules, but they are not hashed into the "
+        "load fingerprint. Add them to _TRANSFORM_PATHS in "
         "apps/workspaces/services/load_generations.py, or to _NOT_LOAD_SHAPING here "
         f"with a reason if they cannot change what a load writes: {unaccounted}"
     )
+
+
+def test_transform_entry_points_are_the_raw_loads_direct_hand_off():
+    # A boundary the raw load does not import directly would stop the raw walk
+    # somewhere a raw-shaping module could hide behind it.
+    direct = {
+        _relative(name)
+        for entry in _RAW_ENTRY_POINTS
+        for name in _imported_modules(_module_file(entry), entry)
+    }
+    for module in _TRANSFORM_ENTRY_POINTS:
+        relative = _relative(module)
+        assert relative in direct, f"{module} is not imported by a raw entry point"
+        assert _under(relative, _TRANSFORM_PATHS), f"{module} is not in _TRANSFORM_PATHS"
+
+
+def test_the_halves_do_not_overlap():
+    overlap = sorted(
+        root
+        for root in _TRANSFORM_PATHS
+        if _under(root, _RAW_LOAD_PATHS) or any(_under(raw, (root,)) for raw in _RAW_LOAD_PATHS)
+    )
+    assert not overlap, f"Paths hashed in both halves: {overlap}"
 
 
 def test_exclusions_are_still_on_the_load_path():
@@ -122,5 +187,7 @@ def test_exclusions_are_still_on_the_load_path():
 
 
 def test_exclusions_are_not_also_hashed():
-    both = sorted(path for path in _NOT_LOAD_SHAPING if _is_hashed(path))
+    both = sorted(
+        path for path in _NOT_LOAD_SHAPING if _under(path, (*_RAW_LOAD_PATHS, *_TRANSFORM_PATHS))
+    )
     assert not both, f"Excluded modules are already fingerprinted: {both}"
