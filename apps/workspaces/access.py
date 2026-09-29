@@ -35,6 +35,7 @@ lost membership. The two switches are independent.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from django.conf import settings
@@ -84,6 +85,11 @@ TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
 TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
 
 _PROVIDER_LABELS = dict(PROVIDER_CHOICES)
+
+# The access_cache tag that limits the coverage-denial log to once per request.
+_COVERAGE_DENIAL_LOGGED = "coverage_denial_logged"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -390,6 +396,32 @@ def role_satisfies(role: str, minimum_role: str) -> bool:
     return role_rank is not None and minimum_rank is not None and role_rank >= minimum_rank
 
 
+def _coverage_denied(user, workspace_id, missing) -> WorkspaceAccess:
+    """A ``TENANT_ACCESS_LOST`` decision, logged so a member's report can be traced.
+
+    INFO, not WARNING: the denial is expected, and Sentry only turns ERROR records
+    into events (it still patches ``Logger.callHandlers``, so this is a breadcrumb).
+    Tenant ids and gap codes only; names and credentials stay out of the log.
+    """
+    if access_cache.first_in_scope(user, workspace_id, _COVERAGE_DENIAL_LOGGED):
+        gaps = sorted(f"{t.tenant_id}:{t.gap_code}:{t.recovery}" for t in missing)
+        logger.info(
+            "workspace_access_denied_coverage user_id=%s workspace_id=%s all_of=%s gaps=%s",
+            user.pk,
+            workspace_id,
+            all_of_access_enforced(),
+            ",".join(gaps),
+            extra={
+                "user_id": user.pk,
+                "workspace_id": str(workspace_id),
+                "all_of": all_of_access_enforced(),
+                "tenant_ids": sorted(t.tenant_id for t in missing),
+                "gap_codes": sorted({t.gap_code for t in missing}),
+            },
+        )
+    return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
+
+
 def _resolve_local_access_ex(
     user, workspace_id, *, minimum_role: str, require_coverage: bool
 ) -> WorkspaceAccess:
@@ -406,7 +438,7 @@ def _resolve_local_access_ex(
         missing = missing_workspace_tenants(user, _workspace_tenants(wm.workspace))
         access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
     if missing:
-        return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
+        return _coverage_denied(user, workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
@@ -424,7 +456,7 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
     missing = await amissing_workspace_tenants(user, await _aworkspace_tenants(wm.workspace))
     access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
     if missing:
-        return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
+        return _coverage_denied(user, workspace_id, missing)
     if not role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
