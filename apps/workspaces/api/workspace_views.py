@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from typing import NamedTuple
 
 from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
@@ -16,6 +18,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.chat.models import Thread
+from apps.common.errors import (
+    CommCareAuthError,
+    ConnectAuthError,
+    OCSAuthError,
+    TokenRefreshError,
+)
 from apps.common.http import string_field
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
@@ -23,6 +31,13 @@ from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
+)
+from apps.users.services.token_refresh import (
+    WORKER_DB_DEADLINE,
+    TokenRefreshUnavailable,
+    get_token_url,
+    refresh_oauth_token,
+    token_needs_refresh,
 )
 from apps.workspaces.access import (
     missing_tenants_by_workspace,
@@ -76,6 +91,23 @@ _PROVIDER_RESOLVERS = {
     "ocs": resolve_ocs_chatbots,
 }
 
+_UPSTREAM_AUTH_ERRORS = (CommCareAuthError, ConnectAuthError, OCSAuthError)
+
+
+@dataclass(frozen=True)
+class Rediscovery:
+    """What rediscovering one user's access with their stored sign-ins found."""
+
+    # A provider error or timeout: retrying may give a different answer.
+    failed: bool = False
+    # Upstream refused a stored sign-in; only the user signing in again settles it.
+    needs_sign_in: bool = False
+
+
+class MemberRecheck(NamedTuple):
+    complete: bool = True
+    needs_sign_in: frozenset = frozenset()
+
 
 async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
     """``(identity, access token)`` pairs usable as-is, without renewing any.
@@ -89,39 +121,104 @@ async def _aunexpired_access_tokens(user, provider) -> list[tuple]:
     return [
         (token.account, token.token)
         for token in await aiter_social_tokens(user, provider)
-        if token.token and not (token.expires_at and token.expires_at <= now)
+        if _usable_as_is(token, now)
     ]
 
 
-async def _arefresh_target_for_workspace(target, providers) -> bool:
+def _usable_as_is(token, now) -> bool:
+    return bool(token.token) and not (token.expires_at and token.expires_at <= now)
+
+
+async def _arenewed_access_tokens(user, provider) -> tuple[list[tuple], bool]:
+    """``(pairs, failed)``: *user*'s tokens, renewing any that need it.
+
+    Only for the user a request names (G2). They did not start the request, so a
+    failed renewal records nothing on their credential (G1). A token that isn't
+    renewed is used as it stands while unexpired; ``failed`` is set only when a
+    transient failure leaves nothing to use.
+    """
+    token_url = get_token_url(provider)
+    now = timezone.now()
+    pairs, failed = [], False
+    for token in await aiter_social_tokens(user, provider):
+        stored = (token.account, token.token) if _usable_as_is(token, now) else None
+        can_refresh = bool(token_url and token.token_secret and token.app)
+        if not can_refresh or not token_needs_refresh(token.expires_at):
+            if stored:
+                pairs.append(stored)
+            continue
+        try:
+            # Bounded by its own timeouts, never cancelled: cancelling between the
+            # provider rotating the grant and Scout storing it would lose the grant.
+            # The worker deadline for the same reason: the grant is the target's, so
+            # the manager waits out a busy row rather than the target reconnecting.
+            access_token = await refresh_oauth_token(
+                token,
+                token_url,
+                request_timeout=SHARE_REFRESH_TIMEOUT,
+                db_timeout=WORKER_DB_DEADLINE,
+                record_failure=False,
+            )
+        except TokenRefreshError as error:
+            if stored:
+                pairs.append(stored)
+            elif isinstance(error, TokenRefreshUnavailable):
+                failed = True
+            continue
+        pairs.append((token.account, access_token))
+    return pairs, failed
+
+
+async def _arefresh_target_for_workspace(target, providers, *, renew=False) -> Rediscovery:
     """Best-effort, bounded server-side refresh of *target*'s memberships for the
-    workspace's tenant providers, using the target's OWN tokens as they stand.
+    workspace's tenant providers, using the target's OWN tokens.
 
     This is what lets a manager add someone who was granted access upstream after
     the target's last Scout login — without the target manually reconnecting.
-    Tokens are never renewed here (see ``_aunexpired_access_tokens``), so a target
-    whose only token has expired is not picked up until they sign in again.
-    Returns True if the target had a usable token for at least one provider (used
-    to distinguish "no access upstream" from "needs to reconnect" in the error).
+    ``renew`` renews expired tokens first, for the named target of an add only;
+    anyone else's tokens are used as they stand (see ``_aunexpired_access_tokens``).
+
+    Additive only (``may_revoke=False``): the target did not start this request, so
+    nothing it observes may archive their access or record a denial (#561 G1). A
+    refused sign-in is reported as ``needs_sign_in`` instead.
 
     Every identity per provider is refreshed. A target holding two OCS teams has
     a token per team, and refreshing only one would report them as not covering a
     tenant they can in fact reach — the false negative multi-token OAuth exists
     to remove (#156).
     """
-    tried = False
+    failed = needs_sign_in = False
     for provider in providers:
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
-        for account, token in await _aunexpired_access_tokens(target, provider):
-            tried = True
+        if renew:
+            pairs, renewal_failed = await _arenewed_access_tokens(target, provider)
+            failed = failed or renewal_failed
+        else:
+            pairs = await _aunexpired_access_tokens(target, provider)
+        for account, token in pairs:
             try:
                 await asyncio.wait_for(
-                    resolve(target, token, social_account=account, allow_replace=False),
+                    resolve(
+                        target,
+                        token,
+                        social_account=account,
+                        allow_replace=False,
+                        may_revoke=False,
+                    ),
                     timeout=SHARE_REFRESH_TIMEOUT,
                 )
+            except _UPSTREAM_AUTH_ERRORS:
+                needs_sign_in = True
+                logger.info(
+                    "Share-time refresh refused upstream for target=%s provider=%s account=%s",
+                    target.id,
+                    provider,
+                    account.pk,
+                )
             except Exception:
+                failed = True
                 logger.warning(
                     "Share-time refresh failed for target=%s provider=%s account=%s",
                     target.id,
@@ -129,7 +226,7 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
                     account.pk,
                     exc_info=True,
                 )
-    return tried
+    return Rediscovery(failed=failed, needs_sign_in=needs_sign_in)
 
 
 # Bounds the provider fan-out and keeps queued refreshes from spending their
@@ -139,23 +236,23 @@ MEMBER_REFRESH_CONCURRENCY = 4
 MEMBER_REFRESH_BUDGET = 2 * SHARE_REFRESH_TIMEOUT
 
 
-async def _arefresh_members_for_provider(users, provider) -> bool:
+async def _arefresh_members_for_provider(users, provider) -> MemberRecheck:
     """Best-effort rediscovery with each user's own, still-valid identities.
 
     Advisory only: the locked coverage check decides, so one member's failure
-    must neither fail the request nor stop the others. Tokens are not renewed:
-    a manager's click must never mark another member's credential as failed.
-    What the rediscovery *observes* is still authoritative about that member's
-    own credential (a revocation archives it, as their next read would).
+    must neither fail the request nor stop the others. Tokens are not renewed and
+    nothing is revoked: a manager's click must never mark another member's
+    credential as failed or archive their access.
 
-    Returns False if some member's rediscovery failed or ran out of time, since
-    then retrying may give a different answer.
+    ``complete`` is False if some member's rediscovery failed or ran out of time,
+    since then retrying may give a different answer. ``needs_sign_in`` holds the
+    ids of members whose stored sign-in upstream refused.
     """
     gate = asyncio.Semaphore(MEMBER_REFRESH_CONCURRENCY)
 
     async def refresh(user):
         async with gate:
-            await _arefresh_target_for_workspace(user, [provider])
+            return await _arefresh_target_for_workspace(user, [provider])
 
     tasks = [asyncio.ensure_future(refresh(user)) for user in users]
     try:
@@ -168,19 +265,27 @@ async def _arefresh_members_for_provider(users, provider) -> bool:
             provider,
             len(users),
         )
-    complete = all(
-        task.done() and not task.cancelled() and task.exception() is None for task in tasks
-    )
+    complete = True
+    needs_sign_in = set()
     for user, task in zip(users, tasks, strict=True):
-        result = task.exception() if task.done() and not task.cancelled() else None
-        if isinstance(result, Exception):
+        if not task.done() or task.cancelled():
+            complete = False
+            continue
+        error = task.exception()
+        if error is not None:
+            complete = False
             logger.warning(
                 "Source-add refresh failed for member=%s provider=%s",
                 user.id,
                 provider,
-                exc_info=result,
+                exc_info=error,
             )
-    return complete
+            continue
+        outcome = task.result()
+        complete = complete and not outcome.failed
+        if outcome.needs_sign_in:
+            needs_sign_in.add(user.pk)
+    return MemberRecheck(complete=complete, needs_sign_in=frozenset(needs_sign_in))
 
 
 def _member_label(user) -> str:
@@ -188,13 +293,19 @@ def _member_label(user) -> str:
     return f"{name} <{user.email}>" if name else user.email
 
 
-def _members_lack_source_body(tenant, gaps, *, recheck_complete=True) -> dict:
+def _members_lack_source_body(tenant, gaps, recheck: MemberRecheck) -> dict:
     names = ", ".join(_member_label(user) for user, _missing in gaps)
     unchecked = (
         ""
-        if recheck_complete
-        else " Scout ran out of time rechecking some members upstream, so retrying may help."
+        if recheck.complete
+        else " Scout couldn't finish rechecking some members upstream, so retrying may help."
     )
+    refused = [user for user, _missing in gaps if user.pk in recheck.needs_sign_in]
+    if refused:
+        unchecked += (
+            f" Scout couldn't recheck {', '.join(_member_label(user) for user in refused)} "
+            "with their saved sign-in; they need to sign in to Scout again."
+        )
     return {
         "error": (
             f"Can't add '{tenant.canonical_name}': {names} can't use it with their own "
@@ -204,12 +315,13 @@ def _members_lack_source_body(tenant, gaps, *, recheck_complete=True) -> dict:
             + unchecked
         ),
         "reason": "members_lack_source",
-        "recheck_complete": recheck_complete,
+        "recheck_complete": recheck.complete,
         "members": [
             {
                 "user_id": str(user.id),
                 "email": user.email,
                 "name": user.get_full_name(),
+                "needs_sign_in": user.pk in recheck.needs_sign_in,
                 **missing_tenants_payload([missing])[0],
             }
             for user, missing in gaps
@@ -736,9 +848,9 @@ class WorkspaceMemberListView(APIView):
         if gaps:
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
-            # using their own unexpired token, then re-check.
+            # using their own token, renewed if it has expired, then re-check.
             providers = sorted({t.provider for t in gaps})
-            async_to_sync(_arefresh_target_for_workspace)(target, providers)
+            async_to_sync(_arefresh_target_for_workspace)(target, providers, renew=True)
 
         # Every member must cover every source (#381), so a target still missing
         # one after the refresh gets an invite that awaits it rather than a hard
@@ -1078,16 +1190,16 @@ class WorkspaceTenantView(APIView):
         # so someone granted access upstream since their last login is not refused.
         already_added = WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).exists()
         lacking = [] if already_added else members_lacking_tenant(workspace, tenant)
-        recheck_complete = True
+        recheck = MemberRecheck()
         if lacking:
-            recheck_complete = async_to_sync(_arefresh_members_for_provider)(
+            recheck = async_to_sync(_arefresh_members_for_provider)(
                 [user for user, _missing in lacking], tenant.provider
             )
         try:
             wt, created = add_tenant_covered_by_members(workspace, tenant, actor_id=request.user.id)
         except MembersLackTenant as refused:
             return Response(
-                _members_lack_source_body(tenant, refused.gaps, recheck_complete=recheck_complete),
+                _members_lack_source_body(tenant, refused.gaps, recheck),
                 status=status.HTTP_409_CONFLICT,
             )
         if not created:

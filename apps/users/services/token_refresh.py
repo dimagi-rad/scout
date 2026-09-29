@@ -691,6 +691,7 @@ async def refresh_oauth_token_result(
     db_timeout: float | None = WORKER_DB_DEADLINE,
     deadline=None,
     clock=time.monotonic,
+    record_failure: bool = True,
 ) -> TokenRefreshResult:
     """Refresh an OAuth token using the refresh token grant.
 
@@ -698,6 +699,8 @@ async def refresh_oauth_token_result(
         social_token: allauth SocialToken instance with token_secret (refresh token)
             and app (SocialApp with client_id and secret).
         token_url: The provider's token endpoint URL.
+        record_failure: False when the credential's owner did not start this refresh,
+            so a refused grant leaves no reconnect marker for someone else's request.
 
     Returns:
         The persisted token snapshot and whether this response won the CAS.
@@ -745,7 +748,7 @@ async def refresh_oauth_token_result(
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         transient = is_transient_status(e.response.status_code)
-        if not transient:
+        if record_failure and not transient:
             try:
                 # Deliberately not the caller's deadline: it may already be exhausted, and
                 # starving the marker is how a diagnosable failure becomes a silent one.
@@ -765,7 +768,7 @@ async def refresh_oauth_token_result(
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         transient = _is_transient_error(e)
-        if not transient:
+        if record_failure and not transient:
             try:
                 await _arecord_refresh_failure(
                     preflight,
@@ -836,9 +839,14 @@ async def refresh_oauth_token(
     *,
     request_timeout: float = 30,
     db_timeout: float | None = WORKER_DB_DEADLINE,
+    record_failure: bool = True,
 ) -> str:
     result = await refresh_oauth_token_result(
-        social_token, token_url, request_timeout=request_timeout, db_timeout=db_timeout
+        social_token,
+        token_url,
+        request_timeout=request_timeout,
+        db_timeout=db_timeout,
+        record_failure=record_failure,
     )
     ensure_usable_credential(result)
     return result.snapshot.access_token
