@@ -31,7 +31,7 @@ import uvicorn
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.exceptions import ValidationError as _ValidationError
-from django.db.models import Q
+from django.db.models import Q, aprefetch_related_objects
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -39,7 +39,9 @@ from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
+    aworkspace_ids_with_active_semantic_model,
     get_active_semantic_model,
+    no_active_semantic_model,
     serialize_catalog,
     serialize_dataset,
 )
@@ -50,6 +52,7 @@ from apps.workspaces.access import (
     NOT_MEMBER,
     WorkspaceAccess,
     access_denied_body,
+    aresolve_local_access_many,
     aresolve_workspace_access,
     aresolve_workspace_access_ex,
 )
@@ -70,7 +73,7 @@ from apps.workspaces.services.access_freshness import (
     VERIFICATION_UNAVAILABLE,
     VerificationBudget,
     aadmit_upstream,
-    acheck_freshness,
+    acheck_freshness_many,
     freshness_enforced,
 )
 from apps.workspaces.services.load_generations import (
@@ -535,31 +538,13 @@ async def _recheck_catalog_workspaces(user, workspace_ids) -> None:
     await aadmit_upstream(user.pk, set(tenant_ids), budget=VerificationBudget.INTERACTIVE)
 
 
-async def _catalog_denial(user, workspace_id) -> str | None:
-    """Why a workspace's dataset catalog may not be listed for this user, else ``None``.
-
-    Database-only: any upstream recheck happened once, beforehand, in
-    ``_recheck_catalog_workspaces``. A proof still stale here is reported as
-    unconfirmed, which the caller clears by requesting that workspace explicitly.
-    """
-    local = await aresolve_workspace_access_ex(user, workspace_id, verification=None)
-    if not local.granted:
-        return local.denied_reason or NOT_MEMBER
-    if not freshness_enforced():
-        return None
-    tenant_ids = [
-        tenant_id
-        async for tenant_id in local.workspace.workspace_tenants.values_list("tenant_id", flat=True)
-    ]
-    check = await acheck_freshness(user.pk, tenant_ids)
-    if check.fresh:
-        return None
-    return CREDENTIAL_MISSING if check.unbound else VERIFICATION_UNAVAILABLE
-
-
 async def _catalog_denials(candidates, active_workspace_id, requested_ids=()) -> list:
-    """``_catalog_denial`` for each membership, rechecking upstream only the active and
-    explicitly requested workspaces so one listing never fans out to every provider.
+    """Why each membership's dataset catalog may not be listed, else ``None``.
+
+    Only the active and explicitly requested workspaces are rechecked upstream, so
+    one listing never fans out to every provider. The rest is database-only and
+    batched across all candidates (C1): a stale proof is reported as unconfirmed,
+    which the caller clears by requesting that workspace explicitly.
     """
     if not candidates:
         return []
@@ -570,7 +555,25 @@ async def _catalog_denials(candidates, active_workspace_id, requested_ids=()) ->
     await _recheck_catalog_workspaces(
         actor, {str(m.workspace_id) for m in candidates} & verifiable_ids
     )
-    return [await _catalog_denial(actor, m.workspace_id) for m in candidates]
+    local = await aresolve_local_access_many(actor, candidates)
+    granted_ids = [ws_id for ws_id, access in local.items() if access.granted]
+    checks = {}
+    if granted_ids and freshness_enforced():
+        tenant_ids_by_ws = {ws_id: [] for ws_id in granted_ids}
+        async for ws_id, tenant_id in WorkspaceTenant.objects.filter(
+            workspace_id__in=granted_ids
+        ).values_list("workspace_id", "tenant_id"):
+            tenant_ids_by_ws[ws_id].append(tenant_id)
+        checks = await acheck_freshness_many(actor.pk, tenant_ids_by_ws)
+    return [_catalog_denial(local[m.workspace_id], checks.get(m.workspace_id)) for m in candidates]
+
+
+def _catalog_denial(local: WorkspaceAccess, check) -> str | None:
+    if not local.granted:
+        return local.denied_reason or NOT_MEMBER
+    if check is None or check.fresh:
+        return None
+    return CREDENTIAL_MISSING if check.unbound else VERIFICATION_UNAVAILABLE
 
 
 async def _resolve_accessible_workspace(workspace_id: str, user_id: str = "") -> Workspace:
@@ -658,13 +661,15 @@ async def list_workspaces(
         )
 
         total = len(accessible)
+        page = accessible[offset : offset + limit]
+        await aprefetch_related_objects([m.workspace for m in page], "tenants")
         items = [
             await _workspace_summary(
                 membership.workspace,
                 role=membership.role,
                 active_workspace_id=workspace_id,
             )
-            for membership in accessible[offset : offset + limit]
+            for membership in page
         ]
 
         tc["result"] = success_response(
@@ -825,11 +830,12 @@ async def list_datasets(
 
         ready_workspace_ids: list[str] = []
         workspace_errors: list[dict] = []
+        with_model = await aworkspace_ids_with_active_semantic_model(w.id for w in workspaces)
         for workspace in workspaces:
-            try:
-                await sync_to_async(get_active_semantic_model, thread_sensitive=True)(workspace)
+            if workspace.id in with_model:
                 ready_workspace_ids.append(str(workspace.id))
-            except SemanticCatalogUnavailable as exc:
+            else:
+                exc = no_active_semantic_model()
                 workspace_errors.append(
                     {
                         "workspace_id": str(workspace.id),

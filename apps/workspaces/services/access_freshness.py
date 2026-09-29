@@ -28,7 +28,11 @@ from django.db import transaction
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
-from apps.users.services.access_verification import aproofs_are_fresh, proofs_are_fresh
+from apps.users.services.access_verification import (
+    afresh_proof_tenant_ids,
+    aproofs_are_fresh,
+    proofs_are_fresh,
+)
 from apps.users.services.access_verification_providers import PROVIDER_BUDGET_SECONDS
 from apps.users.services.access_verification_service import verify_connection_access
 from apps.users.services.access_verification_types import (
@@ -141,6 +145,36 @@ async def acheck_freshness(user_id, tenant_ids) -> FreshnessCheck:
         if not await aproofs_are_fresh(user_id, connection_id, ids):
             stale[connection_id] = frozenset(ids)
     return FreshnessCheck(stale=stale, unbound=frozenset(unbound))
+
+
+async def acheck_freshness_many(user_id, tenant_ids_by_key: dict) -> dict:
+    """:func:`acheck_freshness` for several tenant sets, keyed as given.
+
+    One binding read and one proof read per connection, however many sets share
+    it, so a listing's cost follows the user's connections, not its workspaces.
+    """
+    all_tenant_ids = {tenant_id for ids in tenant_ids_by_key.values() for tenant_id in ids}
+    rows = [row async for row in _live_bindings_queryset(user_id, list(all_tenant_ids))]
+    grouped, _unbound = _group_by_connection(rows)
+    fresh = {
+        connection_id: await afresh_proof_tenant_ids(user_id, connection_id, ids)
+        for connection_id, ids in grouped.items()
+    }
+    rows_by_tenant = defaultdict(list)
+    for tenant_id, connection_id in rows:
+        rows_by_tenant[tenant_id].append((tenant_id, connection_id))
+    checks = {}
+    for key, ids in tenant_ids_by_key.items():
+        own, unbound = _group_by_connection(
+            row for tenant_id in set(ids) for row in rows_by_tenant.get(tenant_id, ())
+        )
+        stale = {
+            connection_id: frozenset(tenant_ids)
+            for connection_id, tenant_ids in own.items()
+            if not tenant_ids <= fresh[connection_id]
+        }
+        checks[key] = FreshnessCheck(stale=stale, unbound=frozenset(unbound))
+    return checks
 
 
 def denial_reason(result: AccessVerificationResult) -> str | None:
