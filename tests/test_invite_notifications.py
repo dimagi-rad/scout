@@ -9,6 +9,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceInvite,
     WorkspaceInviteStatus,
+    WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
@@ -308,10 +309,24 @@ class TestDirectAddEmail:
 
         with django_capture_on_commit_callbacks(execute=True):
             assert self._add(client, workspace, "alice@example.com").status_code == 201
-        mock_task.reset_mock()
-        resolve_pending_invites_on_login(target)
 
         invite.refresh_from_db()
         assert invite.status == WorkspaceInviteStatus.ACCEPTED
         assert invite.resolved_at is not None
+        assert invite.resolved_membership == WorkspaceMembership.objects.get(
+            workspace=workspace, user=target
+        )
+
+        mock_task.reset_mock()
+        resolve_pending_invites_on_login(target)
         mock_task.defer.assert_not_called()
+
+    def test_member_added_email_falls_back_for_a_nameless_adder(self, workspace, user, mocker):
+        mock_task = mocker.patch.object(invite_notifications, "send_email")
+        nameless = User.objects.create_user(email=None, password="pass")
+        membership = WorkspaceMembership.objects.get(workspace=workspace, user=user)
+
+        invite_notifications.notify_member_added(membership, nameless)
+
+        message = _deferred_emails(mock_task)[0]["message"]
+        assert message.startswith("A Scout workspace manager added you")

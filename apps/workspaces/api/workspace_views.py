@@ -798,7 +798,12 @@ class WorkspaceMemberListView(APIView):
         now = timezone.now()
         WorkspaceInvite.objects.filter(
             workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
-        ).update(status=WorkspaceInviteStatus.ACCEPTED, resolved_at=now, updated_at=now)
+        ).update(
+            status=WorkspaceInviteStatus.ACCEPTED,
+            resolved_at=now,
+            resolved_membership=new_membership,
+            updated_at=now,
+        )
         # Defensive: the view runs in autocommit today, but inside an outer atomic
         # block a rollback must not email about a membership that never landed.
         transaction.on_commit(lambda: notify_member_added(new_membership, request.user))

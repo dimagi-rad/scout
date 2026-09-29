@@ -45,9 +45,8 @@ def _invite_link(invite) -> str:
 
 
 def _user_label(user) -> str:
-    if not user:
-        return "A Scout workspace manager"
-    return user.get_full_name() or user.email
+    # Email is nullable, so a nameless, email-less user must still get the fallback.
+    return (user and (user.get_full_name() or user.email)) or "A Scout workspace manager"
 
 
 def _inviter_label(invite) -> str:
