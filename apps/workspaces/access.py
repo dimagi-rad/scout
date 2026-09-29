@@ -345,7 +345,7 @@ async def _aworkspace_tenants(workspace) -> list:
     return [wt.tenant async for wt in workspace.workspace_tenants.select_related("tenant")]
 
 
-def _role_satisfies(role: str, minimum_role: str) -> bool:
+def role_satisfies(role: str, minimum_role: str) -> bool:
     role_rank = _ROLE_RANK.get(role)
     minimum_rank = _ROLE_RANK.get(minimum_role)
     return role_rank is not None and minimum_rank is not None and role_rank >= minimum_rank
@@ -368,7 +368,7 @@ def _resolve_local_access_ex(
     )
     if missing:
         return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
-    if not _role_satisfies(wm.role, minimum_role):
+    if not role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
 
@@ -384,7 +384,7 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
     missing = await amissing_workspace_tenants(user, await _aworkspace_tenants(wm.workspace))
     if missing:
         return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
-    if not _role_satisfies(wm.role, minimum_role):
+    if not role_satisfies(wm.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
     return WorkspaceAccess(workspace=wm.workspace, membership=wm)
 
