@@ -1,16 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { jobsApi, type ActiveJob, type RecentTermination } from "@/api/jobs"
+import {
+  jobsApi,
+  type ActiveJob,
+  type RecentTermination,
+  type WorkspaceLoad,
+} from "@/api/jobs"
 
 const POLL_INTERVAL_MS = 3000
 
 interface State {
   jobs: ActiveJob[]
+  workspaceLoads: WorkspaceLoad[]
   recentTerminations: RecentTermination[]
   lastError: string | null
 }
 
 export interface UseWorkspaceJobs {
   jobs: ActiveJob[]
+  /** Every in-flight load of the workspace, including ones other members or a
+   *  refresh started, which have no job in the caller's threads. */
+  workspaceLoads: WorkspaceLoad[]
   jobsByThreadId: Record<string, ActiveJob>
   /** Thread IDs whose job just transitioned to a terminal state on the most
    *  recent poll (gone from the active list). Consumers should refetch
@@ -38,6 +47,7 @@ export interface UseWorkspaceJobs {
 export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJobs {
   const [state, setState] = useState<State>({
     jobs: [],
+    workspaceLoads: [],
     recentTerminations: [],
     lastError: null,
   })
@@ -58,6 +68,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       prevThreadIdsRef.current = currentThreadIds
       setState({
         jobs: data.jobs,
+        workspaceLoads: data.workspace_loads ?? [],
         recentTerminations: data.recent_terminations ?? [],
         lastError: null,
       })
@@ -132,6 +143,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
 
   return {
     jobs: state.jobs,
+    workspaceLoads: state.workspaceLoads,
     jobsByThreadId,
     recentlyCompletedThreadIds,
     recentTerminations: state.recentTerminations,

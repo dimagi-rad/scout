@@ -5,6 +5,7 @@ import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
+import { SourceFreshness } from "@/components/SourceFreshness"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
@@ -52,11 +53,15 @@ export function ChatPanel() {
 
   const {
     jobsByThreadId,
+    workspaceLoads,
     recentlyCompletedThreadIds,
     recentTerminationsByToolCallId,
     notifyJobLikelyStarted,
   } = useWorkspaceJobs()
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
+  // A load the caller has no job for here (a teammate's, or a refresh) still
+  // changes the data they are reading, so show it read-only.
+  const foreignLoads = activeMaterializationJob ? [] : (workspaceLoads ?? [])
   const currentThread = threads.find((thread) => thread.id === threadId)
   const threadTitle = currentThread?.title ?? "Untitled"
   const titleIsCustom = currentThread?.title_is_custom ?? false
@@ -347,6 +352,23 @@ export function ChatPanel() {
               workspaceId={activeDomainId}
             />
           )}
+
+        {activeDomainId &&
+          foreignLoads.map((load) => (
+            <MaterializationProgressBanner
+              key={load.tenant_id}
+              load={load}
+              workspaceId={activeDomainId}
+            />
+          ))}
+
+        {activeDomainId && (
+          <SourceFreshness
+            key={activeDomainId}
+            workspaceId={activeDomainId}
+            loading={Boolean(activeMaterializationJob) || foreignLoads.length > 0}
+          />
+        )}
 
         {/* Input area */}
         <div className="border-t p-4">

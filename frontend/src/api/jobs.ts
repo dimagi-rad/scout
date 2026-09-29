@@ -28,7 +28,23 @@ export interface ActiveJob {
   job_type: "materialization"
   state: JobState
   progress: JobProgress | null
+  /** Position of the source being loaded within its load ("Source 2 of 4");
+   *  null when the run is not part of a tracked load. */
+  source_index: number | null
+  source_total: number | null
+  tenant_name: string | null
   created_at: string
+}
+
+/** One in-flight load of the workspace, whoever started it. */
+export interface WorkspaceLoad {
+  tenant_id: string
+  tenant_name: string
+  source_index: number
+  source_total: number
+  state: string
+  started_at: string
+  progress: JobProgress | null
 }
 
 export interface RecentTermination {
@@ -44,6 +60,7 @@ export interface RecentTermination {
 
 export interface ActiveJobsResponse {
   jobs: ActiveJob[]
+  workspace_loads?: WorkspaceLoad[]
   recent_terminations: RecentTermination[]
 }
 
