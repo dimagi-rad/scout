@@ -369,3 +369,7 @@ def test_superseded_deploy_check_fails_open():
     )
     assert jobs["deploy"]["needs"] == "test"
     assert jobs["deploy"]["if"] == "${{ !cancelled() && needs.test.result == 'success' }}"
+    # The rollback guard finds the live run by this job's name; a `name:` would
+    # silently disable it.
+    assert "name" not in jobs["deploy"]
+    assert "jobName: 'deploy'" in jobs["supersede"]["steps"][-1]["with"]["script"]

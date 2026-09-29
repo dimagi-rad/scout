@@ -693,8 +693,8 @@ docker image prune -af      # removes only images no container (running or stopp
 ```
 
 Rerun the failed deploy from the Actions tab (it skips itself if a newer commit
-is already queued or live; then that run is the one to watch). If that is not enough, check
-stopped containers (`docker ps -a --filter status=exited`). Remove old API, MCP,
+is already queued or live; then that run is the one to watch). If that is not
+enough, check stopped containers (`docker ps -a --filter status=exited`). Remove old API, MCP,
 Cube or frontend containers freely, but never a stopped worker named by a
 pending drain receipt (see [Migration-safe backend handoff](#migration-safe-backend-handoff)).
 

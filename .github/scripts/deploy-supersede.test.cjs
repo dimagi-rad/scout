@@ -8,6 +8,7 @@ const context = {
   repo: { owner: 'o', repo: 'r' }, ref: 'refs/heads/main', runId: 10, runNumber: 100, sha: OURS,
 };
 const workflowId = 'deploy.yml';
+const jobName = 'deploy';
 const run = (id, run_number, status, head_sha, extra = {}) => ({
   id, run_number, status, head_sha, conclusion: null,
   updated_at: '2026-09-29T00:00:00Z', html_url: `https://github.com/o/r/actions/runs/${id}`,
@@ -57,7 +58,9 @@ function fakeCore() {
   };
 }
 
-const skip = (github, ctx = context) => findReasonToSkip({ github, context: ctx, workflowId });
+const skip = (github, ctx = context, core = fakeCore()) => findReasonToSkip({
+  github, context: ctx, core, workflowId, jobName,
+});
 
 test('a newer queued run of a descendant commit supersedes this one', async () => {
   const github = fakeGithub({
@@ -134,11 +137,11 @@ test('the live run is the latest one whose deploy job succeeded', async () => {
       done(29, 99, sha('9'), '2026-09-29T02:00:00Z'),
     ],
     compare: { [sha('c')]: 'ahead', [sha('9')]: 'behind' },
-    deployed: { 30: 'skipped' },
+    deployed: { 30: 'skipped', 31: 'skipped' },
   });
   assert.equal(await skip(github), null);
   const jobLookups = github.calls.filter(([name]) => name === 'jobs').map(([, args]) => args.run_id);
-  assert.deepEqual(jobLookups, [30, 29]);
+  assert.deepEqual(jobLookups, [31, 30, 29]);
 });
 
 test('deploys from other refs are never skipped', async () => {
@@ -150,14 +153,14 @@ test('deploys from other refs are never skipped', async () => {
 test('checkSuperseded sets the output and explains the skip', async () => {
   const core = fakeCore();
   const github = fakeGithub({ runs: [run(12, 102, 'pending', OURS)] });
-  await checkSuperseded({ github, context, core, workflowId });
+  await checkSuperseded({ github, context, core, workflowId, jobName });
   assert.equal(core.out.outputs.superseded, 'true');
   assert.match(core.out.notices[0], /actions\/runs\/12 is queued to deploy aaaaaaaaaaaa/);
 });
 
 test('checkSuperseded deploys when nothing newer is queued or live', async () => {
   const core = fakeCore();
-  await checkSuperseded({ github: fakeGithub(), context, core, workflowId });
+  await checkSuperseded({ github: fakeGithub(), context, core, workflowId, jobName });
   assert.equal(core.out.outputs.superseded, 'false');
   assert.deepEqual(core.out.notices, []);
 });
@@ -165,7 +168,38 @@ test('checkSuperseded deploys when nothing newer is queued or live', async () =>
 test('checkSuperseded fails open when the API errors', async () => {
   const core = fakeCore();
   const github = fakeGithub({ listError: new Error('boom') });
-  await checkSuperseded({ github, context, core, workflowId });
+  await checkSuperseded({ github, context, core, workflowId, jobName });
   assert.equal(core.out.outputs.superseded, 'false');
   assert.match(core.out.warnings[0], /deploying anyway: boom/);
+});
+
+test('a run that deployed but failed afterwards is still live', async () => {
+  // `report` runs after `deploy`, so its failure must not hide what is live.
+  const github = fakeGithub({
+    runs: [done(20, 120, sha('c'), '2026-09-29T02:00:00Z', { conclusion: 'failure' })],
+    compare: { [sha('c')]: 'ahead' },
+  });
+  assert.equal((await skip(github)).why, 'already deployed');
+});
+
+test('the live run is found by run number, not by when a run was last touched', async () => {
+  // Re-running one job of old run 5 bumps its updated_at past run 20's.
+  const github = fakeGithub({
+    runs: [
+      done(5, 90, sha('9'), '2026-09-29T09:00:00Z'),
+      done(20, 120, sha('c'), '2026-09-29T02:00:00Z'),
+    ],
+    compare: { [sha('c')]: 'ahead', [sha('9')]: 'behind' },
+  });
+  assert.equal((await skip(github)).run.id, 20);
+});
+
+test('the rollback guard warns when no recent run deployed', async () => {
+  const core = fakeCore();
+  const github = fakeGithub({
+    runs: [done(20, 120, sha('c'), '2026-09-29T02:00:00Z')],
+    deployed: { 20: 'skipped' },
+  });
+  assert.equal(await skip(github, context, core), null);
+  assert.match(core.out.warnings[0], /rollback guard is inactive/);
 });

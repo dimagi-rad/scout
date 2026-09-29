@@ -3,8 +3,11 @@
 // of redundant redeploys. Only deploy.yml runs are considered: a staging run for
 // the other destination on the shared host is never treated as a substitute.
 const WAITING = new Set(['queued', 'pending', 'waiting', 'requested']);
-// Enough to reach past a burst of superseded runs, whose deploy job was skipped.
-const MAX_JOB_LOOKUPS = 20;
+// Superseded runs (deploy job skipped) are among the candidates, so this must
+// reach past a burst of them; each lookup is one API call.
+const MAX_JOB_LOOKUPS = 50;
+// A run can deploy and still end failed or cancelled in `report`.
+const FINISHED = new Set(['success', 'failure', 'cancelled']);
 
 async function contains({ github, context, sha }) {
   if (sha === context.sha) return true;
@@ -27,23 +30,26 @@ async function findSupersedingRun({ github, context, runs }) {
   return null;
 }
 
-// The run whose deploy job most recently succeeded is what production runs now.
-// A superseded run also concludes `success`, so the deploy job itself is checked.
-async function findLiveRun({ github, context, runs }) {
+// The newest run whose deploy job succeeded is what production runs now. Run
+// numbers, not timestamps: re-running one job of an old run bumps its updated_at,
+// and the concurrency group already makes deploys land in run-number order.
+async function findLiveRun({ github, context, core, runs, jobName }) {
   const finished = runs
-    .filter((run) => run.id !== context.runId && run.conclusion === 'success')
-    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
-    .slice(0, MAX_JOB_LOOKUPS);
-  for (const run of finished) {
+    .filter((run) => run.id !== context.runId && FINISHED.has(run.conclusion))
+    .sort((a, b) => b.run_number - a.run_number);
+  for (const run of finished.slice(0, MAX_JOB_LOOKUPS)) {
     const { data } = await github.rest.actions.listJobsForWorkflowRun({
       ...context.repo, run_id: run.id, filter: 'latest', per_page: 100,
     });
-    if (data.jobs.some((job) => job.name === 'deploy' && job.conclusion === 'success')) return run;
+    if (data.jobs.some((job) => job.name === jobName && job.conclusion === 'success')) return run;
+  }
+  if (finished.length) {
+    core.warning(`No successful '${jobName}' job in the last ${Math.min(finished.length, MAX_JOB_LOOKUPS)} finished runs; the rollback guard is inactive for this run.`);
   }
   return null;
 }
 
-async function findReasonToSkip({ github, context, workflowId }) {
+async function findReasonToSkip({ github, context, core, workflowId, jobName }) {
   if (context.ref !== 'refs/heads/main') return null;
   const { data } = await github.rest.actions.listWorkflowRuns({
     ...context.repo, workflow_id: workflowId, branch: 'main', per_page: 100,
@@ -55,17 +61,17 @@ async function findReasonToSkip({ github, context, workflowId }) {
 
   // Re-running an old run would otherwise roll production back past later merges.
   // Redeploying the live commit itself stays allowed.
-  const live = await findLiveRun({ github, context, runs });
+  const live = await findLiveRun({ github, context, core, runs, jobName });
   if (live && live.head_sha !== context.sha && await contains({ github, context, sha: live.head_sha })) {
     return { run: live, why: 'already deployed' };
   }
   return null;
 }
 
-async function checkSuperseded({ github, context, core, workflowId }) {
+async function checkSuperseded({ github, context, core, workflowId, jobName }) {
   let reason = null;
   try {
-    reason = await findReasonToSkip({ github, context, workflowId });
+    reason = await findReasonToSkip({ github, context, core, workflowId, jobName });
   } catch (error) {
     // Deploying one extra time is harmless; skipping the only deploy of main is not.
     core.warning(`Could not check for a newer deploy, deploying anyway: ${error.message}`);

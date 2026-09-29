@@ -47,7 +47,7 @@ jobs:
         with:
           script: |
             const { checkSuperseded } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/deploy-supersede.cjs`);
-            await checkSuperseded({ github, context, core, workflowId: 'deploy.yml' });
+            await checkSuperseded({ github, context, core, workflowId: 'deploy.yml', jobName: 'deploy' });
 
   test:
     needs: supersede
