@@ -14,7 +14,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from apps.common.http import parse_json_object
+from apps.common.http import parse_json_object, string_field
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
@@ -168,13 +168,15 @@ async def tenant_select_view(request):
     body, err = parse_json_object(request)
     if err:
         return err
-    tenant_membership_id = body.get("tenant_id")
+    tenant_membership_id, err = string_field(body, "tenant_id")
+    if err:
+        return err
 
     try:
         tm = await TenantMembership.objects.select_related("tenant").aget(
             id=tenant_membership_id, user=user
         )
-    except TenantMembership.DoesNotExist:
+    except (TenantMembership.DoesNotExist, ValidationError):
         return JsonResponse({"error": "Tenant not found"}, status=404)
 
     tm.last_selected_at = timezone.now()
@@ -197,6 +199,21 @@ async def api_key_providers_view(request):
         for strategy in STRATEGIES.values()
     ]
     return JsonResponse(payload, safe=False)
+
+
+def _credential_fields(body: dict, strategy) -> tuple[dict | None, JsonResponse | None]:
+    """The request's credential ``fields``, or a 400 when a value the strategy will
+    ``.strip()`` and send upstream is not a string."""
+    fields = body.get("fields") or {}
+    if not isinstance(fields, dict):
+        return None, JsonResponse({"error": "fields must be an object."}, status=400)
+    for form_field in strategy.form_fields:
+        value = fields.get(form_field["key"])
+        if value is not None and not isinstance(value, str):
+            return None, JsonResponse(
+                {"error": f"fields.{form_field['key']} must be a string."}, status=400
+            )
+    return fields, None
 
 
 @require_http_methods(["GET", "POST"])
@@ -259,12 +276,18 @@ async def tenant_credential_list_view(request):
     if err:
         return err
 
-    provider = body.get("provider", "").strip()
-    fields = body.get("fields") or {}
+    provider, err = string_field(body, "provider")
+    if err:
+        return err
+    provider = provider.strip()
 
     strategy = STRATEGIES.get(provider)
     if strategy is None:
         return JsonResponse({"error": f"Unknown provider '{provider}'"}, status=400)
+
+    fields, err = _credential_fields(body, strategy)
+    if err:
+        return err
 
     missing = [
         f["key"]
@@ -357,14 +380,16 @@ async def connection_detail_view(request, connection_id):
     if err:
         return err
 
-    fields = body.get("fields") or {}
-
     strategy = STRATEGIES.get(conn.provider)
     if strategy is None:
         return JsonResponse(
             {"error": f"Provider '{conn.provider}' has no API-key strategy"},
             status=400,
         )
+
+    fields, err = _credential_fields(body, strategy)
+    if err:
+        return err
 
     editable = [f for f in strategy.form_fields if f["editable_on_rotate"]]
     missing = [
@@ -413,8 +438,13 @@ async def tenant_ensure_view(request):
     if err:
         return err
 
-    provider = body.get("provider", "").strip()
-    tenant_id = body.get("tenant_id", "").strip()
+    provider, err = string_field(body, "provider")
+    if err:
+        return err
+    tenant_id, err = string_field(body, "tenant_id")
+    if err:
+        return err
+    provider, tenant_id = provider.strip(), tenant_id.strip()
 
     if not provider or not tenant_id:
         return JsonResponse({"error": "provider and tenant_id are required"}, status=400)

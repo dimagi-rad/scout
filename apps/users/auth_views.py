@@ -16,7 +16,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from apps.common.http import parse_json_object
+from apps.common.http import parse_json_object, string_field
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
     SCOPED_OAUTH_PROVIDERS,
@@ -156,8 +156,13 @@ def login_view(request):
     if err:
         return err
 
-    email = body.get("email", "").strip()
-    password = body.get("password", "")
+    email, err = string_field(body, "email")
+    if err:
+        return err
+    password, err = string_field(body, "password")
+    if err:
+        return err
+    email = email.strip()
 
     if not email or not password:
         return JsonResponse({"error": "Email and password are required"}, status=400)
@@ -196,8 +201,13 @@ def signup_view(request):
     if err:
         return err
 
-    email = body.get("email", "").strip().lower()
-    password = body.get("password", "")
+    email, err = string_field(body, "email")
+    if err:
+        return err
+    password, err = string_field(body, "password")
+    if err:
+        return err
+    email = email.strip().lower()
 
     if not email or not password:
         return JsonResponse({"error": "Email and password are required"}, status=400)

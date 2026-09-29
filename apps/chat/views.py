@@ -71,6 +71,29 @@ async def _upsert_thread(thread_id, user, history_title: str = "", *, workspace)
 MAX_MESSAGE_LENGTH = 10_000
 
 
+def _last_message_text(message) -> tuple[str | None, JsonResponse | None]:
+    """The text of the turn's last message, or a 400 when its shape isn't one the AI SDK sends.
+
+    AI SDK v6 sends ``{parts: [{type: "text", text: "..."}]}`` instead of ``{content: "..."}``.
+    """
+    if not isinstance(message, dict):
+        return None, JsonResponse({"error": "Each message must be an object"}, status=400)
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        return None, JsonResponse({"error": "Message content must be a string"}, status=400)
+    if content:
+        return content, None
+    parts = message.get("parts")
+    if parts is None:
+        return "", None
+    if not isinstance(parts, list) or not all(isinstance(p, dict) for p in parts):
+        return None, JsonResponse({"error": "Message parts must be a list of objects"}, status=400)
+    texts = [p.get("text", "") for p in parts if p.get("type") == "text"]
+    if not all(isinstance(t, str) for t in texts):
+        return None, JsonResponse({"error": "Text part text must be a string"}, status=400)
+    return " ".join(texts), None
+
+
 @csrf_protect
 @async_login_required
 @chat_rate_limit
@@ -92,6 +115,10 @@ async def chat_view(request):
 
     messages = body.get("messages", [])
     data = body.get("data", {})
+    if not isinstance(data, dict):
+        return JsonResponse({"error": "data must be an object"}, status=400)
+    if not isinstance(messages, list):
+        return JsonResponse({"error": "messages must be a list"}, status=400)
     workspace_id = data.get("workspaceId") or body.get("workspaceId")
     thread_id = data.get("threadId") or body.get("threadId") or str(uuid.uuid4())
 
@@ -99,13 +126,14 @@ async def chat_view(request):
         return JsonResponse({"error": "messages is required"}, status=400)
     if not workspace_id:
         return JsonResponse({"error": "workspaceId is required"}, status=400)
+    if not isinstance(workspace_id, str):
+        return JsonResponse({"error": "workspaceId must be a string"}, status=400)
+    if not isinstance(thread_id, str):
+        return JsonResponse({"error": "threadId must be a string"}, status=400)
 
-    # AI SDK v6 sends {parts: [{type:"text", text:"..."}]} instead of {content: "..."}.
-    last_msg = messages[-1]
-    user_content = last_msg.get("content", "")
-    if not user_content:
-        parts = last_msg.get("parts", [])
-        user_content = " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
+    user_content, err = _last_message_text(messages[-1])
+    if err:
+        return err
     if not user_content or not user_content.strip():
         return JsonResponse({"error": "Empty message"}, status=400)
     if len(user_content) > MAX_MESSAGE_LENGTH:
