@@ -6,6 +6,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The suite takes ~13 minutes. Without a bound a hang runs for GitHub's 6h
+    # default while holding the deploy concurrency group, so every queued deploy waits.
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:16
