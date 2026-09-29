@@ -11,6 +11,7 @@ and reverts the schema, the siblings it moved off are put back onto it. Only the
 import contextlib
 import os
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
@@ -18,6 +19,7 @@ import psycopg.sql
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from apps.common.identifiers import readonly_role_name, view_name
 from apps.users.models import Tenant
@@ -195,8 +197,10 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
     shared_view = view_name(manager._view_prefix(tenants["s"]), "raw_cases")
     view_schemas = {key: manager._view_schema_name(ws.id) for key, ws in workspaces.items()}
     shared = await TenantSchema.objects.aget(tenant=tenants["s"], state=SchemaState.ACTIVE)
+    expired_at = timezone.now() - timedelta(days=30)
     shared.state = SchemaState.TEARDOWN
-    await shared.asave(update_fields=["state"])
+    shared.last_accessed_at = expired_at
+    await shared.asave(update_fields=["state", "last_accessed_at"])
     cube = patch(
         "apps.workspaces.tasks.build_and_promote_cube_schema",
         return_value=MagicMock(id="cube", content_hash="hash"),
@@ -224,6 +228,7 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
         await workspaces_tasks.teardown_schema(schema_id=str(shared.id), attempt=1)
     await shared.arefresh_from_db()
     assert shared.state == SchemaState.ACTIVE
+    assert shared.last_accessed_at > expired_at, "the next sweep must not re-expire it at once"
 
     rebuilt = sorted(call.kwargs["workspace_id"] for call in deferred.await_args_list)
     assert rebuilt == sorted(str(ws.id) for ws in workspaces.values())

@@ -2568,8 +2568,12 @@ async def _retire_under_tenant_lock(schema, attempt: int) -> bool:
                 return False
             # Nothing else serves this tenant and the physical schema still exists —
             # revert to ACTIVE rather than stranding readable data in TEARDOWN.
+            # Touching last_accessed_at gives it a full TTL before the sweep retries;
+            # otherwise a drop that keeps failing would flip sibling views off and
+            # back on every sweep.
             schema.state = SchemaState.ACTIVE
-            await schema.asave(update_fields=["state"])
+            schema.last_accessed_at = timezone.now()
+            await schema.asave(update_fields=["state", "last_accessed_at"])
             raise
 
         # Destructive op must leave a forensic trace (arch #257, finding 08#9).
