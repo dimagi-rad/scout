@@ -22,8 +22,10 @@ from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.services.status import (
     SOURCE_STATE_SEVERITY,
     aggregate_source_state,
+    classify_tenant_schemas,
     derive_schema_status,
     serving_excluded_tenant_ids,
+    workspace_schema_status,
 )
 
 LOADING = MaterializationRun.RunState.LOADING
@@ -152,9 +154,6 @@ async def test_prompt_and_query_surface_agree_on_serving_writers(
         (1, 1, True, None, "available"),
         (1, 0, True, None, "provisioning"),
         (1, 0, False, None, "unavailable"),
-        # The detail API counts ACTIVE rows, not tenants: two ACTIVE rows for one
-        # source miss the equality and fall through (see the #251 PR discrepancies).
-        (1, 2, False, None, "unavailable"),
         (2, 2, False, None, "provisioning"),
         (2, 0, False, SchemaState.ACTIVE, "available"),
         (2, 2, True, SchemaState.FAILED, "failed"),
@@ -205,3 +204,18 @@ def test_every_schema_state_has_a_severity():
 )
 def test_serving_excluded_tenant_ids(coverage, expected):
     assert serving_excluded_tenant_ids(coverage) == expected
+
+
+def test_workspace_schema_status_counts_sources_not_schema_rows():
+    rows = [
+        ("a", SchemaState.ACTIVE),
+        ("a", SchemaState.ACTIVE),
+        ("b", SchemaState.PROVISIONING),
+        ("c", SchemaState.EXPIRED),
+    ]
+    active, provisioning = classify_tenant_schemas(rows)
+    assert (active, provisioning) == ({"a"}, {"b"})
+    assert workspace_schema_status(["a"], active, provisioning, None) == "available"
+    assert workspace_schema_status(["b"], active, provisioning, None) == "provisioning"
+    assert workspace_schema_status(["c"], active, provisioning, None) == "unavailable"
+    assert workspace_schema_status([], active, provisioning, None) == "unavailable"

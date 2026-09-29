@@ -25,7 +25,6 @@ from apps.semantic.services.custom_datasets import (
     infer_custom_dataset_columns,
 )
 from apps.workspaces.models import (
-    MaterializationRun,
     SchemaState,
     TenantSchema,
     WorkspaceViewSchema,
@@ -34,6 +33,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     aresolve_pipeline_config,
 )
+from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
 from apps.workspaces.services.view_sources import (
@@ -248,17 +248,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
         pipeline_config = None
         tenant_metadata = None
     else:
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema=ts,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
+        last_run = await synced_runs().filter(tenant_schema=ts).afirst()
         pipeline_config = await aresolve_pipeline_config(ts, last_run)
         table_entries = await pipeline_list_tables(ts, pipeline_config)
         tenant_metadata = await aget_tenant_metadata(ts.tenant_id)

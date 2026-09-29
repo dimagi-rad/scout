@@ -221,6 +221,7 @@ async def materialization_retry_view(request, workspace_id):
             workspace_id=str(workspace.id),
             user_id=str(user.id),
             load_intent=load_intent,
+            notify_thread=False,
         )
     except Exception:
         logger.exception("materialization_retry_view: failed to dispatch")

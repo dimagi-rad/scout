@@ -232,17 +232,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             )
             return tc["result"]
 
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema=ts,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
+        last_run = await synced_runs().filter(tenant_schema=ts).afirst()
         try:
             pipeline_config = await _resolve_pipeline_config(ts, last_run)
         except PipelineResolutionError as exc:
@@ -296,17 +286,7 @@ async def describe_table(
         last_run = None
         tenant_metadata = None
         if ts is not None:
-            last_run = (
-                await MaterializationRun.objects.filter(
-                    tenant_schema=ts,
-                    state__in=[
-                        MaterializationRun.RunState.COMPLETED,
-                        MaterializationRun.RunState.PARTIAL,
-                    ],
-                )
-                .order_by("-completed_at")
-                .afirst()
-            )
+            last_run = await synced_runs().filter(tenant_schema=ts).afirst()
             tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
         try:
@@ -370,17 +350,7 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
             )
             return tc["result"]
 
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema=ts,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
+        last_run = await synced_runs().filter(tenant_schema=ts).afirst()
         try:
             pipeline_config = await _resolve_pipeline_config(ts, last_run)
         except PipelineResolutionError as exc:
@@ -1664,14 +1634,30 @@ async def run_materialization(
         return tc["result"]
 
 
-def _load_source_entry(tenant, run: MaterializationRun | None) -> dict:
+_FINISHED_RUN_STATES = frozenset(
+    {MaterializationRun.RunState.COMPLETED, MaterializationRun.RunState.PARTIAL}
+)
+# Ended without landing data; a load moves on to its next source after these.
+_FAILED_RUN_STATES = frozenset(
+    {
+        MaterializationRun.RunState.FAILED,
+        MaterializationRun.RunState.CANCELLED,
+        MaterializationRun.RunState.STALE,
+    }
+)
+_LOADING_ELSEWHERE = "loading_in_other_workspace"
+
+
+def _load_source_entry(tenant, run: MaterializationRun | None, *, elsewhere: bool = False) -> dict:
     entry = {
         "tenant_id": str(tenant.id),
         "name": tenant.canonical_name or tenant.external_id,
         "provider": tenant.provider,
         "state": run.state if run is not None else "waiting",
     }
-    if run is not None and run.state in MaterializationRun.ACTIVE_STATES:
+    if elsewhere:
+        entry["state"] = _LOADING_ELSEWHERE
+    if not elsewhere and run is not None and run.state in MaterializationRun.ACTIVE_STATES:
         progress = run.progress or {}
         entry.update(
             started_at=run.started_at.isoformat(),
@@ -1686,67 +1672,128 @@ def _load_source_entry(tenant, run: MaterializationRun | None) -> dict:
     return entry
 
 
-def _load_progress_message(sources: list[dict], finished: int, single_job: bool) -> str:
+def _load_progress_message(sources: list[dict], finished: int, failed: int, sequenced: bool) -> str:
     loading = [s for s in sources if s["state"] in MaterializationRun.ACTIVE_STATES]
-    if not (single_job and len(loading) == 1):
+    elsewhere = ", ".join(s["name"] for s in sources if s["state"] == _LOADING_ELSEWHERE)
+    failed_note = f", {failed} failed" if failed else ""
+    if not loading:
+        return (
+            "This workspace's load is waiting for another workspace to finish loading "
+            f"shared source(s): {elsewhere} ({finished} finished{failed_note})."
+        )
+    if sequenced and len(loading) == 1:
+        current = loading[0]
+        message = f"Loading source {finished + failed + 1} of {len(sources)} ({current['name']})"
+        if current["detail"]:
+            message += f": {current['detail']}"
+        if current["rows_loaded"] is not None and current["rows_total"]:
+            rows = f"{current['rows_loaded']:,} of {current['rows_total']:,} {current['unit']}"
+            message += f" ({rows})"
+        if failed:
+            message += f"; {failed} failed so far"
+    else:
         # Separate jobs (e.g. per-source refreshes) have no shared order to count through.
-        return f"{len(loading)} of {len(sources)} sources loading, {finished} finished."
-    current = loading[0]
-    message = f"Loading source {finished + 1} of {len(sources)} ({current['name']})"
-    if current["detail"]:
-        message += f": {current['detail']}"
-    if current["rows_loaded"] and current["rows_total"]:
-        message += f" ({current['rows_loaded']:,} of {current['rows_total']:,} {current['unit']})"
+        message = (
+            f"{len(loading)} of {len(sources)} sources loading, {finished} finished{failed_note}."
+        )
+    if elsewhere:
+        message += f" Also waiting on another workspace's load of shared source(s): {elsewhere}."
     return message
 
 
 async def _load_in_progress(workspace: Workspace) -> dict | None:
-    """Summarize an in-flight load of this workspace's sources, or None when idle (#411).
+    """Summarize this workspace's in-flight load, or None when it has none (#411).
 
     A workspace load runs its sources one after another, one MaterializationRun
     each under a shared procrastinate job id; that id scopes "source 2 of 3" to the
-    current load rather than to older runs.
+    current load rather than to older runs. Tenants are shared, so only runs this
+    workspace started count as its load (G5); a sibling's load of a shared tenant
+    is reported apart, and only while this workspace's own load waits on it.
     """
     tenants = [t async for t in workspace.tenants.order_by("canonical_name")]
     tenant_ids = [t.id for t in tenants]
-    active = [
-        run
-        async for run in MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=tenant_ids,
-            state__in=MaterializationRun.ACTIVE_STATES,
+    active_runs = MaterializationRun.objects.filter(
+        tenant_schema__tenant_id__in=tenant_ids,
+        state__in=MaterializationRun.ACTIVE_STATES,
+    )
+    if not await active_runs.aexists():
+        return None
+    workspace_jobs = ThreadJob.objects.filter(
+        thread__workspace_id=workspace.id, job_type=ThreadJob.JobType.MATERIALIZATION
+    )
+    # A load candidate carries load_workspace_id only until promotion, which is
+    # after its run finishes; finished runs are found through the job id instead.
+    own_filter = (
+        Q(tenant_schema__load_workspace_id=workspace.id)
+        | Q(
+            tenant_schema__refresh_workspace_id=workspace.id,
+            tenant_schema__state=SchemaState.PROVISIONING,
         )
+        | Q(procrastinate_job_id__in=workspace_jobs.values("procrastinate_job_id"))
+    )
+    own = [
+        run
+        async for run in active_runs.filter(own_filter)
         .select_related("tenant_schema")
         .order_by("started_at")
     ]
-    if not active:
-        return None
-    job_ids = {run.procrastinate_job_id for run in active} - {None}
+    sibling_tenant_ids = {
+        tenant_id
+        async for tenant_id in active_runs.exclude(own_filter).values_list(
+            "tenant_schema__tenant_id", flat=True
+        )
+    } - {run.tenant_schema.tenant_id for run in own}
+    pending_job_ids: set[int] = set()
+    if sibling_tenant_ids:
+        pending_job_ids = {
+            job_id
+            # PENDING only: the resume claims a ThreadJob as RUNNING after the
+            # materialization has already finished.
+            async for job_id in workspace_jobs.filter(state=ThreadJob.State.PENDING).values_list(
+                "procrastinate_job_id", flat=True
+            )
+        }
+    job_ids = {run.procrastinate_job_id for run in own} - {None}
     latest: dict = {}
     async for run in (
         MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=tenant_ids, procrastinate_job_id__in=job_ids
+            tenant_schema__tenant_id__in=tenant_ids,
+            procrastinate_job_id__in=job_ids | pending_job_ids,
         )
         .select_related("tenant_schema")
         .order_by("started_at")
     ):
         latest[run.tenant_schema.tenant_id] = run
-    for run in active:
+    for run in own:
         latest[run.tenant_schema.tenant_id] = run
+
+    loads = [run.tenant_schema.load_workspace_id == workspace.id for run in own]
+    # The tenant lock makes our load wait on a sibling's load of a tenant we have
+    # yet to reach; one we already loaded, or a lone refresh, does not wait.
+    waits_on_siblings = bool(pending_job_ids) or any(loads)
+    elsewhere = {t for t in sibling_tenant_ids if t not in latest} if waits_on_siblings else set()
+    if not own and not elsewhere:
+        return None
 
     def order(tenant):
         run = latest.get(tenant.id)
         if run is None:
-            return (2, None)
-        return (int(run.state in MaterializationRun.ACTIVE_STATES), run.started_at)
+            return (1, 1 if tenant.id in elsewhere else 2, None)
+        return (int(run.state in MaterializationRun.ACTIVE_STATES), 0, run.started_at)
 
-    sources = [_load_source_entry(t, latest.get(t.id)) for t in sorted(tenants, key=order)]
-    finished = sum(
-        1 for s in sources if s["state"] not in {"waiting", *MaterializationRun.ACTIVE_STATES}
-    )
+    sources = [
+        _load_source_entry(t, latest.get(t.id), elsewhere=t.id in elsewhere)
+        for t in sorted(tenants, key=order)
+    ]
+    finished = sum(1 for s in sources if s["state"] in _FINISHED_RUN_STATES)
+    failed = sum(1 for s in sources if s["state"] in _FAILED_RUN_STATES)
+    # Only a workspace load walks every source in order; a refresh touches one.
+    sequenced = len(job_ids) <= 1 and all(loads)
     return {
         "sources_total": len(sources),
         "sources_finished": finished,
-        "message": _load_progress_message(sources, finished, single_job=len(job_ids) <= 1),
+        "sources_failed": failed,
+        "message": _load_progress_message(sources, finished, failed, sequenced),
         "sources": sources,
     }
 
@@ -1758,9 +1805,12 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
     Returns schema existence, state, last materialization timestamp, and table
     list; exists=False if no schema has been provisioned yet. Safe to call
     before any data has been loaded. While a load is running,
-    ``load_in_progress`` reports which source it is on (e.g. "source 2 of 3")
-    and that source's step and row progress; it is null when nothing is loading. Fails with WORKSPACE_ACCESS_DENIED when
-    the acting user can no longer read the workspace.
+    ``load_in_progress`` reports which source it is on (e.g. "source 2 of 3"),
+    how many sources finished or failed, and that source's step and row progress.
+    It is null when this workspace has no load running; another workspace's load
+    of a shared source shows as ``loading_in_other_workspace`` only while this
+    workspace's load waits on it. Fails with WORKSPACE_ACCESS_DENIED when the
+    acting user can no longer read the workspace.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -1831,17 +1881,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 tc["result"] = not_provisioned
                 return tc["result"]
 
-            last_run = (
-                await MaterializationRun.objects.filter(
-                    tenant_schema=ts,
-                    state__in=[
-                        MaterializationRun.RunState.COMPLETED,
-                        MaterializationRun.RunState.PARTIAL,
-                    ],
-                )
-                .order_by("-completed_at")
-                .afirst()
-            )
+            last_run = await synced_runs().filter(tenant_schema=ts).afirst()
 
             tables = []
             if last_run:
@@ -2039,6 +2079,23 @@ def _run_server(args: argparse.Namespace) -> None:
     mcp.run(transport=args.transport)
 
 
+# Internal Docker network hostnames in addition to loopback. The MCP server is
+# internal-only; DNS rebinding protection is still on. "mcp-server" is the Compose
+# service name the API reaches it by (docker-compose.yml's MCP_SERVER_URL).
+TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[
+        "127.0.0.1:*",
+        "localhost:*",
+        "[::1]:*",
+        "scout-mcp-web:*",
+        "scout-staging-mcp-web:*",
+        "mcp-server",
+        "mcp-server:*",
+    ],
+)
+
+
 def _run_streamable_http(args: argparse.Namespace) -> None:
     """Serve the streamable-HTTP transport with shared-secret caller auth.
 
@@ -2049,18 +2106,7 @@ def _run_streamable_http(args: argparse.Namespace) -> None:
     """
     mcp.settings.host = args.host
     mcp.settings.port = args.port
-    # Allow internal Docker network hostname in addition to loopback defaults.
-    # The MCP server is internal-only; DNS rebinding protection is still on.
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "127.0.0.1:*",
-            "localhost:*",
-            "[::1]:*",
-            "scout-mcp-web:*",
-            "scout-staging-mcp-web:*",
-        ],
-    )
+    mcp.settings.transport_security = TRANSPORT_SECURITY
 
     app = mcp.streamable_http_app()
     app.add_middleware(SharedSecretMiddleware, secret=settings.MCP_SHARED_SECRET)

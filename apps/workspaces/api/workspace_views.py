@@ -9,7 +9,7 @@ from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework import status
@@ -24,6 +24,7 @@ from apps.common.errors import (
     OCSAuthError,
     TokenRefreshError,
 )
+from apps.common.http import string_field
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
 from apps.users.services.tenant_resolution import (
@@ -47,7 +48,6 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
-    SchemaState,
     TenantSchema,
     Workspace,
     WorkspaceInvite,
@@ -73,7 +73,10 @@ from apps.workspaces.services.member_coverage import (
     requester_gaps,
 )
 from apps.workspaces.services.query_state import synced_runs
-from apps.workspaces.services.status import derive_schema_status
+from apps.workspaces.services.status import (
+    classify_tenant_schemas,
+    workspace_schema_status,
+)
 from apps.workspaces.services.workspace_service import remove_workspace_tenant
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -380,6 +383,21 @@ def _serialize_invite(invite, result=None):
     return payload
 
 
+LIVE_INVITE_CONSTRAINT = "one_live_invite_per_workspace_email"
+
+
+def _update_if_live(invite, **fields) -> bool:
+    return bool(
+        WorkspaceInvite.objects.filter(pk=invite.pk, status__in=LIVE_INVITE_STATUSES).update(
+            **fields
+        )
+    )
+
+
+def _invite_no_longer_live():
+    return Response({"error": "Invite is no longer live."}, status=status.HTTP_409_CONFLICT)
+
+
 def _upsert_invite(workspace, email, role, invited_by, new_status):
     """Create or refresh the single live invite for (workspace, email).
 
@@ -387,27 +405,46 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
     the pending↔awaiting_access status rather than violating the
     one-live-invite-per-(workspace,email) constraint. A stale (expired) live
     invite is retired to EXPIRED first so a fresh one can take its place.
+
+    Returns None when a concurrent request resolved or replaced the live invite.
     """
     live = WorkspaceInvite.objects.filter(
         workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
     ).first()
+    # Conditional writes: a login may accept (or a manager revoke) the invite
+    # after the read above, and a live status must not be written back (#561 G4).
     if live and not live.is_expired:
-        live.role = role
-        live.invited_by = invited_by
-        live.status = new_status
-        live.expires_at = default_invite_expiry()
-        live.save(update_fields=["role", "invited_by", "status", "expires_at", "updated_at"])
+        fields = {
+            "role": role,
+            "invited_by": invited_by,
+            "status": new_status,
+            "expires_at": default_invite_expiry(),
+            "updated_at": timezone.now(),
+        }
+        if not _update_if_live(live, **fields):
+            return None
+        for name, value in fields.items():
+            setattr(live, name, value)
         return live
     if live and live.is_expired:
-        live.status = WorkspaceInviteStatus.EXPIRED
-        live.save(update_fields=["status", "updated_at"])
-    return WorkspaceInvite.objects.create(
-        workspace=workspace,
-        email=email,
-        role=role,
-        invited_by=invited_by,
-        status=new_status,
-    )
+        # Best-effort: a login may have retired this row already.
+        _update_if_live(live, status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now())
+    try:
+        # Savepoint, so a lost race doesn't poison an enclosing transaction.
+        with transaction.atomic():
+            return WorkspaceInvite.objects.create(
+                workspace=workspace,
+                email=email,
+                role=role,
+                invited_by=invited_by,
+                status=new_status,
+            )
+    except IntegrityError as exc:
+        diag = getattr(exc.__cause__, "diag", None)
+        if getattr(diag, "constraint_name", None) != LIVE_INVITE_CONSTRAINT:
+            raise
+        # A concurrent re-invite created the live invite first.
+        return None
 
 
 def _schema_status_for_workspaces(workspaces):
@@ -423,17 +460,11 @@ def _schema_status_for_workspaces(workspaces):
     # All tenant ids across these workspaces.
     tenant_ids = {wt.tenant_id for w in workspaces for wt in w.workspace_tenants.all()}
 
-    # Per-tenant schema states (one bulk query).
-    active_tenants = set()
-    provisioning_tenants = set()
-    if tenant_ids:
-        for tenant_id, state in TenantSchema.objects.filter(tenant_id__in=tenant_ids).values_list(
-            "tenant_id", "state"
-        ):
-            if state == SchemaState.ACTIVE:
-                active_tenants.add(tenant_id)
-            elif state in (SchemaState.PROVISIONING, SchemaState.MATERIALIZING):
-                provisioning_tenants.add(tenant_id)
+    active_tenants, provisioning_tenants = classify_tenant_schemas(
+        TenantSchema.objects.filter(tenant_id__in=tenant_ids).values_list("tenant_id", "state")
+        if tenant_ids
+        else ()
+    )
 
     # Multi-tenant workspaces' view schema states (one bulk query).
     view_states = dict(
@@ -444,14 +475,11 @@ def _schema_status_for_workspaces(workspaces):
 
     statuses = {}
     for w in workspaces:
-        ws_tenant_ids = [wt.tenant_id for wt in w.workspace_tenants.all()]
-        active_count = sum(1 for tid in ws_tenant_ids if tid in active_tenants)
-        provisioning = any(tid in provisioning_tenants for tid in ws_tenant_ids)
-        statuses[w.id] = derive_schema_status(
-            tenant_count=len(ws_tenant_ids),
-            active_count=active_count,
-            provisioning=provisioning,
-            view_schema_state=view_states.get(w.id),
+        statuses[w.id] = workspace_schema_status(
+            [wt.tenant_id for wt in w.workspace_tenants.all()],
+            active_tenants,
+            provisioning_tenants,
+            view_states.get(w.id),
         )
     return statuses
 
@@ -618,14 +646,6 @@ class WorkspaceDetailView(APIView):
         missing = missing_tenants_for_member(request.user, workspace)
 
         tenants = list(workspace.tenants.all())
-        active_schemas = TenantSchema.objects.filter(
-            tenant__in=tenants, state=SchemaState.ACTIVE
-        ).count()
-        provisioning = TenantSchema.objects.filter(
-            tenant__in=tenants,
-            state__in=[SchemaState.PROVISIONING, SchemaState.MATERIALIZING],
-        ).exists()
-
         view_schema_state = None
         if len(tenants) > 1:
             try:
@@ -633,11 +653,11 @@ class WorkspaceDetailView(APIView):
             except WorkspaceViewSchema.DoesNotExist:
                 view_schema_state = None
 
-        schema_status = derive_schema_status(
-            tenant_count=len(tenants),
-            active_count=active_schemas,
-            provisioning=provisioning,
-            view_schema_state=view_schema_state,
+        active, provisioning = classify_tenant_schemas(
+            TenantSchema.objects.filter(tenant__in=tenants).values_list("tenant_id", "state")
+        )
+        schema_status = workspace_schema_status(
+            [tenant.id for tenant in tenants], active, provisioning, view_schema_state
         )
 
         last_run_at = (
@@ -818,7 +838,10 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        email = (request.data.get("email") or "").strip().lower()
+        email, err = string_field(request.data, "email")
+        if err:
+            return err
+        email = email.strip().lower()
         if not email or "@" not in email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -833,6 +856,8 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.PENDING
             )
+            if invite is None:
+                return _invite_no_longer_live()
             send_pending_invite_email(invite)
             return Response(
                 _serialize_invite(invite, result="invite_pending"),
@@ -864,6 +889,8 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.AWAITING_ACCESS
             )
+            if invite is None:
+                return _invite_no_longer_live()
             # The invitee already has a Scout account, so they never get the
             # pending-invite email; tell them directly they need upstream access.
             # The manager just performed this action, so don't email them.
@@ -1042,16 +1069,29 @@ class WorkspaceInviteDetailView(APIView):
         new_role = request.data.get("role")
         if new_role not in WorkspaceRole.values:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+        # Conditional: login may have accepted the invite since it was read (#561 G4).
+        if not _update_if_live(invite, role=new_role, updated_at=timezone.now()):
+            return _invite_no_longer_live()
         invite.role = new_role
-        invite.save(update_fields=["role", "updated_at"])
         return Response(_serialize_invite(invite))
 
     def delete(self, request, workspace_id, invite_id):
         _workspace, invite, err = self._get_manager_context(request, workspace_id, invite_id)
         if err:
             return err
-        invite.status = WorkspaceInviteStatus.REVOKED
-        invite.save(update_fields=["status", "updated_at"])
+        # Conditional: revoking an invite login already accepted would hide a live
+        # member behind a REVOKED row (#561 G4).
+        revoked = _update_if_live(
+            invite, status=WorkspaceInviteStatus.REVOKED, updated_at=timezone.now()
+        )
+        # Already REVOKED is the requested state (e.g. a retry after a dropped 204).
+        if (
+            not revoked
+            and not WorkspaceInvite.objects.filter(
+                pk=invite.pk, status=WorkspaceInviteStatus.REVOKED
+            ).exists()
+        ):
+            return _invite_no_longer_live()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1143,13 +1183,15 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        tenant_id = request.data.get("tenant_id")
+        tenant_id, err = string_field(request.data, "tenant_id")
+        if err:
+            return err
         if not tenant_id:
             return Response({"error": "tenant_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             tenant = Tenant.objects.get(id=tenant_id)
-        except Tenant.DoesNotExist:
+        except (Tenant.DoesNotExist, ValidationError):
             return Response(
                 {"error": "Tenant not found or not accessible."},
                 status=status.HTTP_400_BAD_REQUEST,

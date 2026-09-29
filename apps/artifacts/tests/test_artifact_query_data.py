@@ -646,11 +646,49 @@ async def test_narrative_document_preserves_explicit_stored_queries(
     assert run.await_count == 2
 
 
+INVALID_JSON = {"truncated": b"{", "non_utf8": b"\xff", "deeply_nested": b"[" * 100_000}
+NON_OBJECT = {"array": b"[1]", "string": b'"x"', "number": b"5", "null": b"null"}
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body,status", [(b"", 200), (b"{", 400), (b"\xff", 400)])
-async def test_inspector_validates_json_separately_from_dates(
-    live_artifact, member_client, workspace, body, status
+@pytest.mark.parametrize("artifact_state", ["story", "stored_queries", "no_queries", "not_ready"])
+@pytest.mark.parametrize(
+    "body,error",
+    [
+        *((body, "Invalid JSON") for body in INVALID_JSON.values()),
+        *((body, "Request body must be a JSON object.") for body in NON_OBJECT.values()),
+    ],
+    ids=[*INVALID_JSON, *NON_OBJECT],
+)
+async def test_inspector_rejects_a_body_that_is_not_a_json_object(
+    live_artifact, member_client, workspace, artifact_state, body, error
+):
+    if artifact_state == "story":
+        live_artifact.data = {"story_doc": story()}
+        await live_artifact.asave(update_fields=["data"])
+    elif artifact_state == "no_queries":
+        live_artifact.semantic_queries = []
+        await live_artifact.asave(update_fields=["semantic_queries"])
+    data_state = {"status": "stale", "queryable": artifact_state != "not_ready", "message": "x"}
+    with (
+        patch("apps.artifacts.views.artifact_data_state", new=AsyncMock(return_value=data_state)),
+        patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as run,
+    ):
+        response = await member_client.post(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
+            body,
+            content_type="application/json",
+        )
+    assert response.status_code == 400
+    assert response.json() == {"error": error}
+    run.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_inspector_treats_an_empty_body_as_no_runtime_context(
+    live_artifact, member_client, workspace
 ):
     live_artifact.data = {"story_doc": story()}
     await live_artifact.asave(update_fields=["data"])
@@ -661,12 +699,8 @@ async def test_inspector_validates_json_separately_from_dates(
     ) as run:
         response = await member_client.post(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
-            body,
+            b"",
             content_type="application/json",
         )
-    assert response.status_code == status
-    if status == 400:
-        assert response.json()["error"] == "Request body must be valid UTF-8 JSON."
-        run.assert_not_awaited()
-    else:
-        run.assert_awaited_once()
+    assert response.status_code == 200
+    run.assert_awaited_once()

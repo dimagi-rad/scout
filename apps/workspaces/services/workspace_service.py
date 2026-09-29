@@ -17,6 +17,7 @@ from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
 )
+from apps.workspaces.services.schema_manager import RETIRED_VIEW_STATES
 from apps.workspaces.services.tenant_coverage import coverage_entry, parse_coverage
 from apps.workspaces.tasks import (
     materialize_workspace,
@@ -60,6 +61,11 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 )
                 rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
             else:
+                # A retired row serves nothing, and the rebuild below skips it
+                # unless it is marked as wanted again.
+                WorkspaceViewSchema.objects.filter(
+                    workspace=workspace, state__in=RETIRED_VIEW_STATES
+                ).update(state=SchemaState.PROVISIONING)
                 _record_pending_source(workspace, tenant)
                 # Queued first: both take the workspace lock W, and the load holds
                 # it for its whole run, so on a worker with more than one slot a
@@ -86,9 +92,12 @@ def _record_pending_source(workspace, tenant) -> None:
     every source, so answers would omit this one without a warning.
     """
     entry = coverage_entry(tenant)
-    for vs in WorkspaceViewSchema.objects.select_for_update().filter(
-        workspace=workspace, state=SchemaState.ACTIVE
-    ):
+    # Locks rows in every state: a rebuild publishing a non-ACTIVE row as ACTIVE
+    # holds this lock while it reads the workspace's sources, so one side always
+    # sees the other (SchemaManager._name_sources_added_since).
+    for vs in WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace):
+        if vs.state != SchemaState.ACTIVE:
+            continue
         if vs.tenant_coverage in (None, {}):
             coverage = _legacy_coverage(workspace, excluding=tenant)
         else:
@@ -136,8 +145,8 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
     Deletes the WorkspaceTenant record. If the workspace remains multi-tenant
     (>=2 tenants left), marks any existing WorkspaceViewSchema as PROVISIONING
     and dispatches a rebuild. If the workspace drops to single-tenant (or zero),
-    routing moves to the tenant schema and any active view schema becomes an
-    orphan — mark it TEARDOWN and dispatch teardown so the physical
+    routing moves to the tenant schema and any live, provisioning or failed view schema
+    becomes an orphan — mark it TEARDOWN and dispatch teardown so the physical
     ``ws_<hash>`` schema is dropped.
 
     Both ``defer`` calls are transaction-safe — the procrastinate row is only
@@ -158,8 +167,13 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         _invalidate_on_commit(workspace)
         remaining = len(tenant_ids) - 1
         if remaining <= 1:
+            # A PROVISIONING row has a rebuild queued or running; retiring it makes
+            # that rebuild skip, or drop what it built, instead of publishing ACTIVE.
+            # A FAILED row can still hold the last-good schema, and nothing else
+            # sweeps FAILED rows.
             for vs in WorkspaceViewSchema.objects.filter(
-                workspace=workspace, state=SchemaState.ACTIVE
+                workspace=workspace,
+                state__in=[SchemaState.ACTIVE, SchemaState.PROVISIONING, SchemaState.FAILED],
             ):
                 vs.state = SchemaState.TEARDOWN
                 vs.save(update_fields=["state"])

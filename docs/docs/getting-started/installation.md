@@ -126,15 +126,17 @@ docker compose up --build
 
 This starts five services: backend API (port 8000), frontend (port 3000), MCP
 server (port 8100 with the local override), PostgreSQL, and Cube (ports 4000 and
-4010). It does not start a background worker; follow the
-[Docker setup guide](../deployment/docker.md) to run materialization jobs.
+4010). It does not start a background worker, and the MCP server rejects the
+API's requests on its `Host` check in this stack, so agent tool calls fail; see the
+[Docker setup guide](../deployment/docker.md) for both. Use Honcho for working chat.
 
 ## Verify the installation
 
 1. Check Cube with `curl --fail http://localhost:4000/readyz` and
    `curl --fail http://localhost:4010/readyz` (or your configured ports).
 2. Open `http://localhost:5173` (or `http://localhost:3000` with Docker).
-3. Log in with the superuser account you created (or sign up for a new account).
+3. Log in with the superuser account you created. The login page has no sign-up form; OAuth
+   sign-in buttons appear once social applications are configured.
 4. Connect a data source using the next guide, materialize it, and run a semantic
    query. Seeing the chat interface alone does not verify the data runtime.
 

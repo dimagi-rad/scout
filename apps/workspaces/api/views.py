@@ -16,18 +16,23 @@ from apps.common.localized import localized_str
 from apps.knowledge.models import TableKnowledge
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
-    MaterializationRun,
     SchemaState,
     TenantSchema,
     WorkspaceRole,
+    WorkspaceViewSchema,
 )
 from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     resolve_pipeline_config,
 )
+from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
-from apps.workspaces.services.status import aggregate_source_state
+from apps.workspaces.services.status import (
+    aggregate_source_state,
+    classify_tenant_schemas,
+    workspace_schema_status,
+)
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from apps.workspaces.tasks import refresh_tenant_schema, settle_finished_refresh_candidates
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
@@ -181,21 +186,11 @@ def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names:
     request (arch #254, finding 10#2). Surfaces only ``completed`` sources whose
     physical table is present, plus dbt models that physically exist.
     """
-    run = (
-        MaterializationRun.objects.filter(
-            tenant_schema=tenant_schema,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        )
-        .order_by("-completed_at")
-        .first()
-    )
+    run = synced_runs().filter(tenant_schema=tenant_schema).first()
     if run is None:
         return []
 
-    materialized_at = run.completed_at.isoformat() if run.completed_at else None
+    materialized_at = run.completed_at.isoformat()
     sources_result = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
@@ -400,17 +395,7 @@ class DataDictionaryView(APIView):
         return self._get_from_pipeline(workspace, tenant_schema)
 
     def _get_from_pipeline(self, workspace, tenant_schema):
-        last_run = (
-            MaterializationRun.objects.filter(
-                tenant_schema=tenant_schema,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .first()
-        )
+        last_run = synced_runs().filter(tenant_schema=tenant_schema).first()
 
         try:
             pipeline_config = resolve_pipeline_config(tenant_schema, last_run)
@@ -463,13 +448,8 @@ class DataDictionaryView(APIView):
                 entry["annotation"] = annotation
             enriched_tables[qualified_name] = entry
 
-        generated_at = last_run.completed_at if last_run else None
-        return Response(
-            {
-                "tables": enriched_tables,
-                "generated_at": generated_at.isoformat() if generated_at else None,
-            }
-        )
+        generated_at = last_run.completed_at.isoformat() if last_run else None
+        return Response({"tables": enriched_tables, "generated_at": generated_at})
 
 
 @dataclass(frozen=True)
@@ -680,7 +660,11 @@ class RefreshStatusView(APIView):
     """
     GET /api/workspaces/<workspace_id>/refresh/status/
 
-    Returns the current schema state of each workspace source (and an aggregate).
+    ``state`` is the workspace's availability, judged by its serving schemas and,
+    for several sources, its view schema: the same value and vocabulary as
+    ``schema_status`` on the workspace detail. ``refresh_state`` is the latest
+    refresh attempt, so a failed refresh stays visible while older data is still
+    served. ``tenants`` carries both per source.
     """
 
     permission_classes = [IsAuthenticated]
@@ -692,39 +676,64 @@ class RefreshStatusView(APIView):
 
         tenants = sorted(workspace.tenants.all(), key=lambda tenant: str(tenant.id))
         if not tenants:
-            return Response({"state": "unavailable", "started_at": None, "error": None})
-        statuses = [_latest_refresh_status(tenant) for tenant in tenants]
+            return Response(
+                {
+                    "state": "unavailable",
+                    "refresh_state": "unavailable",
+                    "started_at": None,
+                    "error": None,
+                }
+            )
+        rows = list(
+            TenantSchema.objects.filter(tenant__in=tenants)
+            .order_by("-created_at")
+            .values_list("tenant_id", "state", "created_at")
+        )
+        active, provisioning = classify_tenant_schemas((t, state) for t, state, _ in rows)
+        statuses = [
+            _source_refresh_status(tenant, rows, active, provisioning) for tenant in tenants
+        ]
         if len(statuses) == 1:
             return Response({k: v for k, v in statuses[0].items() if k != "tenant_id"})
-        aggregate = aggregate_source_state(entry["state"] for entry in statuses)
+
+        view = WorkspaceViewSchema.objects.filter(workspace=workspace).first()
+        state = workspace_schema_status(
+            [tenant.id for tenant in tenants],
+            active,
+            provisioning,
+            view.state if view else None,
+        )
+        refresh_state = aggregate_source_state(entry["refresh_state"] for entry in statuses)
         representative = max(
-            (entry for entry in statuses if entry["state"] == aggregate),
+            (entry for entry in statuses if entry["refresh_state"] == refresh_state),
             key=lambda entry: entry["started_at"] or "",
         )
+        error = representative["error"]
+        if state == "failed" and error is None:
+            error = (
+                view.last_error if view else ""
+            ) or "The workspace view schema failed to build."
         return Response(
             {
-                "state": aggregate,
+                "state": state,
+                "refresh_state": refresh_state,
                 "started_at": representative["started_at"],
-                "error": representative["error"],
+                "error": error,
                 "tenants": statuses,
             }
         )
 
 
-def _latest_refresh_status(tenant) -> dict:
-    latest = TenantSchema.objects.filter(tenant=tenant).order_by("-created_at").first()
-    if latest is None:
-        return {
-            "tenant_id": str(tenant.id),
-            "state": "unavailable",
-            "started_at": None,
-            "error": None,
-        }
+def _source_refresh_status(tenant, rows, active, provisioning) -> dict:
+    """*rows* are ``(tenant_id, state, created_at)``, newest first."""
+    latest = next(((state, created) for tid, state, created in rows if tid == tenant.id), None)
+    refresh_state, started_at = latest if latest else ("unavailable", None)
     return {
         "tenant_id": str(tenant.id),
-        "state": latest.state,
-        "started_at": latest.created_at.isoformat(),
-        "error": "Schema provisioning failed." if latest.state == SchemaState.FAILED else None,
+        "state": workspace_schema_status([tenant.id], active, provisioning, None),
+        "refresh_state": refresh_state,
+        "started_at": started_at.isoformat() if started_at else None,
+        "error": "Schema provisioning failed." if refresh_state == SchemaState.FAILED else None,
     }
 
 
@@ -762,17 +771,7 @@ class TableDetailView(APIView):
         if table_name.startswith("stg_"):
             return None
 
-        last_run = (
-            MaterializationRun.objects.filter(
-                tenant_schema=tenant_schema,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .first()
-        )
+        last_run = synced_runs().filter(tenant_schema=tenant_schema).first()
         pipeline_config = resolve_pipeline_config(tenant_schema, last_run)
 
         live_table_names = _live_tables_in_schema_sync(schema_name)

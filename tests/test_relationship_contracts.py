@@ -1,5 +1,6 @@
 """Provider-shaped relationships run against real PostgreSQL, not string snapshots."""
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -229,16 +230,17 @@ async def test_auxiliary_tables_require_completed_source_and_physical_presence(
 ):
     pipeline = PipelineRegistry().get("commcare_sync")
     run = SimpleNamespace(
-        completed_at=None, result={"sources": {"forms": {"state": state, "rows": 8}}}
+        completed_at=datetime(2026, 9, 8, tzinfo=UTC),
+        result={"sources": {"forms": {"state": state, "rows": 8}}},
     )
     with (
-        patch("mcp_server.services.metadata.MaterializationRun") as runs,
+        patch("mcp_server.services.metadata.synced_runs") as runs,
         patch(
             "mcp_server.services.metadata._live_tables_in_schema",
             AsyncMock(return_value={"raw_forms", "raw_form_cases"} if exists else {"raw_forms"}),
         ),
     ):
-        runs.objects.filter.return_value.order_by.return_value.afirst = AsyncMock(return_value=run)
+        runs.return_value.filter.return_value.afirst = AsyncMock(return_value=run)
         tables = await pipeline_list_tables(SimpleNamespace(schema_name="fixture"), pipeline)
     bridge = next((table for table in tables if table["name"] == "raw_form_cases"), None)
     assert (bridge is not None) is expected

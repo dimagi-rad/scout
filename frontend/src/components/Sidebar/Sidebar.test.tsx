@@ -219,6 +219,31 @@ describe("Sidebar workspace revalidation (#355)", () => {
     expect(mocks.revalidateDomains).toHaveBeenCalledTimes(2)
   })
 
+  it("polls every minute while you stay on the tab, and not while it's hidden", () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] })
+    vi.setSystemTime(new Date("2026-09-29T12:00:00Z"))
+    const { unmount } = renderSidebar()
+
+    vi.advanceTimersByTime(59_000)
+    expect(mocks.revalidateDomains).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1_000)
+    expect(mocks.revalidateDomains).toHaveBeenCalledOnce()
+    // A tick has no moment to be fresh for, so it may join a request already in flight.
+    expect(mocks.revalidateDomains).toHaveBeenCalledWith({ fresh: false })
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" })
+    try {
+      vi.advanceTimersByTime(60_000)
+      expect(mocks.revalidateDomains).toHaveBeenCalledOnce()
+    } finally {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" })
+    }
+
+    unmount()
+    vi.advanceTimersByTime(60_000)
+    expect(mocks.revalidateDomains).toHaveBeenCalledOnce()
+  })
+
   it("does not revalidate while the tab is hidden", () => {
     renderSidebar()
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" })
