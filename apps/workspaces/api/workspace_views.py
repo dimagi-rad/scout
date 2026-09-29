@@ -378,8 +378,7 @@ class WorkspaceListView(APIView):
         memberships = (
             WorkspaceMembership.objects.filter(user=request.user)
             .select_related("workspace")
-            # display_name reads workspace.tenants; the prefetch keeps that off the per-row path.
-            .prefetch_related("workspace__workspace_tenants__tenant", "workspace__tenants")
+            .prefetch_related("workspace__workspace_tenants__tenant")
             .annotate(
                 member_count=Count("workspace__memberships", distinct=True),
                 last_synced_at=Subquery(latest_run),
@@ -398,20 +397,21 @@ class WorkspaceListView(APIView):
 
         results = []
         for m in memberships:
+            workspace_tenants = [wt.tenant for wt in m.workspace.workspace_tenants.all()]
             tenants = [
                 {
-                    "id": str(wt.tenant.id),
-                    "tenant_name": wt.tenant.canonical_name,
-                    "provider": wt.tenant.provider,
+                    "id": str(tenant.id),
+                    "tenant_name": tenant.canonical_name,
+                    "provider": tenant.provider,
                 }
-                for wt in m.workspace.workspace_tenants.all()
+                for tenant in workspace_tenants
             ]
             missing = missing_by_ws[m.workspace.id]
             results.append(
                 {
                     "id": str(m.workspace.id),
                     "name": m.workspace.name,
-                    "display_name": m.workspace.display_name,
+                    "display_name": m.workspace.display_name_for(workspace_tenants),
                     "is_auto_created": m.workspace.is_auto_created,
                     "role": m.role,
                     "tenants": tenants,

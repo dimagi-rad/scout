@@ -30,8 +30,6 @@ def manage_user(db, workspace):
 
 @pytest.fixture
 def second_tenant(db):
-    from apps.users.models import Tenant
-
     return Tenant.objects.create(
         provider="commcare", external_id="other-domain", canonical_name="Other Domain"
     )
