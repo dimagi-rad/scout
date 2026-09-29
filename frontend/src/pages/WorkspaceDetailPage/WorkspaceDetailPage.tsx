@@ -32,6 +32,7 @@ import { RoleBadge } from "@/components/RoleBadge"
 import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/SearchFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { slugifyWorkspaceName, workspacePath } from "@/lib/workspacePath"
+import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 
 const DEFAULT_NEW_MEMBER_ROLE: WorkspaceMember["role"] = "read_write"
 
@@ -468,7 +469,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
 
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 
-function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
+export function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
   const userId = useAppStore((s) => s.user?.id)
 
   // Connected sources — fast local-DB query, gates only its own section.
@@ -551,7 +552,9 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   }
 
   const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
-  const available = userTenants.filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
+  const available = userTenants
+    .filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
+    .sort(compareUserTenantsByName)
 
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
