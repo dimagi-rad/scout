@@ -189,9 +189,6 @@ def test_list_schema_status_matches_detail(client, user, workspace, tenant_schem
     assert list_status == detail["schema_status"] == "available"
 
 
-# ── derive_schema_status: multi-tenant view-schema states ───────────────────
-
-
 def test_derive_schema_status_multi_tenant_failed_view_schema():
     """A FAILED multi-tenant view schema yields the distinct 'failed' status,
     not the generic 'provisioning' bucket — so the UI/agent can surface it."""

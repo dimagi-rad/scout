@@ -696,8 +696,6 @@ class RefreshStatusView(APIView):
         statuses = [_latest_refresh_status(tenant) for tenant in tenants]
         if len(statuses) == 1:
             return Response({k: v for k, v in statuses[0].items() if k != "tenant_id"})
-        # Truthful per source. The aggregate is the most severe state any source
-        # is in, failure first, so it never contradicts the error beside it.
         aggregate = aggregate_source_state(entry["state"] for entry in statuses)
         representative = max(
             (entry for entry in statuses if entry["state"] == aggregate),

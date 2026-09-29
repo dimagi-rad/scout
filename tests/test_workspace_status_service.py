@@ -57,6 +57,14 @@ async def _second_source(workspace, *, schema_state, run_state=None):
 
 
 async def _scenario(name, workspace, tenant):
+    if name == "single_first_load":
+        first = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="first_source", state=SchemaState.PROVISIONING
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=first, pipeline="commcare_sync", state=LOADING
+        )
+        return
     serving = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="first_source", state=SchemaState.ACTIVE
     )
@@ -76,7 +84,7 @@ async def _scenario(name, workspace, tenant):
         )
         return
     other = await _second_source(
-        workspace, schema_state=SchemaState.MATERIALIZING, run_state=LOADING
+        workspace, schema_state=SchemaState.PROVISIONING, run_state=LOADING
     )
     first = {"tenant_id": str(tenant.id)}
     second = {"tenant_id": str(other.id)}
@@ -107,6 +115,7 @@ SCENARIOS = [
     ("idle", "ready", None),
     ("single_blue_green_refresh", "ready", True),
     ("single_in_place_writer", "recovering", False),
+    ("single_first_load", "recovering", False),
     ("multi_excluded_source_loading", "ready", True),
     ("multi_included_source_loading", "recovering", False),
     ("multi_source_both_included_and_excluded", "recovering", False),
