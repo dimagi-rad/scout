@@ -570,6 +570,8 @@ class WorkspaceDetailView(APIView):
         )
 
     def patch(self, request, workspace_id):
+        # Must keep requiring coverage: get() blanks system_prompt for an uncovered
+        # member, so accepting their write would let them save that blank over it.
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
@@ -1049,7 +1051,7 @@ class WorkspaceTenantView(APIView):
                 [user for user, _missing in lacking], tenant.provider
             )
         try:
-            wt, created = add_tenant_covered_by_members(workspace, tenant)
+            wt, created = add_tenant_covered_by_members(workspace, tenant, actor_id=request.user.id)
         except MembersLackTenant as refused:
             return Response(
                 _members_lack_source_body(tenant, refused.gaps, recheck_complete=recheck_complete),

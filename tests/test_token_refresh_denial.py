@@ -119,7 +119,8 @@ async def test_inconclusive_refresh_preserves_access(
             simulate_timeout=simulate_timeout,
         )
     assert not isinstance(caught.value, UpstreamTokenExpired)
-    if simulate_timeout or status in (429, 503):
+    transient = simulate_timeout or status in (429, 503)
+    if transient:
         assert isinstance(caught.value, UpstreamRefreshFailed)
     else:
         assert not isinstance(caught.value, ExpectedStateError)
@@ -127,7 +128,8 @@ async def test_inconclusive_refresh_preserves_access(
     assert await TenantMembership.objects.filter(pk=member.pk).aexists()
     await connection.arefresh_from_db()
     assert connection.upstream_denial_code == ""
-    assert connection.oauth_refresh_failure_fingerprint
+    # A blip says nothing about the grant, so it must not leave the reconnect marker.
+    assert bool(connection.oauth_refresh_failure_fingerprint) == (not transient)
 
 
 @pytest.mark.django_db(transaction=True)

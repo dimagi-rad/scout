@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import yaml
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
@@ -23,7 +22,7 @@ from apps.semantic.models import (
     SemanticModel,
 )
 from apps.semantic.services.catalog import PhysicalTable, ensure_semantic_model
-from apps.semantic.services.cube import generate_cube_schema
+from apps.semantic.services.cube import cube_schema_yaml, generate_cube_schema
 from apps.semantic.services.query import SemanticQueryError, _compile_semantic_query
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import (
@@ -104,7 +103,7 @@ def required_setup():
         workspace=workspace,
         semantic_model=model,
         filename="required.yaml",
-        content=yaml.safe_dump(generate_cube_schema(model)),
+        content=cube_schema_yaml(generate_cube_schema(model)),
         content_hash="required",
         status=CubeSchema.Status.ACTIVE,
     )

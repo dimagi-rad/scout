@@ -1,8 +1,7 @@
 """Upstream-freshness admission for protected workspace access.
 
 ``apps.workspaces.access`` decides from local state whether a member may use a
-workspace. This layer adds the confirmed freshness policy
-(docs/meeting-readiness-2026-09-17/FRESHNESS-CONTRACT.md): every live tenant
+workspace. This layer adds the freshness policy (#548): every live tenant
 membership the decision relies on must hold an upstream proof younger than five
 minutes. A stale proof is rechecked through the connection-elected verification
 service, so concurrent callers share one provider round-trip.
@@ -47,7 +46,7 @@ class VerificationBudget(StrEnum):
 
 # An interactive caller is a person waiting on a response; a worker can afford the
 # provider adapter's full budget. Either way the deadline is end-to-end across every
-# connection being rechecked, never multiplied per connection (FOLLOW-UPS #7).
+# connection being rechecked, never multiplied per connection.
 BUDGET_SECONDS = {
     VerificationBudget.INTERACTIVE: 10.0,
     VerificationBudget.BACKGROUND: PROVIDER_BUDGET_SECONDS,

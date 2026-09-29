@@ -46,7 +46,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from apps.agents.graph.base import (
     AGENT_EXCLUDED_MCP_TOOLS,
     MCP_TOOL_NAMES,
-    _fetch_schema_context,
+    _fetch_semantic_model_context,
     _make_injecting_tool_node,
 )
 from apps.agents.graph.state import AgentState
@@ -55,6 +55,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
+    WorkspaceTenant,
 )
 from mcp_server.server import mcp as scout_mcp
 
@@ -232,8 +233,18 @@ async def test_prompt_does_not_reference_params_absent_from_tool_schema(db):
     tenant = await Tenant.objects.acreate(
         provider="commcare", external_id="contract-prompt-domain", canonical_name="Contract Prompt"
     )
+    workspace = await Workspace.objects.acreate(name="Contract Prompt")
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
     # No TenantSchema => the "no data loaded" branch that emits the pipeline= text.
-    prompt_section = await _fetch_schema_context(tenant, None)
+    prompt_section = "\n".join(
+        [
+            await _fetch_semantic_model_context(
+                workspace, interactive=interactive, write_capable=write_capable
+            )
+            for interactive in (True, False)
+            for write_capable in (True, False)
+        ]
+    )
 
     assert not ("pipeline=" in prompt_section or 'pipeline="' in prompt_section), (
         "Prompt instructs run_materialization with a `pipeline=` argument, but the "

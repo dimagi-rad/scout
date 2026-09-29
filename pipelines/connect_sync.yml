@@ -14,6 +14,8 @@ sources:
   # The v2 export serializers for the resources below do not emit a per-row
   # `id`, so there is no integer watermark to keyset-resume from. Like `users`,
   # they do a full DROP/CREATE/INSERT every run and use a surrogate identity PK.
+  # The materializer enforces this whatever the flag says (a replayed page
+  # would append duplicates); `resumable: false` here only documents it.
   - name: completed_works
     description: "Completed work records"
     resumable: false

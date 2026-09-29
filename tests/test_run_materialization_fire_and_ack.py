@@ -101,6 +101,8 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
 
     assert result["data"]["status"] == "started"
     assert "thread_job_id" in result["data"]
+    # Intent is captured before queueing, so an equivalent pending load is joined.
+    assert mw.defer_async.call_args.kwargs["load_intent"] == {str(tenant.id): 1}
     tj = await ThreadJob.objects.aget(procrastinate_job_id=7777)
     assert tj.thread_id == thread.id
     assert tj.tool_call_id == "tc-xyz"

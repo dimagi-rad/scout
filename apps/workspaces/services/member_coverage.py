@@ -103,7 +103,7 @@ def members_lacking_tenant(workspace, tenant) -> list[tuple]:
     return [(member, gaps[(member.pk, key)]) for member in members if (member.pk, key) in gaps]
 
 
-def add_tenant_covered_by_members(workspace, tenant):
+def add_tenant_covered_by_members(workspace, tenant, *, actor_id=None):
     """Add ``tenant`` only if every current member can use it.
 
     Returns ``(WorkspaceTenant, created)``; re-adding an existing tenant is a
@@ -118,7 +118,7 @@ def add_tenant_covered_by_members(workspace, tenant):
         lacking = members_lacking_tenant(workspace, tenant)
         if lacking:
             raise MembersLackTenant(lacking)
-        return add_workspace_tenant(workspace, tenant)
+        return add_workspace_tenant(workspace, tenant, actor_id=actor_id)
 
 
 def admit_covered_member(workspace, user, *, role, invited_by):

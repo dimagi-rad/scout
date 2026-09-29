@@ -73,6 +73,10 @@ from apps.workspaces.services.access_freshness import (
     acheck_freshness,
     freshness_enforced,
 )
+from apps.workspaces.services.load_generations import (
+    INTENT_FULL_REFRESH,
+    acapture_workspace_load_intent,
+)
 from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     aresolve_pipeline_config,
@@ -1558,9 +1562,17 @@ async def run_materialization(
             return tc["result"]
 
         try:
+            # Captured before queueing so an equivalent pending load is joined.
+            load_intent = await acapture_workspace_load_intent(workspace_id, INTENT_FULL_REFRESH)
+        except Exception:
+            # Not fatal: without it the worker captures intent when the job starts.
+            logger.exception("Could not capture load intent for workspace %s", workspace_id)
+            load_intent = None
+        try:
             job = await materialize_workspace.defer_async(
                 workspace_id=str(workspace_id),
                 user_id=str(user_id) if user_id else "",
+                load_intent=load_intent,
             )
         except Exception:
             logger.exception("Failed to dispatch materialize_workspace task")

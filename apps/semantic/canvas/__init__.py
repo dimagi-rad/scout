@@ -1,7 +1,7 @@
 """Thread-bound semantic canvas: a changeset over the persisted semantic model.
 
-Modeled on the changeset design in docs/canvas-design.md: per-object delta rows,
-derived states, live diagnostics, and an atomic commit into the semantic tables.
+Per-object delta rows, derived states, live diagnostics, and an atomic commit
+into the semantic tables.
 """
 
 from apps.semantic.canvas.commit import commit_canvas

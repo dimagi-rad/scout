@@ -456,6 +456,82 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
     assert candidate.state == SchemaState.FAILED
 
 
+async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace, tenant, user):
+    """Adding a source loads it before publication; sources already serving data
+    are published as they are, not reloaded for it."""
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        await _run(workspace, user)
+        new_source = await Tenant.objects.acreate(
+            provider="commcare", external_id="new-source", canonical_name="New"
+        )
+        await agrant_tenant_access(user, new_source)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=new_source)
+        # Serving but near its inactivity TTL: publishing over it must count as use.
+        touched_before = timezone.now() - timedelta(hours=23)
+        await TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).aupdate(
+            last_accessed_at=touched_before
+        )
+        with (
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._rebuild_dependent_view_schemas", new_callable=AsyncMock
+            ) as dependents,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await workspaces_tasks.materialize_workspace_core(
+                str(workspace.id), str(user.id), None, only_unserved=True
+            )
+
+    # Siblings of the untouched source keep valid views; only the loaded one fans out.
+    assert list(dependents.await_args.args[0]) == [new_source.id]
+    [served] = await _active_schemas(tenant)
+    assert served.last_accessed_at > touched_before
+    assert [call[0] for call in pipeline.calls] == [tenant.id, new_source.id]
+    by_tenant = {e.get("tenant_id") or e["tenant"]: e for e in result["tenants"]}
+    assert by_tenant[str(tenant.id)]["result"]["status"] == "already_loaded"
+    assert result["all_succeeded"] is True
+    build.assert_called_once()
+    assert len(await _active_schemas(new_source)) == 1
+
+
+async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, tenant, user):
+    for index in range(2):
+        source = await Tenant.objects.acreate(
+            provider="commcare", external_id=f"denied-source-{index}"
+        )
+        await agrant_tenant_access(user, source)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=source)
+    for source in [source async for source in workspace.tenants.all()]:
+        await TenantSchema.objects.acreate(
+            tenant=source, schema_name=f"serving_{source.id.hex}", state=SchemaState.ACTIVE
+        )
+    denial = {
+        "tenants": [],
+        "error": "Verification unavailable",
+        "error_code": "verification_unavailable",
+    }
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(side_effect=[None, None, None, denial]),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()
+            ) as dependents,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await workspaces_tasks.materialize_workspace_core(
+                str(workspace.id), str(user.id), None, only_unserved=True
+            )
+    assert result["all_succeeded"] is False
+    assert pipeline.calls == []
+    assert list(dependents.await_args.args[0]) == []
+
+
 async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(workspace, tenant, user):
     """The reusing job has no run of its own; the resume must read the reused run,
     not report the tenant as "the run recorded nothing for it"."""
@@ -549,6 +625,51 @@ async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, 
 
     retire.assert_called_once_with(schedule_in={"seconds": 30 * 60})
     retire.return_value.defer.assert_called_once_with(schema_id=str(first.id))
+
+
+@pytest.mark.parametrize(
+    ("outcome", "rebuilds"),
+    [
+        ({"status": "denied", "error": "role changed", "tenants": []}, True),
+        ({"tenants": [], "all_succeeded": True, "view_schema": None}, False),
+        ({"view_schema": {"ok": True}}, False),
+        ({"view_schema": {"ok": False, "error": "transient publication failure"}}, True),
+        (RuntimeError("worker lost the database"), True),
+    ],
+)
+async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_views(
+    outcome, rebuilds
+):
+    """If the new-source load exits before publishing, nothing else would add the
+    new source to the views."""
+    core = (
+        AsyncMock(side_effect=outcome)
+        if isinstance(outcome, Exception)
+        else AsyncMock(return_value=outcome)
+    )
+    with (
+        patch("apps.workspaces.tasks.materialize_workspace_core", core),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as rebuild,
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as resume,
+    ):
+        call = workspaces_tasks.materialize_workspace(
+            MagicMock(job=MagicMock(id=7)),
+            workspace_id="ws",
+            user_id="1",
+            only_unserved=True,
+            notify_thread=False,
+        )
+        if isinstance(outcome, Exception):
+            with pytest.raises(RuntimeError):
+                await call
+        else:
+            await call
+
+    assert rebuild.await_count == (1 if rebuilds else 0)
+    resume.assert_not_awaited()
 
 
 async def test_reusing_a_generation_resets_its_inactivity_clock(workspace, tenant, user):

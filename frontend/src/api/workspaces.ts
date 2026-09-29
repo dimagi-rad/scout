@@ -51,7 +51,10 @@ export interface WorkspaceDetail {
   display_name: string
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
+  // Blanked by the server while missing_tenants is non-empty, so it is not the
+  // real prompt then and must never be written back.
   system_prompt: string
+  missing_tenants?: MissingTenant[]
   schema_status: SchemaStatus
   tenant_count: number
   member_count: number

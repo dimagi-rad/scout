@@ -10,9 +10,18 @@ from django.utils import timezone
 from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
 from apps.workspaces import tasks as workspace_tasks
+from apps.workspaces.access import (
+    access_denied_body,
+    aresolve_workspace_access_ex,
+    role_satisfies,
+)
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
-from apps.workspaces.services.failure_guidance import BLOCKS_IMMEDIATE_RETRY, summary_failures
+from apps.workspaces.services.failure_guidance import (
+    BLOCKS_IMMEDIATE_RETRY,
+    BLOCKS_RETRY_WITHOUT_WRITE_ROLE,
+    summary_failures,
+)
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -69,7 +78,9 @@ def _needs_materialization_retry_check(job: ThreadJob) -> bool:
     return bool(job.failure_phase) or job.started_at is None
 
 
-def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
+def _termination_to_dict(
+    job: ThreadJob, run_results: list[dict], *, viewer_can_write: bool = False
+) -> dict:
     """Serialize a terminal ThreadJob for the ``recent_terminations`` payload.
 
     Retry stays available if it can recover any source or a failed follow-up.
@@ -83,6 +94,9 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
         retry_available = False
     elif _needs_materialization_retry_check(job):
         failures = summary_failures([*job.materialization_preflight_failures, *run_results])
+        blocking = BLOCKS_IMMEDIATE_RETRY | (
+            frozenset() if viewer_can_write else BLOCKS_RETRY_WITHOUT_WRITE_ROLE
+        )
         completed_source = any(
             isinstance(result, dict)
             and isinstance(result.get("sources"), dict)
@@ -93,9 +107,7 @@ def _termination_to_dict(job: ThreadJob, run_results: list[dict]) -> dict:
             for result in run_results
         )
         retry_available = (
-            completed_source
-            or not failures
-            or any(f.code not in BLOCKS_IMMEDIATE_RETRY for f in failures)
+            completed_source or not failures or any(f.code not in blocking for f in failures)
         )
     return {
         "thread_job_id": str(job.id),
@@ -122,9 +134,12 @@ async def active_jobs_view(request, workspace_id):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    workspace, err = await aresolve_workspace(user, workspace_id)
-    if err is not None:
-        return err
+    # The full access result carries the viewer's role, which the retry policy needs.
+    access = await aresolve_workspace_access_ex(user, workspace_id)
+    if not access.granted:
+        return JsonResponse(access_denied_body(access), status=403)
+    workspace = access.workspace
+    viewer_can_write = role_satisfies(access.membership.role, WorkspaceRole.READ_WRITE)
 
     def _fetch_active_jobs():
         return (
@@ -193,7 +208,11 @@ async def active_jobs_view(request, workspace_id):
         if isinstance(run.result, dict):
             results_by_job.setdefault(run.procrastinate_job_id, []).append(run.result)
     recent_terminations = [
-        _termination_to_dict(job, results_by_job.get(job.procrastinate_job_id, []))
+        _termination_to_dict(
+            job,
+            results_by_job.get(job.procrastinate_job_id, []),
+            viewer_can_write=viewer_can_write,
+        )
         for job in terminated_jobs
     ]
 

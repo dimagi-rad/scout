@@ -11,6 +11,11 @@ DEBUG = True
 LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE", default=0)
 LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE", default=4)
 
+# The MCP server rejects all requests without a shared secret (#51). A fixed
+# local value lets the API, worker and MCP server agree without any setup; it
+# guards nothing beyond loopback and is never read by production settings.
+MCP_SHARED_SECRET = MCP_SHARED_SECRET or "scout-local-dev-mcp-secret"
+
 # Use console email backend for development
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 

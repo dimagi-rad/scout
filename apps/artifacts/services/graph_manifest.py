@@ -9,7 +9,7 @@ from typing import Any
 from django.db import connection, transaction
 from django.utils import timezone
 
-from apps.artifacts.models import Artifact, ArtifactSemanticQuery
+from apps.artifacts.models import Artifact, ArtifactSemanticQuery, ArtifactType
 
 from .graph_doc import (
     collect_query_specs,
@@ -54,17 +54,67 @@ def build_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]
     return build_semantic_query_manifest(story_doc_from_artifact_data(artifact.data))
 
 
-def sync_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]:
-    """Regenerate and persist manifest rows for one artifact version."""
-    manifest = build_artifact_semantic_query_manifest(artifact)
-    compatibility_queries = [
+def _compatibility_queries(artifact: Artifact, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    queries = [
         {"name": entry["key"], **entry["query"]}
         for entry in manifest["entries"]
         if entry.get("validation_status") == "valid"
     ]
-    if not compatibility_queries and not manifest["entries"] and artifact.semantic_queries:
-        compatibility_queries = artifact.semantic_queries
+    if not queries and not manifest["entries"] and artifact.semantic_queries:
+        return artifact.semantic_queries
+    return queries
+
+
+def lacks_semantic_query_manifest(artifact: Artifact) -> bool:
+    """A story saved before manifests existed, or whose post-create sync never ran."""
+    return (
+        artifact.artifact_type == ArtifactType.STORY
+        and not artifact.semantic_queries
+        and not artifact.semantic_query_manifest
+    )
+
+
+def derive_missing_semantic_query_manifest(artifact: Artifact) -> None:
+    """Fill a manifest-less story's manifest fields on this instance only.
+
+    For read paths: READ members reach them, so they must not persist anything.
+    """
+    if not lacks_semantic_query_manifest(artifact):
+        return
+    manifest = build_artifact_semantic_query_manifest(artifact)
+    artifact.semantic_queries = _compatibility_queries(artifact, manifest)
+    artifact.semantic_query_manifest = manifest
+
+
+def backfill_missing_semantic_query_manifest(artifact: Artifact) -> None:
+    """Persist the manifest for a manifest-less story, once, from a write path.
+
+    Checks the stored row rather than ``artifact``, which a read path may already
+    have filled in memory. The check runs under the row lock, so a caller that loses
+    a race sees the winner's manifest and does nothing.
+    """
+    if artifact.artifact_type != ArtifactType.STORY:
+        return
     with transaction.atomic():
+        stored = (
+            Artifact.objects.select_for_update()
+            .only("artifact_type", "semantic_queries", "semantic_query_manifest")
+            .get(pk=artifact.pk)
+        )
+        artifact.semantic_queries = stored.semantic_queries
+        artifact.semantic_query_manifest = stored.semantic_query_manifest
+        if lacks_semantic_query_manifest(stored):
+            sync_artifact_semantic_query_manifest(artifact)
+
+
+def sync_artifact_semantic_query_manifest(artifact: Artifact) -> dict[str, Any]:
+    """Regenerate and persist manifest rows for one artifact version."""
+    manifest = build_artifact_semantic_query_manifest(artifact)
+    compatibility_queries = _compatibility_queries(artifact, manifest)
+    with transaction.atomic():
+        # Keep this UPDATE first: its row lock serialises concurrent syncs of one
+        # artifact. Were the DELETE first, both could run before either INSERT and the
+        # second bulk_create would hit unique_artifact_semantic_query_key.
         Artifact.objects.filter(pk=artifact.pk).update(
             semantic_query_manifest=manifest,
             semantic_queries=compatibility_queries,
