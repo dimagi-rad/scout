@@ -135,7 +135,10 @@ async def active_jobs_view(request, workspace_id):
 
     user = request._authenticated_user
     # The full access result carries the viewer's role, which the retry policy needs.
-    access = await aresolve_workspace_access_ex(user, workspace_id)
+    # Every job below is one the caller started from this workspace, so, as for MCP
+    # status polling (#598), membership and coverage suffice: a 403 from a provider
+    # verification outage would drop the user's own progress card mid-load.
+    access = await aresolve_workspace_access_ex(user, workspace_id, verification=None)
     if not access.granted:
         return JsonResponse(access_denied_body(access), status=403)
     workspace = access.workspace
