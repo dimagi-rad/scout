@@ -13,8 +13,14 @@ from apps.common.errors import (
     OCSAccessDeniedError,
     OCSAuthError,  # noqa: F401  — re-exported; callers catch the provider base
     OCSTokenExpiredError,
+    OCSUnavailableError,
 )
-from mcp_server.loaders._http import build_retry, get_with_auth_refresh
+from mcp_server.loaders._http import (
+    RETRY_STATUS_FORCELIST,
+    RETRY_TOTAL,
+    build_retry,
+    get_with_auth_refresh,
+)
 from mcp_server.loaders._urls import ProviderURLPolicy
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,10 @@ class OCSExportError(Exception):
     response fails loudly instead of yielding a silently-empty page
     (arch #252, finding 03#6).
     """
+
+
+class OCSExportUnavailableError(OCSExportError, OCSUnavailableError):
+    """OCS stayed unavailable through the retry policy on an export request."""
 
 
 class OCSBaseLoader:
@@ -75,14 +85,25 @@ class OCSBaseLoader:
         Transient 5xx/429 responses are retried by the session adapter; a
         surviving non-2xx becomes a typed error rather than a bare HTTPError.
         """
-        resp = get_with_auth_refresh(
-            self._session,
-            url,
-            trusted_origin=self.base_url,
-            refresh=self._refresh,
-            params=params,
-            timeout=HTTP_TIMEOUT,
-        )
+        try:
+            resp = get_with_auth_refresh(
+                self._session,
+                url,
+                trusted_origin=self.base_url,
+                refresh=self._refresh,
+                params=params,
+                timeout=HTTP_TIMEOUT,
+            )
+        except (requests.exceptions.SSLError, requests.exceptions.ProxyError):
+            # A broken TLS chain or proxy is a Scout-side config fault that retrying
+            # cannot clear, so it must stay reportable.
+            raise
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # The session adapter already retried, so this is the exhausted case.
+            raise OCSUnavailableError(
+                f"Open Chat Studio could not be reached for experiment "
+                f"{self.experiment_id}: {type(e).__name__}"
+            ) from e
         self._response_url = resp.url if isinstance(resp.url, str) else url
         # Describe only; remediation copy belongs to the presentation layer, keyed
         # off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
@@ -97,6 +118,11 @@ class OCSBaseLoader:
             raise OCSTokenExpiredError(
                 f"Open Chat Studio rejected the sign-in for chatbot "
                 f"{self.experiment_id} (HTTP 401): it has expired or been revoked."
+            )
+        if resp.status_code in RETRY_STATUS_FORCELIST:
+            raise OCSExportUnavailableError(
+                f"Open Chat Studio was unavailable for experiment {self.experiment_id}: "
+                f"HTTP {resp.status_code} after {RETRY_TOTAL + 1} attempts"
             )
         if resp.status_code >= 400:
             raise OCSExportError(

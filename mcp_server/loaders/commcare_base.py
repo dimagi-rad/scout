@@ -16,8 +16,14 @@ from apps.common.errors import (
     CommCareAccessDeniedError,
     CommCareAuthError,  # noqa: F401  — re-exported; callers catch the provider base
     CommCareTokenExpiredError,
+    CommCareUnavailableError,
 )
-from mcp_server.loaders._http import build_retry, get_with_auth_refresh
+from mcp_server.loaders._http import (
+    RETRY_STATUS_FORCELIST,
+    RETRY_TOTAL,
+    build_retry,
+    get_with_auth_refresh,
+)
 from mcp_server.loaders._urls import ProviderURLPolicy
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,10 @@ class CommCareExportError(Exception):
     ``raise_for_status`` with no retry turned an expected throttle into a run
     failure (arch #252, findings 12#4/03#6).
     """
+
+
+class CommCareExportUnavailableError(CommCareExportError, CommCareUnavailableError):
+    """CommCare HQ stayed unavailable through the retry policy on an export request."""
 
 
 def build_auth_header(credential: dict[str, str]) -> dict[str, str]:
@@ -82,14 +92,24 @@ class CommCareBaseLoader:
         (bounded, capped Retry-After); a surviving non-2xx becomes a typed
         error rather than a bare ``requests.HTTPError``.
         """
-        resp = get_with_auth_refresh(
-            self._session,
-            url,
-            trusted_origin="https://www.commcarehq.org",
-            refresh=self._refresh,
-            params=params,
-            timeout=HTTP_TIMEOUT,
-        )
+        try:
+            resp = get_with_auth_refresh(
+                self._session,
+                url,
+                trusted_origin="https://www.commcarehq.org",
+                refresh=self._refresh,
+                params=params,
+                timeout=HTTP_TIMEOUT,
+            )
+        except (requests.exceptions.SSLError, requests.exceptions.ProxyError):
+            # A broken TLS chain or proxy is a Scout-side config fault that retrying
+            # cannot clear, so it must stay reportable.
+            raise
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # The session adapter already retried, so this is the exhausted case.
+            raise CommCareUnavailableError(
+                f"CommCare HQ could not be reached for domain {self.domain}: {type(e).__name__}"
+            ) from e
         self._response_url = resp.url if isinstance(resp.url, str) else url
         # Describe only; remediation copy belongs to the presentation layer, keyed
         # off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
@@ -104,6 +124,11 @@ class CommCareBaseLoader:
             raise CommCareTokenExpiredError(
                 f"CommCare HQ rejected the sign-in for project space {self.domain} "
                 f"(HTTP 401): it has expired or been revoked."
+            )
+        if resp.status_code in RETRY_STATUS_FORCELIST:
+            raise CommCareExportUnavailableError(
+                f"CommCare HQ was unavailable for domain {self.domain}: "
+                f"HTTP {resp.status_code} after {RETRY_TOTAL + 1} attempts"
             )
         if resp.status_code >= 400:
             raise CommCareExportError(
