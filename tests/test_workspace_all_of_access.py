@@ -520,6 +520,25 @@ class TestRemediationWithoutCoverage:
         assert len(roster["members"]) == 2
         assert roster["invites"] == []
 
+    def test_saving_settings_never_changes_the_system_prompt_it_could_not_read(
+        self, client, manager, partial_member
+    ):
+        """The page shows a blanked prompt here, so echoing it back must not wipe the real one."""
+        Workspace.objects.filter(pk=partial_member.pk).update(system_prompt="secret instructions")
+        client.force_login(manager)
+
+        for body in ({"system_prompt": ""}, {"name": "Renamed", "system_prompt": ""}):
+            resp = client.patch(
+                f"/api/workspaces/{partial_member.id}/",
+                body,
+                content_type="application/json",
+            )
+            assert resp.status_code == 403
+
+        partial_member.refresh_from_db()
+        assert partial_member.system_prompt == "secret instructions"
+        assert partial_member.name == "Two sources"
+
     def test_cannot_delete_a_workspace_others_are_in(
         self, client, manager, partial_member, other_user, two_sources
     ):

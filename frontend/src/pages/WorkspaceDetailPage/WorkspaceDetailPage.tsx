@@ -870,7 +870,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   )
 }
 
-function SettingsTab({
+export function SettingsTab({
   workspace,
   onRename,
   onDelete,
@@ -881,7 +881,8 @@ function SettingsTab({
 }) {
   const isCurrentAccount = useIsCurrentAccount()
   const [name, setName] = useState(workspace.name)
-  const [systemPrompt, setSystemPrompt] = useState(workspace.system_prompt ?? "")
+  const [savedPrompt, setSavedPrompt] = useState(workspace.system_prompt ?? "")
+  const [systemPrompt, setSystemPrompt] = useState(savedPrompt)
   const [savingName, setSavingName] = useState(false)
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -891,6 +892,11 @@ function SettingsTab({
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const isManager = workspace.role === "manage"
+  // The server blanks the prompt and refuses every PATCH while sources are missing.
+  const missingTenants = workspace.missing_tenants ?? []
+  const promptRedacted = missingTenants.length > 0
+  const canEdit = isManager && !promptRedacted
+  const promptChanged = systemPrompt !== savedPrompt
 
   async function handleSaveName(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -910,10 +916,12 @@ function SettingsTab({
 
   async function handleSavePrompt(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
+    if (promptRedacted || !promptChanged) return
     setSavingPrompt(true)
     setPromptError(null)
     try {
       await workspaceApi.update(workspace.id, { system_prompt: systemPrompt })
+      setSavedPrompt(systemPrompt)
     } catch (err) {
       setPromptError(err instanceof ApiError ? err.message : "Failed to save system prompt")
     } finally {
@@ -935,6 +943,27 @@ function SettingsTab({
 
   return (
     <div className="max-w-2xl space-y-8" data-testid="settings-tab">
+      {promptRedacted && (
+        <div
+          className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+          data-testid="settings-access-notice"
+        >
+          <p>
+            {isManager
+              ? "The workspace name and system prompt can't be changed, and the prompt is hidden, until you regain access."
+              : "The system prompt is hidden until you regain access."}{" "}
+            Still needed:
+          </p>
+          <ul className="mt-1 space-y-1">
+            {missingTenants.map((t) => (
+              <li key={t.tenant_id} data-testid={`settings-missing-${t.tenant_id}`}>
+                <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <section>
         <h3 className="mb-3 text-sm font-medium">Workspace name</h3>
         <form onSubmit={handleSaveName} className="flex items-start gap-3">
@@ -943,12 +972,12 @@ function SettingsTab({
               className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={!isManager}
+              disabled={!canEdit}
               data-testid="settings-name-input"
             />
             {nameError && <p className="mt-1 text-xs text-destructive">{nameError}</p>}
           </div>
-          {isManager && (
+          {canEdit && (
             <Button
               type="submit"
               size="sm"
@@ -966,28 +995,37 @@ function SettingsTab({
         <p className="mb-3 text-xs text-muted-foreground">
           Custom instructions for the AI agent in this workspace.
         </p>
-        <form onSubmit={handleSavePrompt} className="space-y-2">
-          <textarea
-            className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
-            rows={6}
-            value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            disabled={!isManager}
-            placeholder="Leave blank for default behavior…"
-            data-testid="settings-system-prompt"
-          />
-          {promptError && <p className="text-xs text-destructive">{promptError}</p>}
-          {isManager && (
-            <Button
-              type="submit"
-              size="sm"
-              disabled={savingPrompt}
-              data-testid="settings-save-prompt"
-            >
-              {savingPrompt ? "Saving…" : "Save system prompt"}
-            </Button>
-          )}
-        </form>
+        {promptRedacted ? (
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="settings-system-prompt-unavailable"
+          >
+            Hidden until you regain access.
+          </p>
+        ) : (
+          <form onSubmit={handleSavePrompt} className="space-y-2">
+            <textarea
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
+              rows={6}
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              disabled={!isManager}
+              placeholder="Leave blank for default behavior…"
+              data-testid="settings-system-prompt"
+            />
+            {promptError && <p className="text-xs text-destructive">{promptError}</p>}
+            {isManager && (
+              <Button
+                type="submit"
+                size="sm"
+                disabled={savingPrompt || !promptChanged}
+                data-testid="settings-save-prompt"
+              >
+                {savingPrompt ? "Saving…" : "Save system prompt"}
+              </Button>
+            )}
+          </form>
+        )}
       </section>
 
       {isManager && (
