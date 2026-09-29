@@ -26,3 +26,15 @@ def parse_json_object(
     if not isinstance(body, dict):
         return None, JsonResponse({"error": "Request body must be a JSON object."}, status=400)
     return body, None
+
+
+def string_field(body: dict, key: str, default: str = "") -> tuple[str | None, JsonResponse | None]:
+    """Read ``body[key]`` as a string, returning ``(value, None)`` or ``(None, error_response)``.
+
+    A missing key gives ``default``. Any other type, ``null`` included, is a 400 instead of the
+    AttributeError a caller's ``.strip()`` would raise.
+    """
+    value = body.get(key, default)
+    if not isinstance(value, str):
+        return None, JsonResponse({"error": f"{key} must be a string."}, status=400)
+    return value, None
