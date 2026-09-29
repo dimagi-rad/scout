@@ -150,7 +150,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     if (!duplicateWorkspace) return
     setActiveDomain(duplicateWorkspace.id)
     onClose()
-    navigate(workspacePath(duplicateWorkspace))
+    navigate(`${pathPrefix}${workspacePath(duplicateWorkspace)}`)
   }
 
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
@@ -168,7 +168,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       if (!isCurrentAccount()) return
       setActiveDomain(workspace.id)
       onClose()
-      navigate(workspacePath(workspace))
+      navigate(`${pathPrefix}${workspacePath(workspace)}`)
     } catch (err) {
       if (!isCurrentAccount()) return
       setError(err instanceof ApiError ? err.message : "Failed to create workspace")
@@ -220,7 +220,9 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                   className="rounded-md border border-dashed py-4 text-center text-sm"
                   data-testid="create-sources-error"
                 >
-                  <p className="text-destructive">{sourcesError}</p>
+                  <p className="text-destructive" role="alert">
+                    {sourcesError}
+                  </p>
                   <Button
                     type="button"
                     variant="outline"
