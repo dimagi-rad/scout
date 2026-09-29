@@ -24,6 +24,7 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
+    STALE_JOB_THRESHOLD,
     TENANT_NOT_RUN,
     _aggregate_materialization_state,
     _credential_guidance,
@@ -1830,3 +1831,11 @@ async def test_deferral_retains_prior_validation_failure(workspace, tenant, writ
     state, reason = await _semantic_layer_state(workspace)
     assert state == "stale"
     assert "Cube validation failed: bad metric" in reason
+
+
+def test_resume_timeout_leaves_room_for_thinking_but_beats_the_stale_reconcile():
+    """A thinking model can spend minutes on one 16k-token call, so the resume
+    ceiling must allow that. It must also fire before the reconcile sweep would
+    flip a healthy, still-running resume to FAILED."""
+    assert dj_settings.AGENT_RESUME_TIMEOUT_S >= 300
+    assert STALE_JOB_THRESHOLD.total_seconds() > dj_settings.AGENT_RESUME_TIMEOUT_S

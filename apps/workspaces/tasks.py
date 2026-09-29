@@ -4051,7 +4051,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"succeeds. Disclose this if it affects your answer."
         )
 
-    timeout_s = getattr(settings, "AGENT_RESUME_TIMEOUT_S", 120)
+    timeout_s = settings.AGENT_RESUME_TIMEOUT_S
     sentry_sdk.add_breadcrumb(
         category="resume",
         message="ainvoke_start",
