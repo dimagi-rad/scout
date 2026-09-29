@@ -24,7 +24,7 @@ When the agent builds a chart or dashboard, it appears as an artifact button in 
 A failed tool call shows its error message and code. Common ones:
 
 - **Validation errors** -- the query referenced an unknown dataset or member, used an unsupported filter, or the SQL failed safety checks.
-- **Timeouts** -- the query ran longer than 30 seconds. Add filters or aggregate to reduce the data scanned.
+- **Timeouts** -- the query hit the 30-second database timeout (semantic queries fail after about a minute in total). Add filters or aggregate to reduce the data scanned.
 - **Access errors** -- your account's access to a data source has expired or been removed. Reconnect it on the **Connected Accounts** page.
 
 The agent usually reads the error, adjusts its query, and tries again. It is told to limit retries, and to stop and explain what it needs when it can't find the right fields rather than guessing.

@@ -96,5 +96,5 @@ Both commands need the **Read/Write** or **Manage** workspace role and are hidde
 - The agent cannot change your source data. Semantic queries are read-only, and SQL queries must be a single `SELECT` that runs under a read-only database role.
 - SQL queries can only read the workspace's own schemas, not system catalogs, and can only call functions on an allowlist of analytics functions. File access, remote connections, and similar functions are blocked.
 - Semantic queries return 100 rows by default and at most 500. SQL queries return at most 500 rows. The agent is told when results are truncated.
-- Queries time out after 30 seconds.
+- Database queries time out after 30 seconds. A semantic query can take up to about a minute before failing, because Cube adds compile and polling time.
 - Each user can send up to 20 chat messages per minute.
