@@ -22,6 +22,29 @@ const providerBadgeStyles: Record<string, string> = {
 }
 
 const MAX_VISIBLE_TENANTS = 4
+// Users with hundreds of workspaces (#358) got every row rendered at once.
+const PAGE_SIZE = 50
+
+type SortKey = "newest" | "oldest" | "name"
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
+  { value: "name", label: "Name (A–Z)" },
+]
+
+function compareWorkspaces(sort: SortKey) {
+  return (a: TenantMembership, b: TenantMembership): number => {
+    if (sort === "name") {
+      return (
+        a.display_name.localeCompare(b.display_name, undefined, { numeric: true }) ||
+        a.id.localeCompare(b.id)
+      )
+    }
+    const byDate = Date.parse(a.created_at) - Date.parse(b.created_at)
+    return sort === "oldest" ? byDate : -byDate
+  }
+}
 
 function TenantList({ tenants }: { tenants: { id: string; tenant_name: string; provider: string }[] }) {
   const visible = tenants.slice(0, MAX_VISIBLE_TENANTS)
@@ -126,6 +149,8 @@ export function WorkspacesPage() {
     role: null,
     provider: null,
   })
+  const [sort, setSort] = useState<SortKey>("newest")
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
 
   const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
 
@@ -191,11 +216,24 @@ export function WorkspacesPage() {
         if (!tenants.some((t) => t.provider === activeFilters.provider)) return false
       }
       return true
-    })
-  }, [domains, search, activeFilters])
+    }).sort(compareWorkspaces(sort))
+  }, [domains, search, activeFilters, sort])
+
+  const visible = filtered.slice(0, visibleCount)
+
+  function handleSearchChange(value: string) {
+    setSearch(value)
+    setVisibleCount(PAGE_SIZE)
+  }
 
   function handleFilterChange(group: string, value: string | null) {
     setActiveFilters((prev) => ({ ...prev, [group]: value }))
+    setVisibleCount(PAGE_SIZE)
+  }
+
+  function handleSortChange(value: SortKey) {
+    setSort(value)
+    setVisibleCount(PAGE_SIZE)
   }
 
   return (
@@ -242,7 +280,7 @@ export function WorkspacesPage() {
           {(filterGroups.length > 0 || domains.length > 5) && (
             <SearchFilterBar
               search={search}
-              onSearchChange={setSearch}
+              onSearchChange={handleSearchChange}
               placeholder="Search workspaces..."
               filters={filterGroups}
               activeFilters={activeFilters}
@@ -250,20 +288,58 @@ export function WorkspacesPage() {
             />
           )}
 
+          {/* Own row: the filter bar's chips don't shrink, so sharing it would squeeze search. */}
+          <div className="flex justify-end">
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              Sort
+              <select
+                value={sort}
+                onChange={(e) => handleSortChange(e.target.value as SortKey)}
+                data-testid="workspaces-sort"
+                className="h-9 rounded-md border border-input bg-transparent px-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                {SORT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
           {filtered.length === 0 ? (
             <div className="rounded-lg border border-dashed p-8 text-center">
               <p className="text-muted-foreground">No workspaces match your search.</p>
             </div>
           ) : (
-            <div className="space-y-2">
-              {filtered.map((ws) => (
-                <WorkspaceRow
-                  key={ws.id}
-                  workspace={ws}
-                  onClick={() => navigate(workspacePath(ws))}
-                />
-              ))}
-            </div>
+            <>
+              <div className="space-y-2">
+                {visible.map((ws) => (
+                  <WorkspaceRow
+                    key={ws.id}
+                    workspace={ws}
+                    onClick={() => navigate(workspacePath(ws))}
+                  />
+                ))}
+              </div>
+              {filtered.length > PAGE_SIZE && (
+                <div className="flex items-center justify-between gap-3 text-sm text-muted-foreground">
+                  <span data-testid="workspaces-count" aria-live="polite">
+                    Showing {visible.length} of {filtered.length}
+                  </span>
+                  {visible.length < filtered.length && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
+                      data-testid="workspaces-show-more"
+                    >
+                      Show more
+                    </Button>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
