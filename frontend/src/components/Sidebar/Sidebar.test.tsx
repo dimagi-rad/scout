@@ -6,7 +6,7 @@ import { Sidebar } from "./Sidebar"
 
 const mocks = vi.hoisted(() => {
   const fetchDomains = vi.fn()
-  const revalidateDomains = vi.fn()
+  const revalidateDomains = vi.fn(() => Promise.resolve("fetched"))
   const fetchThreads = vi.fn()
   const logout = vi.fn()
   const newThread = vi.fn()
@@ -192,6 +192,8 @@ describe("Sidebar workspace revalidation (#355)", () => {
 
     fireEvent(document, new Event("visibilitychange"))
     expect(mocks.revalidateDomains).toHaveBeenCalledOnce()
+    // Never joins a request from before the return, which can't include a new grant.
+    expect(mocks.revalidateDomains).toHaveBeenCalledWith({ fresh: true })
 
     // A tab switch also focuses the window; one refetch covers both.
     fireEvent.focus(window)
@@ -202,6 +204,19 @@ describe("Sidebar workspace revalidation (#355)", () => {
     expect(mocks.revalidateDomains).toHaveBeenCalledTimes(2)
     // The mount-time full fetch is the only one that may show loading state.
     expect(mocks.fetchDomains).toHaveBeenCalledOnce()
+  })
+
+  it("doesn't spend the throttle window on a revalidation that was skipped (D5)", async () => {
+    mocks.revalidateDomains.mockResolvedValueOnce("skipped")
+    renderSidebar()
+
+    fireEvent(document, new Event("visibilitychange"))
+    await waitFor(() => expect(mocks.revalidateDomains).toHaveBeenCalledOnce())
+    await Promise.resolve()
+
+    vi.setSystemTime(new Date("2026-09-29T12:00:05Z"))
+    fireEvent.focus(window)
+    expect(mocks.revalidateDomains).toHaveBeenCalledTimes(2)
   })
 
   it("does not revalidate while the tab is hidden", () => {

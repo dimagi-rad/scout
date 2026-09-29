@@ -101,6 +101,24 @@ describe("domainSlice.fetchDomains — default pick skips lost-access workspaces
     expect(useAppStore.getState().activeDomainId).toBe("live")
   })
 
+  it("moves off an active workspace that was deleted (D2)", async () => {
+    useAppStore.setState({ activeDomainId: "gone", domains: [ws("gone", true), ws("live", true)] as never })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("live", true)] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("live")
+  })
+
+  it("keeps an active id the previous list never had, such as a deep link", async () => {
+    useAppStore.setState({ activeDomainId: "linked", domains: [ws("live", true)] as never })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("live", true)] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("linked")
+  })
+
   it("falls back to the first workspace when none are accessible", async () => {
     const { workspaceApi } = await import("@/api/workspaces")
     vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("skelly", false)] as never)
@@ -207,6 +225,38 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     expect(list).toHaveBeenCalledOnce()
   })
 
+  it("reports whether it fetched, so callers can tell a skip from a refresh (D1, D5)", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a")])
+    const actions = useAppStore.getState().domainActions
+
+    expect(await actions.revalidateDomains()).toBe("fetched")
+    useAppStore.setState({ domainsStatus: "loading" })
+    expect(await actions.revalidateDomains()).toBe("skipped")
+  })
+
+  it("reports a failed refresh as failed, not fetched", async () => {
+    vi.spyOn(workspaceApi, "list").mockRejectedValue(new Error("503"))
+
+    expect(await useAppStore.getState().domainActions.revalidateDomains()).toBe("failed")
+  })
+
+  it("makes a fresh request rather than joining one that started before it (D1)", async () => {
+    let resolveOlder!: (value: TenantMembership[]) => void
+    const list = vi.spyOn(workspaceApi, "list")
+      .mockReturnValueOnce(new Promise((r) => { resolveOlder = r }))
+      .mockResolvedValueOnce([ws("granted"), ws("a")])
+    const actions = useAppStore.getState().domainActions
+
+    const older = actions.revalidateDomains()
+    const fresh = actions.revalidateDomains({ fresh: true })
+    resolveOlder([ws("a")])
+
+    expect(await fresh).toBe("fetched")
+    await older
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["granted", "a"])
+  })
+
   it("drops its result when a full fetch starts after it", async () => {
     let resolveStale!: (value: TenantMembership[]) => void
     vi.spyOn(workspaceApi, "list")
@@ -217,7 +267,8 @@ describe("domainSlice.revalidateDomains — silent background refresh (#355)", (
     const stale = actions.revalidateDomains()
     await actions.fetchDomains()
     resolveStale([ws("stale")])
-    await stale
+    // Its answer was thrown away, so callers mustn't act on it as the current list.
+    expect(await stale).toBe("skipped")
 
     expect(useAppStore.getState().domains.map((d) => d.id)).toEqual(["fresh"])
   })

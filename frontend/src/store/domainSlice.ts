@@ -14,6 +14,12 @@ export type TenantMembership = WorkspaceListItem & {
 
 export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 
+/**
+ * "skipped": something else owns the list, so this call didn't update it: the list isn't
+ * loaded (an initial or retried full load is running), or a newer request superseded it.
+ */
+export type RevalidateResult = "fetched" | "failed" | "skipped"
+
 export interface DomainSlice {
   domains: TenantMembership[]
   activeDomainId: string | null
@@ -22,8 +28,11 @@ export interface DomainSlice {
   domainsError: string | null
   domainActions: {
     fetchDomains: () => Promise<void>
-    /** Background refresh: never shows loading or error, and keeps state when nothing changed. */
-    revalidateDomains: () => Promise<void>
+    /**
+     * Background refresh: never shows loading or error, and keeps state when nothing changed.
+     * `fresh` never joins a request that started before the call.
+     */
+    revalidateDomains: (options?: { fresh?: boolean }) => Promise<RevalidateResult>
     setActiveDomain: (id: string) => void
     setActiveDomainByTenantId: (provider: string, tenantId: string) => void
     ensureTenant: (provider: string, tenantId: string) => Promise<void>
@@ -38,10 +47,23 @@ function defaultDomainId(domains: TenantMembership[]): string | null {
   return (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
 }
 
+// Dropped from the list (deleted, or you were removed): every lookup of it would
+// now miss, and a missing role reads as writable, so move to the default. An id
+// that was never listed, such as a deep link still being checked, is kept.
+function nextActiveDomainId(
+  prev: TenantMembership[],
+  next: TenantMembership[],
+  activeId: string | null,
+): string | null {
+  if (activeId === null) return defaultDomainId(next)
+  const removed = prev.some((d) => d.id === activeId) && !next.some((d) => d.id === activeId)
+  return removed ? defaultDomainId(next) : activeId
+}
+
 export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => {
   // Bumped by every list request, so a background result never overwrites a newer foreground one.
   let listRequestSeq = 0
-  let revalidation: Promise<void> | null = null
+  let revalidation: Promise<RevalidateResult> | null = null
 
   return {
     domains: [],
@@ -55,12 +77,12 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         set({ domainsStatus: "loading", domainsError: null })
         try {
           const domains = await workspaceApi.list()
-          const activeDomainId = get().activeDomainId
+          const current = get()
           set({
             domains,
             domainsStatus: "loaded",
             domainsError: null,
-            activeDomainId: activeDomainId ?? defaultDomainId(domains),
+            activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
           })
         } catch (error) {
           set({
@@ -70,34 +92,32 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
         }
       },
 
-      revalidateDomains: () => {
+      revalidateDomains: async ({ fresh = false } = {}) => {
         // An initial or retried load shows its own state; don't race it.
-        if (get().domainsStatus !== "loaded") return Promise.resolve()
-        if (revalidation) return revalidation
+        if (get().domainsStatus !== "loaded") return "skipped"
+        if (revalidation) {
+          const joined = await revalidation
+          if (!fresh) return joined
+          // That request may predate what the caller is waiting for (a grant, #355).
+          return get().domainActions.revalidateDomains()
+        }
         listRequestSeq += 1
         const seq = listRequestSeq
         revalidation = workspaceApi
           .list()
-          .then((domains) => {
-            if (seq !== listRequestSeq) return
+          .then((domains): RevalidateResult => {
+            if (seq !== listRequestSeq) return "skipped"
             const current = get()
             // A new array re-runs every subscriber (#355); publish only real changes.
-            if (JSON.stringify(domains) === JSON.stringify(current.domains)) return
-            const activeId = current.activeDomainId
-            // Removed from the active workspace: every lookup of it would now miss,
-            // and a missing role reads as writable, so move to the default.
-            const removed =
-              activeId !== null &&
-              current.domains.some((d) => d.id === activeId) &&
-              !domains.some((d) => d.id === activeId)
+            if (JSON.stringify(domains) === JSON.stringify(current.domains)) return "fetched"
             set({
               domains,
-              activeDomainId: activeId === null || removed ? defaultDomainId(domains) : activeId,
+              activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
             })
+            return "fetched"
           })
-          .catch(() => {
-            // The list on screen is still usable, so a failed background refresh stays silent.
-          })
+          // The list on screen is still usable, so a failed background refresh stays silent.
+          .catch((): RevalidateResult => "failed")
           .finally(() => {
             revalidation = null
           })
