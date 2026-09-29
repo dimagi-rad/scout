@@ -40,7 +40,6 @@ export function RecipesPage() {
     deleteRecipe,
     runRecipe,
     fetchRuns,
-    updateRecipeRun,
   } = useAppStore((s) => s.recipeActions)
 
   const { status: networkStatus } = useNetworkStatus()
@@ -186,14 +185,6 @@ export function RecipesPage() {
     [currentRecipe, updateRecipe]
   )
 
-  const handleUpdateRun = useCallback(
-    async (runId: string, data: { is_shared?: boolean; is_public?: boolean }) => {
-      if (!currentRecipe) return
-      await updateRecipeRun(currentRecipe.id, runId, data)
-    },
-    [currentRecipe, updateRecipeRun]
-  )
-
   const handleExecuteRun = useCallback(
     async (variables: Record<string, string>) => {
       if (!runnerRecipe) {
@@ -223,8 +214,6 @@ export function RecipesPage() {
             recipe={currentRecipe}
             run={run}
             onBack={handleBackFromRun}
-            onUpdateRun={handleUpdateRun}
-            canWrite={canWrite}
           />
         </div>
       )
@@ -240,7 +229,6 @@ export function RecipesPage() {
           onBack={handleBack}
           onSave={handleSave}
           onRun={handleRunFromDetail}
-          onUpdateRun={handleUpdateRun}
           onViewRun={handleViewRun}
           canWrite={canWrite}
         />

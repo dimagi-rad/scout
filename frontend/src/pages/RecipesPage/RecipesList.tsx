@@ -1,4 +1,4 @@
-import { Play, Eye, Trash2, Clock, Variable, Users } from "lucide-react"
+import { Play, Eye, Trash2, Clock, Variable } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -51,16 +51,6 @@ export function RecipesList({
                   <h3 className="font-medium truncate" title={recipe.name}>
                     {recipe.name}
                   </h3>
-                  {recipe.is_shared && (
-                    <Badge
-                      variant="secondary"
-                      className="shrink-0 text-xs gap-1"
-                      data-testid={`recipe-badge-shared-${recipe.id}`}
-                    >
-                      <Users className="h-3 w-3" />
-                      Shared
-                    </Badge>
-                  )}
                 </div>
                 {recipe.description && (
                   <p className="text-sm text-muted-foreground line-clamp-2 mt-1">

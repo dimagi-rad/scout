@@ -82,7 +82,6 @@ READ_WRITE_MUTATIONS = [
     ("post", "/knowledge/import/", {}),
     ("put", "/recipes/{target}/", {"name": "blocked"}),
     ("delete", "/recipes/{target}/", None),
-    ("patch", "/recipes/{target}/runs/{other}/", {"is_public": True}),
     ("post", "/materialization/cancel/", {}),
     ("post", "/materialize/retry/", {}),
     ("post", "/jobs/{target}/cancel/", {}),
@@ -285,7 +284,6 @@ def test_read_mutations_leave_existing_content_and_jobs_unchanged(
         name="Recipe before",
         prompt="Query",
     )
-    recipe_run = RecipeRun.objects.create(recipe=recipe, run_by=read_user)
     thread = Thread.objects.create(workspace=workspace, user=read_user, title="Thread")
     thread_job = ThreadJob.objects.create(
         thread=thread,
@@ -341,11 +339,6 @@ def test_read_mutations_leave_existing_content_and_jobs_unchanged(
             data=json.dumps({"name": "Recipe after"}),
             content_type="application/json",
         ),
-        client.patch(
-            f"{base}/recipes/{recipe.id}/runs/{recipe_run.id}/",
-            data=json.dumps({"is_public": True}),
-            content_type="application/json",
-        ),
         client.delete(f"{base}/recipes/{recipe.id}/"),
         client.post(f"{base}/materialization/cancel/"),
         client.post(
@@ -376,7 +369,6 @@ def test_read_mutations_leave_existing_content_and_jobs_unchanged(
     deleted_artifact.refresh_from_db()
     knowledge.refresh_from_db()
     recipe.refresh_from_db()
-    recipe_run.refresh_from_db()
     thread_job.refresh_from_db()
     materialization_run.refresh_from_db()
     assert artifact.title == "Artifact before"
@@ -387,7 +379,6 @@ def test_read_mutations_leave_existing_content_and_jobs_unchanged(
     assert not KnowledgeEntry.objects.filter(workspace=workspace, title="Imported").exists()
     assert recipe.name == "Recipe before"
     assert not recipe.is_deleted
-    assert not recipe_run.is_public
     assert thread_job.state == ThreadJob.State.PENDING
     assert materialization_run.state == MaterializationRun.RunState.LOADING
     assert not WorkspaceDataRecovery.objects.filter(workspace=workspace).exists()

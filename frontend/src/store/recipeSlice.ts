@@ -17,7 +17,6 @@ export interface Recipe {
   description: string
   prompt: string
   variables: RecipeVariable[]
-  is_shared: boolean
   variable_count?: number
   last_run_at?: string
   created_at: string
@@ -41,9 +40,6 @@ export interface RecipeRun {
   status: "pending" | "running" | "completed" | "failed"
   variable_values: Record<string, string>
   step_results: StepResult[]
-  is_shared: boolean
-  is_public: boolean
-  share_token: string | null
   started_at: string | null
   completed_at: string | null
   created_at: string
@@ -64,11 +60,6 @@ export interface RecipeSlice {
     deleteRecipe: (recipeId: string) => Promise<void>
     runRecipe: (recipeId: string, variables: Record<string, string>) => Promise<RecipeRun>
     fetchRuns: (recipeId: string) => Promise<void>
-    updateRecipeRun: (
-      recipeId: string,
-      runId: string,
-      data: { is_shared?: boolean; is_public?: boolean },
-    ) => Promise<RecipeRun>
   }
 }
 
@@ -165,24 +156,6 @@ export const createRecipeSlice: StateCreator<RecipeSlice & DomainSlice, [], [], 
           if (!isCurrent()) return
           set({ recipeRuns: [] })
         }
-      },
-
-      updateRecipeRun: async (
-        recipeId: string,
-        runId: string,
-        data: { is_shared?: boolean; is_public?: boolean },
-      ) => {
-        const isCurrent = requests.start()
-        const activeDomainId = get().activeDomainId
-        if (!activeDomainId) throw new Error("No active domain selected.")
-        const updated = await api.patch<RecipeRun>(
-          `/api/workspaces/${activeDomainId}/recipes/${recipeId}/runs/${runId}/`,
-          data,
-        )
-        if (!isCurrent()) return updated
-        const runs = get().recipeRuns.map((r) => (r.id === runId ? updated : r))
-        set({ recipeRuns: runs })
-        return updated
       },
     },
   }

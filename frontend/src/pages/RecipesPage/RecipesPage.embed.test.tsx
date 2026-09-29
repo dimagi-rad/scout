@@ -10,11 +10,11 @@ vi.mock("@/hooks/useNetworkStatus", () => ({ useNetworkStatus: () => ({ status: 
 
 const RECIPE: Recipe = {
   id: "recipe-a", name: "Synthetic recipe", description: "", prompt: "", variables: [],
-  is_shared: false, created_at: "", updated_at: "",
+  created_at: "", updated_at: "",
 }
 const RUN: RecipeRun = {
-  id: "run-a", status: "completed", variable_values: {}, step_results: [], is_shared: false,
-  is_public: false, share_token: null, started_at: null, completed_at: null, created_at: "",
+  id: "run-a", status: "completed", variable_values: {}, step_results: [],
+  started_at: null, completed_at: null, created_at: "",
 }
 
 function renderAt(mount: string, initialEntry: string) {

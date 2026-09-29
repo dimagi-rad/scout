@@ -20,7 +20,6 @@ class RecipeListSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "description",
-            "is_shared",
             "variable_count",
             "last_run_at",
             "created_by_name",
@@ -55,7 +54,6 @@ class RecipeDetailSerializer(serializers.ModelSerializer):
             "description",
             "prompt",
             "variables",
-            "is_shared",
             "created_by_name",
             "created_at",
             "updated_at",
@@ -73,7 +71,7 @@ class RecipeUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Recipe
-        fields = ["name", "description", "prompt", "variables", "is_shared"]
+        fields = ["name", "description", "prompt", "variables"]
 
 
 class RunRecipeSerializer(serializers.Serializer):
@@ -87,34 +85,6 @@ class RunRecipeSerializer(serializers.Serializer):
 
 class RecipeRunSerializer(serializers.ModelSerializer):
     """Serializer for recipe run history."""
-
-    class Meta:
-        model = RecipeRun
-        fields = [
-            "id",
-            "status",
-            "variable_values",
-            "step_results",
-            "is_shared",
-            "is_public",
-            "share_token",
-            "started_at",
-            "completed_at",
-            "created_at",
-        ]
-        read_only_fields = fields
-
-
-class RecipeRunUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating recipe run sharing settings."""
-
-    class Meta:
-        model = RecipeRun
-        fields = ["is_shared", "is_public"]
-
-
-class PublicRecipeRunSerializer(serializers.ModelSerializer):
-    """Read-only serializer for public access to a recipe run."""
 
     class Meta:
         model = RecipeRun

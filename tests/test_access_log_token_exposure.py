@@ -1,10 +1,8 @@
 """Guard that bearer capabilities don't transit access logs (arch #257, 08#6).
 
-Share-token URLs (``/api/chat/threads/shared/<token>/``,
-``/api/recipes/runs/shared/<token>/``) and OAuth callbacks (``?code=``) carry a
-bearer capability in the request line. Uvicorn's access log is on by default and
-ships to CloudWatch (30-day retention), so anyone with CloudWatch read access
-could harvest live share tokens from the access log.
+OAuth callbacks (``?code=``) carry a bearer capability in the request line.
+Uvicorn's access log is on by default and ships to CloudWatch (30-day retention),
+so anyone with CloudWatch read access could harvest them from the access log.
 
 The minimal, grounded fix is to disable uvicorn's access log on the API
 container (Django's own request logging never logged these paths, and request
@@ -21,13 +19,13 @@ from tests.kamal_config import load_config as _load
 
 @pytest.mark.parametrize("destination", [None, "staging"])
 def test_api_uvicorn_disables_access_log(destination):
-    """The API container's uvicorn command must disable the access log so share
-    tokens / OAuth codes in the request line never reach CloudWatch."""
+    """The API container's uvicorn command must disable the access log so OAuth
+    codes in the request line never reach CloudWatch."""
     cfg = _load("deploy.yml", destination)
     cmd = cfg["servers"]["web"]["cmd"]
     assert "uvicorn" in cmd
     assert "--no-access-log" in cmd, (
-        "API uvicorn must run with --no-access-log; otherwise share tokens and "
+        "API uvicorn must run with --no-access-log; otherwise "
         "OAuth ?code= values in the request line are written to the access log "
         "and shipped to CloudWatch (finding 08#6)."
     )

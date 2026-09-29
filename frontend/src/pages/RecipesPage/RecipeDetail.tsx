@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import { ArrowLeft, Save, Play, Loader2, Clock, CheckCircle, XCircle, AlertCircle, Users, Eye } from "lucide-react"
+import { ArrowLeft, Save, Play, Loader2, Clock, CheckCircle, XCircle, AlertCircle, Eye } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -13,7 +13,6 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion"
 import { READ_ONLY_HINT, writeErrorMessage } from "@/hooks/useWorkspaceRole"
-import { cn } from "@/lib/utils"
 import type { Recipe, RecipeRun } from "@/store/recipeSlice"
 
 interface RecipeDetailProps {
@@ -22,10 +21,6 @@ interface RecipeDetailProps {
   onBack: () => void
   onSave: (data: Partial<Recipe>) => Promise<void>
   onRun: () => void
-  onUpdateRun: (
-    runId: string,
-    data: { is_shared?: boolean; is_public?: boolean },
-  ) => Promise<void>
   onViewRun: (runId: string) => void
   canWrite?: boolean
 }
@@ -71,7 +66,6 @@ export function RecipeDetail({
   onBack,
   onSave,
   onRun,
-  onUpdateRun,
   onViewRun,
   canWrite = true,
 }: RecipeDetailProps) {
@@ -81,9 +75,6 @@ export function RecipeDetail({
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const [writeError, setWriteError] = useState<string | null>(null)
-  const [runShareError, setRunShareError] = useState<{ runId: string; message: string } | null>(
-    null,
-  )
 
   useEffect(() => {
     setName(recipe.name)
@@ -91,7 +82,6 @@ export function RecipeDetail({
     setPrompt(recipe.prompt || "")
     setHasChanges(false)
     setWriteError(null)
-    setRunShareError(null)
   }, [recipe])
 
   const reportWriteError = useCallback(
@@ -100,30 +90,6 @@ export function RecipeDetail({
     },
     [canWrite],
   )
-
-  const handleSharingChange = useCallback(
-    async (field: "is_shared" | "is_public", value: boolean) => {
-      setWriteError(null)
-      try {
-        await onSave({ [field]: value })
-      } catch (error) {
-        reportWriteError(error)
-      }
-    },
-    [onSave, reportWriteError],
-  )
-
-  const handleRunSharingChange = async (runId: string, value: boolean) => {
-    setRunShareError(null)
-    try {
-      await onUpdateRun(runId, { is_shared: value })
-    } catch (error) {
-      setRunShareError({
-        runId,
-        message: writeErrorMessage(error, "Couldn’t update sharing. Try again.", canWrite),
-      })
-    }
-  }
 
   const handleNameChange = (value: string) => {
     setName(value)
@@ -258,36 +224,6 @@ export function RecipeDetail({
 
       <Card>
         <CardHeader>
-          <CardTitle>Sharing</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <label
-            className={cn("flex items-start gap-3", canWrite && "cursor-pointer")}
-            title={canWrite ? undefined : READ_ONLY_HINT}
-            data-testid="recipe-sharing-project"
-          >
-            <input
-              type="checkbox"
-              checked={recipe.is_shared}
-              onChange={(e) => handleSharingChange("is_shared", e.target.checked)}
-              disabled={!canWrite}
-              className="mt-0.5 h-4 w-4 rounded border-gray-300"
-            />
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <Users className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-medium">Share with workspace</span>
-              </div>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                All workspace members can view and run this recipe
-              </p>
-            </div>
-          </label>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
           <CardTitle>Variables</CardTitle>
         </CardHeader>
         <CardContent>
@@ -389,38 +325,6 @@ export function RecipeDetail({
                             <Eye className="h-4 w-4 text-muted-foreground shrink-0" />
                           </div>
                         </button>
-
-                        <div className="flex items-center gap-4 border-t pt-2">
-                          <label
-                            className={cn(
-                              "flex items-center gap-1.5 text-xs",
-                              canWrite && "cursor-pointer",
-                            )}
-                            title={canWrite ? undefined : READ_ONLY_HINT}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={run.is_shared}
-                              onChange={(e) =>
-                                void handleRunSharingChange(run.id, e.target.checked)
-                              }
-                              disabled={!canWrite}
-                              className="h-3.5 w-3.5 rounded border-gray-300"
-                              data-testid={`recipe-run-share-${run.id}`}
-                            />
-                            <Users className="h-3 w-3 text-muted-foreground" />
-                            <span className="text-muted-foreground">Project</span>
-                          </label>
-                          {runShareError?.runId === run.id && (
-                            <p
-                              className="text-xs text-destructive"
-                              role="alert"
-                              data-testid={`recipe-run-share-error-${run.id}`}
-                            >
-                              {runShareError.message}
-                            </p>
-                          )}
-                        </div>
                       </div>
                     ))}
                   </div>

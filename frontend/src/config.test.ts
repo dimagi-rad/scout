@@ -9,8 +9,8 @@ import { joinBase, stripBase, stripBasePath, withBasePath } from "@/config"
 describe("joinBase (pure)", () => {
   it("prefixes a leading-slash path with a non-empty base", () => {
     expect(joinBase("/scout", "/health/")).toBe("/scout/health/")
-    expect(joinBase("/scout", "/api/chat/threads/shared/tok/")).toBe(
-      "/scout/api/chat/threads/shared/tok/",
+    expect(joinBase("/scout", "/api/workspaces/ws-1/threads/")).toBe(
+      "/scout/api/workspaces/ws-1/threads/",
     )
   })
 
@@ -26,9 +26,7 @@ describe("joinBase (pure)", () => {
 
 describe("stripBase (pure)", () => {
   it("removes a non-empty base prefix", () => {
-    expect(stripBase("/scout", "/scout/shared/threads/tok-123")).toBe(
-      "/shared/threads/tok-123",
-    )
+    expect(stripBase("/scout", "/scout/embed/chat")).toBe("/embed/chat")
   })
 
   it("maps the bare base to root", () => {
@@ -41,7 +39,7 @@ describe("stripBase (pure)", () => {
   })
 
   it("returns the pathname unchanged when base is empty", () => {
-    expect(stripBase("", "/shared/threads/tok-123")).toBe("/shared/threads/tok-123")
+    expect(stripBase("", "/embed/chat")).toBe("/embed/chat")
   })
 })
 
@@ -54,6 +52,6 @@ describe("withBasePath / stripBasePath (env-bound, BASE_PATH === '')", () => {
   })
 
   it("stripBasePath returns the pathname unchanged", () => {
-    expect(stripBasePath("/shared/threads/tok-123")).toBe("/shared/threads/tok-123")
+    expect(stripBasePath("/embed/chat")).toBe("/embed/chat")
   })
 })

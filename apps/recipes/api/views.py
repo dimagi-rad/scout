@@ -10,8 +10,6 @@ from asgiref.sync import sync_to_async
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_protect
 from rest_framework import status
-from rest_framework.permissions import AllowAny
-from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -26,11 +24,9 @@ from apps.workspaces.workspace_resolver import aresolve_workspace
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 from .serializers import (
-    PublicRecipeRunSerializer,
     RecipeDetailSerializer,
     RecipeListSerializer,
     RecipeRunSerializer,
-    RecipeRunUpdateSerializer,
     RecipeUpdateSerializer,
     RunRecipeSerializer,
 )
@@ -193,49 +189,3 @@ class RecipeRunListView(APIView):
             return Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
         runs = RecipeRun.objects.filter(recipe=recipe).order_by("-created_at")
         return Response(RecipeRunSerializer(runs, many=True).data)
-
-
-class RecipeRunDetailView(APIView):
-    """
-    PATCH /api/recipes/<recipe_id>/runs/<run_id>/ - Update run sharing settings.
-    """
-
-    def patch(self, request, workspace_id, recipe_id, run_id):
-        workspace, _membership, err = resolve_workspace(
-            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
-        )
-        if err:
-            return err
-        try:
-            recipe = Recipe.objects.get(pk=recipe_id, workspace=workspace)
-        except Recipe.DoesNotExist:
-            return Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
-        try:
-            run = RecipeRun.objects.get(pk=run_id, recipe=recipe)
-        except RecipeRun.DoesNotExist:
-            return Response({"error": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        serializer = RecipeRunUpdateSerializer(run, data=request.data, partial=True)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        serializer.save()
-        return Response(RecipeRunSerializer(run).data)
-
-
-class PublicRecipeRunView(APIView):
-    """Public access to a shared recipe run."""
-
-    permission_classes = [AllowAny]
-    authentication_classes = []
-    renderer_classes = [JSONRenderer]
-
-    def get(self, request, share_token):
-        from django.shortcuts import get_object_or_404
-
-        run = get_object_or_404(
-            RecipeRun,
-            share_token=share_token,
-            is_public=True,
-        )
-        serializer = PublicRecipeRunSerializer(run)
-        return Response(serializer.data)

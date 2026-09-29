@@ -42,7 +42,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
         description: str,
         variables: list[dict[str, Any]],
         prompt: str,
-        is_shared: bool = False,
     ) -> dict[str, Any]:
         """
         Save a conversation workflow as a reusable recipe with variables.
@@ -68,9 +67,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
             prompt: The prompt template with {{variable}} placeholders. This is a
                 markdown-formatted instruction that will be sent to the agent when
                 the recipe is run. Use {{variable_name}} syntax for parameterized values.
-
-            is_shared: If True, all workspace members can view and run this recipe.
-                Default is False (only the creator can see it).
 
         Returns:
             A dict containing:
@@ -197,7 +193,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
                 description=description.strip() if description else "",
                 prompt=prompt.strip(),
                 variables=validated_variables,
-                is_shared=is_shared,
                 created_by=user,
             )
 

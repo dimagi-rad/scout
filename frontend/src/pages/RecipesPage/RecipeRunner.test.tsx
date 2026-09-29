@@ -10,7 +10,6 @@ const recipe: Recipe = {
   description: "",
   prompt: "Summarise visits on {{day}}",
   variables: [{ name: "day", type: "date", required: true }],
-  is_shared: true,
   created_at: "2026-09-01T10:00:00Z",
   updated_at: "2026-09-01T10:00:00Z",
 }
