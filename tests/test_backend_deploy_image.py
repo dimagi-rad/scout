@@ -214,3 +214,13 @@ def test_manual_sequence_checker_reports_missing_marker(marker):
     with pytest.raises(AssertionError, match="Expected one") as failure:
         _assert_manual_worker_sequence(wrong)
     assert marker in str(failure.value)
+
+
+@pytest.mark.parametrize(("name", "_environment"), WORKFLOWS)
+def test_every_workflow_ssh_call_sends_keepalives(name, _environment):
+    text = (REPO_ROOT / ".github" / "workflows" / name).read_text()
+    calls = re.findall(r"^\s*ssh -T .*$", text, flags=re.MULTILINE)
+    assert calls, "Expected ssh calls in the deploy workflow"
+    for call in calls:
+        assert "-o ServerAliveInterval=30" in call, call
+        assert "-o ServerAliveCountMax=6" in call, call
