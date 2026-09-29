@@ -690,8 +690,10 @@ class WorkspaceMemberListView(APIView):
 
     def get(self, request, workspace_id):
         # The only source of the membership ids that leaving and handing over the
-        # manager role need, so reachable without coverage; but then it names only
-        # the caller, and only a manager (who can hand over) sees others' id and role.
+        # manager role need, so reachable without coverage. Uncovered, a non-manager
+        # sees only themselves; a manager also sees who the others are, since handing
+        # over blind is no escape hatch (A3). The roster is Scout's own data, not
+        # tenant data; user ids, join dates and invites stay covered-only.
         workspace, membership, err = resolve_workspace(
             request, workspace_id, require_coverage=False
         )
@@ -712,7 +714,12 @@ class WorkspaceMemberListView(APIView):
                 "created_at": m.created_at.isoformat(),
             }
             if covered or m.user_id == request.user.id
-            else {"id": str(m.id), "role": m.role}
+            else {
+                "id": str(m.id),
+                "role": m.role,
+                "email": m.user.email,
+                "name": m.user.get_full_name(),
+            }
             for m in memberships
         ]
         live_invites = WorkspaceInvite.objects.filter(
