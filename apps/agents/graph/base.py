@@ -52,6 +52,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
+from mcp_server.pipeline_registry import get_registry
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -380,59 +381,112 @@ async def _fetch_semantic_model_context(
     try:
         return await _semantic_catalog_context(workspace)
     except SemanticCatalogUnavailable:
-        tenant_count = await workspace.tenants.acount()
-        if tenant_count == 1:
-            tenant = await workspace.tenants.afirst()
-            ts = await TenantSchema.objects.filter(
-                tenant=tenant,
-                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-            ).afirst()
-            if ts is None:
-                if not write_capable:
-                    return _READ_ONLY_MATERIALIZE_GUIDANCE
-                return (
-                    _HEADLESS_MATERIALIZE_GUIDANCE
-                    if not interactive
-                    else _INTERACTIVE_MATERIALIZE_GUIDANCE
-                )
-            if ts.state == SchemaState.MATERIALIZING:
-                if not write_capable:
-                    return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
-                return (
-                    _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-                    if not interactive
-                    else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
-                )
-            if not write_capable:
-                return _READ_ONLY_LOADED_SQL_GUIDANCE
-            return _LOADED_REBUILD_GUIDANCE
-        if tenant_count > 1:
-            vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
-            if vs is not None and vs.state == SchemaState.MATERIALIZING:
-                if not write_capable:
-                    return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
-                return (
-                    _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-                    if not interactive
-                    else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
-                )
-            loaded = vs is not None and vs.state == SchemaState.ACTIVE
-            if not write_capable:
-                guidance = (
-                    _READ_ONLY_LOADED_SQL_GUIDANCE if loaded else _READ_ONLY_MATERIALIZE_GUIDANCE
-                )
-            elif loaded:
-                guidance = _LOADED_REBUILD_GUIDANCE
-            elif not interactive:
-                guidance = _HEADLESS_MATERIALIZE_GUIDANCE
-            else:
-                guidance = _INTERACTIVE_MATERIALIZE_GUIDANCE
-            return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}"
+        load_state, multi = await _catalog_unavailable_load_state(workspace)
+        unresolved, every = await _unresolved_pipeline_providers(workspace)
+        if every and load_state != _LOADING:
+            guidance = _pipeline_unresolved_guidance(
+                unresolved, loaded=load_state == _LOADED, write_capable=write_capable
+            )
+        else:
+            guidance = _load_state_guidance(
+                load_state, interactive=interactive, write_capable=write_capable
+            )
+            if unresolved:
+                guidance = f"{guidance}\n\n{_partial_pipeline_note(unresolved)}"
+        return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}" if multi else guidance
+
+
+_NOT_LOADED, _LOADING, _LOADED = "not_loaded", "loading", "loaded"
+
+
+async def _catalog_unavailable_load_state(workspace) -> tuple[str, bool]:
+    """``(load state, multi-tenant)`` of a workspace whose semantic catalog is unavailable."""
+    tenant_count = await workspace.tenants.acount()
+    if tenant_count == 1:
+        tenant = await workspace.tenants.afirst()
+        ts = await TenantSchema.objects.filter(
+            tenant=tenant,
+            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        ).afirst()
+        if ts is None:
+            return _NOT_LOADED, False
+        return (_LOADING if ts.state == SchemaState.MATERIALIZING else _LOADED), False
+    if tenant_count > 1:
+        vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
+        state = vs.state if vs is not None else None
+        if state == SchemaState.MATERIALIZING:
+            return _LOADING, True
+        return (_LOADED if state == SchemaState.ACTIVE else _NOT_LOADED), True
+    return _NOT_LOADED, False
+
+
+def _load_state_guidance(load_state: str, *, interactive: bool, write_capable: bool) -> str:
+    if load_state == _LOADING:
         if not write_capable:
-            return _READ_ONLY_MATERIALIZE_GUIDANCE
+            return _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE
         return (
-            _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else _INTERACTIVE_MATERIALIZE_GUIDANCE
+            _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
+            if interactive
+            else _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
         )
+    if load_state == _LOADED:
+        return _LOADED_REBUILD_GUIDANCE if write_capable else _READ_ONLY_LOADED_SQL_GUIDANCE
+    if not write_capable:
+        return _READ_ONLY_MATERIALIZE_GUIDANCE
+    return _INTERACTIVE_MATERIALIZE_GUIDANCE if interactive else _HEADLESS_MATERIALIZE_GUIDANCE
+
+
+async def _unresolved_pipeline_providers(workspace) -> tuple[list[str], bool]:
+    """Providers a load would fail ``PIPELINE_UNRESOLVED`` for, and whether that is all of them.
+
+    Checked the way a load picks its pipeline: by provider alone.
+    """
+    # order_by(): Tenant's default ordering would otherwise leak into DISTINCT.
+    providers = {
+        provider
+        async for provider in workspace.tenants.order_by()
+        .values_list("provider", flat=True)
+        .distinct()
+    }
+    unresolved = sorted(providers - {config.provider for config in get_registry().list()})
+    if unresolved:
+        # The agent no longer starts the run that would fail, so record it here.
+        logger.warning("No materialization pipeline for provider(s) %s", ", ".join(unresolved))
+    return unresolved, bool(providers) and len(unresolved) == len(providers)
+
+
+def _pipeline_admin_advice(providers: list[str]) -> str:
+    return (
+        "an administrator must configure or repair the materialization pipeline for "
+        f"provider {', '.join(providers)}; re-running materialization cannot fix this "
+        "until that configuration changes"
+    )
+
+
+def _pipeline_unresolved_guidance(
+    providers: list[str], *, loaded: bool, write_capable: bool
+) -> str:
+    """Mode-agnostic: no retry or wait fixes a missing pipeline definition (F2)."""
+    no_rerun = " Do NOT call `run_materialization`; it fails the same way." if write_capable else ""
+    if loaded:
+        return (
+            "Data is loaded, but no semantic datasets are available and materialization "
+            "cannot rebuild them. Read-only `query` SQL still works on the loaded tables; "
+            "`list_tables` and `describe_table` may fail for these sources."
+            f"{no_rerun} If the user asks for semantic datasets or a refresh, tell them "
+            f"{_pipeline_admin_advice(providers)}."
+        )
+    return (
+        f"No data has been loaded, and materialization cannot load it.{no_rerun} "
+        f"Tell the user {_pipeline_admin_advice(providers)}, and stop there."
+    )
+
+
+def _partial_pipeline_note(providers: list[str]) -> str:
+    return (
+        f"A load skips this workspace's provider {', '.join(providers)} sources: "
+        f"{_pipeline_admin_advice(providers)}. Tell the user when it affects their question."
+    )
 
 
 # No `pipeline=` arg: run_materialization's LLM-facing schema is empty (all params
