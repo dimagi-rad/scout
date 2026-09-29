@@ -588,6 +588,11 @@ class WorkspaceListView(APIView):
             return Response(
                 {"error": "tenant_ids must be a list."}, status=status.HTTP_400_BAD_REQUEST
             )
+        if not tenant_ids:
+            return Response(
+                {"error": "Choose at least one data source for the workspace."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         accessible_tenant_ids = set(
             str(tid)
