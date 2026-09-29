@@ -1096,3 +1096,35 @@ async def test_an_undenied_run_reports_no_mid_run_denial(workspace, tenant, user
     async with _loads(pipeline):
         result = await _run(workspace, user)
     assert result["denied_mid_run"] is None
+
+
+async def test_a_load_failure_then_a_denial_names_the_failed_source_once(workspace, tenant, user):
+    """A source whose load raised is reported by the loop's own entry; the denial's
+    entry for it must not be added to the guidance a second time."""
+    await _add_sources(workspace, user, serving=[], unserved=["second"])
+    tenants = [t async for t in workspace.tenants.all()]
+    denial = _denial(tenants, ErrorCode.AUTH_TOKEN_EXPIRED)
+    expired = RuntimeError("sign-in expired mid-load")
+    expired.code = ErrorCode.AUTH_TOKEN_EXPIRED
+    pipeline = _Pipeline()
+    async with _loads(pipeline):
+        with (
+            patch(
+                "apps.workspaces.tasks._materialization_write_denial",
+                AsyncMock(return_value=denial),
+            ),
+            patch(
+                "apps.workspaces.tasks._load_workspace_candidate",
+                AsyncMock(side_effect=expired),
+            ),
+            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+        ):
+            build.return_value.tenant_coverage = {}
+            result = await _run_new_source_load_denied_after_first_tenant(
+                workspace, user, only_unserved=False
+            )
+
+    assert all(entry.get("tenant_id") for entry in result["tenants"])
+    [line] = result["guidance"]
+    for source in tenants:
+        assert line.count(source.external_id) == 1, line

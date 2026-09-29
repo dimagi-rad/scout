@@ -961,6 +961,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": True,
                     "result": result,
@@ -970,6 +971,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": False,
                     "cancelled": True,
@@ -994,6 +996,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": False,
                     "error": str(e),
@@ -1005,6 +1008,7 @@ async def materialize_workspace_core(
             tenant_results.append(
                 {
                     "tenant": tenant_id,
+                    "tenant_id": str(tm.tenant_id),
                     "provider": tm.tenant.provider,
                     "success": False,
                     "error": str(e),
