@@ -154,7 +154,7 @@ Each workspace member has one role.
 | Agent write tools (artifacts, recipes, learnings, materialization) | no | yes | yes |
 | Share their own threads | no | yes | yes |
 | Edit or soft-delete artifacts and recipes | no | yes | yes |
-| Create and edit knowledge entries, edit learnings, annotate tables | no | yes | yes |
+| Create and edit knowledge entries, edit learnings | no | yes | yes |
 | Refresh data, retry or cancel loads, repair artifact data | no | yes | yes |
 | Edit the semantic model through the Semantic Canvas | no | yes | yes |
 | Add, remove and change the roles of members; manage invites | no | no | yes |
@@ -255,7 +255,7 @@ A recipe is a saved prompt template with typed variables, created by the agent's
   Read-write members create, edit and delete them, and can import or export
   them as a zip.
 - **TableKnowledge**: table descriptions, column notes, data-quality notes and
-  related tables. Read-write members edit them through the data dictionary.
+  related tables. They are edited only through the Django admin.
 - **AgentLearning**: corrections the agent saves with `save_learning`. They
   can't be created by hand; read-write members can edit or delete them.
 
