@@ -32,6 +32,7 @@ from django.db import connection as django_connection
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.common.commcare_servers import COMMCARE_SERVERS
 from apps.common.db_deadline import preserve_transaction_timeouts
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import TokenRefreshError, UpstreamRefreshFailed, UpstreamTokenExpired
@@ -62,19 +63,21 @@ def _connect_token_url() -> str:
     return f"{settings.CONNECT_API_URL.rstrip('/')}/o/token/"
 
 
-PROVIDER_TOKEN_URLS = {
-    "commcare": "https://www.commcarehq.org/oauth/token/",
-}
+def get_token_url(provider: str, scope_key: str = "") -> str | None:
+    """Return the OAuth token endpoint for a provider, or None if unknown.
 
-
-def get_token_url(provider: str) -> str | None:
-    """Return the OAuth token endpoint for a provider, or None if unknown."""
+    ``scope_key`` matters for CommCare only: it names the HQ server (``""`` = www)
+    whose token endpoint issued the credential, since EU grants are unknown to www.
+    """
     provider = canonical_provider(provider)
     if provider == "ocs":
         return _ocs_token_url()
     if provider == "commcare_connect":
         return _connect_token_url()
-    return PROVIDER_TOKEN_URLS.get(provider)
+    if provider == "commcare":
+        server = COMMCARE_SERVERS.get(scope_key)
+        return server.token_url if server else None
+    return None
 
 
 class TokenRefreshUnavailable(TokenRefreshError, UpstreamRefreshFailed):

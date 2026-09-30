@@ -10,6 +10,7 @@ from allauth.socialaccount.models import SocialToken
 from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import (
+    account_scope,
     is_active_identity,
     oauth_membership_scope_mismatch,
     ocs_scope_unusable,
@@ -129,7 +130,9 @@ async def aiter_fresh_access_tokens(user, provider: str) -> list[tuple]:
     pairs = []
     for token_obj in await aiter_social_tokens(user, provider):
         try:
-            cred = await _aresolve_oauth_credential(token_obj, provider)
+            cred = await _aresolve_oauth_credential(
+                token_obj, provider, account_scope(token_obj.account)
+            )
         except CredentialResolutionError:
             continue
         pairs.append((token_obj.account, cred["value"]))
@@ -179,7 +182,7 @@ async def aresolve_credential(membership) -> dict | None:
             f"'{membership.team_slug}' to materialize it.",
         )
 
-    return await _aresolve_oauth_credential(token_obj, conn.provider)
+    return await _aresolve_oauth_credential(token_obj, conn.provider, conn.scope_key)
 
 
 async def aconnection_status(conn) -> str:
@@ -224,7 +227,7 @@ def _make_token_refresher(
     return _refresh
 
 
-async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
+async def _aresolve_oauth_credential(token_obj, provider: str, scope_key: str = "") -> dict:
     """Build an OAuth credential dict, refreshing the token if near expiry.
 
     Fails closed when a near-expiry token cannot be renewed. A rejected grant or
@@ -234,8 +237,11 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
     When a refresh is possible the credential carries a ``refresh`` callable so
     loaders can renew the token mid-run and survive a token whose lifetime is
     shorter than the run — CommCare's 15-min OAuth TTL (finding 14#3).
+
+    ``scope_key`` is the credential's scope; for CommCare it names the HQ server
+    whose token endpoint can renew it (#719).
     """
-    token_url = get_token_url(provider)
+    token_url = get_token_url(provider, scope_key)
     can_refresh = bool(token_url and token_obj.token_secret and token_obj.app)
 
     token_value = token_obj.token

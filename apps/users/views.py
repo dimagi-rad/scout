@@ -14,6 +14,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
+from apps.common.commcare_servers import DEFAULT_SERVER
 from apps.common.http import parse_json_object, string_field
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
@@ -28,7 +29,7 @@ from apps.users.services.credential_resolver import (
     aiter_fresh_access_tokens,
     aiter_social_tokens,
 )
-from apps.users.services.oauth_scope import scope_account_ids
+from apps.users.services.oauth_scope import account_scope, scope_account_ids
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.onboarding_cache import me_onboarding_cache_key
 from apps.users.services.tenant_resolution import (
@@ -78,7 +79,9 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
             if not force and await cache.aget(cache_key):
                 continue
             try:
-                credential = await _aresolve_oauth_credential(token_obj, provider)
+                credential = await _aresolve_oauth_credential(
+                    token_obj, provider, account_scope(token_obj.account)
+                )
                 await resolve(
                     user, credential["value"], social_account=token_obj.account, allow_replace=False
                 )
@@ -110,6 +113,7 @@ def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slu
         for desc in descriptors:
             tenant, _ = Tenant.objects.get_or_create(
                 provider=provider,
+                server=DEFAULT_SERVER,
                 external_id=desc.external_id,
                 defaults={"canonical_name": desc.canonical_name},
             )
@@ -155,6 +159,7 @@ async def tenant_list_view(request):
             {
                 "id": str(tm.id),
                 "provider": tm.tenant.provider,
+                "server": tm.tenant.server,
                 "tenant_id": tm.tenant.external_id,
                 "tenant_uuid": str(tm.tenant.id),
                 "tenant_name": tm.tenant.canonical_name,
@@ -457,17 +462,23 @@ async def tenant_ensure_view(request):
     tenant_id, err = string_field(body, "tenant_id")
     if err:
         return err
-    provider, tenant_id = provider.strip(), tenant_id.strip()
+    server, err = string_field(body, "server", DEFAULT_SERVER)
+    if err:
+        return err
+    provider, tenant_id, server = provider.strip(), tenant_id.strip(), server.strip()
 
     if not provider or not tenant_id:
         return JsonResponse({"error": "provider and tenant_id are required"}, status=400)
 
     try:
         tm = await TenantMembership.objects.select_related("tenant").aget(
-            user=user, tenant__provider=provider, tenant__external_id=tenant_id
+            user=user,
+            tenant__provider=provider,
+            tenant__server=server,
+            tenant__external_id=tenant_id,
         )
     except TenantMembership.DoesNotExist:
-        if provider == "commcare_connect":
+        if provider == "commcare_connect" and not server:
             credentials = await aiter_fresh_access_tokens(user, "commcare_connect")
             if not credentials:
                 return JsonResponse(

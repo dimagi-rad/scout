@@ -11,9 +11,9 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
 from django.utils import timezone
 
+from apps.common.commcare_servers import COMMCARE_SERVERS
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.tenant_resolution import (
-    COMMCARE_DOMAIN_API,
     TenantResolutionError,
     _fetch_all_domains,
     resolve_connect_opportunities,
@@ -21,6 +21,7 @@ from apps.users.services.tenant_resolution import (
 )
 
 CONNECT_URL = "https://connect.dimagi.com/export/opp_org_program_list/"
+COMMCARE_DOMAIN_API = COMMCARE_SERVERS[""].user_domains_url
 
 
 async def _oauth_conn(user, provider, scope_key=""):
@@ -105,7 +106,7 @@ async def test_commcare_pagination_follows_relative_next(user, httpx_mock):
         url="https://www.commcarehq.org/api/user_domains/v1/?offset=1",
         json={"objects": [{"domain_name": "b", "project_name": "B"}], "meta": {"next": None}},
     )
-    domains = await _fetch_all_domains("tok")
+    domains = await _fetch_all_domains("tok", COMMCARE_DOMAIN_API)
     assert {d["domain_name"] for d in domains} == {"a", "b"}  # page 2 not silently dropped
 
 

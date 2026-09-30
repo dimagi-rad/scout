@@ -40,6 +40,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from apps.common.commcare_servers import get_commcare_server
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
@@ -58,8 +59,6 @@ from apps.users.services.upstream_denial import (
 from apps.workspaces import access_cache
 
 logger = logging.getLogger(__name__)
-
-COMMCARE_DOMAIN_API = "https://www.commcarehq.org/api/user_domains/v1/"
 
 
 async def _anewest_account(user, provider: str):
@@ -256,17 +255,32 @@ def _sync_memberships(
         return memberships
 
 
+async def _aaccount_holding(user, provider: str, access_token: str):
+    """The identity whose stored token is ``access_token``, if any."""
+    async for token in SocialToken.objects.filter(
+        account__in=provider_accounts(user.pk, provider)
+    ).select_related("account"):
+        if access_token and token.token == access_token:
+            return token.account
+    return None
+
+
 async def resolve_commcare_domains(
     user, access_token: str, *, social_account=None, allow_replace=True, may_revoke=True
 ) -> list[TenantMembership]:
     """Fetch the user's CommCare domains and full-sync TenantMembership records.
 
-    A CommCare HQ token is account-wide, so this stays one connection per user
-    (``scope_key=""``); ``social_account`` only pins which identity holds it.
+    A CommCare HQ token is account-wide on the server that issued it, so there is
+    one connection per user per server (``scope_key`` is the server key, ``""`` for
+    www); ``social_account`` pins which identity holds it and so which server to ask.
     """
+    # Callers without an identity keep their old binding semantics; the lookup only
+    # decides which server the token belongs to.
+    account = social_account or await _aaccount_holding(user, "commcare", access_token)
+    server = get_commcare_server(account_scope(account))
     observed = await adiscovery_connection(user, "commcare", access_token, social_account)
     try:
-        domains = await _fetch_all_domains(access_token)
+        domains = await _fetch_all_domains(access_token, server.user_domains_url)
     except CommCareAuthError as error:
         if may_revoke:
             await _record_discovery_denial(
@@ -276,8 +290,8 @@ async def resolve_commcare_domains(
     conn = await _aoauth_connection(
         user,
         "commcare",
-        scope_key="",
-        scope_label="",
+        scope_key=server.key,
+        scope_label=server.label if server.key else "",
         account=social_account,
         allow_replace=allow_replace,
         observed_connection=observed,
@@ -290,6 +304,7 @@ async def resolve_commcare_domains(
     for domain in domains:
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="commcare",
+            server=server.key,
             external_id=domain["domain_name"],
             defaults={"canonical_name": domain.get("project_name")},
         )
@@ -482,7 +497,7 @@ async def _record_discovery_denial(connection, access_token, status, account=Non
     )
 
 
-async def _fetch_all_domains(access_token: str) -> list[dict]:
+async def _fetch_all_domains(access_token: str, domains_url: str) -> list[dict]:
     """Paginate through the CommCare user_domains API, returning the COMPLETE set.
 
     Tastypie returns a *relative* ``meta.next`` (e.g. ``/api/user_domains/v1/?offset=20``),
@@ -492,7 +507,7 @@ async def _fetch_all_domains(access_token: str) -> list[dict]:
     Raises CommCareAuthError on 401/403; TenantResolutionError on shape drift.
     """
     results: list[dict] = []
-    url: str | None = COMMCARE_DOMAIN_API
+    url: str | None = domains_url
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
@@ -508,5 +523,5 @@ async def _fetch_all_domains(access_token: str) -> list[dict]:
                 raise TenantResolutionError("CommCare response missing 'objects' key")
             results.extend(data["objects"])
             next_url = (data.get("meta") or {}).get("next")
-            url = urljoin(COMMCARE_DOMAIN_API, next_url) if next_url else None
+            url = urljoin(domains_url, next_url) if next_url else None
     return results

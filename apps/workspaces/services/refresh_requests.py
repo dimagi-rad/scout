@@ -217,7 +217,7 @@ def _unbound_candidates(tenant):
         state=SchemaState.PROVISIONING,
         refresh_job_id__isnull=True,
         load_workspace_id__isnull=True,
-    ).exclude(schema_name=tenant_schema_name(tenant.provider, tenant.external_id))
+    ).exclude(schema_name=tenant_schema_name(tenant.provider, tenant.external_id, tenant.server))
 
 
 @dataclass(frozen=True)

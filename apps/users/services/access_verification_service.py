@@ -168,7 +168,7 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
     if token is None:
         await _release_claim(claim)
         return None, AccessVerificationResult(AccessVerificationStatus.RETRY, _VERIFICATION_RETRY)
-    token_url = get_token_url(claim.observation.provider)
+    token_url = get_token_url(claim.observation.provider, claim.observation.scope_key)
     can_refresh = bool(token_url and token.token_secret and token.app)
     if not can_refresh or not token_needs_refresh(token.expires_at, can_refresh=True):
         return claim, None

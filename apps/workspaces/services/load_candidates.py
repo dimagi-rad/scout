@@ -98,7 +98,10 @@ def open_workspace_candidate(
         schema = TenantSchema.objects.create(
             tenant=tenant,
             schema_name=refresh_schema_name(
-                tenant.provider, tenant.external_id, token=uuid.uuid4().hex[:8]
+                tenant.provider,
+                tenant.external_id,
+                token=uuid.uuid4().hex[:8],
+                server=tenant.server,
             ),
             state=SchemaState.PROVISIONING,
             load_workspace_id=workspace_id,
