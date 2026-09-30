@@ -396,7 +396,7 @@ def test_commit_refuses_to_delete_a_dataset_named_bare(
     _commit(
         canvas,
         user,
-        [_measure_op("stat_rows", measure_type="number", cube_sql="(select 1 from {visit_stats})")],
+        [_measure_op("stat_rows", measure_type="number", cube_sql="count({visit_stats})")],
     )
 
     message = _blocking_message(
@@ -473,6 +473,48 @@ def test_undo_refuses_to_restore_sql_that_fails_todays_field_rules(
     assert not SemanticModelRevision.objects.filter(reverts=edit).exists()
 
 
+@pytest.mark.parametrize(
+    ("measure", "key", "edited", "rejected"),
+    [
+        (
+            {"measure_type": "number", "cube_sql": "{total_amount} / 2"},
+            "cube_sql",
+            "{total_amount} / 4",
+            "(select sum(amount) from raw_visits)",
+        ),
+        (
+            {"measure_type": "sum", "expression": "amount", "filters": [{"sql": "amount > 0"}]},
+            "filters",
+            [{"sql": "amount > 10"}],
+            [{"sql": "amount > (select 0)"}],
+        ),
+    ],
+)
+def test_undo_through_the_api_refuses_to_restore_measure_sql_the_validator_rejects(
+    client, canvas, semantic_model, workspace, user, measure, key, edited, rejected
+):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    _commit(canvas, user, [_measure_op("scaled", **measure)])
+    target = "field/raw_visits.scaled"
+    _commit(canvas, user, [{"op": "set", "target": f"{target}/{key}", "value": edited}])
+    edit = SemanticModelRevision.objects.order_by("-created_at").first()
+    # Stands in for SQL saved before measure and filter SQL were validated.
+    [entry] = edit.changes
+    entry["before"]["metadata"][key] = rejected
+    edit.save(update_fields=["changes"])
+    client.force_login(user)
+
+    response = client.post(f"/api/workspaces/{workspace.id}/data-model/revisions/{edit.id}/undo/")
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "INVALID"
+    assert body["conflicts"][0]["object"] == target
+    field = semantic_model.datasets.get(name="raw_visits").fields.get(name="scaled")
+    assert field.metadata[key] == edited
+    assert not SemanticModelRevision.objects.filter(reverts=edit).exists()
+
+
 def test_undo_of_a_curation_edit_ignores_sql_it_does_not_touch(
     canvas, semantic_model, workspace, user
 ):
@@ -500,7 +542,7 @@ def test_undo_of_a_dataset_create_refuses_while_it_is_named_bare(
     _commit(
         canvas,
         user,
-        [_measure_op("stat_rows", measure_type="number", cube_sql="(select 1 from {visit_stats})")],
+        [_measure_op("stat_rows", measure_type="number", cube_sql="count({visit_stats})")],
     )
 
     refusal = undo_revision(workspace, created.id, user)["refused"]
