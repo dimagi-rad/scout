@@ -182,10 +182,12 @@ def test_failed_cache_warmup_logs_one_warning_without_a_traceback(
 def other_connection():
     other = connections.create_connection("default")
     yield other
-    # Postgres drops session locks only once the backend exits, after close() returns.
-    with other.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_unlock_all()")
-    other.close()
+    try:
+        # Postgres drops session locks only once the backend exits, after close() returns.
+        with other.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_unlock_all()")
+    finally:
+        other.close()
 
 
 def _hold_validator_slots(conn, slots):
@@ -227,10 +229,11 @@ def test_build_fails_over_when_every_validator_slot_stays_busy(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_validation_uses_a_free_slot_and_releases_it(
-    workspace, model, cube_http, other_connection, keep_build_session
+def test_validation_skips_a_busy_slot_and_releases_the_one_it_took(
+    workspace, model, cube_http, other_connection, keep_build_session, monkeypatch
 ):
-    _hold_validator_slots(other_connection, range(cube_schema.VALIDATOR_CONCURRENCY - 1))
+    monkeypatch.setattr(cube_schema, "VALIDATOR_CONCURRENCY", 2)
+    _hold_validator_slots(other_connection, [0])
 
     build_and_promote_cube_schema(workspace, model=model)
 
