@@ -419,6 +419,53 @@ def test_undo_sees_a_cube_prefixed_reference(canvas, semantic_model, workspace, 
     assert "raw_visits.ratio" in refusal["conflicts"][0]["message"]
 
 
+def test_undo_refuses_to_restore_sql_that_fails_todays_field_rules(
+    canvas, semantic_model, workspace, user
+):
+    paid = "CASE WHEN {CUBE}.\"amount\" > 0 THEN 'Paid' ELSE 'Unpaid' END"
+    _commit(
+        canvas,
+        user,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "paid_status",
+                    "field_type": "dimension",
+                    "data_type": "text",
+                    "cube_sql": paid,
+                },
+            }
+        ],
+    )
+    _commit(
+        canvas,
+        user,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.paid_status/cube_sql",
+                "value": paid.replace("> 0", "> 10"),
+            }
+        ],
+    )
+    edit = SemanticModelRevision.objects.order_by("-created_at").first()
+    # Stands in for SQL that was valid when saved but fails rules added since.
+    [entry] = edit.changes
+    entry["before"]["metadata"]["cube_sql"] = '{CUBE}."no_such_column"'
+    edit.save(update_fields=["changes"])
+
+    refusal = undo_revision(workspace, edit.id, user)["refused"]
+
+    assert refusal["code"] == "INVALID"
+    assert refusal["conflicts"][0]["object"] == "field/raw_visits.paid_status"
+    field = semantic_model.datasets.get(name="raw_visits").fields.get(name="paid_status")
+    assert "> 10" in field.metadata["cube_sql"]
+    assert not SemanticModelRevision.objects.filter(reverts=edit).exists()
+
+
 def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(
     canvas, semantic_model, workspace, user, custom_sql
 ):

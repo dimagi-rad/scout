@@ -19,6 +19,7 @@ from apps.semantic.canvas.objects import (
     normalize_member_references,
     references_dataset,
     references_field,
+    serialize_field_base,
 )
 from apps.semantic.canvas.service import (
     ChangeType,
@@ -323,6 +324,18 @@ def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
 
     out.extend(_field_expression_diagnostics(dataset, change, fields))
     return out
+
+
+def saved_field_diagnostics(field: SemanticField) -> list[dict]:
+    """The canvas field contract applied to a saved field, such as one an undo writes back."""
+    change = SemanticCanvasChange(
+        object_type=ObjectType.FIELD, object_uuid=field.id, fields={"name": field.name}
+    )
+    values = serialize_field_base(field)
+    return [
+        *_field_expression_diagnostics(field.dataset, change, values),
+        *_calculated_measure_diagnostics(change, values),
+    ]
 
 
 def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> list[dict]:

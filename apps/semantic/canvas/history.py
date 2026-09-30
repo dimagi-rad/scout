@@ -18,6 +18,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
 
+from apps.semantic.canvas.diagnostics import saved_field_diagnostics
 from apps.semantic.canvas.objects import (
     field_sql_text,
     normalize_member_references,
@@ -281,7 +282,15 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
                 "revision first, or edit the objects directly.",
                 conflicts,
             )
-        undo_entries = _apply_undo(workspace, model, entries)
+        try:
+            undo_entries = _apply_undo(workspace, model, entries)
+        except _InvalidRestore as invalid:
+            return refused(
+                "INVALID",
+                "What this revision replaced no longer passes the current field rules, so "
+                "restoring it would break the data model. Edit the objects directly instead.",
+                invalid.problems,
+            )
         if undo_entries is None:
             return refused("CONFLICT", "The restored objects collide with the current data model.")
         removed = [entry["object_uuid"] for entry in undo_entries if entry["after"] is None]
@@ -307,14 +316,60 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
     }
 
 
+class _InvalidRestore(Exception):
+    def __init__(self, problems: list[dict[str, Any]]) -> None:
+        super().__init__("restored fields fail validation")
+        self.problems = problems
+
+
 def _apply_undo(workspace, model, entries) -> list[dict[str, Any]] | None:
-    """None when a write hit a uniqueness race the checks could not see; rolled back."""
+    """None when a write hit a uniqueness race the checks could not see; rolled back.
+
+    Raises ``_InvalidRestore`` (also rolled back) when a restored field fails
+    today's field rules, e.g. SQL written before those rules tightened.
+    """
     try:
         with transaction.atomic():
-            return [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
+            undone = [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
+            if problems := _restored_field_problems(entries):
+                raise _InvalidRestore(problems)
+            return undone
     except IntegrityError:
         logger.warning("Undo of a data model revision collided in workspace %s", workspace.id)
         return None
+
+
+def _restored_field_problems(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate authored fields this undo wrote back, in their saved state.
+
+    Catalog-generated fields are the refresh's to keep valid, as on the canvas.
+    """
+    restored: set[str] = set()
+    for entry in entries:
+        before = entry.get("before")
+        if before is None:
+            continue
+        if entry["object_type"] == FIELD:
+            restored.add(entry["object_uuid"])
+        elif entry["object_type"] == DATASET and entry.get("after") is None:
+            restored.update(field["id"] for field in before.get("fields") or [])
+    problems = []
+    for field in SemanticField.objects.filter(id__in=restored).select_related("dataset"):
+        metadata = field.metadata or {}
+        authored = metadata.get("source") == CANVAS_SOURCE or any(
+            metadata.get(key) for key in ("cube_sql", "filters")
+        )
+        if not authored:
+            continue
+        problems.extend(
+            {
+                "object": f"field/{field.dataset.name}.{field.name}",
+                "object_uuid": str(field.id),
+                "message": diagnostic["message"],
+            }
+            for diagnostic in saved_field_diagnostics(field)
+        )
+    return problems
 
 
 def _model_class(object_type: str):
