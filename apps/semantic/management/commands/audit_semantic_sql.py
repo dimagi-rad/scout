@@ -6,6 +6,7 @@ from functools import partial
 
 from django.core.management.base import BaseCommand
 from django.db.models import Prefetch
+from sqlglot.errors import TokenError
 
 from apps.semantic.models import SemanticDataset, SemanticField, SemanticRelationship
 from apps.semantic.services.custom_datasets import CustomDatasetError, custom_dataset_dependencies
@@ -70,7 +71,8 @@ def audit_semantic_sql(*, workspace_ids=None) -> list[dict]:
     def check(kind, owner, name, path, visible, validate):
         try:
             validate()
-        except (SemanticSQLValidationError, CustomDatasetError) as exc:
+        # A malformed stored fragment must be reported, not abort the whole audit.
+        except (SemanticSQLValidationError, CustomDatasetError, TokenError, ValueError) as exc:
             findings.append(
                 {
                     "kind": kind,
@@ -122,7 +124,7 @@ def audit_semantic_sql(*, workspace_ids=None) -> list[dict]:
                     name,
                     "metadata.cube_sql",
                     visible,
-                    partial(compile_measure_sql, cube_sql),
+                    partial(compile_measure_sql, cube_sql, columns=columns),
                 )
             filters = field_metadata.get("filters")
             for index, item in enumerate(filters if isinstance(filters, list) else []):
@@ -134,7 +136,7 @@ def audit_semantic_sql(*, workspace_ids=None) -> list[dict]:
                         name,
                         f"metadata.filters[{index}].sql",
                         visible,
-                        partial(compile_measure_filter_sql, sql),
+                        partial(compile_measure_filter_sql, sql, columns=columns),
                     )
 
     for relationship in relationships:

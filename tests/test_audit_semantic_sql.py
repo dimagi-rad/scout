@@ -76,6 +76,12 @@ def test_audit_lists_only_stored_sql_that_fails_validation(model):
         field_type="dimension",
         metadata={"cube_sql": "current_setting('work_mem')"},
     )
+    SemanticField.objects.create(
+        dataset=visits,
+        name="broken_text",
+        field_type="dimension",
+        metadata={"cube_sql": "'unterminated"},
+    )
     SemanticRelationship.objects.create(
         workspace=model.workspace,
         name="visits_users",
@@ -101,11 +107,12 @@ def test_audit_lists_only_stored_sql_that_fails_validation(model):
 
     assert [(f["kind"], f["object"], f["path"]) for f in findings] == [
         ("dimension", "visits.bad_band", "metadata.cube_sql"),
+        ("dimension", "visits.broken_text", "metadata.cube_sql"),
         ("measure", "visits.escalating", "metadata.cube_sql"),
         ("measure_filter", "visits.escalating", "metadata.filters[1].sql"),
         ("relationship", "bad_join", "join_expression"),
     ]
-    escalating = findings[1]
+    escalating = findings[2]
     assert escalating["object_id"] == str(bad_measure.id)
     assert escalating["workspace_id"] == str(model.workspace_id)
     assert escalating["visible"] is False
@@ -117,4 +124,4 @@ def test_audit_lists_only_stored_sql_that_fails_validation(model):
 
     text = StringIO()
     call_command("audit_semantic_sql", "--workspace-id", str(model.workspace_id), stdout=text)
-    assert "Summary: 4 stored SQL fragment(s) fail validation." in text.getvalue()
+    assert "Summary: 5 stored SQL fragment(s) fail validation." in text.getvalue()
