@@ -231,14 +231,15 @@ async def chat_view(request):
     if lease is None:
         return JsonResponse({"error": THREAD_BUSY_MESSAGE}, status=409)
     try:
-        response = await _start_turn(
-            lease,
-            user=user,
-            workspace=workspace,
-            access=access,
-            thread_id=thread_id,
-            user_content=user_content,
-        )
+        async with lease.kept_alive():
+            response = await _start_turn(
+                lease,
+                user=user,
+                workspace=workspace,
+                access=access,
+                thread_id=thread_id,
+                user_content=user_content,
+            )
     except BaseException:
         await lease.release()
         raise
@@ -340,7 +341,10 @@ async def _start_turn(
         metadata=trace_metadata,
     )
 
+    response = _TurnStreamingResponse(lease)
+
     async def _traced_stream():
+        response.turn_started = True
         # aclosing: nothing else closes the inner stream on disconnect, and its
         # cleanup (stopping the run, saving the partial reply) must finish before
         # the lease is released and another turn can take the thread.
@@ -352,10 +356,29 @@ async def _start_turn(
                     async for chunk in stream:
                         yield chunk
 
-    response = StreamingHttpResponse(
-        _traced_stream(),
-        content_type="text/event-stream; charset=utf-8",
-    )
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
+    response.streaming_content = _traced_stream()
     return response
+
+
+class _TurnStreamingResponse(StreamingHttpResponse):
+    """The turn's SSE response; frees the thread if the server closes it unsent.
+
+    Once the body has started, the stream itself releases the lease after its
+    cleanup, so ``close`` must leave a started turn alone.
+    """
+
+    def __init__(self, lease: TurnLease):
+        super().__init__(content_type="text/event-stream; charset=utf-8")
+        self["Cache-Control"] = "no-cache"
+        self["X-Accel-Buffering"] = "no"
+        self.lease = lease
+        self.turn_started = False
+
+    def close(self):
+        try:
+            if not self.turn_started:
+                self.lease.release_sync()
+        except Exception:
+            logger.warning("Could not release the turn lease of an unsent chat response")
+        finally:
+            super().close()

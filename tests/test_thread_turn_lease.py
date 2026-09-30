@@ -12,14 +12,18 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
-from django.test import AsyncClient
+from django.db import connection
+from django.test import AsyncClient, override_settings
 from django.utils import timezone
+from procrastinate.contrib.django.models import ProcrastinateJob
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat import turn_lease
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.turn_lease import aacquire_turn_lease, atry_acquire_turn_lease
+from apps.chat.views import _TurnStreamingResponse
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
@@ -31,8 +35,11 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.tasks import (
     RESUME_BUSY_MAX_ATTEMPTS,
+    RESUME_TASK_NAME,
     RESUME_THREAD_BUSY_SUMMARY,
     _persist_synthetic_failure_message,
+    _resume_in_flight,
+    reconcile_stale_thread_job,
     resume_thread_after_materialization,
 )
 from tests.tenant_access import ausable_connection
@@ -52,6 +59,11 @@ async def _lease_row(thread_id):
         .values("turn_lease_token", "turn_lease_expires_at")
         .aget()
     )
+
+
+def _fail_unawaited(coro):
+    coro.close()
+    raise RuntimeError("db down")
 
 
 async def _expire(thread_id):
@@ -107,16 +119,55 @@ class TestLease:
 
         assert (await _lease_row(thread.id))["turn_lease_token"] is None
 
-    async def test_a_run_past_its_max_lifetime_stops_renewing_the_lease(self):
-        thread = await _thread("lease-max-lifetime")
+    async def test_a_run_that_loses_its_lease_is_cancelled(self):
+        thread = await _thread("lease-lost")
         lease = await atry_acquire_turn_lease(thread.id)
-        soon = timezone.now() + timedelta(seconds=1)
-        await Thread.objects.filter(id=thread.id).aupdate(turn_lease_expires_at=soon)
+        wrote_after_loss = []
+
+        async def run():
+            async with lease.kept_alive():
+                await _expire(thread.id)
+                await atry_acquire_turn_lease(thread.id)
+                await asyncio.sleep(5)
+                wrote_after_loss.append(True)
 
         with patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05):
-            async with lease.held(max_lifetime=timedelta(seconds=0.01)):
-                await asyncio.sleep(0.2)
-                assert (await _lease_row(thread.id))["turn_lease_expires_at"] == soon
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.create_task(run())
+
+        assert lease.lost
+        assert wrote_after_loss == []
+
+    async def test_a_run_whose_renewals_keep_failing_is_cancelled_after_a_ttl(self):
+        thread = await _thread("lease-renew-fails")
+        lease = await atry_acquire_turn_lease(thread.id)
+
+        async def run():
+            async with lease.kept_alive():
+                await asyncio.sleep(5)
+
+        with (
+            patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05),
+            patch.object(turn_lease, "TURN_LEASE_TTL", timedelta(seconds=0.2)),
+            patch.object(lease, "renew", AsyncMock(side_effect=RuntimeError("db down"))),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await asyncio.create_task(run())
+
+        assert lease.lost
+
+    async def test_a_failed_release_can_be_retried(self):
+        thread = await _thread("lease-release-retry")
+        lease = await atry_acquire_turn_lease(thread.id)
+
+        with (
+            patch.object(turn_lease.asyncio, "shield", side_effect=_fail_unawaited),
+            pytest.raises(RuntimeError),
+        ):
+            await lease.release()
+        await lease.release()
+
+        assert (await _lease_row(thread.id))["turn_lease_token"] is None
 
     async def test_acquire_waits_for_a_release(self):
         thread = await _thread("lease-wait")
@@ -408,3 +459,94 @@ def test_lease_outlives_several_missed_heartbeats():
     assert (
         timedelta(seconds=turn_lease.TURN_LEASE_HEARTBEAT_SECONDS * 3) < turn_lease.TURN_LEASE_TTL
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+class TestUnsentResponse:
+    async def test_closing_an_unsent_response_frees_the_thread(self):
+        thread = await _thread("unsent-close")
+        response = _TurnStreamingResponse(await atry_acquire_turn_lease(thread.id))
+
+        await sync_to_async(response.close)()
+
+        assert (await _lease_row(thread.id))["turn_lease_token"] is None
+
+    async def test_closing_a_started_response_leaves_release_to_the_stream(self):
+        thread = await _thread("started-close")
+        lease = await atry_acquire_turn_lease(thread.id)
+        response = _TurnStreamingResponse(lease)
+        response.turn_started = True
+
+        await sync_to_async(response.close)()
+
+        assert (await _lease_row(thread.id))["turn_lease_token"] == lease.token
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+class TestResumeDeadline:
+    async def test_a_resume_hung_outside_the_ainvoke_timeout_fails_and_frees_the_thread(self):
+        tj = await _resumable_job("resume-hung", 880010)
+
+        async def hang(*_args, **_kwargs):
+            await asyncio.sleep(30)
+
+        persist = AsyncMock()
+        with (
+            override_settings(AGENT_RESUME_TIMEOUT_S=0),
+            patch("apps.workspaces.tasks.RESUME_SETUP_BUDGET_SECONDS", 0.2),
+            patch("apps.workspaces.tasks._build_agent_for_resume", side_effect=hang),
+            patch("apps.workspaces.tasks._persist_synthetic_failure_message", persist),
+        ):
+            result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+        assert result == {"status": "resume_deadline"}
+        await tj.arefresh_from_db()
+        assert tj.state == ThreadJob.State.FAILED
+        assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
+        persist.assert_awaited_once()
+        assert persist.await_args.kwargs == {"holds_turn_lease": True}
+        assert (await _lease_row(tj.thread_id))["turn_lease_token"] is None
+
+
+@pytest.fixture
+def queued_jobs():
+    """procrastinate_jobs is unmanaged, so the transactional flush leaves rows behind."""
+    before = set(ProcrastinateJob.objects.values_list("id", flat=True))
+    yield
+    added = set(ProcrastinateJob.objects.values_list("id", flat=True)) - before
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM procrastinate_jobs WHERE id = ANY(%s)", [list(added)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+class TestReconcilerDuringBackoff:
+    async def test_a_queued_resume_is_seen_as_in_flight(self, queued_jobs):
+        tj = await _resumable_job("reconcile-backoff", 880011)
+        assert not await _resume_in_flight(tj.id)
+
+        await resume_thread_after_materialization.configure(
+            schedule_in={"seconds": 60}
+        ).defer_async(thread_job_id=str(tj.id), busy_attempt=3)
+
+        assert await _resume_in_flight(tj.id)
+
+    async def test_the_reconciler_does_not_restart_a_backing_off_resume(self):
+        tj = await _resumable_job("reconcile-skip", 880012)
+        resume = MagicMock(defer_async=AsyncMock())
+
+        with (
+            patch("apps.workspaces.tasks._procrastinate_job_status", return_value="succeeded"),
+            patch("apps.workspaces.tasks._resume_in_flight", return_value=True),
+            patch("apps.workspaces.tasks.resume_thread_after_materialization", resume),
+        ):
+            action = await reconcile_stale_thread_job(tj)
+
+        assert action is None
+        resume.defer_async.assert_not_awaited()
+
+
+def test_the_in_flight_lookup_names_the_real_task():
+    assert resume_thread_after_materialization.name == RESUME_TASK_NAME

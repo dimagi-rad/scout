@@ -2940,6 +2940,26 @@ _PROCRASTINATE_FAILED_STATUSES = frozenset({"failed", "aborted", "cancelled"})
 _PROCRASTINATE_SUCCEEDED_STATUS = "succeeded"
 
 
+RESUME_TASK_NAME = "apps.workspaces.tasks.resume_thread_after_materialization"
+
+
+async def _resume_in_flight(thread_job_id) -> bool:
+    """True when a resume of this ThreadJob is queued or running, or we can't tell."""
+    try:
+        return await ProcrastinateJob.objects.filter(
+            task_name=RESUME_TASK_NAME,
+            args__thread_job_id=str(thread_job_id),
+            status__in=["todo", "doing"],
+        ).aexists()
+    except Exception:
+        logger.warning(
+            "Could not check for a queued resume of %s; skipping reconcile this tick",
+            thread_job_id,
+            exc_info=True,
+        )
+        return True
+
+
 async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
     """Reconcile one stale active ThreadJob against its procrastinate job.
 
@@ -3026,7 +3046,11 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         )
         return None
     # PENDING job whose materialization SUCCEEDED but was never claimed — safe to
-    # defer a fresh resume; the resume task flips the state.
+    # defer a fresh resume; the resume task flips the state. A resume already
+    # queued or running (e.g. backing off a busy thread) covers it; another would
+    # restart the backoff count and churn the queue on every poll.
+    if await _resume_in_flight(tj.id):
+        return None
     try:
         await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
     except Exception:
@@ -3457,6 +3481,10 @@ def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
         return contextlib.nullcontext()
 
 
+# Bounds how long the synthetic write keeps the thread from the user's chat.
+SYNTHETIC_MESSAGE_TIMEOUT_SECONDS = 120
+
+
 async def _persist_synthetic_failure_message(
     thread_job, text: str, *, holds_turn_lease: bool = False
 ) -> None:
@@ -3488,7 +3516,7 @@ async def _persist_synthetic_failure_message(
                 thread_job.id,
             )
             return
-        async with lease.held(max_lifetime=STALE_JOB_THRESHOLD):
+        async with lease.held(), asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
             await _append_synthetic_message(thread_job, text)
     except Exception:
         logger.warning(
@@ -3767,6 +3795,8 @@ async def _aggregate_materialization_state(
 RESUME_BUSY_RETRY_BASE_SECONDS = 5
 RESUME_BUSY_RETRY_MAX_SECONDS = 60
 RESUME_BUSY_MAX_ATTEMPTS = 20
+# Beyond AGENT_RESUME_TIMEOUT_S: agent build, MCP tool load and the state reads.
+RESUME_SETUP_BUDGET_SECONDS = 120
 RESUME_THREAD_BUSY_SUMMARY = (
     "The data load finished, but the conversation stayed busy, so the follow-up "
     "response could not be posted. Please re-ask your question."
@@ -3804,10 +3834,33 @@ async def resume_thread_after_materialization(
     lease = await atry_acquire_turn_lease(tj.thread_id)
     if lease is None:
         return await _defer_resume_while_thread_busy(tj, busy_attempt)
-    # By STALE_JOB_THRESHOLD the reconciler has failed the job, so a resume hung
-    # outside the ainvoke timeout (agent build, MCP) must stop blocking chat.
-    async with lease.held(max_lifetime=STALE_JOB_THRESHOLD):
-        return await _resume_with_turn_lease(tj, thread_job_id)
+    # The ainvoke has its own timeout, but the agent build and state reads around
+    # it do not; a resume hung there would heartbeat the lease and block the
+    # user's chat until the worker died, so the whole run gets a deadline.
+    deadline = asyncio.timeout(settings.AGENT_RESUME_TIMEOUT_S + RESUME_SETUP_BUDGET_SECONDS)
+    async with lease.held():
+        try:
+            async with deadline:
+                return await _resume_with_turn_lease(tj, thread_job_id)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            return await _fail_resume_past_deadline(tj)
+
+
+async def _fail_resume_past_deadline(tj: ThreadJob) -> dict:
+    logger.error("resume: ThreadJob %s overran its deadline; marking FAILED", tj.id)
+    updated = await ThreadJob.objects.filter(
+        id=tj.id, state__in=[ThreadJob.State.RUNNING, ThreadJob.State.PENDING]
+    ).aupdate(
+        state=ThreadJob.State.FAILED,
+        completed_at=timezone.now(),
+        failure_phase=ThreadJob.FailurePhase.RESUME,
+        error_summary="The agent took too long to respond after materialization. Please retry.",
+    )
+    if updated:
+        await _persist_synthetic_failure_message(tj, RESUME_TIMEOUT_MESSAGE, holds_turn_lease=True)
+    return {"status": "resume_deadline"}
 
 
 async def _defer_resume_while_thread_busy(tj: ThreadJob, busy_attempt: int) -> dict:
@@ -3830,7 +3883,7 @@ async def _defer_resume_while_thread_busy(tj: ThreadJob, busy_attempt: int) -> d
         return {"status": "thread_busy_gave_up"}
     delay = min(RESUME_BUSY_RETRY_BASE_SECONDS * (2**busy_attempt), RESUME_BUSY_RETRY_MAX_SECONDS)
     # The running job holds no queueing lock once doing, so the re-queue can take
-    # it; a resume the reconciler queued meanwhile already covers this one.
+    # it; AlreadyEnqueued means another resume of this job already re-queued.
     try:
         await resume_thread_after_materialization.configure(
             schedule_in={"seconds": delay}, queueing_lock=_resume_lock(str(tj.id))
