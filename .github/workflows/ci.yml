@@ -63,9 +63,10 @@ jobs:
         run: uv run --extra dev ruff format --check .
 
   # Non-blocking: reports the error count without gating merges (#160).
+  # Always exits 0: job-level continue-on-error still posts a failed check, which reads as a
+  # red PR. The count goes to the summary and a warning annotation instead.
   typecheck-python:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -81,7 +82,9 @@ jobs:
             echo
             tail -n 1 pyright.log
           } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          if [ "$status" -ne 0 ]; then
+            echo "::warning title=pyright::$(tail -n 1 pyright.log)"
+          fi
 
   lint-frontend:
     runs-on: ubuntu-latest
