@@ -17,6 +17,7 @@ import {
   type ThreadArtifactSummary,
 } from "./ChatThreadSidePanel"
 import {
+  ChatBusyNotice,
   ChatErrorNotice,
   ChatOverloadNotice,
   ChatStoppedNotice,
@@ -25,16 +26,11 @@ import {
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
 import {
   busyRetryAfter,
-  decideBusyAction,
   decideOverloadAction,
+  isBusyChatError,
   isRetryableErrorPart,
 } from "./overloadRetry"
-import {
-  BUSY_MAX_AUTO_RETRIES,
-  busyRetryDelayMs,
-  busyTracker,
-  fetchWithBusyRetry,
-} from "@/api/busy"
+import { BUSY_MAX_AUTO_RETRIES, busyRetryDelayMs, busyTracker } from "@/api/busy"
 
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -65,6 +61,7 @@ export function ChatPanel() {
   const busyAttemptsRef = useRef(0)
   const busyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [busyToken] = useState(() => Symbol("chat-busy"))
+  const [busyNotice, setBusyNotice] = useState(false)
   const [stoppedNotice, setStoppedNotice] = useState(false)
 
   const {
@@ -110,9 +107,6 @@ export function ChatPanel() {
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: contextRef.current }),
-        // A busy 503 is raised before the agent runs or writes a checkpoint, and
-        // the thread upsert is idempotent, so resending the turn is safe.
-        fetch: (input, init) => fetchWithBusyRetry(() => fetch(input, init), { autoRetry: true }),
       }),
   )
 
@@ -124,28 +118,26 @@ export function ChatPanel() {
       else if (isRetryableErrorPart(part)) hitRetryableRef.current = true
     },
   })
+  const busyError = error !== undefined && isBusyChatError(error)
+
+  const cancelBusyRetry = useCallback(() => {
+    if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
+    busyTimerRef.current = null
+    busyHitRef.current = null
+    busyAttemptsRef.current = 0
+    busyTracker.settle(busyToken)
+  }, [busyToken])
 
   function resetOverloadState() {
     hitRetryableRef.current = false
     retriedRef.current = false
     setOverloadNotice(false)
-    busyHitRef.current = null
-    busyAttemptsRef.current = 0
-    if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
-    busyTimerRef.current = null
-    busyTracker.release(busyToken)
+    setBusyNotice(false)
+    cancelBusyRetry()
   }
 
   // A pending busy retry belongs to this thread; never replay it into another.
-  useEffect(() => {
-    return () => {
-      if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
-      busyTimerRef.current = null
-      busyHitRef.current = null
-      busyAttemptsRef.current = 0
-      busyTracker.release(busyToken)
-    }
-  }, [threadId, busyToken])
+  useEffect(() => cancelBusyRetry, [threadId, cancelBusyRetry])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -289,18 +281,17 @@ export function ChatPanel() {
     const prev = prevRetryStatusRef.current
     prevRetryStatusRef.current = status
     const justFinished =
-      (prev === "streaming" || prev === "submitted") && status === "ready"
+      (prev === "streaming" || prev === "submitted") && (status === "ready" || status === "error")
     if (!justFinished) return
 
-    const busy = busyHitRef.current
+    // Busy arrives either as a stream part or, before streaming starts, as a 503.
+    // The chat view raises it before the agent runs or writes a checkpoint, and the
+    // thread upsert is idempotent, so resending the turn is safe.
+    const busy = busyHitRef.current ?? (busyError ? { retryAfter: null } : null)
     busyHitRef.current = null
     if (busy) {
       hitRetryableRef.current = false
-      const busyAction = decideBusyAction({
-        attempts: busyAttemptsRef.current,
-        maxAttempts: BUSY_MAX_AUTO_RETRIES,
-      })
-      if (busyAction === "retry") {
+      if (busyAttemptsRef.current < BUSY_MAX_AUTO_RETRIES) {
         busyAttemptsRef.current += 1
         busyTracker.startRetry(busyToken)
         busyTimerRef.current = setTimeout(() => {
@@ -310,9 +301,7 @@ export function ChatPanel() {
         }, busyRetryDelayMs(busy.retryAfter, busyAttemptsRef.current))
       } else {
         busyAttemptsRef.current = 0
-        void busyTracker.awaitManualRetry(busyToken).then((decision) => {
-          if (decision === "retry") void regenerate()
-        })
+        setBusyNotice(true)
       }
       return
     }
@@ -330,7 +319,7 @@ export function ChatPanel() {
       retriedRef.current = false
       setOverloadNotice(true)
     }
-  }, [status, regenerate, busyToken])
+  }, [status, regenerate, busyToken, busyError])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -346,6 +335,7 @@ export function ChatPanel() {
 
   function handleStop() {
     setStoppedNotice(true)
+    cancelBusyRetry()
     void stop()
   }
 
@@ -420,8 +410,11 @@ export function ChatPanel() {
           ))}
           {isStreaming && <ChatThinkingIndicator />}
           {stoppedNotice && <ChatStoppedNotice />}
-          {error && <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />}
+          {error && !busyError && (
+            <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />
+          )}
           {overloadNotice && <ChatOverloadNotice onRetry={handleOverloadRetry} />}
+          {busyNotice && <ChatBusyNotice onRetry={handleOverloadRetry} />}
         </div>
 
         {/* Materialization progress banner — always visible when a job is active for this thread */}

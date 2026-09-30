@@ -5,7 +5,12 @@
  * transient `data-chat-status` part (see apps/chat/stream.py) instead of a
  * dead-end error. We auto-retry the turn once, and only surface a message if the
  * retry also fails.
+ *
+ * The same part with reason "busy" means Scout hit a connection limit; ChatPanel
+ * backs off and retries that one up to BUSY_MAX_AUTO_RETRIES times (see api/busy).
  */
+
+import { isBusyBody } from "@/api/busy"
 
 /** What to do after a turn that may have hit a transient overload. */
 export type OverloadAction = "retry" | "notify" | "none"
@@ -46,7 +51,11 @@ export function busyRetryAfter(part: { type?: string; data?: unknown }): number 
   return typeof data.retryAfter === "number" ? data.retryAfter : null
 }
 
-/** After a busy turn: back off and resend a few times, then hand the user a Retry. */
-export function decideBusyAction(args: { attempts: number; maxAttempts: number }): "retry" | "manual" {
-  return args.attempts < args.maxAttempts ? "retry" : "manual"
+/** True for a chat POST answered with the busy 503; useChat's error message is the raw body. */
+export function isBusyChatError(error: Error): boolean {
+  try {
+    return isBusyBody(JSON.parse(error.message))
+  } catch {
+    return false
+  }
 }

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
   busyRetryAfter,
-  decideBusyAction,
   decideOverloadAction,
+  isBusyChatError,
   isRetryableErrorPart,
 } from "./overloadRetry"
 
@@ -60,9 +60,10 @@ describe("busy chat turns", () => {
     expect(busyRetryAfter({ type: "text-delta" })).toBeUndefined()
   })
 
-  it("retries a few times, then hands the user a manual Retry", () => {
-    expect(decideBusyAction({ attempts: 0, maxAttempts: 3 })).toBe("retry")
-    expect(decideBusyAction({ attempts: 2, maxAttempts: 3 })).toBe("retry")
-    expect(decideBusyAction({ attempts: 3, maxAttempts: 3 })).toBe("manual")
+  it("recognises a chat POST answered busy", () => {
+    const body = { error: "busy", code: "CAPACITY_EXHAUSTED", message: "Scout is busy." }
+    expect(isBusyChatError(new Error(JSON.stringify(body)))).toBe(true)
+    expect(isBusyChatError(new Error('{"error": "Thread not found"}'))).toBe(false)
+    expect(isBusyChatError(new Error("Failed to fetch"))).toBe(false)
   })
 })
