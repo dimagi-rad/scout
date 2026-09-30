@@ -42,6 +42,8 @@ export function OnboardingWizard() {
   const [ocs, setOcs] = useState<OAuthProvider | null>(null)
   // Listed only once its OAuth app is configured on this deployment (#719).
   const [commcareEu, setCommcareEu] = useState<OAuthProvider | null>(null)
+  // A deployment may configure only the EU app; the www link would then 404.
+  const [commcareWwwMissing, setCommcareWwwMissing] = useState(false)
   const [providersState, setProvidersState] = useState<"loading" | "loaded" | "failed">(
     "loading",
   )
@@ -52,11 +54,16 @@ export function OnboardingWizard() {
       const data = await api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
       setOcs(data.providers.find((p) => p.id === "ocs") ?? null)
       setCommcareEu(data.providers.find((p) => p.id === "commcare_eu") ?? null)
+      setCommcareWwwMissing(
+        data.providers.some((p) => p.id === "commcare_eu") &&
+          !data.providers.some((p) => p.id === "commcare"),
+      )
       setProvidersState("loaded")
     } catch (err) {
       console.error("Failed to load sign-in options", err)
       setOcs(null)
       setCommcareEu(null)
+      setCommcareWwwMissing(false)
       setProvidersState("failed")
     }
   }, [])
@@ -202,16 +209,18 @@ export function OnboardingWizard() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <Button
-            className="w-full"
-            variant="outline"
-            data-testid="onboarding-oauth"
-            asChild
-          >
-            <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>
-              {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
-            </a>
-          </Button>
+          {!commcareWwwMissing && (
+            <Button
+              className="w-full"
+              variant="outline"
+              data-testid="onboarding-oauth"
+              asChild
+            >
+              <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>
+                {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
+              </a>
+            </Button>
+          )}
           {commcareEu && (
             <Button
               className="w-full"

@@ -52,6 +52,18 @@ describe("OnboardingWizard", () => {
     expect(link.textContent).toBe("Connect with CommCare HQ (EU)")
   })
 
+  it("drops the www sign-in on a deployment that configured only EU", async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      providers: [
+        { id: "commcare_eu", name: "CommCare HQ (EU)", login_url: "/accounts/commcare_eu/login/" },
+      ],
+    })
+    render(<OnboardingWizard />)
+
+    await screen.findByTestId("onboarding-oauth-commcare-eu")
+    expect(screen.queryByTestId("onboarding-oauth")).toBeNull()
+  })
+
   it("hides EU CommCare HQ sign-in when it is not configured", async () => {
     vi.mocked(api.get).mockResolvedValue(providers(null))
     render(<OnboardingWizard />)
