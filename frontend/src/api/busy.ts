@@ -3,22 +3,22 @@
  * connection limit was reached; see apps/common/capacity.py).
  *
  * The backend answers with HTTP 503, a `Retry-After` header and
- * `{"error": "busy"}`, or mid-chat with a `retryable-error` part whose reason is
- * "busy". Either way the user sees one calm notice (BusyNotice) while a few
- * retries back off, and then a manual Retry instead of an error.
+ * `{"error": "busy", "message": ...}`, or mid-chat with a `retryable-error` part
+ * whose reason is "busy". Reads back off and retry a few times while BusyNotice
+ * says "retrying"; if Scout is still busy after that, the request fails with the
+ * friendly busy message and BusyNotice offers a manual Retry.
  */
 
 export const BUSY_MAX_AUTO_RETRIES = 3
+export const BUSY_MESSAGE = "Scout is busy right now. Please try again in a few seconds."
 const BASE_DELAY_MS = 1000
 const MAX_DELAY_MS = 30_000
-
-export type ManualDecision = "retry" | "dismiss"
 
 export interface BusySnapshot {
   /** Requests waiting out a backoff before their next automatic try. */
   retrying: number
-  /** Requests that gave up retrying and wait for the user's Retry or Dismiss. */
-  waiting: number
+  /** A request gave up while Scout was busy, and nothing has succeeded since. */
+  stillBusy: boolean
 }
 
 export function isBusyBody(body: unknown): boolean {
@@ -29,33 +29,34 @@ export function isBusyBody(body: unknown): boolean {
   )
 }
 
-/** Honour the server's `Retry-After` (seconds); otherwise back off exponentially. */
-export function busyRetryDelayMs(retryAfter: string | number | null | undefined, attempt: number): number {
+/**
+ * Honour the server's `Retry-After` (seconds); otherwise back off exponentially.
+ * Jitter spreads out clients that were all turned away in the same instant.
+ */
+export function busyRetryDelayMs(
+  retryAfter: string | number | null | undefined,
+  attempt: number,
+  random: () => number = Math.random,
+): number {
   const seconds = typeof retryAfter === "number" ? retryAfter : Number.parseFloat(retryAfter ?? "")
-  const delay = Number.isFinite(seconds) && seconds >= 0
+  const base = Number.isFinite(seconds) && seconds >= 0
     ? seconds * 1000
     : BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)
-  return Math.min(delay, MAX_DELAY_MS)
+  return Math.min(base * (0.8 + random() * 0.4), MAX_DELAY_MS)
 }
 
 type Listener = () => void
 
 export function createBusyTracker() {
   const retrying = new Set<symbol>()
-  const waiters = new Map<symbol, (decision: ManualDecision) => void>()
   const listeners = new Set<Listener>()
-  let snapshot: BusySnapshot = { retrying: 0, waiting: 0 }
+  let stillBusy = false
+  let snapshot: BusySnapshot = { retrying: 0, stillBusy: false }
 
   function publish() {
-    snapshot = { retrying: retrying.size, waiting: waiters.size }
+    if (snapshot.retrying === retrying.size && snapshot.stillBusy === stillBusy) return
+    snapshot = { retrying: retrying.size, stillBusy }
     listeners.forEach((listener) => listener())
-  }
-
-  function resolveAll(decision: ManualDecision) {
-    const pending = [...waiters.values()]
-    waiters.clear()
-    publish()
-    pending.forEach((resolve) => resolve(decision))
   }
 
   return {
@@ -71,26 +72,17 @@ export function createBusyTracker() {
       publish()
     },
     settle(token: symbol) {
-      if (retrying.delete(token)) publish()
-    },
-    /** Park `token` until the user chooses; its backoff, if any, is over. */
-    awaitManualRetry(token: symbol): Promise<ManualDecision> {
-      retrying.delete(token)
-      return new Promise((resolve) => {
-        waiters.set(token, resolve)
-        publish()
-      })
-    },
-    /** Drop `token` without asking the user, e.g. when its chat is closed. */
-    release(token: symbol) {
-      const resolve = waiters.get(token)
-      waiters.delete(token)
       retrying.delete(token)
       publish()
-      resolve?.("dismiss")
     },
-    retryAll: () => resolveAll("retry"),
-    dismissAll: () => resolveAll("dismiss"),
+    gaveUp() {
+      stillBusy = true
+      publish()
+    },
+    recovered() {
+      stillBusy = false
+      publish()
+    },
   }
 }
 
@@ -98,37 +90,58 @@ export type BusyTracker = ReturnType<typeof createBusyTracker>
 
 export const busyTracker = createBusyTracker()
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason)
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
 
-async function busyBody(res: Response): Promise<boolean> {
+export async function isBusyResponse(res: Response): Promise<boolean> {
   if (res.status !== 503) return false
   const body: unknown = await res.clone().json().catch(() => undefined)
   return isBusyBody(body)
 }
 
 /**
- * Run `send` and ride out "busy" answers: back off and retry automatically when
- * `autoRetry` is set, then park the request until the user picks Retry or
- * Dismiss. A dismissed request resolves with the busy response for the caller to
- * handle as an ordinary failure.
+ * Run `send`, backing off and retrying up to BUSY_MAX_AUTO_RETRIES times while
+ * the answer is "busy" (only when `autoRetry` is set). Returns the last response
+ * either way, so the caller's normal error handling sees a busy failure.
  */
 export async function fetchWithBusyRetry(
   send: () => Promise<Response>,
-  { autoRetry, tracker = busyTracker }: { autoRetry: boolean; tracker?: BusyTracker },
+  {
+    autoRetry,
+    signal,
+    tracker = busyTracker,
+  }: { autoRetry: boolean; signal?: AbortSignal | null; tracker?: BusyTracker },
 ): Promise<Response> {
   const token = Symbol("busy-request")
-  let autoRetries = autoRetry ? 0 : BUSY_MAX_AUTO_RETRIES
+  const maxRetries = autoRetry ? BUSY_MAX_AUTO_RETRIES : 0
   try {
-    for (;;) {
+    for (let retries = 0; ; retries += 1) {
       const res = await send()
-      if (!(await busyBody(res))) return res
-      if (autoRetries < BUSY_MAX_AUTO_RETRIES) {
-        autoRetries += 1
-        tracker.startRetry(token)
-        await sleep(busyRetryDelayMs(res.headers.get("Retry-After"), autoRetries))
-        continue
+      if (!(await isBusyResponse(res))) {
+        if (res.ok) tracker.recovered()
+        return res
       }
-      if ((await tracker.awaitManualRetry(token)) === "dismiss") return res
+      if (retries >= maxRetries) {
+        tracker.gaveUp()
+        return res
+      }
+      tracker.startRetry(token)
+      await sleep(busyRetryDelayMs(res.headers.get("Retry-After"), retries + 1), signal)
     }
   } finally {
     tracker.settle(token)

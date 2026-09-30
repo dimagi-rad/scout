@@ -3,7 +3,7 @@
  */
 
 import { BASE_PATH } from "@/config"
-import { fetchWithBusyRetry, isBusyBody } from "./busy"
+import { BUSY_MESSAGE, fetchWithBusyRetry, isBusyBody } from "./busy"
 
 export function getCsrfToken(): string {
   const match = document.cookie.match(/(?:^|;\s*)csrftoken_scout=([^;]+)/)
@@ -30,10 +30,10 @@ async function request<T>(
 
   const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
   // A busy 503 can follow a write that already landed, so only reads repeat on
-  // their own; a mutation waits for the user's explicit Retry.
+  // their own.
   const res = await fetchWithBusyRetry(
     () => fetch(prefixedUrl, { ...fetchOptions, headers, credentials: "include" }),
-    { autoRetry: method === "GET" || method === "HEAD" },
+    { autoRetry: method === "GET" || method === "HEAD", signal: fetchOptions.signal },
   )
 
   if (!res.ok) {
@@ -74,7 +74,7 @@ async function responseError(res: Response): Promise<ApiError> {
   const body: unknown = await res.json().catch(() => undefined)
   const record = asRecord(body)
   // A busy body's `error` is the machine code "busy"; its prose is `message`.
-  const message = (isBusyBody(body) ? messageText(record?.message) : undefined)
+  const message = (isBusyBody(body) ? messageText(record?.message) ?? BUSY_MESSAGE : undefined)
     ?? errorMessage(record?.detail)
     ?? errorMessage(record?.error)
     ?? errorMessage(body)

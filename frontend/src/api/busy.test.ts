@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api, ApiError } from "./client"
 import {
   BUSY_MAX_AUTO_RETRIES,
+  BUSY_MESSAGE,
   busyRetryDelayMs,
   busyTracker,
   createBusyTracker,
@@ -10,10 +11,11 @@ import {
   isBusyBody,
 } from "./busy"
 
-const BUSY = { error: "busy", message: "Scout is busy right now. Please try again in a few seconds." }
+const BUSY = { error: "busy", code: "CAPACITY_EXHAUSTED", message: BUSY_MESSAGE }
+const noJitter = () => 0.5
 
-function busyResponse(retryAfter: string | null = "5") {
-  return new Response(JSON.stringify(BUSY), {
+function busyResponse(retryAfter: string | null = "5", body: unknown = BUSY) {
+  return new Response(JSON.stringify(body), {
     status: 503,
     headers: {
       "Content-Type": "application/json",
@@ -29,10 +31,14 @@ function okResponse(body: unknown = { ok: true }) {
   })
 }
 
-beforeEach(() => vi.useFakeTimers())
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.spyOn(Math, "random").mockReturnValue(0.5)
+})
 afterEach(() => {
-  busyTracker.dismissAll()
+  busyTracker.recovered()
   vi.useRealTimers()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
@@ -44,16 +50,21 @@ describe("busy answers", () => {
   })
 
   it("honours Retry-After and otherwise backs off exponentially", () => {
-    expect(busyRetryDelayMs("5", 1)).toBe(5000)
-    expect(busyRetryDelayMs(2, 3)).toBe(2000)
-    expect(busyRetryDelayMs(null, 1)).toBe(1000)
-    expect(busyRetryDelayMs(null, 3)).toBe(4000)
-    expect(busyRetryDelayMs("3600", 1)).toBe(30_000)
+    expect(busyRetryDelayMs("5", 1, noJitter)).toBe(5000)
+    expect(busyRetryDelayMs(2, 3, noJitter)).toBe(2000)
+    expect(busyRetryDelayMs(null, 1, noJitter)).toBe(1000)
+    expect(busyRetryDelayMs(null, 3, noJitter)).toBe(4000)
+    expect(busyRetryDelayMs("3600", 1, noJitter)).toBe(30_000)
+  })
+
+  it("spreads clients that were turned away together", () => {
+    expect(busyRetryDelayMs("5", 1, () => 0)).toBeCloseTo(4000)
+    expect(busyRetryDelayMs("5", 1, () => 1)).toBeCloseTo(6000)
   })
 })
 
 describe("fetchWithBusyRetry", () => {
-  it("retries after the server's Retry-After and shows a retrying notice meanwhile", async () => {
+  it("retries after the server's Retry-After and says so meanwhile", async () => {
     const tracker = createBusyTracker()
     const send = vi.fn()
       .mockResolvedValueOnce(busyResponse("5"))
@@ -61,47 +72,58 @@ describe("fetchWithBusyRetry", () => {
 
     const pending = fetchWithBusyRetry(send, { autoRetry: true, tracker })
     await vi.advanceTimersByTimeAsync(0)
-    expect(tracker.getSnapshot()).toEqual({ retrying: 1, waiting: 0 })
+    expect(tracker.getSnapshot()).toEqual({ retrying: 1, stillBusy: false })
 
     await vi.advanceTimersByTimeAsync(4999)
     expect(send).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1)
 
-    const res = await pending
-    expect(res.status).toBe(200)
+    expect((await pending).status).toBe(200)
     expect(send).toHaveBeenCalledTimes(2)
-    expect(tracker.getSnapshot()).toEqual({ retrying: 0, waiting: 0 })
+    expect(tracker.getSnapshot()).toEqual({ retrying: 0, stillBusy: false })
   })
 
-  it("stops after a few automatic tries and waits for a manual Retry", async () => {
+  it("gives up after a few automatic tries and hands back the busy answer", async () => {
     const tracker = createBusyTracker()
     const send = vi.fn().mockResolvedValue(busyResponse("1"))
 
     const pending = fetchWithBusyRetry(send, { autoRetry: true, tracker })
     await vi.advanceTimersByTimeAsync(60_000)
 
+    expect((await pending).status).toBe(503)
     expect(send).toHaveBeenCalledTimes(BUSY_MAX_AUTO_RETRIES + 1)
-    expect(tracker.getSnapshot()).toEqual({ retrying: 0, waiting: 1 })
-
-    send.mockResolvedValueOnce(okResponse())
-    tracker.retryAll()
-    const res = await pending
-    expect(res.status).toBe(200)
-    expect(send).toHaveBeenCalledTimes(BUSY_MAX_AUTO_RETRIES + 2)
-    expect(tracker.getSnapshot()).toEqual({ retrying: 0, waiting: 0 })
+    expect(tracker.getSnapshot()).toEqual({ retrying: 0, stillBusy: true })
   })
 
   it("never repeats a mutation on its own", async () => {
     const tracker = createBusyTracker()
     const send = vi.fn().mockResolvedValue(busyResponse())
 
-    const pending = fetchWithBusyRetry(send, { autoRetry: false, tracker })
-    await vi.advanceTimersByTimeAsync(60_000)
+    expect((await fetchWithBusyRetry(send, { autoRetry: false, tracker })).status).toBe(503)
     expect(send).toHaveBeenCalledTimes(1)
-    expect(tracker.getSnapshot()).toEqual({ retrying: 0, waiting: 1 })
+    expect(tracker.getSnapshot().stillBusy).toBe(true)
+  })
 
-    tracker.dismissAll()
-    expect((await pending).status).toBe(503)
+  it("stops backing off when the caller aborts", async () => {
+    const tracker = createBusyTracker()
+    const controller = new AbortController()
+    const send = vi.fn().mockResolvedValue(busyResponse("5"))
+
+    const pending = fetchWithBusyRetry(send, { autoRetry: true, signal: controller.signal, tracker })
+    const outcome = pending.catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+
+    expect(await outcome).toMatchObject({ name: "AbortError" })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(tracker.getSnapshot()).toEqual({ retrying: 0, stillBusy: false })
+  })
+
+  it("clears the still-busy notice once a request succeeds again", async () => {
+    const tracker = createBusyTracker()
+    tracker.gaveUp()
+    await fetchWithBusyRetry(vi.fn().mockResolvedValue(okResponse()), { autoRetry: true, tracker })
+    expect(tracker.getSnapshot().stillBusy).toBe(false)
   })
 
   it("passes other failures straight through", async () => {
@@ -111,6 +133,7 @@ describe("fetchWithBusyRetry", () => {
 
     expect(await fetchWithBusyRetry(send, { autoRetry: true, tracker })).toBe(unavailable)
     expect(send).toHaveBeenCalledTimes(1)
+    expect(tracker.getSnapshot().stillBusy).toBe(false)
   })
 })
 
@@ -122,21 +145,23 @@ describe("api client", () => {
     vi.stubGlobal("fetch", fetchMock)
 
     const pending = api.get<{ value: number }>("/api/things/")
-    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(1200)
     await expect(pending).resolves.toEqual({ value: 42 })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it("reports a dismissed busy mutation as a calm ApiError", async () => {
+  it("fails a busy mutation at once with the friendly message", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(busyResponse()))
 
-    const pending = api.post("/api/things/", { a: 1 })
-    await vi.advanceTimersByTimeAsync(0)
-    expect(busyTracker.getSnapshot().waiting).toBe(1)
-    busyTracker.dismissAll()
-
-    const error = await pending.catch((e: unknown) => e)
+    const error = await api.post("/api/things/", { a: 1 }).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(ApiError)
-    expect(error).toMatchObject({ status: 503, message: BUSY.message })
+    expect(error).toMatchObject({ status: 503, message: BUSY_MESSAGE })
+  })
+
+  it("never shows the machine code when a busy body has no message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(busyResponse(null, { error: "busy" })))
+
+    const error = await api.post("/api/things/", {}).catch((e: unknown) => e)
+    expect(error).toMatchObject({ status: 503, message: BUSY_MESSAGE })
   })
 })

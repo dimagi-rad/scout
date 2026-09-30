@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
@@ -23,31 +23,32 @@ describe("BusyNotice", () => {
 
   it("offers a manual Retry once automatic retries are spent", async () => {
     const tracker = createBusyTracker()
-    render(<BusyNotice tracker={tracker} />)
+    const onRetry = vi.fn()
+    render(<BusyNotice tracker={tracker} onRetry={onRetry} />)
 
-    let decision: Promise<string> = Promise.resolve("")
-    act(() => {
-      decision = tracker.awaitManualRetry(Symbol("request"))
-    })
+    act(() => tracker.gaveUp())
     expect(screen.getByTestId("busy-notice-message")).toHaveTextContent("Scout is still busy")
 
     await userEvent.click(screen.getByTestId("busy-notice-retry"))
-
-    await expect(decision).resolves.toBe("retry")
-    expect(screen.queryByTestId("busy-notice")).toBeNull()
+    expect(onRetry).toHaveBeenCalledOnce()
   })
 
   it("lets the user dismiss the notice", async () => {
     const tracker = createBusyTracker()
-    render(<BusyNotice tracker={tracker} />)
+    render(<BusyNotice tracker={tracker} onRetry={vi.fn()} />)
 
-    let decision: Promise<string> = Promise.resolve("")
-    act(() => {
-      decision = tracker.awaitManualRetry(Symbol("request"))
-    })
+    act(() => tracker.gaveUp())
     await userEvent.click(screen.getByTestId("busy-notice-dismiss"))
 
-    await expect(decision).resolves.toBe("dismiss")
     expect(screen.queryByTestId("busy-notice")).toBeNull()
+  })
+
+  it("stays reachable above modal overlays and the offline bar", () => {
+    const tracker = createBusyTracker()
+    render(<BusyNotice tracker={tracker} />)
+    act(() => tracker.gaveUp())
+
+    expect(screen.getByTestId("busy-notice-region").className).toContain("z-[60]")
+    expect(screen.getByTestId("busy-notice").className).toContain("pointer-events-auto")
   })
 })
