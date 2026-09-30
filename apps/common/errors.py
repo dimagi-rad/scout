@@ -78,6 +78,17 @@ class ExpectedStateError(Exception):
     """
 
 
+class DataNotLoaded(ExpectedStateError, ValueError):
+    """No ACTIVE schema serves the data a caller wants to read.
+
+    Expected: a workspace before its first load, or after its data expired. The
+    caller surfaces the code (the agent prompt and query errors carry the load
+    guidance). A ValueError so existing validation-failure paths still catch it.
+    """
+
+    code = ErrorCode.DATA_NOT_LOADED
+
+
 class TokenRefreshError(Exception):
     """OAuth refresh failed; unclassified defects remain reportable."""
 

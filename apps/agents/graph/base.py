@@ -166,7 +166,14 @@ PROMPT_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 # search: substring-matching ``'"code": "NOT_FOUND"'`` only worked under
 # FastMCP's indent=2 and would silently break under compact separators (06#1).
 # Single source of truth shared with base_system.py's "When the Schema is Broken".
-ESCALATION_ERROR_CODES = frozenset({"NOT_FOUND", "VALIDATION_ERROR"})
+ESCALATION_ERROR_CODES = frozenset(
+    {
+        ErrorCode.NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.DATA_NOT_LOADED,
+        ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
+    }
+)
 ESCALATION_TRIGGER_COUNT = 3
 ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
 

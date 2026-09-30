@@ -955,7 +955,7 @@ async def semantic_catalog(workspace_id: str = "", user_id: str = "", thread_id:
             tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
         except SemanticCatalogUnavailable as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(e.code, str(e))
             return tc["result"]
 
         tc["result"] = success_response(
@@ -1004,7 +1004,7 @@ async def describe_dataset(
             tc["result"] = error_response(NOT_FOUND, f"Dataset '{dataset_name}' not found")
             return tc["result"]
         except SemanticCatalogUnavailable as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(e.code, str(e))
             return tc["result"]
 
         tc["result"] = success_response(

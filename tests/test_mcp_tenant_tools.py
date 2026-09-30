@@ -636,7 +636,7 @@ class TestLoadTenantContext:
         assert "search_path=dimagi" in ctx.connection_params["options"]
 
     async def test_raises_when_no_active_schema(self, tenant_membership):
-        with pytest.raises(ValueError, match="No active schema"):
+        with pytest.raises(ValueError, match="No active data schema"):
             await load_tenant_context("dimagi", "commcare")
 
     async def test_raises_when_no_managed_db_url(self, tenant_membership):

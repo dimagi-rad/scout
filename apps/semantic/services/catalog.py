@@ -9,6 +9,7 @@ from typing import Any
 from asgiref.sync import async_to_sync
 from django.db import transaction
 
+from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import view_name
 from apps.knowledge.models import TableKnowledge
 from apps.semantic.models import (
@@ -62,9 +63,15 @@ from mcp_server.source_identity import source_identity, unverified_source_identi
 class SemanticCatalogUnavailable(Exception):
     """Raised when no queryable schema is available for a workspace."""
 
-    def __init__(self, message: str, schema_status: str = "unavailable") -> None:
+    def __init__(
+        self,
+        message: str,
+        schema_status: str = "unavailable",
+        code: ErrorCode = ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
+    ) -> None:
         super().__init__(message)
         self.schema_status = schema_status
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -348,11 +355,14 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
         # pipeline: this model gets cached and promoted to ACTIVE, so a wrong
         # guess outlives the request. Reported as its own message because
         # "refresh workspace data" cannot fix a missing pipeline (#155).
-        raise SemanticCatalogUnavailable(str(exc), schema_status="failed") from exc
+        raise SemanticCatalogUnavailable(
+            str(exc), schema_status="failed", code=ErrorCode.PIPELINE_UNRESOLVED
+        ) from exc
     except ViewSourcesError as exc:
         raise SemanticCatalogUnavailable(
             "The workspace view source map is invalid. Rebuild the query layer.",
             schema_status="failed",
+            code=ErrorCode.SCHEMA_BUILD_FAILED,
         ) from exc
     except Exception as exc:
         schema_status = workspace_schema_statuses([workspace.id])[workspace.id]
@@ -362,6 +372,7 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
         raise SemanticCatalogUnavailable(
             "Data unavailable. Please refresh workspace data.",
             schema_status=schema_status,
+            code=ErrorCode.DATA_NOT_LOADED,
         ) from exc
 
 
@@ -482,7 +493,7 @@ def _active_semantic_models(workspace):
 
 def no_active_semantic_model() -> SemanticCatalogUnavailable:
     return SemanticCatalogUnavailable(
-        "No active semantic model is available. Refresh workspace data.",
+        "No active semantic model is available.",
         schema_status="unavailable",
     )
 

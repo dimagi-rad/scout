@@ -79,7 +79,7 @@ async def run_semantic_query(
         return await query_readiness_error(
             workspace,
             query_spec,
-            VALIDATION_ERROR,
+            exc.code,
             str(exc),
             category="data_unavailable",
             readiness=readiness,
@@ -92,7 +92,7 @@ async def run_semantic_query(
         return await query_readiness_error(
             workspace,
             query_spec,
-            VALIDATION_ERROR,
+            exc.code,
             str(exc),
             category="data_unavailable",
             readiness=readiness,
@@ -108,7 +108,7 @@ async def run_semantic_query(
         return await query_readiness_error(
             workspace,
             query_spec,
-            VALIDATION_ERROR,
+            getattr(exc, "code", VALIDATION_ERROR),
             str(exc),
             category="data_unavailable",
             readiness=readiness,
