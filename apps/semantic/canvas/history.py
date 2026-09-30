@@ -10,6 +10,7 @@ lose that edit.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.contrib.auth import get_user_model
@@ -27,6 +28,8 @@ from apps.semantic.models import (
     SemanticRelationship,
 )
 from apps.semantic.services.custom_datasets import CustomDatasetError, compile_custom_dataset_sql
+
+logger = logging.getLogger(__name__)
 
 DATASET = "dataset"
 FIELD = "field"
@@ -75,14 +78,9 @@ SUMMARY_MAX_ITEMS = 3
 VERBS = {CREATE: "Created", UPDATE: "Edited", DELETE: "Deleted"}
 
 
-class RevisionUndoError(Exception):
-    def __init__(self, code: str, message: str, conflicts: list[dict] | None = None) -> None:
-        super().__init__(message)
-        self.code = code
-        self.conflicts = conflicts or []
-
-    def as_dict(self) -> dict[str, Any]:
-        return {"code": self.code, "message": str(self), "conflicts": self.conflicts}
+def refused(code: str, message: str, conflicts: list[dict] | None = None) -> dict[str, Any]:
+    """An undo that wrote nothing; a plain result, so no exception text reaches a response."""
+    return {"refused": {"code": code, "message": message, "conflicts": conflicts or []}}
 
 
 def snapshot_field(field: SemanticField) -> dict[str, Any]:
@@ -240,7 +238,7 @@ def list_revisions(workspace, limit: int = 50) -> list[dict[str, Any]]:
 
 
 def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str, Any]:
-    """Reverse one revision atomically; raises RevisionUndoError, writing nothing."""
+    """Reverse one revision atomically, or return ``refused(...)`` having written nothing."""
     with transaction.atomic():
         revision = (
             SemanticModelRevision.objects.select_for_update()
@@ -248,10 +246,14 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
             .first()
         )
         if revision is None:
-            raise RevisionUndoError("NOT_FOUND", "No such data model revision in this workspace.")
+            return refused("NOT_FOUND", "No such data model revision in this workspace.")
         if SemanticModelRevision.objects.filter(reverts=revision).exists():
-            raise RevisionUndoError("ALREADY_UNDONE", "This revision has already been undone.")
+            return refused("ALREADY_UNDONE", "This revision has already been undone.")
         model = _lock_model(workspace)
+        if model is None:
+            return refused(
+                "CATALOG_BUSY", "The data model is being refreshed. Try the undo again shortly."
+            )
         entries = list(revision.changes or [])
         restoring = {
             entry["object_uuid"]
@@ -266,19 +268,15 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
             is not None
         ]
         if conflicts:
-            raise RevisionUndoError(
+            return refused(
                 "CONFLICT",
                 "Undoing this revision would overwrite or break a later change. Undo the later "
                 "revision first, or edit the objects directly.",
                 conflicts,
             )
-        try:
-            with transaction.atomic():
-                undo_entries = [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
-        except IntegrityError as exc:
-            raise RevisionUndoError(
-                "CONFLICT", "The restored objects collide with the current data model."
-            ) from exc
+        undo_entries = _apply_undo(workspace, model, entries)
+        if undo_entries is None:
+            return refused("CONFLICT", "The restored objects collide with the current data model.")
         removed = [entry["object_uuid"] for entry in undo_entries if entry["after"] is None]
         # A settled canvas row over a now-missing object would read as a conflict.
         SemanticCanvasChange.objects.filter(
@@ -300,6 +298,16 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
         "undone": serialize_revision(revision, undone=True),
         "revision": serialize_revision(undo, undone=False),
     }
+
+
+def _apply_undo(workspace, model, entries) -> list[dict[str, Any]] | None:
+    """None when a write hit a uniqueness race the checks could not see; rolled back."""
+    try:
+        with transaction.atomic():
+            return [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
+    except IntegrityError:
+        logger.warning("Undo of a data model revision collided in workspace %s", workspace.id)
+        return None
 
 
 def _model_class(object_type: str):
@@ -325,16 +333,17 @@ def _conflict(entry: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
-def _lock_model(workspace) -> SemanticModel:
-    # Same no-wait lock a custom-dataset commit takes, so an undo never races a
-    # catalog refresh that re-syncs the custom datasets it adds or removes.
+def _lock_model(workspace) -> SemanticModel | None:
+    """None while a catalog refresh holds the model.
+
+    Same no-wait lock a custom-dataset commit takes, so an undo never races a
+    refresh that re-syncs the custom datasets it adds or removes.
+    """
     try:
         return SemanticModel.objects.select_for_update(nowait=True).get(workspace=workspace)
     except OperationalError as exc:
         if getattr(exc.__cause__, "sqlstate", None) == "55P03":
-            raise RevisionUndoError(
-                "CATALOG_BUSY", "The data model is being refreshed. Try the undo again shortly."
-            ) from exc
+            return None
         raise
 
 
@@ -421,8 +430,8 @@ def _restore_conflict(workspace, model, entry, before, restoring: set[str]):
         if before.get("custom_dataset"):
             try:
                 _compiled_custom_sql(model, before["custom_dataset"])
-            except CustomDatasetError as exc:
-                return _conflict(entry, f"Its SQL no longer works on the current data: {exc}")
+            except CustomDatasetError:
+                return _conflict(entry, "Its SQL no longer works on the current data.")
         for relationship in before.get("relationships", []):
             if problem := _relationship_restore_problem(workspace, relationship, restoring):
                 return _conflict(entry, problem)

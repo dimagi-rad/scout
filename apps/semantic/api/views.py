@@ -7,7 +7,6 @@ from rest_framework.views import APIView
 
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
-    RevisionUndoError,
     apply_operations,
     canvas_projection,
     commit_canvas,
@@ -176,11 +175,12 @@ class DataModelRevisionUndoView(APIView):
                 {"error": "Read-write or manage role required to undo data model changes."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        try:
-            result = undo_revision(workspace, revision_id, request.user)
-        except RevisionUndoError as exc:
+        result = undo_revision(workspace, revision_id, request.user)
+        if refusal := result.get("refused"):
             code = (
-                status.HTTP_404_NOT_FOUND if exc.code == "NOT_FOUND" else status.HTTP_409_CONFLICT
+                status.HTTP_404_NOT_FOUND
+                if refusal["code"] == "NOT_FOUND"
+                else status.HTTP_409_CONFLICT
             )
-            return Response({**exc.as_dict(), "error": str(exc)}, status=code)
+            return Response({**refusal, "error": refusal["message"]}, status=code)
         return Response(result)

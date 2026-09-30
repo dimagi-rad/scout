@@ -151,9 +151,11 @@ def rebuild_cube_schema(workspace, model) -> dict[str, Any]:
 def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str, Any]:
     """Undo one data model revision, then promote Cube as a commit does.
 
-    Raises ``history.RevisionUndoError``, having written nothing, when it cannot be undone.
+    A refused undo (``{"refused": ...}``) wrote nothing, so Cube is left alone.
     """
     result = history.undo_revision(workspace, revision_id, user=user, thread_id=thread_id)
+    if "refused" in result:
+        return result
     model = SemanticModel.objects.get(workspace=workspace)
     return {**result, "cube_schema": rebuild_cube_schema(workspace, model)}
 

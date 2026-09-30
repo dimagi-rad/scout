@@ -8,7 +8,6 @@ from apps.agents.tools.canvas_tool import create_canvas_tools, destructive_delet
 from apps.artifacts.models import Artifact
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
-    RevisionUndoError,
     apply_operations,
     commit_canvas,
     list_revisions,
@@ -222,10 +221,9 @@ def test_undo_refuses_to_overwrite_a_later_edit(canvas, semantic_model, workspac
     _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "Two"}])
     second = SemanticModelRevision.objects.exclude(id=first.id).get()
 
-    with pytest.raises(RevisionUndoError) as exc_info:
-        undo_revision(workspace, first.id, user)
+    refusal = undo_revision(workspace, first.id, user)["refused"]
 
-    assert exc_info.value.code == "CONFLICT"
+    assert refusal["code"] == "CONFLICT"
     assert semantic_model.datasets.get(name="raw_visits").label == "Two"
     assert SemanticModelRevision.objects.count() == 2
 
@@ -245,10 +243,9 @@ def test_undo_of_a_create_refuses_after_a_later_field_edit(
         [{"op": "set", "target": "field/visit_stats.visit_count/label", "value": "Visits"}],
     )
 
-    with pytest.raises(RevisionUndoError) as exc_info:
-        undo_revision(workspace, created.id, user)
+    refusal = undo_revision(workspace, created.id, user)["refused"]
 
-    assert exc_info.value.code == "CONFLICT"
+    assert refusal["code"] == "CONFLICT"
     assert semantic_model.datasets.filter(name="visit_stats").exists()
 
 
@@ -291,11 +288,10 @@ def test_undo_refuses_to_remove_a_field_another_field_uses(canvas, semantic_mode
         ],
     )
 
-    with pytest.raises(RevisionUndoError) as exc_info:
-        undo_revision(workspace, first.id, user)
+    refusal = undo_revision(workspace, first.id, user)["refused"]
 
-    assert exc_info.value.code == "CONFLICT"
-    assert "raw_visits.avg_amount" in exc_info.value.conflicts[0]["message"]
+    assert refusal["code"] == "CONFLICT"
+    assert "raw_visits.avg_amount" in refusal["conflicts"][0]["message"]
     assert (
         semantic_model.datasets.get(name="raw_visits").fields.filter(name="total_amount").exists()
     )
@@ -309,10 +305,9 @@ def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(
     deleted = SemanticModelRevision.objects.order_by("-created_at").first()
     SemanticDataset.objects.filter(name="raw_visits").update(is_visible=False)
 
-    with pytest.raises(RevisionUndoError) as exc_info:
-        undo_revision(workspace, deleted.id, user)
+    refusal = undo_revision(workspace, deleted.id, user)["refused"]
 
-    assert "SQL no longer works" in exc_info.value.conflicts[0]["message"]
+    assert "SQL no longer works" in refusal["conflicts"][0]["message"]
     assert not SemanticDataset.objects.filter(name="visit_stats").exists()
 
 
@@ -321,10 +316,9 @@ def test_undo_twice_is_refused(canvas, semantic_model, workspace, user):
     revision = SemanticModelRevision.objects.get()
     undo_revision(workspace, revision.id, user)
 
-    with pytest.raises(RevisionUndoError) as exc_info:
-        undo_revision(workspace, revision.id, user)
+    refusal = undo_revision(workspace, revision.id, user)["refused"]
 
-    assert exc_info.value.code == "ALREADY_UNDONE"
+    assert refusal["code"] == "ALREADY_UNDONE"
 
 
 def test_undo_is_scoped_to_the_workspace(canvas, semantic_model, user):
@@ -332,10 +326,9 @@ def test_undo_is_scoped_to_the_workspace(canvas, semantic_model, user):
     _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
     revision = SemanticModelRevision.objects.get()
 
-    with pytest.raises(RevisionUndoError) as exc_info:
-        undo_revision(other_workspace, revision.id, user)
+    refusal = undo_revision(other_workspace, revision.id, user)["refused"]
 
-    assert exc_info.value.code == "NOT_FOUND"
+    assert refusal["code"] == "NOT_FOUND"
 
 
 def test_revision_api_lists_and_undoes_for_writers(client, canvas, semantic_model, workspace, user):

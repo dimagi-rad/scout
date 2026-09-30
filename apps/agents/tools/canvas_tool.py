@@ -26,7 +26,6 @@ from langchain_core.tools import tool
 from apps.artifacts.models import Artifact
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
-    RevisionUndoError,
     apply_operations,
     canvas_projection,
     commit_canvas,
@@ -356,10 +355,10 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
                     .values_list("id", flat=True)
                     .first()
                 )
-            try:
-                return undo_revision(workspace, revision_uuid, user, thread_id=thread_id)
-            except RevisionUndoError as exc:
-                return {"errors": [exc.as_dict()]}
+            result = undo_revision(workspace, revision_uuid, user, thread_id=thread_id)
+            if refusal := result.get("refused"):
+                return {"errors": [refusal]}
+            return result
 
         return await sync_to_async(_undo, thread_sensitive=True)()
 
