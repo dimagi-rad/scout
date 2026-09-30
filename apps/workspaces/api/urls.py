@@ -10,7 +10,7 @@ from .jobs_views import active_jobs_view, cancel_job_view
 from .materialization_views import materialization_cancel_view, materialization_retry_view
 from .views import RefreshSchemaView
 
-app_name = "data_dictionary"
+app_name = "workspace_data"
 
 urlpatterns = [
     path("refresh/", RefreshSchemaView.as_view(), name="refresh_schema"),
