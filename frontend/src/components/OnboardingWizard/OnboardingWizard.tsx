@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { BASE_PATH } from "@/config"
 import { oauthConnectUrl, type OAuthProvider } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
@@ -8,7 +7,14 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
-type Step = "choose" | "api-key"
+// Shown before providers load (or if they fail); the same connect flow as once loaded.
+const WWW_COMMCARE_FALLBACK: OAuthProvider = {
+  id: "commcare",
+  name: "CommCare HQ",
+  login_url: "/accounts/commcare/login/",
+}
+
+type Step ="choose" | "api-key"
 
 interface MembershipResult {
   membership_id: string
@@ -250,13 +256,7 @@ export function OnboardingWizard() {
               data-testid="onboarding-oauth"
               asChild
             >
-              <a
-                href={
-                  commcare
-                    ? oauthConnectUrl(commcare, "/")
-                    : `${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`
-                }
-              >
+              <a href={oauthConnectUrl(commcare ?? WWW_COMMCARE_FALLBACK, "/")}>
                 {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
               </a>
             </Button>

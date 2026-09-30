@@ -129,6 +129,16 @@ describe("OnboardingWizard", () => {
     )
   })
 
+  it("connects www, not logs in, even when providers failed to load", async () => {
+    vi.mocked(api.get).mockRejectedValue(new Error("503"))
+    render(<OnboardingWizard />)
+
+    await screen.findByTestId("onboarding-providers-error")
+    expect(screen.getByTestId("onboarding-oauth").getAttribute("href")).toBe(
+      "/accounts/commcare/login/?process=connect&next=%2F",
+    )
+  })
+
   it("says when the server list failed to load and retries", async () => {
     let schemaCalls = 0
     vi.mocked(api.get).mockImplementation((path) => {
