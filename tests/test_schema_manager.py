@@ -6,6 +6,7 @@ import psycopg.sql
 import pytest
 from django.utils import timezone
 
+from apps.common.errors import ExpectedStateError
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant
 from apps.workspaces.models import (
@@ -15,6 +16,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager, dbt_role_name, readonly_role_name
+from config.sentry import before_send
 
 
 @pytest.mark.django_db
@@ -591,6 +593,24 @@ class TestBuildViewSchemaTenantCoverage:
             SchemaManager().build_view_schema(workspace)
 
         mock_connection.assert_not_called()
+
+    def test_no_served_source_is_an_expected_state(self, workspace, tenant):
+        """SCOUT-DJANGO-7: the row records the failure, so Sentry must not."""
+        TenantSchema.objects.create(
+            tenant=tenant, schema_name="t_loading", state=SchemaState.PROVISIONING
+        )
+        with (
+            patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
+            pytest.raises(ValueError, match="no active schema") as raised,
+        ):
+            SchemaManager().build_view_schema(workspace)
+
+        assert isinstance(raised.value, ExpectedStateError)
+        exc = raised.value
+        assert before_send({"event": 1}, {"exc_info": (type(exc), exc, None)}) is None
+        vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+        assert vs.state == SchemaState.FAILED
+        assert "Run a data refresh" in vs.last_error
 
     def test_zero_active_tenants_fails_and_records_full_exclusion(self, workspace, tenant):
         with (

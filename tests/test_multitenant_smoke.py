@@ -69,6 +69,9 @@ def test_adding_a_tenant_that_already_serves_data_only_rebuilds_views(api_client
 def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup):
     """Coverage reports the new source as missing until its load publishes data."""
     user, ws, t2 = setup
+    TenantSchema.objects.create(
+        tenant=ws.tenants.get(), schema_name="smoke_1_live", state=SchemaState.ACTIVE
+    )
     view = WorkspaceViewSchema.objects.create(
         workspace=ws, schema_name="ws_smoke_view", state=SchemaState.ACTIVE
     )

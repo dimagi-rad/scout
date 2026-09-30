@@ -17,7 +17,10 @@ from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
 )
-from apps.workspaces.services.schema_manager import RETIRED_VIEW_STATES
+from apps.workspaces.services.schema_manager import (
+    RETIRED_VIEW_STATES,
+    fail_view_schema_if_unbuildable,
+)
 from apps.workspaces.services.tenant_coverage import coverage_entry, parse_coverage
 from apps.workspaces.tasks import (
     materialize_workspace,
@@ -49,7 +52,8 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
     transaction, and the rebuild keeps it there, so coverage honestly reports it
     missing from the moment it is added instead of the views silently omitting
     it. Uses get_or_create to handle concurrent requests; only a newly created
-    link dispatches work.
+    link dispatches work. While no source serves anything there is nothing to
+    rebuild, so the views are recorded FAILED and only the load is queued.
 
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
@@ -59,7 +63,12 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
         if created:
             _invalidate_on_commit(workspace)
             serving = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).exists()
-            if serving or actor_id is None:
+            if not serving and fail_view_schema_if_unbuildable(workspace):
+                # No source serves anything yet, so a rebuild could only fail
+                # (SCOUT-DJANGO-7); whichever source loads first rebuilds them.
+                if actor_id is not None:
+                    _defer_unserved_load(workspace.id, [tenant.id], actor_id)
+            elif serving or actor_id is None:
                 WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                     state=SchemaState.PROVISIONING
                 )
@@ -174,7 +183,9 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
 
     Deletes the WorkspaceTenant record. If the workspace remains multi-tenant
     (>=2 tenants left), marks any existing WorkspaceViewSchema as PROVISIONING
-    and dispatches a rebuild. If the workspace drops to single-tenant,
+    and dispatches a rebuild, unless no remaining source serves anything: then
+    the view schema is recorded FAILED and nothing is queued, as a rebuild could
+    only fail. If the workspace drops to single-tenant,
     routing moves to the tenant schema and any live, provisioning or failed view schema
     becomes an orphan — mark it TEARDOWN and dispatch teardown so the physical
     ``ws_<hash>`` schema is dropped.
@@ -218,7 +229,10 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
                 vs.state = SchemaState.TEARDOWN
                 vs.save(update_fields=["state"])
                 teardown_view_schema_task.defer(view_schema_id=str(vs.id))
-        else:
+        # When nothing is served, views over the removed source stay physically
+        # until a load rebuilds them or that source's retirement retry drops them;
+        # a FAILED row is never served, so they are unreadable meanwhile.
+        elif not fail_view_schema_if_unbuildable(workspace, removing=True):
             WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                 state=SchemaState.PROVISIONING
             )

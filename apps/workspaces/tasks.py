@@ -121,9 +121,11 @@ from apps.workspaces.services.refresh_requests import (
     reconcile_legacy_refresh_candidates,
 )
 from apps.workspaces.services.schema_manager import (
+    NoActiveTenantSchema,
     SchemaManager,
     SchemaStillReferenced,
     ViewSchemaRetired,
+    aview_schema_buildable,
 )
 from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app
@@ -1129,10 +1131,17 @@ async def materialize_workspace_core(
             # Don't re-raise — the resume task must still fire. The failure is
             # recorded on the WorkspaceViewSchema row (state=FAILED, last_error),
             # which the resume task reads directly.
-            logger.exception(
-                "Post-materialization view schema rebuild failed for workspace %s",
-                workspace_id,
-            )
+            if isinstance(exc, NoActiveTenantSchema):
+                logger.warning(
+                    "Post-materialization view schema rebuild skipped for workspace %s: %s",
+                    workspace_id,
+                    exc,
+                )
+            else:
+                logger.exception(
+                    "Post-materialization view schema rebuild failed for workspace %s",
+                    workspace_id,
+                )
             failed_view_schema = await WorkspaceViewSchema.objects.filter(
                 workspace=workspace
             ).afirst()
@@ -1332,7 +1341,7 @@ async def materialize_workspace(
     ``only_unserved`` loads every workspace source that serves nothing (typically
     the one just added) and republishes the views; if the run stops before publishing, a plain view
     rebuild is queued instead so the views reflect the sources that do serve, when there is
-    something for it to build (``_fallback_views_buildable``).
+    something for it to build (``aview_schema_buildable``).
     """
     job_id = context.job.id
     preflight_failures = None
@@ -1354,28 +1363,12 @@ async def materialize_workspace(
         published = reported_publication and (outcome is None or outcome.get("ok"))
         if only_unserved and not published:
             try:
-                if await _fallback_views_buildable(workspace_id):
+                if await aview_schema_buildable(workspace_id):
                     await rebuild_workspace_view_schema.defer_async(workspace_id=str(workspace_id))
             except Exception:
                 logger.exception("Could not queue the view rebuild for workspace %s", workspace_id)
         if notify_thread:
             await _defer_resume_for_job(job_id, preflight_failures)
-
-
-async def _fallback_views_buildable(workspace_id) -> bool:
-    """Whether a bare view rebuild after an unpublished load can build anything.
-
-    A single source is served from its own schema, so a view schema there is an
-    orphan; and with no source served at all (a new workspace whose first load
-    never ran) the rebuild can only mark the views FAILED although nothing did.
-    """
-    tenant_ids = await _workspace_tenant_ids(workspace_id)
-    return (
-        len(tenant_ids) > 1
-        and await TenantSchema.objects.filter(
-            tenant_id__in=tenant_ids, state=SchemaState.ACTIVE
-        ).aexists()
-    )
 
 
 def _resume_records(result: dict) -> list[dict]:
@@ -2200,12 +2193,15 @@ async def rebuild_workspace_view_schema(workspace_id: str, revive_retired: bool 
             exc.state,
         )
         return {"status": "skipped", "reason": str(exc)}
-    except Exception:
+    except Exception as exc:
         # build_view_schema owns the row state (FAILED for a first build, ACTIVE
         # plus last_error when the rolled-back views still serve), so don't
         # re-write state here and risk clobbering a concurrent transition —
         # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
-        logger.exception("Failed to build view schema for workspace %s", workspace_id)
+        if isinstance(exc, NoActiveTenantSchema):
+            logger.warning("Cannot build view schema for workspace %s: %s", workspace_id, exc)
+        else:
+            logger.exception("Failed to build view schema for workspace %s", workspace_id)
         skip_reason = (
             "Semantic Cube schema build skipped because the workspace view schema build failed."
         )
