@@ -123,11 +123,6 @@ def _pending_impact(canvas) -> list[dict[str, Any]]:
     return _deletions_needing_confirmation(canvas.workspace, targets)
 
 
-def undo_deletions(workspace, revision_id) -> list[dict[str, Any]]:
-    """What undoing a revision would delete or rename, under the same rule as a commit."""
-    return _needs_confirmation(_undo_impact(workspace, revision_id))
-
-
 def _undo_impact(workspace, revision_id) -> list[dict[str, Any]]:
     """Like ``_pending_impact``, for the changes an undo writes: the reverse of each entry."""
     revision = SemanticModelRevision.objects.filter(id=revision_id, workspace=workspace).first()
@@ -147,7 +142,8 @@ def _undo_impact(workspace, revision_id) -> list[dict[str, Any]]:
         # Artifacts saved since the revision use its after-state names.
         if before.get("name") != after.get("name"):
             targets.append((after["dataset_name"], after["name"], "rename"))
-        if changes_definition(before, after):
+        # A rename alone changes no numbers, as in _pending_impact.
+        if changes_definition({**before, "name": after.get("name")}, after):
             targets.append((after["dataset_name"], after["name"], "redefine"))
     return _deletions_needing_confirmation(workspace, targets)
 

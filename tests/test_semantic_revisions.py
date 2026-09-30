@@ -1080,3 +1080,21 @@ async def test_undoing_a_rename_or_redefinition_is_gated_and_reported_like_a_com
     )
     assert undone["redefined_fields_used_by_artifacts"][0]["change"] == "redefine"
     assert await SemanticField.objects.filter(name="total_amount").aexists()
+
+
+@pytest.mark.django_db
+def test_undoing_a_pure_rename_reports_no_redefinition(canvas, semantic_model, workspace, user):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    _commit(canvas, user, [RENAME_TOTAL])
+    rename = SemanticModelRevision.objects.order_by("-created_at").first()
+    Artifact.objects.create(
+        workspace=workspace,
+        title="Totals",
+        code="",
+        conversation_id="c",
+        semantic_queries=[{"measures": ["raw_visits.amount_total"]}],
+    )
+
+    impact = canvas_tool._undo_impact(workspace, rename.id)
+
+    assert [item.get("change") for item in impact] == ["rename"]
