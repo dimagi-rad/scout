@@ -129,13 +129,15 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     cubes = []
     for dataset in datasets:
         fields = [field for field in dataset.fields.all() if field.is_visible]
+        columns = dataset_column_names(dataset)
         dimensions = [
-            _cube_dimension(field, is_primary_key=_is_primary_key_field(dataset, field))
+            _cube_dimension(
+                field, columns=columns, is_primary_key=_is_primary_key_field(dataset, field)
+            )
             for field in fields
             if field.field_type
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
-        columns = dataset_column_names(dataset)
         measure_references = cube_member_references(references, dataset)
         measures = [
             _cube_measure(field, references=measure_references, columns=columns)
@@ -234,11 +236,13 @@ def _is_primary_key_field(dataset, field: SemanticField) -> bool:
     )
 
 
-def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> dict[str, Any]:
+def _cube_dimension(
+    field: SemanticField, *, columns: set[str], is_primary_key: bool = False
+) -> dict[str, Any]:
     cube_sql = (field.metadata or {}).get("cube_sql")
     payload = {
         "name": field.name,
-        "sql": compile_dimension_sql(cube_sql, columns=dataset_column_names(field.dataset))
+        "sql": compile_dimension_sql(cube_sql, columns=columns)
         if cube_sql
         else _cube_sql(field.expression),
         "type": "time"

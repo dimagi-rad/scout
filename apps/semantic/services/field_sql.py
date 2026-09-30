@@ -384,17 +384,11 @@ def _compile_member_sql(
         # qualified name must be a real column of this dataset, never an arbitrary word.
         if column.table in references:
             if references[column.table] != "CUBE" or columns is None:
-                raise error(
-                    f"The {label} can only qualify columns as {{CUBE}}.column; "
-                    "reference other members as {member}."
-                )
+                raise _qualified_column_error(label, error, columns)
             _require_dataset_column(column, columns, label=label, error=error)
             column.set("table", exp.Var(this="{CUBE}"))
         elif column.table:
-            raise error(
-                f"The {label} can only qualify columns as {{CUBE}}.column; "
-                "reference other members as {member}."
-            )
+            raise _qualified_column_error(label, error, columns)
         elif column.name in references:
             reference = exp.Var(this="{" + references[column.name] + "}")
             if column is expression:
@@ -408,6 +402,19 @@ def _compile_member_sql(
     if _REFERENCE_PLACEHOLDER in sql:
         raise error(f"The {label} can only use Cube references as values or column qualifiers.")
     return sql
+
+
+def _qualified_column_error(
+    label: str, error: type[SemanticSQLValidationError], columns: set[str] | None
+) -> SemanticSQLValidationError:
+    if columns is None:
+        return error(
+            f"The {label} cannot use qualified columns; write members as {{dataset.field}}."
+        )
+    return error(
+        f"The {label} can only qualify columns as {{CUBE}}.column; "
+        "reference other members as {member}."
+    )
 
 
 def _require_dataset_column(
