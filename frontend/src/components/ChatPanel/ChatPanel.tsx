@@ -30,7 +30,12 @@ import {
   isBusyChatError,
   isRetryableErrorPart,
 } from "./overloadRetry"
-import { BUSY_MAX_AUTO_RETRIES, busyRetryDelayMs, busyTracker } from "@/api/busy"
+import {
+  BUSY_MAX_AUTO_RETRIES,
+  BUSY_RETRY_AFTER_SECONDS,
+  busyRetryDelayMs,
+  busyTracker,
+} from "@/api/busy"
 
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -137,7 +142,8 @@ export function ChatPanel() {
   }
 
   // A pending busy retry, or a notice whose Retry would regenerate, belongs to this
-  // thread; never replay it into another.
+  // thread; never replay it into another. threadId is the trigger: this cleanup runs
+  // on every thread change, so the dependency must stay even though it isn't read.
   useEffect(() => () => {
     cancelBusyRetry()
     setBusyNotice(false)
@@ -297,7 +303,7 @@ export function ChatPanel() {
     // message again, so it gets the single retry the overload path allows.
     const streamBusy = busyHitRef.current
     busyHitRef.current = null
-    const busy = streamBusy ?? (busyError ? { retryAfter: null } : null)
+    const busy = streamBusy ?? (busyError ? { retryAfter: BUSY_RETRY_AFTER_SECONDS } : null)
     const maxBusyRetries = streamBusy ? 1 : BUSY_MAX_AUTO_RETRIES
     if (busy) {
       hitRetryableRef.current = false
