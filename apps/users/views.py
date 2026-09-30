@@ -517,6 +517,7 @@ async def tenant_ensure_view(request):
         {
             "id": str(tm.id),
             "provider": tm.tenant.provider,
+            "server": tm.tenant.server,
             "tenant_id": tm.tenant.external_id,
             "tenant_name": tm.tenant.canonical_name,
             "workspace_id": str(workspace.id) if workspace else None,
