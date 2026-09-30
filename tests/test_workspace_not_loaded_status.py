@@ -22,10 +22,10 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.load_activity import (
     _STATUS_TASK_NAMES,
+    MATERIALIZE_TASK_NAME,
     REBUILD_VIEW_TASK_NAME,
     workspace_schema_statuses,
 )
-from apps.workspaces.services.reconciliation import _VIEW_BUILD_TASK_NAMES
 from apps.workspaces.tasks import (
     materialize_workspace,
     rebuild_workspace_view_schema,
@@ -126,7 +126,8 @@ def test_a_queued_view_rebuild_is_provisioning(
 def test_status_build_tasks_match_the_view_build_tasks():
     """load_activity cannot import tasks, so its copy of the names must be pinned."""
     assert rebuild_workspace_view_schema.name == REBUILD_VIEW_TASK_NAME
-    assert set(_STATUS_TASK_NAMES) == set(_VIEW_BUILD_TASK_NAMES)
+    assert materialize_workspace.name == MATERIALIZE_TASK_NAME
+    assert set(_STATUS_TASK_NAMES) == {MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME}
 
 
 @pytest.mark.django_db

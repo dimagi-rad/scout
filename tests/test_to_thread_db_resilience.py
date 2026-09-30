@@ -21,7 +21,7 @@ from apps.workspaces.services.data_operation import to_thread_fresh_db
 
 
 @pytest.mark.asyncio
-async def testto_thread_fresh_db_closes_connections_before_body(monkeypatch):
+async def test_to_thread_fresh_db_closes_connections_before_body(monkeypatch):
     """The wrapper closes stale/dead connections BEFORE running the body, on the
     pool thread, and forwards args/return value."""
     order: list[str] = []
@@ -43,7 +43,7 @@ async def testto_thread_fresh_db_closes_connections_before_body(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def testto_thread_fresh_db_closes_even_if_body_raises(monkeypatch):
+async def test_to_thread_fresh_db_closes_even_if_body_raises(monkeypatch):
     """Cleanup runs before the body, so a body that fails still got a fresh
     connection (the failure is not caused by a stale one)."""
     order: list[str] = []

@@ -12,6 +12,7 @@ from apps.chat.models import Thread, ThreadJob
 from apps.workspaces.models import Workspace
 from apps.workspaces.services.reconciliation import (
     RESUME_STUCK_RUNNING_MESSAGE,
+    RESUME_TASK_NAME,
     STALE_JOB_THRESHOLD,
     _procrastinate_job_status,
     reconcile_stale_thread_job,
@@ -90,6 +91,7 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
 
     # The janitor defers the resume task — state is NOT flipped by the janitor.
     # The resume task is responsible for that transition.
+    configure_resume.assert_called_once_with(RESUME_TASK_NAME)
     configure_resume.return_value.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
     assert result == {"flipped": 1}
     await tj.arefresh_from_db()

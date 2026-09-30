@@ -57,7 +57,6 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services import reconciliation
 from apps.workspaces.services.access_freshness import (
     FRESHNESS_ERROR_CODES,
     VerificationBudget,
@@ -118,6 +117,9 @@ from apps.workspaces.services.query_state import (
 )
 from apps.workspaces.services.reconciliation import (
     MATERIALIZATION_STALLED_HEARTBEAT_SECONDS,
+    sweep_stale_materialization_runs,
+    sweep_stale_thread_jobs,
+    sweep_stale_workspace_data_recoveries,
 )
 from apps.workspaces.services.reconciliation import (
     build_agent_for_resume as _build_agent_for_resume,
@@ -2798,14 +2800,14 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     job is no longer running. Fires the resume task so the user is not stuck
     with a phantom spinner.
     """
-    return await reconciliation.sweep_stale_thread_jobs()
+    return await sweep_stale_thread_jobs()
 
 
 @app.periodic(cron="*/15 * * * *")
 @app.task
 async def expire_stale_workspace_data_recoveries(timestamp: int = 0) -> dict:
     """Release artifact recoveries stranded by a stopped background worker."""
-    return await reconciliation.sweep_stale_workspace_data_recoveries()
+    return await sweep_stale_workspace_data_recoveries()
 
 
 @app.periodic(cron="*/15 * * * *")
@@ -2813,7 +2815,7 @@ async def expire_stale_workspace_data_recoveries(timestamp: int = 0) -> dict:
 async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
     """Fail MaterializationRuns stuck ACTIVE after a hard worker death, then settle
     view schemas whose build will never finish."""
-    return await reconciliation.sweep_stale_materialization_runs()
+    return await sweep_stale_materialization_runs()
 
 
 # procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~144 janitor
