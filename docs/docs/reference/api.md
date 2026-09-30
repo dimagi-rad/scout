@@ -127,7 +127,10 @@ Errors:
 - `403`: no access to the workspace.
 - `404`: the thread belongs to another user or workspace.
 - `405`: not a POST.
-- `409`: a background response is still being written to this thread.
+- `409`: another agent run holds this thread: a background response, another
+  live turn, or a stopped turn still saving its partial reply. The body is
+  `{"error": "busy", "reason": "thread_busy", "message": ...}` with a
+  `Retry-After` header, and the chat UI resends as it does for a busy `503`.
 - `429`: more than 20 messages in 60 seconds from this user. The response
   carries `Retry-After` and `X-RateLimit-*` headers.
 - `500`: the agent could not be initialized. The message includes a reference

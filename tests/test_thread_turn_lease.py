@@ -249,7 +249,10 @@ class TestChatTurn:
             resp = await _post_chat(client, ws, thread)
 
         assert resp.status_code == 409
-        assert b"still being generated" in resp.content
+        # "busy" is what the chat UI's resend path keys on (frontend/src/api/busy.ts).
+        assert resp.json()["error"] == "busy"
+        assert resp.json()["reason"] == "thread_busy"
+        assert resp["Retry-After"]
         build_agent.assert_not_awaited()
 
     async def test_the_stream_holds_the_thread_until_it_finishes(self):

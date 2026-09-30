@@ -31,7 +31,7 @@ from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
-from apps.common.capacity import classify_capacity_error
+from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
 from apps.workspaces.access import access_denied_body, role_satisfies
 from apps.workspaces.models import WorkspaceRole
@@ -229,7 +229,7 @@ async def chat_view(request):
     # only after persisting its partial reply.
     lease = await aacquire_turn_lease(thread_id, wait_seconds=TURN_LEASE_WAIT_SECONDS)
     if lease is None:
-        return JsonResponse({"error": THREAD_BUSY_MESSAGE}, status=409)
+        return _thread_busy_response()
     try:
         async with lease.kept_alive():
             response = await _start_turn(
@@ -243,8 +243,21 @@ async def chat_view(request):
     except BaseException:
         await lease.release()
         raise
-    if not isinstance(response, StreamingHttpResponse):
+    if lease.lost or not isinstance(response, StreamingHttpResponse):
         await lease.release()
+        if lease.lost:
+            return _thread_busy_response()
+    return response
+
+
+def _thread_busy_response() -> JsonResponse:
+    # The "busy" error code makes the chat UI back off and resend, as it does for a
+    # capacity 503: the turn was refused before anything touched the checkpoint.
+    response = JsonResponse(
+        {"error": BUSY_ERROR, "reason": "thread_busy", "message": THREAD_BUSY_MESSAGE},
+        status=409,
+    )
+    response["Retry-After"] = str(RETRY_AFTER_SECONDS)
     return response
 
 
