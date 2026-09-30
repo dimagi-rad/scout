@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from apps.agents.graph.base import (
     ESCALATION_MESSAGE,
     READ_ONLY_ESCALATION_MESSAGE,
+    READ_ONLY_SEMANTIC_ESCALATION_MESSAGE,
     SEMANTIC_ESCALATION_MESSAGE,
     _schema_escalation_message,
     _should_escalate,
@@ -128,25 +129,22 @@ def _repeated(code):
     return messages
 
 
-@pytest.mark.parametrize(
-    "code",
-    [
-        DATA_NOT_LOADED,
-        SEMANTIC_MODEL_UNAVAILABLE,
-        ErrorCode.SCHEMA_BUILD_FAILED,
-        ErrorCode.PIPELINE_UNRESOLVED,
-    ],
-)
-def test_codes_semantic_query_used_to_flatten_still_escalate(code):
-    """semantic_query reported these as VALIDATION_ERROR, which escalates."""
+@pytest.mark.parametrize("code", [DATA_NOT_LOADED, SEMANTIC_MODEL_UNAVAILABLE])
+def test_codes_that_used_to_be_validation_errors_still_escalate(code):
     assert _should_escalate(_repeated(code))
+
+
+@pytest.mark.parametrize("code", [ErrorCode.SCHEMA_BUILD_FAILED, ErrorCode.PIPELINE_UNRESOLVED])
+def test_failures_a_reload_cannot_fix_do_not_escalate_to_a_reload(code):
+    """get_schema_status and the SQL tools already sent these, and never escalated."""
+    assert not _should_escalate(_repeated(code))
 
 
 @pytest.mark.parametrize(
     ("code", "write_capable", "expected"),
     [
         (SEMANTIC_MODEL_UNAVAILABLE, True, SEMANTIC_ESCALATION_MESSAGE),
-        (SEMANTIC_MODEL_UNAVAILABLE, False, SEMANTIC_ESCALATION_MESSAGE),
+        (SEMANTIC_MODEL_UNAVAILABLE, False, READ_ONLY_SEMANTIC_ESCALATION_MESSAGE),
         (DATA_NOT_LOADED, True, ESCALATION_MESSAGE),
         (DATA_NOT_LOADED, False, READ_ONLY_ESCALATION_MESSAGE),
     ],
@@ -156,6 +154,19 @@ def test_a_missing_data_model_escalates_to_a_rebuild_not_a_reload(code, write_ca
         _repeated(code), write_capable=write_capable, interactive=True
     )
     assert message == expected
+
+
+def test_a_mixed_round_is_not_blamed_on_the_data_model():
+    messages = _repeated(SEMANTIC_MODEL_UNAVAILABLE)
+    messages.insert(
+        -1,
+        ToolMessage(
+            content='{"success": false, "error": {"code": "DATA_NOT_LOADED", "message": "m"}}',
+            tool_call_id="parallel",
+        ),
+    )
+    message = _schema_escalation_message(messages, write_capable=True, interactive=True)
+    assert message == ESCALATION_MESSAGE
 
 
 @pytest.mark.django_db

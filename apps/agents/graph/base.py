@@ -170,12 +170,10 @@ ESCALATION_ERROR_CODES = frozenset(
     {
         ErrorCode.NOT_FOUND,
         ErrorCode.VALIDATION_ERROR,
-        # semantic_query reported these as VALIDATION_ERROR until #251, so they
-        # keep escalating as they did.
+        # semantic_query and the SQL tools reported these as VALIDATION_ERROR
+        # until #251, so they keep escalating as they did.
         ErrorCode.DATA_NOT_LOADED,
         ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
-        ErrorCode.SCHEMA_BUILD_FAILED,
-        ErrorCode.PIPELINE_UNRESOLVED,
     }
 )
 ESCALATION_TRIGGER_COUNT = 3
@@ -218,16 +216,21 @@ def _tool_message_error(content: Any) -> dict | None:
 
 
 def _schema_escalation_message(messages: list, *, write_capable: bool, interactive: bool) -> str:
-    latest_code = next(
-        (
-            _tool_message_error_code(m.content)
-            for m in reversed(messages)
-            if isinstance(m, ToolMessage)
-        ),
-        None,
-    )
-    if latest_code == ErrorCode.SEMANTIC_MODEL_UNAVAILABLE:
-        return SEMANTIC_ESCALATION_MESSAGE
+    """The escalation text for the trailing tool round's errors.
+
+    Only a round whose every result is a missing data model gets the rebuild text:
+    a reload fixes anything else, and parallel results arrive in no fixed order.
+    """
+    trailing_codes = set()
+    for message in reversed(messages):
+        if isinstance(message, ToolMessage):
+            trailing_codes.add(_tool_message_error_code(message.content))
+        elif not (isinstance(message, AIMessage) and getattr(message, "tool_calls", None)):
+            break
+    if trailing_codes == {ErrorCode.SEMANTIC_MODEL_UNAVAILABLE}:
+        return (
+            SEMANTIC_ESCALATION_MESSAGE if write_capable else READ_ONLY_SEMANTIC_ESCALATION_MESSAGE
+        )
     if not write_capable:
         return READ_ONLY_ESCALATION_MESSAGE
     if not interactive:
@@ -294,6 +297,12 @@ SEMANTIC_ESCALATION_MESSAGE = (
     "I've encountered repeated errors — this workspace's data model (its semantic "
     "datasets) isn't available, so its data can't be queried yet. The data model "
     "needs to be rebuilt; that does not reload any data."
+)
+
+READ_ONLY_SEMANTIC_ESCALATION_MESSAGE = (
+    "I've encountered repeated errors — this workspace's data model (its semantic "
+    "datasets) isn't available, so its data can't be queried yet. A workspace member "
+    "with write access can rebuild the data model; that does not reload any data."
 )
 
 # Marks the escalation node's message so headless callers (recipe runs) can tell
@@ -1470,6 +1479,7 @@ __all__ = [
     "FIXED_MESSAGE_NODES",
     "HEADLESS_ESCALATION_MESSAGE",
     "READ_ONLY_ESCALATION_MESSAGE",
+    "READ_ONLY_SEMANTIC_ESCALATION_MESSAGE",
     "SEMANTIC_ESCALATION_MESSAGE",
     "_should_escalate",
     "build_agent_graph",

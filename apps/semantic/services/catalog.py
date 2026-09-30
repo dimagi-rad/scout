@@ -382,7 +382,7 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
         raise SemanticCatalogUnavailable(
             "Data unavailable. Please refresh workspace data.",
             schema_status=schema_status,
-            code=_UNREADABLE_CATALOG_CODES[schema_status],
+            code=_UNREADABLE_CATALOG_CODES.get(schema_status, ErrorCode.INTERNAL_ERROR),
         ) from exc
 
 
