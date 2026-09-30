@@ -1,20 +1,16 @@
-import { workspaceApi } from "@/api/workspaces"
-import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
+import type { WorkspaceFreshness } from "@/api/workspaces"
 import { formatRelativeTime } from "@/lib/relativeTime"
 
 interface Props {
-  workspaceId: string
-  /** A load is running. Refetched when it ends, since the data just changed. */
-  loading?: boolean
+  freshness: WorkspaceFreshness | null
 }
 
 /**
  * One "Data as of" line per source, so a stale source is not hidden by a fresh one.
  * Reads the serving snapshot's age, the same figure the stale-data banner judges by.
- * Mount with `key={workspaceId}` (see useRefetchOnLoadEnd).
  */
-export function SourceFreshness({ workspaceId, loading = false }: Props) {
-  const sources = useRefetchOnLoadEnd(workspaceApi.getFreshness, workspaceId, loading)?.sources ?? []
+export function SourceFreshness({ freshness }: Props) {
+  const sources = freshness?.sources ?? []
 
   if (sources.length === 0) return null
 

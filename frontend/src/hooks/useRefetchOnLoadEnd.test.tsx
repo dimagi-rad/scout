@@ -41,4 +41,17 @@ describe("useRefetchOnLoadEnd", () => {
 
     expect(result.current).toBe("after load")
   })
+
+  it("never returns another workspace's data", async () => {
+    const { fetcher, pending } = deferredFetcher()
+    const { result, rerender } = renderHook(
+      ({ workspaceId, loading }) => useRefetchOnLoadEnd(fetcher, workspaceId, loading),
+      { initialProps: { workspaceId: "ws-1", loading: false } },
+    )
+    await act(async () => pending[0]("ws-1 data"))
+
+    rerender({ workspaceId: "ws-2", loading: true })
+
+    expect(result.current).toBeNull()
+  })
 })

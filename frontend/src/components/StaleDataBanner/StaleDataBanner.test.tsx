@@ -11,6 +11,7 @@ import {
   type WorkspaceListItem,
 } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
+import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { READ_ONLY_REFRESH_NOTE, StaleDataBanner } from "./StaleDataBanner"
 import { dismissStaleBanner } from "./staleData"
 import { freshness, freshSource } from "./testFixtures"
@@ -29,10 +30,25 @@ function asRole(role: WorkspaceListItem["role"]) {
   useAppStore.setState({ domains: [{ id: WS, role } as WorkspaceListItem] })
 }
 
-function renderBanner(props: Partial<Parameters<typeof StaleDataBanner>[0]> = {}) {
+type HarnessProps = { loading?: boolean; onRefreshStarted?: () => void }
+
+// Fetches as ChatPanel does, so the tests cover the banner against the real endpoint call.
+function Harness({ loading = false, onRefreshStarted }: HarnessProps) {
+  const freshness = useRefetchOnLoadEnd(workspaceApi.getFreshness, WS, loading)
+  return (
+    <StaleDataBanner
+      workspaceId={WS}
+      freshness={freshness}
+      loading={loading}
+      onRefreshStarted={onRefreshStarted}
+    />
+  )
+}
+
+function renderBanner(props: HarnessProps = {}) {
   return render(
     <MemoryRouter>
-      <StaleDataBanner workspaceId={WS} {...props} />
+      <Harness {...props} />
     </MemoryRouter>,
   )
 }
@@ -90,7 +106,7 @@ describe("StaleDataBanner", () => {
 
     rerender(
       <MemoryRouter>
-        <StaleDataBanner workspaceId={WS} loading />
+        <Harness loading />
       </MemoryRouter>,
     )
     expect(screen.queryByTestId("stale-data-banner")).toBeNull()

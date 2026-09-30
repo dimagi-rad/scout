@@ -5,8 +5,10 @@ import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
+import { workspaceApi } from "@/api/workspaces"
 import { SourceFreshness } from "@/components/SourceFreshness"
 import { StaleDataBanner } from "@/components/StaleDataBanner"
+import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
@@ -81,10 +83,18 @@ export function ChatPanel() {
     ))
   const workspaceLoading =
     Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0
+  // Fetched here, not in the banner and the data-as-of lines, so both read one
+  // response and it survives the switch between the empty and thread layouts.
+  const freshness = useRefetchOnLoadEnd(
+    workspaceApi.getFreshness,
+    activeDomainId,
+    workspaceLoading,
+  )
   const staleBanner = activeDomainId && (
     <StaleDataBanner
       key={activeDomainId}
       workspaceId={activeDomainId}
+      freshness={freshness}
       loading={workspaceLoading}
       onRefreshStarted={notifyJobLikelyStarted}
     />
@@ -386,14 +396,7 @@ export function ChatPanel() {
 
         {loadBanners}
         {staleBanner}
-
-        {activeDomainId && (
-          <SourceFreshness
-            key={activeDomainId}
-            workspaceId={activeDomainId}
-            loading={workspaceLoading}
-          />
-        )}
+        <SourceFreshness freshness={freshness} />
 
         {/* Input area */}
         <div className="border-t p-4">

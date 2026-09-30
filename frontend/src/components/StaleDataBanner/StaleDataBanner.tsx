@@ -2,9 +2,8 @@ import { useState } from "react"
 import { Link } from "react-router-dom"
 import { Clock, RotateCw, X } from "lucide-react"
 import { jobsApi } from "@/api/jobs"
-import { workspaceApi } from "@/api/workspaces"
+import type { WorkspaceFreshness } from "@/api/workspaces"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
-import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { dismissStaleBanner, isStaleBannerDismissed, staleData } from "./staleData"
@@ -14,7 +13,8 @@ export const READ_ONLY_REFRESH_NOTE = "A workspace member with write access can 
 
 interface Props {
   workspaceId: string
-  /** A load is running: the banner hides, and refetches freshness when it ends. */
+  freshness: WorkspaceFreshness | null
+  /** A load is running: the banner hides. */
   loading?: boolean
   onRefreshStarted?: () => void
 }
@@ -22,10 +22,14 @@ interface Props {
 /**
  * Offers a manual refresh once the workspace's oldest serving source is past
  * the server's threshold (#173: refreshing stays manual). Mount with
- * `key={workspaceId}` so dismissal and fetched detail belong to one workspace.
+ * `key={workspaceId}` so a dismissal belongs to one workspace.
  */
-export function StaleDataBanner({ workspaceId, loading = false, onRefreshStarted }: Props) {
-  const freshness = useRefetchOnLoadEnd(workspaceApi.getFreshness, workspaceId, loading)
+export function StaleDataBanner({
+  workspaceId,
+  freshness,
+  loading = false,
+  onRefreshStarted,
+}: Props) {
   const { canWrite } = useWorkspaceRole(workspaceId)
   const [dismissed, setDismissed] = useState(() => isStaleBannerDismissed(workspaceId))
   const refresh = useRetryableAction(REFRESH_FAILED, canWrite)

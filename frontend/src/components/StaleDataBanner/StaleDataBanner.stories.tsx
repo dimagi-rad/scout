@@ -1,10 +1,6 @@
 import { MemoryRouter } from "react-router-dom"
 import type { Meta, StoryObj } from "@storybook/react-vite"
-import {
-  workspaceApi,
-  type SourceFreshnessDetail,
-  type WorkspaceListItem,
-} from "@/api/workspaces"
+import type { SourceFreshnessDetail, WorkspaceListItem } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { StaleDataBanner } from "./StaleDataBanner"
 import { clearStaleBannerDismissal } from "./staleData"
@@ -15,12 +11,16 @@ interface FixtureArgs {
   sources: SourceFreshnessDetail[]
 }
 
-// beforeEach serves the args as the detail payload; the key remounts per story.
+// The key remounts per story, so a dismiss in one does not carry to the next.
 function Fixture(args: FixtureArgs) {
   return (
     <MemoryRouter>
       <div className="min-h-screen bg-background py-4 text-foreground">
-        <StaleDataBanner key={JSON.stringify(args)} workspaceId="story-ws" />
+        <StaleDataBanner
+          key={JSON.stringify(args)}
+          workspaceId="story-ws"
+          freshness={freshness(args.sources)}
+        />
       </div>
     </MemoryRouter>
   )
@@ -32,12 +32,9 @@ const meta = {
   parameters: { layout: "fullscreen" },
   beforeEach: ({ args }) => {
     const previous = useAppStore.getState()
-    const getFreshness = workspaceApi.getFreshness
     useAppStore.setState({ domains: [{ id: "story-ws", role: args.role } as WorkspaceListItem] })
-    workspaceApi.getFreshness = async () => freshness(args.sources)
     clearStaleBannerDismissal("story-ws")
     return () => {
-      workspaceApi.getFreshness = getFreshness
       useAppStore.setState(previous)
     }
   },

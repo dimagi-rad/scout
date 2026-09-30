@@ -72,6 +72,15 @@ describe("ChatPanel stale-data banner", () => {
     expect(await screen.findByTestId("stale-data-banner")).toBeInTheDocument()
   })
 
+  it("feeds the banner and the data-as-of lines from one request", async () => {
+    mockMessages([{ id: "m1", role: "assistant", parts: [{ type: "text", text: "Earlier answer" }] }])
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+
+    expect(await screen.findByTestId("source-freshness-Alpha")).toBeInTheDocument()
+    expect(screen.getByTestId("stale-data-banner")).toBeInTheDocument()
+    expect(workspaceApi.getFreshness).toHaveBeenCalledTimes(1)
+  })
+
   it("hides while a teammate's load is running", async () => {
     jobs.workspaceLoads = [
       { tenant_id: "t1", tenant_name: "Alpha", source_index: 1, source_total: 1, started_at: "2026-09-30T00:00:00Z", state: "running", progress: null },
