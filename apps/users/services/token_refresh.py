@@ -262,11 +262,15 @@ def credential_fingerprint(token) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def token_health(token, provider, *, refresh_failed=False) -> str:
-    """User-action status, independent of the proactive refresh buffer."""
+def token_health(token, provider, *, scope_key="", refresh_failed=False) -> str:
+    """User-action status, independent of the proactive refresh buffer.
+
+    ``scope_key`` must be the credential's own scope, so a CommCare server the
+    registry no longer knows reads as unrenewable here as it does at resolution.
+    """
     if refresh_failed:
         return "expired"
-    token_url = get_token_url(provider)
+    token_url = get_token_url(provider, scope_key)
     if token_url and token.token_secret and token.app:
         return "connected"
     if token.expires_at is not None:
