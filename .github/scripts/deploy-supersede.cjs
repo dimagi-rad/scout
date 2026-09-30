@@ -103,10 +103,11 @@ async function findLiveRun({
 
 async function findReasonToSkip({ github, context, core, workflowId, jobName }) {
   if (context.ref !== 'refs/heads/main') return null;
-  const { data } = await github.rest.actions.listWorkflowRuns({
-    ...context.repo, workflow_id: workflowId, branch: 'main', per_page: 100,
+  const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: 'main' });
+  // Our own run is on the list, so a page that tops out below it is stale too.
+  const { runs } = await listMainRuns({
+    github, context, core, workflowId, branch, floor: context.runNumber,
   });
-  const runs = data.workflow_runs;
 
   const queued = await findSupersedingRun({ github, context, runs });
   if (queued) return { run: queued, why: 'is queued to deploy' };
