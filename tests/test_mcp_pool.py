@@ -10,6 +10,7 @@ not pay another TLS handshake.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -403,4 +404,20 @@ def test_pool_internals_the_capacity_tag_relies_on_still_exist():
     pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
 
     assert "pool_size" in pool.get_stats()
-    assert callable(AsyncConnectionPool._connect)
+    assert inspect.iscoroutinefunction(AsyncConnectionPool._connect)
+    assert "timeout" in inspect.signature(AsyncConnectionPool._connect).parameters
+
+
+@pytest.mark.asyncio
+async def test_a_later_successful_connect_clears_a_stale_slot_refusal():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=refusal),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with patch.object(AsyncConnectionPool, "_connect", new=AsyncMock(return_value=MagicMock())):
+        await pool._connect()
+
+    assert pool._last_connect_error is None

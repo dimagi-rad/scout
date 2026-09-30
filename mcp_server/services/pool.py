@@ -91,10 +91,12 @@ class ManagedPool(AsyncConnectionPool):
 
     async def _connect(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
         try:
-            return await super()._connect(timeout)
+            conn = await super()._connect(timeout)
         except BaseException as exc:
             self._last_connect_error = exc
             raise
+        self._last_connect_error = None
+        return conn
 
     async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
         try:
