@@ -6,6 +6,57 @@ const WAITING = new Set(['queued', 'pending', 'waiting', 'requested']);
 // Superseded runs (deploy job skipped) are among the candidates, so this must
 // reach past a burst of them; each lookup is one API call.
 const MAX_JOB_LOOKUPS = 50;
+// Runs created this long before main's head commit still count as "since head":
+// the commit date can trail the push by a little (clock skew, a slow merge).
+const RECENT_MARGIN_MS = 60 * 60 * 1000;
+
+const newestNumber = (runs) => runs.reduce((max, run) => Math.max(max, run.run_number), 0);
+const newestCreated = (runs) => runs.reduce(
+  (max, run) => Math.max(max, Date.parse(run.created_at) || 0), 0,
+);
+
+function mergeRuns(...lists) {
+  const byId = new Map();
+  for (const run of lists.flat()) byId.set(run.id, run);
+  return [...byId.values()];
+}
+
+// listWorkflowRuns intermittently answers with a weeks-old slice of runs (#769):
+// the page then lacks both head's run and the true live run. Cross-check the page
+// against head's own runs, and against runs created since head when head has none.
+// A page that stays behind them after one retry is unreliable: callers then get
+// only head's runs, which is enough to tell "head is live or on its way" and
+// nothing else.
+async function listMainRuns({ github, context, core, workflowId, branch, floor = 0 }) {
+  const list = async (filters = {}) => {
+    const { data } = await github.rest.actions.listWorkflowRuns({
+      ...context.repo, workflow_id: workflowId, branch: 'main', per_page: 100, ...filters,
+    });
+    return data.workflow_runs;
+  };
+  const head = branch.commit.sha;
+  const headTime = Date.parse(branch.commit.commit.committer.date);
+  let page = await list();
+  let headRuns = await list({ head_sha: head });
+  let known = Math.max(floor, newestNumber(headRuns));
+  const suspicious = newestNumber(page) < known
+    || (!headRuns.length && newestCreated(page) < headTime);
+  if (suspicious) {
+    const since = new Date(headTime - RECENT_MARGIN_MS).toISOString().replace(/\.\d+Z$/, 'Z');
+    const recent = await list({ created: `>=${since}` });
+    known = Math.max(known, newestNumber(recent));
+    headRuns = mergeRuns(headRuns, recent.filter((run) => run.head_sha === head));
+    page = await list();
+  }
+  const reliable = newestNumber(page) >= known;
+  if (!reliable) {
+    core.warning(
+      `The deploy run list stayed stale after a retry (newest run #${newestNumber(page)}, `
+      + `expected at least #${known}); using only the runs of main's head ${head.slice(0, 12)}.`,
+    );
+  }
+  return { head, headRuns, reliable, runs: reliable ? mergeRuns(page, headRuns) : headRuns };
+}
 
 async function contains({ github, context, sha }) {
   if (sha === context.sha) return true;
@@ -87,4 +138,6 @@ async function checkSuperseded({ github, context, core, workflowId, jobName }) {
   return reason;
 }
 
-module.exports = { WAITING, findLiveRun, findReasonToSkip, checkSuperseded };
+module.exports = {
+  WAITING, findLiveRun, listMainRuns, findReasonToSkip, checkSuperseded,
+};

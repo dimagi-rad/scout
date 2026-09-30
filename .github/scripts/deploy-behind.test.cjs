@@ -18,10 +18,30 @@ const run = (id, run_number, head_sha, status, extra = {}) => ({
   ...extra,
 });
 
+// Filters a run list the way listWorkflowRuns does for `head_sha` and `created`.
+function filterRuns(runs, args) {
+  if (args.head_sha) return runs.filter((r) => r.head_sha === args.head_sha);
+  if (args.created) {
+    const since = Date.parse(args.created.replace(/^>=/, ''));
+    return runs.filter((r) => Date.parse(r.created_at) >= since);
+  }
+  return runs;
+}
+
 // `deployed` maps a run id to its deploy job's conclusion (default success).
+// `pages` are the successive answers to the unfiltered run list (the last one
+// repeats), standing in for its stale slices; filtered queries always see `runs`.
 function fakeGithub({
-  runs = [], deployed = {}, commitDate = minutesAgo(120), issues = [], comments = [], author = 'merger',
+  runs = [], pages = null, deployed = {}, commitDate = minutesAgo(120), issues = [], comments = [],
+  author = 'merger',
 } = {}) {
+  let pageCalls = 0;
+  const listRuns = (args) => {
+    if (args.head_sha || args.created) return { workflow_runs: filterRuns(runs, args) };
+    const page = pages ? pages[Math.min(pageCalls, pages.length - 1)] : runs;
+    pageCalls += 1;
+    return { workflow_runs: page };
+  };
   const calls = [];
   const record = (name, result) => async (args) => {
     calls.push([name, args]);
@@ -37,7 +57,7 @@ function fakeGithub({
         }),
       },
       actions: {
-        listWorkflowRuns: record('runs', { workflow_runs: runs }),
+        listWorkflowRuns: record('runs', listRuns),
         listJobsForWorkflowRun: record('jobs', (args) => ({
           jobs: [{ name: 'deploy', conclusion: deployed[args.run_id] || 'success' }],
         })),
@@ -83,6 +103,9 @@ test('production running main is current', async () => {
   assert.deepEqual(github.calls[1][1], {
     owner: 'o', repo: 'r', workflow_id: 'deploy.yml', branch: 'main', per_page: 100,
   });
+  assert.deepEqual(github.calls[2][1], {
+    owner: 'o', repo: 'r', workflow_id: 'deploy.yml', branch: 'main', per_page: 100, head_sha: HEAD,
+  });
 });
 
 test('main ahead past the threshold with nothing pending is behind', async () => {
@@ -102,7 +125,7 @@ for (const status of ['pending', 'queued', 'waiting', 'in_progress']) {
     const lag = await assess(github);
     assert.equal(lag.state, 'deploying');
     assert.equal(lag.run.id, 13);
-    assert.deepEqual(names(github), ['branch', 'runs']);
+    assert.deepEqual(names(github), ['branch', 'runs', 'runs']);
   });
 }
 
@@ -241,4 +264,58 @@ test('without a GitHub author the head run\'s actor is mentioned, else nobody', 
   const nobody = fakeGithub({ runs: strandedRuns(), deployed: strandedDeploys, author: null });
   await check(nobody);
   assert.doesNotMatch(nobody.calls.at(-1)[1].body, /cc @/);
+});
+
+// #769: the run list answered with a weeks-old slice lacking head's run and the live run.
+const staleSlice = [
+  run(3, 87, 'o'.repeat(40), 'completed', { created_at: minutesAgo(60 * 24 * 40) }),
+  run(2, 86, 'p'.repeat(40), 'completed', { created_at: minutesAgo(60 * 24 * 41) }),
+];
+
+test('a stale run list is re-read before it is trusted', async () => {
+  const runs = [
+    run(12, 112, HEAD, 'completed', { created_at: minutesAgo(90) }),
+    run(10, 110, LIVE, 'completed'),
+  ];
+  const github = fakeGithub({ runs, pages: [staleSlice, runs] });
+  const core = fakeCore();
+  const lag = await check(github, core);
+  assert.equal(lag.state, 'current');
+  assert.equal(lag.live.id, 12);
+  const listed = github.calls.filter(([name]) => name === 'runs').map(([, args]) => args);
+  assert.equal(listed.length, 4);
+  assert.equal(listed[1].head_sha, HEAD);
+  assert.match(listed[2].created, /^>=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  assert.deepEqual(core.out.warnings, []);
+});
+
+test('a run list that stays stale files nothing and says why', async () => {
+  const runs = [
+    run(12, 112, HEAD, 'completed', { conclusion: 'cancelled', created_at: minutesAgo(90) }),
+    run(10, 110, LIVE, 'completed'),
+  ];
+  const github = fakeGithub({ runs, pages: [staleSlice], deployed: { 12: 'skipped' }, issues: [{ number: 5 }] });
+  const core = fakeCore();
+  const lag = await check(github, core);
+  assert.equal(lag.state, 'unknown');
+  assert.deepEqual(names(github).filter((n) => !['branch', 'runs', 'jobs'].includes(n)), []);
+  assert.ok(core.out.warnings.some((w) => /stayed stale after a retry \(newest run #87, expected at least #112\)/.test(w)), core.out.warnings);
+  assert.match(core.out.warnings.at(-1), /Could not tell whether production is behind main hhhhhhhhhhhh; not filing/);
+});
+
+test('a stale run list still trusts head\'s own runs', async () => {
+  const deployed = [run(12, 112, HEAD, 'completed', { created_at: minutesAgo(90) })];
+  assert.equal((await check(fakeGithub({ runs: deployed, pages: [staleSlice] }))).state, 'current');
+  const queued = [run(12, 112, HEAD, 'queued', { created_at: minutesAgo(90) })];
+  assert.equal((await check(fakeGithub({ runs: queued, pages: [staleSlice] }))).state, 'deploying');
+});
+
+test('a stale list is caught through runs created since head when head has none', async () => {
+  // Head has no run of its own, but a dispatched run of an older commit is newer
+  // than anything on the stale page.
+  const runs = [run(11, 111, LIVE, 'completed', { created_at: minutesAgo(50) })];
+  const github = fakeGithub({ runs, pages: [staleSlice], commitDate: minutesAgo(60) });
+  const core = fakeCore();
+  assert.equal((await check(github, core)).state, 'unknown');
+  assert.match(core.out.warnings[0], /expected at least #111/);
 });
