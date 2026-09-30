@@ -11,7 +11,7 @@ from urllib3.response import HTTPResponse
 from apps.common.error_codes import code_of
 from apps.common.errors import ExpectedStateError, UpstreamRefreshFailed
 from apps.users.services.token_refresh import TokenRefreshUnavailable
-from apps.workspaces.tasks import _CREDENTIAL_GUIDANCE
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 from mcp_server.loaders._http import (
     MAX_RETRY_AFTER_SECONDS,
     RETRY_BACKOFF_JITTER,
@@ -134,5 +134,5 @@ def test_refresh_outage_has_expected_actionable_error(failure):
         get_with_auth_refresh(session, "https://x/y", trusted_origin="https://x", refresh=refresh)
     assert isinstance(caught.value, ExpectedStateError)
     assert code_of(caught.value) == "AUTH_REFRESH_FAILED"
-    assert "retry" in _CREDENTIAL_GUIDANCE[code_of(caught.value)]
+    assert "retry" in CREDENTIAL_GUIDANCE[code_of(caught.value)]
     assert session.get.call_count == 1

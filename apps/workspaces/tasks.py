@@ -184,7 +184,7 @@ def _unreachable_tenant_error(tenant) -> str:
     """Describe a workspace tenant the acting user holds no live membership for.
 
     Describes only. What the user should do about it is keyed by
-    ``WORKSPACE_TENANT_UNREACHABLE`` in ``_CREDENTIAL_GUIDANCE``, because the
+    ``WORKSPACE_TENANT_UNREACHABLE`` in ``CREDENTIAL_GUIDANCE``, because the
     run summary and the chat resume both report this and neither should phrase
     the advice itself (see ``apps/common/errors.py``).
     """

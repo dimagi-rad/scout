@@ -1599,7 +1599,7 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     assert "<ErrorCode." not in body
     assert "nothing you query covers" not in body
     assert "say the numbers exclude them" not in body
-    # The advice comes from _CREDENTIAL_GUIDANCE, attributed to the tenant — a
+    # The advice comes from CREDENTIAL_GUIDANCE, attributed to the tenant — a
     # tenant with no run row could not reach any guidance path before (#364).
     assert ("not connected to your account" in body) is not reachable
     assert "Per-tenant data loaded successfully" not in body
