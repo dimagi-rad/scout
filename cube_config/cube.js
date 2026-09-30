@@ -1,10 +1,48 @@
 const { Pool } = require('pg');
+const { PostgresDriver } = require('@cubejs-backend/postgres-driver');
 const { createHash } = require('node:crypto');
+const { createConnectionSlots, positiveIntegerFromEnv } = require('./connection-slots');
 
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
 const PUBLICATION_REVISION = Symbol('scoutPublicationRevision');
 const CATALOG_QUERY_TIMEOUT_MS = 5000;
 const DRIVER_STATEMENT_TIMEOUT_MS = 30000;
+// Prod and staging share one RDS instance that has already run out of
+// connections, so every pool here is capped and sheds idle connections quickly.
+// Cube's Postgres query queue runs two queries per orchestrator at a time.
+const DRIVER_POOL_MAX = 2;
+const DRIVER_IDLE_TIMEOUT_MS = 10000;
+const DRIVER_EVICTION_INTERVAL_MS = 5000;
+const CATALOG_POOL_MAX = 3;
+const driverSlots = createConnectionSlots(
+  positiveIntegerFromEnv(process.env, 'SCOUT_CUBE_MAX_DRIVER_CONNECTIONS', 16)
+);
+
+// Counts every tenant connection, including the unpooled one Cube opens for
+// testConnection(), against one process-wide limit.
+class SlottedPostgresDriver extends PostgresDriver {
+  async createConnection(poolConfig, poolName) {
+    const release = await driverSlots.acquire();
+    let client;
+    try {
+      client = await super.createConnection(poolConfig, poolName);
+    } catch (error) {
+      release();
+      throw error;
+    }
+    client.once('end', release);
+    return client;
+  }
+}
+
+function boundedPoolConfig(maxPoolSize) {
+  return {
+    maxPoolSize,
+    idleTimeoutMillis: DRIVER_IDLE_TIMEOUT_MS,
+    softIdleTimeoutMillis: DRIVER_IDLE_TIMEOUT_MS,
+    evictionRunIntervalMillis: DRIVER_EVICTION_INTERVAL_MS,
+  };
+}
 
 function sslConfigForUrl(rawUrl) {
   if (!rawUrl) {
@@ -67,6 +105,7 @@ const managedDatabaseUrl = process.env.MANAGED_DATABASE_URL || appDatabaseUrl;
 const appPool = new Pool({
   connectionString: appDatabaseUrl,
   ssl: sslConfigForUrl(appDatabaseUrl),
+  max: CATALOG_POOL_MAX,
   connectionTimeoutMillis: CATALOG_QUERY_TIMEOUT_MS,
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
   query_timeout: CATALOG_QUERY_TIMEOUT_MS,
@@ -125,26 +164,29 @@ module.exports = {
 
   dbType: () => 'postgres',
 
-  driverFactory: ({ securityContext }) => {
+  driverFactory: ({ securityContext, dataSource = 'default' }) => {
     const context = workspaceContext(securityContext);
     if (!context) {
       // Cube's standalone /readyz runs testConnection() through this driver, so
       // it must connect; there is no tenant role to downgrade to (#421). These are
       // session defaults, not enforcement: the guarantee is still that no model is
       // served for this context, and these only bound what one could reach.
-      return {
-        type: 'postgres',
+      // It stays outside the tenant slots so tenant load cannot fail readiness.
+      return new PostgresDriver({
         ...managedConfig,
+        ...boundedPoolConfig(1),
+        dataSource,
         options: `-c statement_timeout=${DRIVER_STATEMENT_TIMEOUT_MS} -c default_transaction_read_only=on -c search_path=pg_catalog`,
-      };
+      });
     }
 
     const [, , schemaName, readonlyRole] = context;
-    return {
-      type: 'postgres',
+    return new SlottedPostgresDriver({
       ...managedConfig,
+      ...boundedPoolConfig(DRIVER_POOL_MAX),
+      dataSource,
       options: `-c role=${readonlyRole} -c search_path=${schemaName},public -c statement_timeout=${DRIVER_STATEMENT_TIMEOUT_MS}`,
-    };
+    });
   },
 
   repositoryFactory: ({ securityContext }) => ({

@@ -11,10 +11,32 @@ result entry.
 the authenticated workspace and semantic model. It overrides any token claim and
 preserves microseconds. Concurrent queries in one REST request share the lookup;
 different requests do not. Missing active schemas or catalog failures fail closed.
-The extra catalog roundtrip uses the existing shared pool (default maximum ten
+The extra catalog roundtrip uses the existing shared catalog pool (at most three
 connections), with five-second acquisition, client-query, and server-statement
 timeouts. It does not allocate an orchestrator, driver, or connection pool per
 publication; existing workspace/schema/read-only-role isolation remains unchanged.
+
+## Database connection bounds
+
+Production and staging share one RDS instance, which has already run out of
+connections once, so every Cube pool is capped (#421):
+
+| Pool | Cap | Idle release |
+|---|---|---|
+| Catalog (`semantic_cubeschema` reads) | 3 | pg default, 10 s |
+| Readiness driver (`/readyz`) | 1 | 10 s |
+| Each tenant driver (one per workspace/schema/role orchestrator) | 2 | 10 s |
+| All tenant drivers together, including `testConnection()` probes | `SCOUT_CUBE_MAX_DRIVER_CONNECTIONS`, default 16 | |
+
+A tenant driver's cap matches Cube's Postgres query-queue concurrency of two. The
+process-wide tenant limit is what bounds the total: without it the per-driver cap
+multiplies by the number of active workspaces. A connection that would exceed it
+waits for another to close, so under load queries queue rather than fail, up to
+Cube's 20-second pool acquisition timeout. An idle tenant driver holds no
+connections after about 15 seconds.
+
+Worst case per Cube process: 16 tenant + 1 readiness (+1 transient readiness
+probe) + 3 catalog = 21 connections. Production and staging together: 42.
 
 ## Bounded query-result retention without CubeStore
 

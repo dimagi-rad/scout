@@ -1,20 +1,41 @@
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
 // Exercise the production configuration without a network connection or npm
-// install. Only pg.Pool is stubbed; ID generation and driver configuration run.
-function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = []) {
+// install. pg.Pool and Cube's PostgresDriver are stubbed; ID generation, driver
+// configuration and the connection limit run for real.
+class FakeClient extends EventEmitter {
+  end() { this.emit('end'); }
+}
+
+class FakePostgresDriver {
+  constructor(config) { this.config = config; this.options = config.options; }
+  async createConnection() {
+    if (this.config.failConnect) throw new Error('Synthetic connect failure');
+    return new FakeClient();
+  }
+}
+
+function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = [], env = {}) {
   const sandbox = {
     module: { exports: {} },
-    process: { env: {} },
+    process: { env },
     URL,
-    require: (name) => name === 'pg' ? { Pool: class {
-      constructor(options) { pools.push(options); }
-      query(...args) { return query(...args); }
-    } } : require(name),
+    require: (name) => {
+      if (name === 'pg') {
+        return { Pool: class {
+          constructor(options) { pools.push(options); }
+          query(...args) { return query(...args); }
+        } };
+      }
+      if (name === '@cubejs-backend/postgres-driver') return { PostgresDriver: FakePostgresDriver };
+      if (name.startsWith('./')) return require(join(__dirname, name));
+      return require(name);
+    },
   };
   vm.runInNewContext(readFileSync(join(__dirname, 'cube.js'), 'utf8'), sandbox);
   return sandbox.module.exports;
@@ -185,5 +206,60 @@ test('the readiness driver is time-bounded, read-only, and cannot resolve tenant
     assert.match(driver.options ?? '', /-c statement_timeout=30000(\s|$)/);
     assert.match(driver.options ?? '', /-c default_transaction_read_only=on(\s|$)/);
     assert.match(driver.options ?? '', /-c search_path=pg_catalog(\s|$)/);
+  }
+});
+
+test('every pool is capped and sheds idle connections', () => {
+  const pools = [];
+  const config = loadConfig(undefined, pools);
+  assert.equal(pools[0].max, 3);
+  for (const [ctx, max] of [[context(), 2], [{}, 1]]) {
+    const driver = config.driverFactory(ctx);
+    assert.equal(driver.config.maxPoolSize, max);
+    assert.equal(driver.config.idleTimeoutMillis, 10000);
+    assert.equal(driver.config.softIdleTimeoutMillis, 10000);
+    assert.equal(driver.config.dataSource, 'default');
+  }
+});
+
+test('tenant connections share one process-wide limit across workspaces', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '2' });
+  const a = config.driverFactory(context());
+  const b = config.driverFactory(context({ workspaceId: 'workspace-b', schemaName: 'workspace_b', readonlyRole: 'workspace_b_ro' }));
+  const first = await a.createConnection();
+  await b.createConnection();
+  let third = null;
+  const waiting = b.createConnection().then((client) => { third = client; });
+  await new Promise(setImmediate);
+  assert.equal(third, null);
+
+  first.end();
+  first.end();
+  await waiting;
+  assert.ok(third);
+  let fourth = null;
+  a.createConnection().then((client) => { fourth = client; });
+  await new Promise(setImmediate);
+  assert.equal(fourth, null, 'a repeated end must not free a second slot');
+});
+
+test('a failed connect returns its slot', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
+  const failing = config.driverFactory(context());
+  failing.config.failConnect = true;
+  await assert.rejects(failing.createConnection(), /Synthetic connect failure/);
+  failing.config.failConnect = false;
+  assert.ok(await failing.createConnection());
+});
+
+test('readiness connections stay outside the tenant limit', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
+  await config.driverFactory(context()).createConnection();
+  assert.ok(await config.driverFactory({}).createConnection());
+});
+
+test('an invalid tenant connection limit fails startup', () => {
+  for (const value of ['0', '-1', '1.5', 'many', '9007199254740993']) {
+    assert.throws(() => loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: value }), /positive safe integer/);
   }
 });
