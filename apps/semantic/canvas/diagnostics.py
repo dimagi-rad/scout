@@ -19,7 +19,13 @@ from apps.semantic.canvas.service import (
     custom_dataset_primary_key,
     validate_custom_dataset_draft,
 )
-from apps.semantic.models import CustomDataset, SemanticCanvasChange, SemanticField
+from apps.semantic.models import (
+    CustomDataset,
+    SemanticCanvasChange,
+    SemanticDataset,
+    SemanticField,
+    SemanticRelationship,
+)
 from apps.semantic.services.field_sql import (
     DimensionSQLValidationError,
     compile_dimension_sql,
@@ -91,6 +97,8 @@ def compute_diagnostics(
             )
         )
 
+    diagnostics.extend(_reference_diagnostics(canvas, model, changes))
+
     for change in changes:
         if change.change_type == ChangeType.CREATE:
             continue
@@ -106,6 +114,138 @@ def compute_diagnostics(
                 )
             )
     return diagnostics
+
+
+def _reference_diagnostics(canvas, model, changes) -> list[dict]:
+    """Refuse removing or renaming a field another field's SQL or a join still names.
+
+    The Cube build runs after the commit, so a dangling ``{member}`` would
+    leave the saved model unbuildable rather than block the save.
+    """
+    targets = []
+    gone_fields: set[str] = set()
+    gone_datasets: set[str] = set()
+    for change in changes:
+        if change.change_type == ChangeType.CREATE:
+            continue
+        is_delete = change.change_type == ChangeType.DELETE
+        if change.object_type == ObjectType.DATASET and is_delete:
+            dataset = model.datasets.filter(id=change.object_uuid).first()
+            if dataset is not None:
+                gone_datasets.add(str(dataset.id))
+                targets.append((change, "", dataset.name, None, "Deleting"))
+        elif change.object_type == ObjectType.FIELD and (is_delete or "name" in change.fields):
+            field = (
+                SemanticField.objects.filter(id=change.object_uuid)
+                .select_related("dataset")
+                .first()
+            )
+            if field is None:
+                continue
+            if is_delete:
+                gone_fields.add(str(field.id))
+            path, verb = ("", "Deleting") if is_delete else ("name", "Renaming")
+            targets.append((change, path, field.dataset.name, field, verb))
+    if not targets:
+        return []
+
+    pending = {str(change.object_uuid): change for change in changes}
+    dataset_names = {
+        str(id_): name
+        for id_, name in SemanticDataset.objects.filter(semantic_model=model).values_list(
+            "id", "name"
+        )
+    }
+    texts = []
+    for field in SemanticField.objects.filter(dataset__semantic_model=model):
+        if str(field.id) in gone_fields or str(field.dataset_id) in gone_datasets:
+            continue
+        edit = pending.get(str(field.id))
+        draft = edit.fields if edit is not None and edit.change_type == ChangeType.UPDATE else {}
+        merged = {
+            "expression": field.expression,
+            **(field.metadata or {}),
+            **{key: value for key, value in draft.items() if key != "name"},
+        }
+        label = (
+            f"Field {dataset_names.get(str(field.dataset_id), '')}.{draft.get('name', field.name)}"
+        )
+        texts.append((str(field.id), str(field.dataset_id), label, _sql_text(merged)))
+    for change in changes:
+        if change.object_type == ObjectType.FIELD and change.change_type == ChangeType.CREATE:
+            dataset_id = str(change.fields.get("dataset_uuid", ""))
+            name = change.fields.get("name", "")
+            label = f"Field {dataset_names.get(dataset_id, '')}.{name}"
+            texts.append((str(change.object_uuid), dataset_id, label, _sql_text(change.fields)))
+    deleted_joins = {
+        str(change.object_uuid)
+        for change in changes
+        if change.object_type == ObjectType.RELATIONSHIP and change.change_type == ChangeType.DELETE
+    }
+    for relationship in SemanticRelationship.objects.filter(workspace_id=model.workspace_id):
+        endpoints = {str(relationship.from_dataset_id), str(relationship.to_dataset_id)}
+        if str(relationship.id) in deleted_joins or endpoints & gone_datasets:
+            continue
+        texts.append(
+            (
+                str(relationship.id),
+                "",
+                f"Relationship {relationship.name}",
+                relationship.join_expression or "",
+            )
+        )
+
+    out = []
+    for change, path, dataset_name, field, verb in targets:
+        if field is None:
+            prefix = f"{{{dataset_name}."
+            user = next(
+                (
+                    label
+                    for _id, owner, label, text in texts
+                    if owner != str(change.object_uuid) and prefix in text
+                ),
+                "",
+            )
+            what = f"dataset {dataset_name}"
+        else:
+            qualified = f"{{{dataset_name}.{field.name}}}"
+            local = f"{{{field.name}}}"
+            user = next(
+                (
+                    label
+                    for id_, owner, label, text in texts
+                    if id_ != str(field.id)
+                    and (qualified in text or (owner == str(field.dataset_id) and local in text))
+                ),
+                "",
+            )
+            what = f"field {dataset_name}.{field.name}"
+        if user:
+            out.append(
+                _diagnostic(
+                    "MEMBER_IN_USE",
+                    change,
+                    path,
+                    f"{verb} {what} would break {user}, which references it. "
+                    "Update or remove that reference in the same batch first.",
+                )
+            )
+    return out
+
+
+def _sql_text(values: dict[str, Any]) -> str:
+    return " ".join(
+        [
+            str(values.get("expression") or ""),
+            str(values.get("cube_sql") or ""),
+            *(
+                str(item.get("sql", ""))
+                for item in values.get("filters") or []
+                if isinstance(item, dict)
+            ),
+        ]
+    )
 
 
 def _field_draft_diagnostics(model, change, siblings) -> list[dict]:

@@ -299,6 +299,44 @@ def test_undo_refuses_to_remove_a_field_another_field_uses(canvas, semantic_mode
     )
 
 
+def test_commit_refuses_to_rename_or_delete_a_field_another_field_uses(
+    canvas, semantic_model, user
+):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    ratio_sql = "{total_amount}::numeric / NULLIF({total_amount}, 0)"
+    _commit(canvas, user, [_measure_op("ratio", measure_type="number", cube_sql=ratio_sql)])
+
+    for operation in (
+        {"op": "set", "target": "field/raw_visits.total_amount/name", "value": "amount_total"},
+        {"op": "delete_object", "object": "field/raw_visits.total_amount"},
+    ):
+        apply_operations(canvas, [operation], user)
+        report = commit_canvas(canvas, user)
+        assert report["blocked"] is True
+        [problem] = report["blocking_diagnostics"]
+        assert problem["code"] == "MEMBER_IN_USE"
+        assert "raw_visits.ratio" in problem["message"]
+        apply_operations(
+            canvas, [{"op": "revert_object", "object": "field/raw_visits.total_amount"}], user
+        )
+
+    _commit(
+        canvas,
+        user,
+        [
+            {"op": "set", "target": "field/raw_visits.total_amount/name", "value": "amount_total"},
+            {
+                "op": "set",
+                "target": "field/raw_visits.ratio/cube_sql",
+                "value": ratio_sql.replace("total_amount", "amount_total"),
+            },
+        ],
+    )
+    assert (
+        semantic_model.datasets.get(name="raw_visits").fields.filter(name="amount_total").exists()
+    )
+
+
 def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(
     canvas, semantic_model, workspace, user, custom_sql
 ):
