@@ -147,7 +147,7 @@ describe("StaleDataBanner", () => {
   })
 
   it("says reconnect instead of refresh when the viewer's sign-in expired", async () => {
-    mockDetail([source(72, { reconnect: true, not_refreshed: true, last_load: "skipped" })])
+    mockDetail([source(72, { reconnect: true })])
     renderBanner()
 
     const link = await screen.findByTestId("stale-data-banner-reconnect")

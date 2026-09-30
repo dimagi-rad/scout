@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import type { SourceFreshnessDetail, WorkspaceFreshness } from "@/api/workspaces"
+import type { SourceFreshnessDetail } from "@/api/workspaces"
 import { formatDataAge, staleData } from "./staleData"
 import { freshness, freshSource } from "./testFixtures"
 
@@ -44,9 +44,8 @@ describe("staleData", () => {
   })
 
   it("defaults to 24 hours when the payload has no threshold", () => {
-    const f = { ...freshness([source("a", 25)]) } as Partial<WorkspaceFreshness>
-    delete f.stale_data_banner_hours
-    expect(staleData(f as WorkspaceFreshness, { now: NOW })?.ageLabel).toBe("25 hours ago")
+    const f = freshness([source("a", 25)], { stale_data_banner_hours: undefined })
+    expect(staleData(f, { now: NOW })?.ageLabel).toBe("25 hours ago")
     expect(staleData(freshness([source("a", 23)]), { now: NOW })).toBeNull()
   })
 

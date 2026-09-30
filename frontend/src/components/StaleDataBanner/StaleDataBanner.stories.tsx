@@ -62,6 +62,6 @@ export const OldestOfSeveral: Story = {
 export const SignInExpired: Story = {
   args: {
     role: "manage",
-    sources: [source("Alpha", 72, { reconnect: true, not_refreshed: true, last_load: "skipped" })],
+    sources: [source("Alpha", 72, { reconnect: true })],
   },
 }

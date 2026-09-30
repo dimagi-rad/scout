@@ -56,16 +56,14 @@ export interface SourceFreshnessDetail {
   // True when this source's data is part of what the workspace currently queries.
   serving: boolean
   last_fetched_at: string | null
-  last_load: "refreshed" | "reused" | "skipped" | null
-  // The latest load skipped it and nothing has fetched it since.
-  not_refreshed: boolean
   // Skipped over this viewer's own expired sign-in: a refresh cannot fix it.
   reconnect: boolean
 }
 
 export interface WorkspaceFreshness {
-  stale_data_banner_hours: number
-  // A run is active on any of the workspace's sources, whoever started it.
+  // Absent from a server that predates the setting.
+  stale_data_banner_hours?: number
+  // A load covering the workspace is queued or running, whoever started it.
   in_progress: boolean
   sources: SourceFreshnessDetail[]
 }

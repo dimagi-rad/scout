@@ -15,8 +15,6 @@ export function freshSource(
     provider_label: "CommCare HQ",
     serving: hoursAgo !== null,
     last_fetched_at: hoursAgo === null ? null : new Date(now - hoursAgo * HOUR).toISOString(),
-    last_load: "refreshed",
-    not_refreshed: false,
     reconnect: false,
     ...extra,
   }
