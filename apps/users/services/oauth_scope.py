@@ -3,7 +3,7 @@
 from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
 
-from apps.common.commcare_servers import server_for_oauth_provider
+from apps.common.commcare_servers import server_for_provider
 from apps.users.providers.ocs.provider import team_slug_from_uid
 
 
@@ -75,7 +75,7 @@ def account_scope(account) -> str:
         return ""
     provider = canonical_provider(account.provider)
     if provider == "commcare":
-        return server_for_oauth_provider(account.provider)
+        return server_for_provider(account.provider)
     if provider != "ocs":
         return ""
     # The qualified UID is allauth's identity key; prefer it over mutable claims.
