@@ -27,7 +27,9 @@ import os
 import subprocess
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import ParamSpec
 
 import django
 import uvicorn
@@ -135,7 +137,12 @@ MAX_WORKSPACE_DISCOVERY_LIMIT = 100
 MAX_DATASET_DISCOVERY_LIMIT = 100
 
 
-def busy_on_capacity(tool):
+_P = ParamSpec("_P")
+
+
+def busy_on_capacity(
+    tool: Callable[_P, Awaitable[dict]],
+) -> Callable[_P, Awaitable[dict]]:
     """Answer a tool that hit the DB connection limit with the retryable busy result.
 
     Applied per tool rather than per call site: a catalog read several layers down
@@ -143,7 +150,7 @@ def busy_on_capacity(tool):
     """
 
     @functools.wraps(tool)
-    async def guarded(*args, **kwargs):
+    async def guarded(*args: _P.args, **kwargs: _P.kwargs) -> dict:
         try:
             return await tool(*args, **kwargs)
         except Exception as exc:

@@ -12,7 +12,7 @@ from apps.common.capacity import CapacityExhausted, CapacityResource
 from apps.common.error_codes import ErrorCode
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-from mcp_server.server import get_metadata, list_tables
+from mcp_server.server import get_metadata, list_tables, mcp
 from mcp_server.services import metadata
 from mcp_server.services.metadata import _live_tables_in_schema, pipeline_list_tables
 
@@ -141,3 +141,11 @@ async def test_get_metadata_answers_busy_instead_of_reporting_zero_tables(
     assert result["success"] is False
     assert result["error"]["code"] == ErrorCode.CAPACITY_EXHAUSTED
     reported.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "name", ["list_tables", "describe_table", "get_metadata", "get_schema_status"]
+)
+def test_the_registered_catalog_tools_carry_the_busy_guard(name):
+    # The registered fn, not the module symbol: @mcp.tool() must stay outermost.
+    assert hasattr(mcp._tool_manager.get_tool(name).fn, "__wrapped__")
