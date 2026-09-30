@@ -11,6 +11,7 @@ lose that edit.
 from __future__ import annotations
 
 import logging
+from functools import cached_property
 from typing import Any
 
 from django.contrib.auth import get_user_model
@@ -261,10 +262,11 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
             if entry["object_type"] == DATASET and entry.get("after") is None
         }
         removing = {entry["object_uuid"] for entry in entries if entry.get("before") is None}
+        refs = _References(model)
         conflicts = [
             conflict
             for entry in entries
-            if (conflict := _undo_conflict(workspace, model, entry, restoring, removing))
+            if (conflict := _undo_conflict(workspace, model, entry, restoring, removing, refs))
             is not None
         ]
         if conflicts:
@@ -349,7 +351,7 @@ def _lock_model(workspace) -> SemanticModel | None:
         raise
 
 
-def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[str]):
+def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[str], refs):
     object_type = entry["object_type"]
     before, after = entry.get("before"), entry.get("after")
     current = _current(entry)
@@ -365,7 +367,7 @@ def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[s
         now = snapshot_object(object_type, current, deep=True)
         if _authored(object_type, now) != _authored(object_type, after):
             return _conflict(entry, "It was edited afterwards, so removing it would lose that.")
-        if user := _removal_user(model, object_type, now, removing):
+        if user := _removal_user(refs, object_type, now, removing):
             return _conflict(entry, f"{user} uses it, so removing it would break that.")
         return None
     now = snapshot_object(object_type, current)
@@ -374,7 +376,7 @@ def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[s
         if key != CURATED_KEY and _read(now, key) != new:
             return _conflict(entry, f"Its {key.removeprefix('metadata.')} changed afterwards.")
     if "name" in changed:
-        return _rename_conflict(workspace, model, entry, before, after, removing)
+        return _rename_conflict(workspace, entry, before, after, removing, refs)
     return None
 
 
@@ -392,9 +394,9 @@ def _dataset_restored_first(entry: dict[str, Any], restoring: set[str]) -> bool:
     return False
 
 
-def _removal_user(model, object_type: str, now: dict[str, Any], removing: set[str]) -> str:
+def _removal_user(refs, object_type: str, now: dict[str, Any], removing: set[str]) -> str:
     if object_type == FIELD:
-        return _field_user(model, now, removing)
+        return refs.user_of(now, removing)
     if object_type != DATASET:
         return ""
     fields = now.get("fields") or []
@@ -404,16 +406,16 @@ def _removal_user(model, object_type: str, now: dict[str, Any], removing: set[st
         *(relationship["id"] for relationship in now.get("relationships") or []),
     }
     for field in fields:
-        if user := _field_user(model, field, going):
+        if user := refs.user_of(field, going):
             return user
     return ""
 
 
-def _rename_conflict(workspace, model, entry, before, after, removing: set[str]):
+def _rename_conflict(workspace, entry, before, after, removing: set[str], refs):
     old_name = before["name"]
     if entry["object_type"] == FIELD:
         taken = SemanticField.objects.filter(dataset_id=after["dataset_id"], name=old_name)
-        if user := _field_user(model, after, removing):
+        if user := refs.user_of(after, removing):
             return _conflict(entry, f"{user} uses its current name, so renaming would break it.")
     elif entry["object_type"] == RELATIONSHIP:
         taken = SemanticRelationship.objects.filter(workspace=workspace, name=old_name)
@@ -424,33 +426,57 @@ def _rename_conflict(workspace, model, entry, before, after, removing: set[str])
     return None
 
 
-def _field_user(model, field_snapshot: dict[str, Any], removing: set[str]) -> str:
-    """Name a field or join that references this field by ``{name}`` or ``{dataset.name}``."""
-    dataset, name = field_snapshot["dataset_name"], field_snapshot["name"]
-    qualified = f"{{{dataset}.{name}}}"
-    local = f"{{{name}}}"
-    fields = (
-        SemanticField.objects.filter(dataset__semantic_model=model)
-        .exclude(id__in=[*removing, field_snapshot["id"]])
-        .select_related("dataset")
-    )
-    for field in fields:
-        metadata = field.metadata or {}
-        text = " ".join(
-            [
-                field.expression or "",
-                str(metadata.get("cube_sql") or ""),
-                *(str(item.get("sql", "")) for item in metadata.get("filters") or []),
-            ]
+class _References:
+    """Every field's SQL text and every join, read once per undo on first use.
+
+    The conflict pass writes nothing, so one read serves every entry.
+    """
+
+    def __init__(self, model) -> None:
+        self._model = model
+
+    @cached_property
+    def _fields(self) -> list[tuple[str, str, str, str]]:
+        rows = []
+        fields = SemanticField.objects.filter(dataset__semantic_model=self._model).select_related(
+            "dataset"
         )
-        if qualified in text or (field.dataset.name == dataset and local in text):
-            return f"Field {field.dataset.name}.{field.name}"
-    joins = SemanticRelationship.objects.filter(
-        workspace_id=model.workspace_id, join_expression__contains=qualified
-    ).exclude(id__in=removing)
-    if relationship := joins.first():
-        return f"Relationship {relationship.name}"
-    return ""
+        for field in fields:
+            metadata = field.metadata or {}
+            text = " ".join(
+                [
+                    field.expression or "",
+                    str(metadata.get("cube_sql") or ""),
+                    *(str(item.get("sql", "")) for item in metadata.get("filters") or []),
+                ]
+            )
+            rows.append((str(field.id), field.dataset.name, field.name, text))
+        return rows
+
+    @cached_property
+    def _joins(self) -> list[tuple[str, str, str]]:
+        return [
+            (str(id_), name, expression or "")
+            for id_, name, expression in SemanticRelationship.objects.filter(
+                workspace_id=self._model.workspace_id
+            ).values_list("id", "name", "join_expression")
+        ]
+
+    def user_of(self, field_snapshot: dict[str, Any], removing: set[str]) -> str:
+        """Name a field or join that references this field by ``{name}`` or ``{dataset.name}``."""
+        dataset, name = field_snapshot["dataset_name"], field_snapshot["name"]
+        qualified = f"{{{dataset}.{name}}}"
+        local = f"{{{name}}}"
+        excluded = {*map(str, removing), str(field_snapshot["id"])}
+        for field_id, field_dataset, field_name, text in self._fields:
+            if field_id in excluded:
+                continue
+            if qualified in text or (field_dataset == dataset and local in text):
+                return f"Field {field_dataset}.{field_name}"
+        for join_id, join_name, expression in self._joins:
+            if join_id not in excluded and qualified in expression:
+                return f"Relationship {join_name}"
+        return ""
 
 
 def _restore_conflict(workspace, model, entry, before, restoring: set[str]):
