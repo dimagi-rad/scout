@@ -69,7 +69,7 @@ from apps.workspaces.services.invite_notifications import (
     send_pending_invite_email,
 )
 from apps.workspaces.services.load_activity import workspace_schema_statuses
-from apps.workspaces.services.load_progress import last_synced_by_tenant, workspace_ids_in_progress
+from apps.workspaces.services.load_progress import workspace_ids_in_progress
 from apps.workspaces.services.member_coverage import (
     MembersLackTenant,
     add_tenant_covered_by_members,
@@ -697,18 +697,6 @@ class WorkspaceDetailView(APIView):
             .first()
         )
         last_synced_at = last_run_at.isoformat() if last_run_at else None
-        source_synced = last_synced_by_tenant(t.id for t in tenants)
-        sources = [
-            {
-                "tenant_id": str(t.id),
-                "tenant_name": t.canonical_name,
-                "provider": t.provider,
-                "last_synced_at": (
-                    source_synced[t.id].isoformat() if t.id in source_synced else None
-                ),
-            }
-            for t in tenants
-        ]
 
         return Response(
             {
@@ -722,7 +710,6 @@ class WorkspaceDetailView(APIView):
                 "missing_tenants": missing_tenants_payload(missing),
                 "schema_status": schema_status,
                 "in_progress": bool(workspace_ids_in_progress([workspace.id])),
-                "sources": sources,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
                 "created_at": workspace.created_at.isoformat(),

@@ -5,7 +5,10 @@ import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
+import { workspaceApi } from "@/api/workspaces"
 import { SourceFreshness } from "@/components/SourceFreshness"
+import { StaleDataBanner } from "@/components/StaleDataBanner"
+import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
@@ -78,6 +81,30 @@ export function ChatPanel() {
         workspaceId={activeDomainId}
       />
     ))
+  const workspaceLoading =
+    Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0
+  // Fetched here, not in the banner and the data-as-of lines, so both read one
+  // response and it survives the switch between the empty and thread layouts.
+  const [freshness, refetchFreshness] = useRefetchOnLoadEnd(
+    workspaceApi.getFreshness,
+    activeDomainId,
+    workspaceLoading,
+  )
+  // A refresh queues a job the load poll cannot see until a worker starts it;
+  // the freshness endpoint does, so the banner hides instead of re-offering Refresh.
+  const handleRefreshStarted = useCallback(() => {
+    notifyJobLikelyStarted()
+    refetchFreshness()
+  }, [notifyJobLikelyStarted, refetchFreshness])
+  const staleBanner = activeDomainId && (
+    <StaleDataBanner
+      key={activeDomainId}
+      workspaceId={activeDomainId}
+      freshness={freshness}
+      loading={workspaceLoading}
+      onRefreshStarted={handleRefreshStarted}
+    />
+  )
   const currentThread = threads.find((thread) => thread.id === threadId)
   const threadTitle = currentThread?.title ?? "Untitled"
   const titleIsCustom = currentThread?.title_is_custom ?? false
@@ -317,6 +344,7 @@ export function ChatPanel() {
     return (
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
+        {staleBanner}
         <div className="min-h-0 flex-1">
           <ChatEmptyState
             input={input}
@@ -373,14 +401,8 @@ export function ChatPanel() {
           )}
 
         {loadBanners}
-
-        {activeDomainId && (
-          <SourceFreshness
-            key={activeDomainId}
-            workspaceId={activeDomainId}
-            loading={Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0}
-          />
-        )}
+        {staleBanner}
+        <SourceFreshness freshness={freshness} />
 
         {/* Input area */}
         <div className="border-t p-4">

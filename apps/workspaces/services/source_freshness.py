@@ -270,8 +270,9 @@ async def _source_freshness(workspace_id, viewer_id: str) -> list[dict]:
             source["error_code"] = outcome.get("error_code") or ""
             if outcome.get("cancelled") or outcome.get("not_reached"):
                 source["stopped"] = True
-            source["remedy"] = remedy(
-                outcome, tenant.provider, own_load=not loader or loader == viewer_id
-            )
+            own_load = not loader or loader == viewer_id
+            source["remedy"] = remedy(outcome, tenant.provider, own_load=own_load)
+            # Another member's expired sign-in is theirs: this viewer's refresh can work.
+            source["reconnect"] = own_load and source["error_code"] in CREDENTIAL_CODES
         sources.append(source)
     return sources

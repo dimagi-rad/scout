@@ -301,6 +301,8 @@ WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = env.bool(
     "WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT", default=False
 )
 
+# The chat offers a manual refresh once the oldest serving source is this old (#173).
+STALE_DATA_BANNER_HOURS = env.int("STALE_DATA_BANNER_HOURS", default=24)
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-5-5")
