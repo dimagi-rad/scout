@@ -14,6 +14,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.status import SYNCED_RUN_STATES, serving_excluded_tenant_ids
 from apps.workspaces.services.tenant_coverage import parse_coverage
 
@@ -166,10 +167,7 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
     )
     physical_status = view.state if view else "active" if physical_ready else "missing"
     coverage = parse_coverage(view.tenant_coverage) if view and physical_ready else None
-    runs = MaterializationRun.objects.filter(
-        tenant_schema__tenant_id__in=tenant_ids,
-        state__in=MaterializationRun.ACTIVE_STATES,
-    )
+    runs = active_runs_for_workspaces([workspace.id])
     in_progress = await runs.aexists()
     unsafe_writer = await serving_writer_in_flight(runs, coverage)
     semantic_status, semantic_error = await semantic_layer_state(workspace)

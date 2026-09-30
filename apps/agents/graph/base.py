@@ -58,13 +58,16 @@ from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_acti
 from apps.semantic.services.date_context import agent_date_context
 from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import (
-    MaterializationRun,
     SchemaState,
     WorkspaceDataRecovery,
     WorkspaceRole,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_schema_status
+from apps.workspaces.services.load_activity import (
+    active_runs_for_workspaces,
+    athread_awaits_load,
+    aworkspace_schema_status,
+)
 from apps.workspaces.services.query_state import serving_writer_in_flight, workspace_query_surface
 from apps.workspaces.services.source_freshness import (
     CREDENTIAL_CODES,
@@ -404,10 +407,7 @@ async def _fetch_semantic_model_context(
 ) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
-    active_runs = MaterializationRun.objects.filter(
-        tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
-        state__in=list(MaterializationRun.ACTIVE_STATES),
-    )
+    active_runs = active_runs_for_workspaces([workspace.id])
     if await active_runs.aexists():
         tenant_count = await workspace.tenants.acount()
         serving_view = (
