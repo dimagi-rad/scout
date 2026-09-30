@@ -7,6 +7,10 @@ a no-op PostgreSQL predicate. Cube includes SQL parameters in both result-cache
 and query-queue keys, so an older queued query cannot populate a newer publication's
 result entry.
 
+Cube's `schemaVersion` is the active row's `content_hash` alone, so a same-YAML
+publication reuses the compiled schema. The compiled SQL takes the revision as a
+query-time parameter, so the fence needs no recompile.
+
 `queryRewrite` reads the active timestamp from the application database, scoped to
 the authenticated workspace and semantic model. It overrides any token claim and
 preserves microseconds. Concurrent queries in one REST request share the lookup;
