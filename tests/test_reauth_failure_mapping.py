@@ -11,7 +11,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from apps.common.error_codes import ErrorCode
-from apps.workspaces.tasks import _compose_failure_summary, _credential_guidance, _SourceFailure
+from apps.workspaces.services.failure_guidance import (
+    SourceFailure,
+    compose_failure_summary,
+    credential_guidance,
+)
 
 _DENIED_ERROR = (
     "OCSAccessDeniedError: Your Open Chat Studio account no longer has access to "
@@ -35,12 +39,12 @@ def test_guidance_is_keyed_on_the_code_not_the_message():
 
     The whole point of the code: prose is not evidence.
     """
-    lines = _credential_guidance(
+    lines = credential_guidance(
         [
-            _SourceFailure(
+            SourceFailure(
                 "sessions", "HTTP 401 reconnect your account", ErrorCode.AUTH_ACCESS_DENIED
             ),
-            _SourceFailure("messages", "HTTP 403 access removed", ErrorCode.AUTH_TOKEN_EXPIRED),
+            SourceFailure("messages", "HTTP 403 access removed", ErrorCode.AUTH_TOKEN_EXPIRED),
         ]
     )
     assert "sessions: access was removed upstream" in " ".join(lines)
@@ -49,15 +53,15 @@ def test_guidance_is_keyed_on_the_code_not_the_message():
 
 def test_no_guidance_without_a_credential_code():
     assert (
-        _credential_guidance([_SourceFailure("visits", "HTTP 500", ErrorCode.INTERNAL_ERROR)]) == []
+        credential_guidance([SourceFailure("visits", "HTTP 500", ErrorCode.INTERNAL_ERROR)]) == []
     )
 
 
 def test_guidance_groups_every_source_sharing_a_code():
-    lines = _credential_guidance(
+    lines = credential_guidance(
         [
-            _SourceFailure("sessions", "", ErrorCode.AUTH_TOKEN_EXPIRED),
-            _SourceFailure("messages", "", ErrorCode.AUTH_TOKEN_EXPIRED),
+            SourceFailure("sessions", "", ErrorCode.AUTH_TOKEN_EXPIRED),
+            SourceFailure("messages", "", ErrorCode.AUTH_TOKEN_EXPIRED),
         ]
     )
     assert len(lines) == 1
@@ -65,14 +69,14 @@ def test_guidance_groups_every_source_sharing_a_code():
 
 
 def test_summary_appends_reauth_guidance_on_a_401():
-    summary = _compose_failure_summary(
+    summary = compose_failure_summary(
         [_run({"cases": _failed(_EXPIRED_ERROR, ErrorCode.AUTH_TOKEN_EXPIRED)})]
     )
     assert "reconnect the affected account" in summary.lower()
 
 
 def test_summary_omits_reauth_guidance_for_a_non_credential_failure():
-    summary = _compose_failure_summary(
+    summary = compose_failure_summary(
         [
             _run(
                 {
@@ -88,7 +92,7 @@ def test_summary_omits_reauth_guidance_for_a_non_credential_failure():
 
 
 def test_summary_tells_the_user_reconnecting_will_not_fix_a_403():
-    summary = _compose_failure_summary(
+    summary = compose_failure_summary(
         [_run({"sessions": _failed(_DENIED_ERROR, ErrorCode.AUTH_ACCESS_DENIED)})]
     )
     assert "alone does not change upstream permissions" in summary.lower()
@@ -103,7 +107,7 @@ def test_summary_attributes_each_kind_of_advice_to_its_own_source():
     "reconnect" followed by "reconnecting will NOT restore it" reads as a
     contradiction the user cannot act on (#372).
     """
-    summary = _compose_failure_summary(
+    summary = compose_failure_summary(
         [
             _run(
                 {
@@ -125,7 +129,7 @@ def test_summary_renders_every_failed_source_not_just_the_first():
     produce — was dropped, and a second failure was indistinguishable from a
     skipped source.
     """
-    summary = _compose_failure_summary(
+    summary = compose_failure_summary(
         [
             _run(
                 {
@@ -146,7 +150,7 @@ def test_summary_survives_a_failure_record_with_no_code():
 
     It degrades to "no credential guidance", never to a crash or to wrong advice.
     """
-    summary = _compose_failure_summary(
+    summary = compose_failure_summary(
         [_run({"cases": {"state": "failed", "rows": 0, "error": _EXPIRED_ERROR}})]
     )
     assert _EXPIRED_ERROR in summary
