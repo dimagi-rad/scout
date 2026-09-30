@@ -52,7 +52,9 @@ def _map_session(raw: dict) -> dict:
         "session_id": str(raw.get("id") or ""),
         "experiment_id": experiment_id,
         "participant_identifier": participant.get("identifier") or "",
-        "participant_platform": participant.get("platform") or "",
+        # The nested participant serializer only has identifier/remote_id; the
+        # channel platform is a field of the session itself.
+        "participant_platform": raw.get("platform") or "",
         "created_at": raw.get("created_at"),
         "updated_at": raw.get("updated_at"),
         "tags": raw.get("tags") or [],

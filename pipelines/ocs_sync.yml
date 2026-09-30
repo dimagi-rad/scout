@@ -7,7 +7,7 @@ sources:
   - name: experiments
     description: "Chatbot definitions and versions"
   - name: sessions
-    description: "Chat sessions with timestamps, tags, and participant info"
+    description: "Chat sessions with timestamps, tags, and participant info (participant_platform is the session's channel, e.g. web or telegram)"
   - name: messages
     description: "Individual messages within sessions. Message identity is snapshot-local, not a durable upstream ID; inspect identity metadata before saving reviewed labels."
     # Messages are fetched one session-detail request at a time; progress is

@@ -53,7 +53,8 @@ def test_session_loader_paginates_and_filters_by_experiment():
             {
                 "id": "sess-1",
                 "experiment": "exp-1",
-                "participant": {"identifier": "p1", "platform": "web", "remote_id": "r1"},
+                "platform": "web",
+                "participant": {"identifier": "p1", "remote_id": "r1"},
                 "created_at": "2026-04-01T00:00:00Z",
                 "updated_at": "2026-04-01T01:00:00Z",
                 "tags": ["a", "b"],
