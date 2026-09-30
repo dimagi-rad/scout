@@ -139,6 +139,27 @@ test('same-YAML publications get fresh revisions without new orchestrators or dr
   assert.deepEqual(config.driverFactory(before), config.driverFactory(after));
 });
 
+test('schema version depends on content alone, so identical re-promotions do not recompile', async () => {
+  const calls = [];
+  let hash = 'a'.repeat(64);
+  const config = loadConfig(async (...args) => {
+    calls.push(args);
+    return { rows: [{ content_hash: hash, updated_at: new Date(calls.length) }] };
+  });
+  const first = await config.schemaVersion(context());
+  assert.equal(await config.schemaVersion(context()), first);
+  hash = 'b'.repeat(64);
+  assert.notEqual(await config.schemaVersion(context()), first);
+  assert.doesNotMatch(calls[0][0], /updated_at\s*(,|FROM)/);
+  assert.match(calls[0][0], /status = 'active'/);
+});
+
+test('schema version keeps its health-check and no-schema sentinels', async () => {
+  const config = loadConfig(async () => ({ rows: [] }));
+  assert.equal(await config.schemaVersion({}), 'healthcheck');
+  assert.equal(await config.schemaVersion(context()), 'none');
+});
+
 test('one request shares one revision lookup across concurrent queries', async () => {
   let calls = 0;
   const config = loadConfig(async () => {
@@ -186,25 +207,4 @@ test('the readiness driver is time-bounded, read-only, and cannot resolve tenant
     assert.match(driver.options ?? '', /-c default_transaction_read_only=on(\s|$)/);
     assert.match(driver.options ?? '', /-c search_path=pg_catalog(\s|$)/);
   }
-});
-
-test('schema version depends on content alone, so identical re-promotions do not recompile', async () => {
-  const calls = [];
-  let hash = 'a'.repeat(64);
-  const config = loadConfig(async (...args) => {
-    calls.push(args);
-    return { rows: [{ content_hash: hash, updated_at: new Date(calls.length) }] };
-  });
-  const first = await config.schemaVersion(context());
-  assert.equal(await config.schemaVersion(context()), first);
-  hash = 'b'.repeat(64);
-  assert.notEqual(await config.schemaVersion(context()), first);
-  assert.doesNotMatch(calls[0][0], /updated_at\s*(,|FROM)/);
-  assert.match(calls[0][0], /status = 'active'/);
-});
-
-test('schema version keeps its health-check and no-schema sentinels', async () => {
-  const config = loadConfig(async () => ({ rows: [] }));
-  assert.equal(await config.schemaVersion({}), 'healthcheck');
-  assert.equal(await config.schemaVersion(context()), 'none');
 });
