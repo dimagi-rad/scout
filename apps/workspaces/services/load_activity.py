@@ -24,6 +24,10 @@ from apps.workspaces.models import (
 from apps.workspaces.services.status import workspace_schema_status
 
 MATERIALIZE_TASK_NAME = "apps.workspaces.tasks.materialize_workspace"
+REBUILD_VIEW_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_view_schema"
+# A view rebuild queued on its own (a source added to a serving workspace) is a
+# build in flight too, so the status counts it; the chat auto-load does not wait on it.
+_STATUS_TASK_NAMES = (MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME)
 _QUEUED_OR_RUNNING = ("todo", "doing", "aborting")
 _STARTED = ("doing", "aborting")
 # Matches MATERIALIZATION_STALLED_HEARTBEAT_SECONDS in tasks: a started job whose
@@ -48,11 +52,11 @@ async def aunserved_tenant_ids(workspace_id) -> set:
     return tenant_ids - served
 
 
-def _pending_loads(workspace_ids):
+def _pending_loads(workspace_ids, task_names=(MATERIALIZE_TASK_NAME,)):
     """The run, recovery and queued-job querysets that each mean a load is under way.
 
     A MaterializationRun only exists once a worker has started the job, so a
-    queued ``materialize_workspace`` job is read from the queue itself.
+    queued job of one of *task_names* is read from the queue itself.
     """
     ids = [str(workspace_id) for workspace_id in workspace_ids]
     runs = MaterializationRun.objects.filter(
@@ -64,7 +68,7 @@ def _pending_loads(workspace_ids):
     )
     stalled_before = timezone.now() - _STALLED_AFTER
     jobs = ProcrastinateJob.objects.filter(
-        task_name=MATERIALIZE_TASK_NAME,
+        task_name__in=task_names,
         status__in=_QUEUED_OR_RUNNING,
         args__workspace_id__in=ids,
     ).filter(~Q(status__in=_STARTED) | Q(worker__last_heartbeat__gte=stalled_before))
@@ -73,15 +77,20 @@ def _pending_loads(workspace_ids):
 
 async def aworkspace_load_pending(workspace_id) -> bool:
     """Whether a load covering this workspace is queued or running."""
-    for pending in _pending_loads([workspace_id]):
+    return await _aany_pending(_pending_loads([workspace_id]))
+
+
+async def _aany_pending(querysets) -> bool:
+    for pending in querysets:
         if await pending.aexists():
             return True
     return False
 
 
-def workspace_ids_load_pending(workspace_ids) -> set:
-    """Of ``workspace_ids``, those with a load queued or running (three queries)."""
-    runs, recoveries, jobs = _pending_loads(workspace_ids)
+def _workspace_ids_building(workspace_ids) -> set:
+    """Of ``workspace_ids``, those with a load or view build queued or running (three queries)."""
+    workspace_ids = list(workspace_ids)
+    runs, recoveries, jobs = _pending_loads(workspace_ids, _STATUS_TASK_NAMES)
     pending = {
         str(workspace_id)
         for workspace_id in runs.values_list(
@@ -118,7 +127,7 @@ def workspace_schema_statuses(workspace_ids) -> dict:
             "workspace_id", "state"
         )
     )
-    loading = workspace_ids_load_pending(workspace_ids)
+    loading = _workspace_ids_building(workspace_ids)
     return {
         workspace_id: workspace_schema_status(
             tenants_by_workspace[workspace_id],
@@ -149,9 +158,8 @@ async def aworkspace_schema_status(workspace_id) -> str:
         .values_list("state", flat=True)
         .afirst()
     )
-    return workspace_schema_status(
-        tenant_ids, active, await aworkspace_load_pending(workspace_id), view_state
-    )
+    building = await _aany_pending(_pending_loads([workspace_id], _STATUS_TASK_NAMES))
+    return workspace_schema_status(tenant_ids, active, building, view_state)
 
 
 async def athread_awaits_load(thread_id) -> bool:
