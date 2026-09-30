@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
-const { createWorkerCompiler } = require('./validator-compiler');
+const { createWorkerCompiler, DEFAULT_MAX_QUEUE_WAIT_MS } = require('./validator-compiler');
 
 class FakeWorker extends EventEmitter {
   constructor() {
@@ -29,7 +29,13 @@ function harness(options = {}) {
   const exits = [];
   const compile = createWorkerCompiler({
     timeoutMs: 1000,
-    workerFactory: () => { const worker = new FakeWorker(); workers.push(worker); return worker; },
+    maxQueueWaitMs: 5000,
+    workerFactory: () => {
+      if (options.failRestart && workers.length === 1) throw new Error('synthetic restart failure');
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    },
     now: () => time,
     setTimeout: (callback, ms) => { const timer = { callback, at: time + ms }; timers.push(timer); return timer; },
     clearTimeout: (timer) => { timer.cleared = true; },
@@ -121,7 +127,7 @@ test('a request that waited past its deadline is rejected without compiling', as
   const fresh = h.compile('fresh');
   worker.reply(0, { result: 'a' });
   await first;
-  assert.deepEqual(await stale, { error: 'Cube schema validation waited more than 500ms to start' });
+  assert.deepEqual(await stale, { error: 'Cube schema validation waited at least 500ms to start' });
   assert.deepEqual(worker.posted.map((m) => m.schema), ['a', 'fresh']);
   worker.reply(1, { result: 'fresh' });
   assert.equal(await fresh, 'fresh');
@@ -143,4 +149,37 @@ test('an unexpected worker exit rejects everything and exits the process', async
   assert.match((await running).error, /exited with code 0/);
   assert.match((await queued).error, /exited with code 0/);
   assert.equal(errors.length, 1);
+});
+
+test('a request that has queued for exactly the limit is not compiled', async () => {
+  const h = harness({ maxQueueWaitMs: 500 });
+  const first = h.compile('a');
+  const stale = outcome(h.compile('stale'));
+  h.advance(500);
+  h.workers[0].reply(0, { result: 'a' });
+  await first;
+  assert.match((await stale).error, /waited at least 500ms/);
+  assert.equal(h.workers[0].posted.length, 1);
+});
+
+test('queueing is capped well inside the caller budget by default', () => {
+  assert.equal(DEFAULT_MAX_QUEUE_WAIT_MS, 10000);
+});
+
+test('a failed restart exits and dispatches nothing to a missing worker', async () => {
+  const h = harness({ failRestart: true });
+  const slow = outcome(h.compile('slow'));
+  const queued = outcome(h.compile('queued'));
+  const original = console.error;
+  console.error = () => {};
+  try {
+    h.advance(1000);
+    await settle();
+    await settle();
+  } finally {
+    console.error = original;
+  }
+  assert.match((await slow).error, /timed out/);
+  assert.deepEqual(h.exits, [1]);
+  assert.deepEqual(await queued, { error: 'synthetic restart failure' });
 });
