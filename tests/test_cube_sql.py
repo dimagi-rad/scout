@@ -79,7 +79,7 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
         measure_type="number",
         metadata={
             "cube_sql": "{CUBE.count}::numeric / NULLIF({raw_visits.count}, 0)",
-            "filters": [{"sql": "{CUBE}.\"topic\" = '{count}' /* {unknown} */"}],
+            "filters": [{"sql": "{CUBE}.\"id\" = '{count}' /* {unknown} */"}],
         },
     )
     compiled = compile_custom_dataset_sql(
@@ -117,7 +117,7 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
     ratio = next(field for field in cubes["raw_visits"]["measures"] if field["name"] == "ratio")
     assert ratio["sql"] == "CAST({CUBE.count} AS DECIMAL) / NULLIF({raw_visits.count}, 0)"
     # Published SQL is re-rendered from the validated AST, so comments are dropped.
-    assert ratio["filters"][0]["sql"] == r"""{CUBE}."topic" = '\u007bcount\u007d'"""
+    assert ratio["filters"][0]["sql"] == r"""{CUBE}."id" = '\u007bcount\u007d'"""
     assert cubes["raw_visits"]["joins"][0]["sql"] == "{raw_visits.topic} = {topics.topic}"
     custom.fields.update(is_visible=False)
     cubes = {cube["name"]: cube for cube in generate_cube_schema(model)["cubes"]}

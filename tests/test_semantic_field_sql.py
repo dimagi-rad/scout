@@ -131,6 +131,18 @@ def test_dimension_sql_accepts_scalar_analytics(source):
 
 # Every function the shared validator denies, and any statement appended after an
 # expression, must be rejected by each SQL-bearing member property.
+MEMBER_COLUMNS = {
+    "amount",
+    "data",
+    "flagged",
+    "name",
+    "paid",
+    "status",
+    "topic",
+    "user_id",
+    "visit_date",
+}
+
 DENIED_SQL = [
     *(f"max({name}('x'))" for name in sorted(DANGEROUS_FUNCTIONS)),
     *(f"pg_catalog.{name}('x')" for name in sorted(DANGEROUS_FUNCTIONS)),
@@ -148,13 +160,13 @@ DENIED_SQL = [
 @pytest.mark.parametrize("source", DENIED_SQL)
 def test_measure_sql_rejects_denied_sql(source):
     with pytest.raises(MeasureSQLValidationError):
-        compile_measure_sql(source)
+        compile_measure_sql(source, columns=MEMBER_COLUMNS)
 
 
 @pytest.mark.parametrize("source", DENIED_SQL)
 def test_measure_filter_sql_rejects_denied_sql(source):
     with pytest.raises(MeasureSQLValidationError):
-        compile_measure_filter_sql(source)
+        compile_measure_filter_sql(source, columns=MEMBER_COLUMNS)
 
 
 # Join conditions may use an unqualified IN (SELECT ...), so the harmless scalar
@@ -203,7 +215,7 @@ def test_join_sql_rejects_denied_sql(source):
     ],
 )
 def test_measure_sql_accepts_aggregate_expressions(source, expected):
-    result = compile_measure_sql(source)
+    result = compile_measure_sql(source, columns=MEMBER_COLUMNS)
     if expected is not None:
         assert result == expected
 
@@ -234,7 +246,7 @@ def test_measure_sql_accepts_aggregate_expressions(source, expected):
 )
 def test_measure_sql_rejects_non_expression_sql(source):
     with pytest.raises(MeasureSQLValidationError):
-        compile_measure_sql(source)
+        compile_measure_sql(source, columns=MEMBER_COLUMNS)
 
 
 @pytest.mark.parametrize(
@@ -249,7 +261,7 @@ def test_measure_sql_rejects_non_expression_sql(source):
     ],
 )
 def test_measure_filter_sql_accepts_row_conditions(source, expected):
-    result = compile_measure_filter_sql(source)
+    result = compile_measure_filter_sql(source, columns=MEMBER_COLUMNS)
     if expected is not None:
         assert result == expected
 
@@ -257,7 +269,7 @@ def test_measure_filter_sql_accepts_row_conditions(source, expected):
 @pytest.mark.parametrize("source", ["sum({CUBE}.amount) > 0", "count(*) > 1"])
 def test_measure_filter_sql_rejects_aggregates(source):
     with pytest.raises(MeasureSQLValidationError, match="row-level"):
-        compile_measure_filter_sql(source)
+        compile_measure_filter_sql(source, columns=MEMBER_COLUMNS)
 
 
 def test_join_sql_accepts_generated_identity_joins():
@@ -284,3 +296,42 @@ def test_join_sql_accepts_generated_identity_joins():
 def test_join_sql_rejects_other_schemas_and_catalogs(source):
     with pytest.raises(JoinSQLValidationError):
         compile_join_sql(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{CUBE}.not_a_column",
+        'sum({CUBE}."AMOUNT")',
+        "count(DISTINCT not_a_column)",
+        "raw_visits.amount",
+        "{users}.amount",
+        "{CUBE.count}.amount",
+    ],
+)
+def test_measure_sql_only_qualifies_real_dataset_columns(source):
+    with pytest.raises(MeasureSQLValidationError):
+        compile_measure_sql(source, columns=MEMBER_COLUMNS)
+    with pytest.raises(MeasureSQLValidationError):
+        compile_measure_filter_sql(f"{source} IS NOT NULL", columns=MEMBER_COLUMNS)
+
+
+def test_measure_sql_normalizes_unquoted_columns_like_postgres():
+    assert compile_measure_sql("sum({CUBE}.AMOUNT)", columns=MEMBER_COLUMNS) == (
+        "pg_catalog.SUM({CUBE}.AMOUNT)"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["{CUBE}.data ? 'a'", "{CUBE}.data ?| ARRAY['a', 'b']", "{CUBE}.data ?& ARRAY['a']"],
+)
+def test_measure_filter_sql_accepts_jsonb_key_operators(source):
+    assert compile_measure_filter_sql(source, columns=MEMBER_COLUMNS)
+
+
+def test_join_sql_rejects_qualified_columns():
+    with pytest.raises(JoinSQLValidationError):
+        compile_join_sql("{visits.user_id} = {CUBE}.id")
+    with pytest.raises(JoinSQLValidationError):
+        compile_join_sql("{visits.user_id} IN (SELECT raw_users.id FROM raw_users)")

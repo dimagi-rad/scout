@@ -70,7 +70,6 @@ from apps.semantic.services.custom_datasets import (
     compile_custom_dataset_sql,
     infer_custom_dataset_columns,
 )
-from apps.semantic.services.field_sql import MeasureSQLValidationError, compile_measure_filter_sql
 
 ObjectType = SemanticCanvasChange.ObjectType
 ChangeType = SemanticCanvasChange.ChangeType
@@ -696,12 +695,6 @@ def _normalize_measure_filters(index: int, value: Any) -> list[dict[str, str]]:
                 "INVALID_MEASURE_FILTER",
                 f"filters[{filter_index}].sql must be 1000 characters or fewer.",
             )
-        try:
-            compile_measure_filter_sql(sql)
-        except MeasureSQLValidationError as exc:
-            raise CanvasOperationError(
-                index, "INVALID_MEASURE_FILTER", f"filters[{filter_index}]: {exc}"
-            ) from exc
         normalized.append({"sql": sql})
     return normalized
 

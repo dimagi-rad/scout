@@ -720,7 +720,7 @@ def test_created_ratio_measure_can_reference_filtered_measure(
                     "name": "approved_visit_count",
                     "field_type": "measure",
                     "measure_type": "count",
-                    "filters": [{"sql": "{CUBE}.\"status\" = 'approved'"}],
+                    "filters": [{"sql": "{CUBE}.\"username\" = 'approved'"}],
                 },
             },
             {
@@ -748,7 +748,7 @@ def test_created_ratio_measure_can_reference_filtered_measure(
     )
     measures = {measure["name"]: measure for measure in cube["measures"]}
     assert measures["approved_visit_count"]["filters"] == [
-        {"sql": "{CUBE}.\"status\" = 'approved'"}
+        {"sql": "{CUBE}.\"username\" = 'approved'"}
     ]
     assert measures["approval_rate"] == {
         "name": "approval_rate",
@@ -1970,8 +1970,10 @@ def test_created_measure_rejects_denied_filter(canvas, semantic_model, user, fil
         user,
     )
 
-    assert result["errors"][0]["code"] == "INVALID_MEASURE_FILTER"
-    assert canvas.changes.count() == 0
+    assert result["can_commit"] is False
+    assert [d["code"] for d in result["diagnostics"]] == ["INVALID_MEASURE_FILTER"]
+    assert commit_canvas(canvas, user)["blocked"] is True
+    assert not _visits(semantic_model).fields.filter(name="escalating_count").exists()
 
 
 def test_edited_measure_sql_and_filters_are_validated(canvas, semantic_model, user):
@@ -2009,7 +2011,8 @@ def test_edited_measure_sql_and_filters_are_validated(canvas, semantic_model, us
         ],
         user,
     )
-    assert filter_edit["errors"][0]["code"] == "INVALID_MEASURE_FILTER"
+    assert filter_edit["can_commit"] is False
+    assert "INVALID_MEASURE_FILTER" in [d["code"] for d in filter_edit["diagnostics"]]
 
 
 def test_edited_measure_accepts_ordinary_aggregate_sql(canvas, semantic_model, user):

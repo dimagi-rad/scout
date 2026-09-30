@@ -145,11 +145,12 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             if field.field_type
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
+        columns = dataset_column_names(dataset)
         measure_references = (
             references | {f.name for f in fields} | {f"CUBE.{f.name}" for f in fields} | {"CUBE"}
         )
         measures = [
-            _cube_measure(field, references=measure_references)
+            _cube_measure(field, references=measure_references, columns=columns)
             for field in fields
             if field.field_type == SemanticField.FieldType.MEASURE
         ]
@@ -236,7 +237,9 @@ def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> di
     return payload
 
 
-def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, Any]:
+def _cube_measure(
+    field: SemanticField, *, references: set[str], columns: set[str]
+) -> dict[str, Any]:
     measure_type = field.measure_type or SemanticField.MeasureType.NUMBER
     payload = {
         "name": field.name,
@@ -245,10 +248,12 @@ def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, An
     metadata = field.metadata or {}
     cube_sql = metadata.get("cube_sql")
     if isinstance(cube_sql, str) and cube_sql.strip():
-        payload["sql"] = embed_cube_sql(compile_measure_sql(cube_sql), references=references)
+        payload["sql"] = embed_cube_sql(
+            compile_measure_sql(cube_sql, columns=columns), references=references
+        )
     elif measure_type != SemanticField.MeasureType.COUNT:
         payload["sql"] = _cube_sql(field.expression)
-    filters = _cube_measure_filters(metadata.get("filters"), references=references)
+    filters = _cube_measure_filters(metadata.get("filters"), references=references, columns=columns)
     if filters:
         payload["filters"] = filters
     if field.description:
@@ -257,7 +262,9 @@ def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, An
     return payload
 
 
-def _cube_measure_filters(value: Any, *, references: set[str]) -> list[dict[str, str]]:
+def _cube_measure_filters(
+    value: Any, *, references: set[str], columns: set[str]
+) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
     filters: list[dict[str, str]] = []
@@ -267,7 +274,11 @@ def _cube_measure_filters(value: Any, *, references: set[str]) -> list[dict[str,
         sql = item.get("sql")
         if isinstance(sql, str) and sql.strip():
             filters.append(
-                {"sql": embed_cube_sql(compile_measure_filter_sql(sql), references=references)}
+                {
+                    "sql": embed_cube_sql(
+                        compile_measure_filter_sql(sql, columns=columns), references=references
+                    )
+                }
             )
     return filters
 

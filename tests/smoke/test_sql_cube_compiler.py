@@ -65,11 +65,15 @@ def test_custom_sql_literals_are_unchanged_by_cube_compilation():
             {
                 "sources": [embed_cube_sql(source) for source in cases],
                 "filter": embed_cube_sql(
-                    compile_measure_filter_sql("""{CUBE}."topic" ~ '[0-9]{2}'"""),
+                    compile_measure_filter_sql(
+                        """{CUBE}."topic" ~ '[0-9]{2}'""", columns={"topic"}
+                    ),
                     references={"CUBE"},
                 ),
                 "ratio": embed_cube_sql(
-                    compile_measure_sql("{CUBE.filtered}::numeric / NULLIF({count}, 0)"),
+                    compile_measure_sql(
+                        "{CUBE.filtered}::numeric / NULLIF({count}, 0)", columns={"topic"}
+                    ),
                     references={"CUBE.filtered", "count"},
                 ),
             }

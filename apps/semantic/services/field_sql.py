@@ -159,7 +159,14 @@ _AGGREGATE_FUNCTIONS = frozenset(
         "variance_pop",
     }
 )
-_MEASURE_FUNCTIONS = _SCALAR_FUNCTIONS | _AGGREGATE_FUNCTIONS
+# JSONB key/path operators the shared validator already allows in queries.
+_ROW_FUNCTIONS = _SCALAR_FUNCTIONS | {
+    "j_s_o_n_b_contains_all_top_keys",
+    "j_s_o_n_b_contains_any_top_keys",
+    "j_s_o_n_b_contains_top_key",
+    "j_s_o_n_b_path_exists",
+}
+_MEASURE_FUNCTIONS = _ROW_FUNCTIONS | _AGGREGATE_FUNCTIONS
 _MAX_MEMBER_SQL_LENGTH = 1000
 _REFERENCE_PLACEHOLDER = "__scout_ref_"
 _REFERENCE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?")
@@ -273,7 +280,7 @@ def _replace_cube_reference(value: str) -> str:
     return value
 
 
-def compile_measure_sql(value: str) -> str:
+def compile_measure_sql(value: str, *, columns: set[str]) -> str:
     """Validate a measure's SQL and return it with its Cube references restored.
 
     Aggregates are allowed; subqueries, windows and functions outside the
@@ -286,17 +293,19 @@ def compile_measure_sql(value: str) -> str:
         error=MeasureSQLValidationError,
         functions=_MEASURE_FUNCTIONS,
         allow_aggregates=True,
+        columns=columns,
     )
 
 
-def compile_measure_filter_sql(value: str) -> str:
+def compile_measure_filter_sql(value: str, *, columns: set[str]) -> str:
     """Validate a measure filter as a row-level boolean expression."""
     return _compile_member_sql(
         value,
         label="measure filter SQL",
         error=MeasureSQLValidationError,
-        functions=_SCALAR_FUNCTIONS,
+        functions=_ROW_FUNCTIONS,
         allow_aggregates=False,
+        columns=columns,
     )
 
 
@@ -315,6 +324,7 @@ def compile_join_sql(value: str) -> str:
         allow_aggregates=True,
         allow_subqueries=True,
         max_length=None,
+        columns=None,
     )
 
 
@@ -325,6 +335,7 @@ def _compile_member_sql(
     error: type[SemanticSQLValidationError],
     functions: frozenset[str] | None,
     allow_aggregates: bool,
+    columns: set[str] | None,
     allow_subqueries: bool = False,
     max_length: int | None = _MAX_MEMBER_SQL_LENGTH,
 ) -> str:
@@ -371,19 +382,52 @@ def _compile_member_sql(
     for column in list(expression.find_all(exp.Column)):
         if column.args.get("db") or column.args.get("catalog"):
             raise error(f"The {label} cannot use schema- or database-qualified columns.")
+        # PostgreSQL reads rel.name as name(rel) when rel has no such column, so a
+        # qualified name must be a real column of this dataset, never an arbitrary word.
         if column.table in references:
-            column.set("table", exp.Var(this="{" + references[column.table] + "}"))
-        elif not column.table and column.name in references:
+            if references[column.table] != "CUBE" or columns is None:
+                raise error(
+                    f"The {label} can only qualify columns as {{CUBE}}.column; "
+                    "reference other members as {member}."
+                )
+            _require_dataset_column(column, columns, label=label, error=error)
+            column.set("table", exp.Var(this="{CUBE}"))
+        elif column.table:
+            raise error(
+                f"The {label} can only qualify columns as {{CUBE}}.column; "
+                "reference other members as {member}."
+            )
+        elif column.name in references:
             reference = exp.Var(this="{" + references[column.name] + "}")
             if column is expression:
                 expression = reference
             else:
                 column.replace(reference)
+        elif columns is not None and not _inside_subquery(column, expression):
+            _require_dataset_column(column, columns, label=label, error=error)
     sql = expression.sql(dialect="postgres", comments=False)
     # Anything left over sat somewhere other than a value or column qualifier.
     if _REFERENCE_PLACEHOLDER in sql:
         raise error(f"The {label} can only use Cube references as values or column qualifiers.")
     return sql
+
+
+def _require_dataset_column(
+    column: exp.Column,
+    columns: set[str],
+    *,
+    label: str,
+    error: type[SemanticSQLValidationError],
+) -> None:
+    identifier = column.this
+    if not isinstance(identifier, exp.Identifier):
+        raise error(f"The {label} can only use * inside count(*).")
+    name = identifier.name if identifier.quoted else identifier.name.lower()
+    if name not in columns:
+        raise error(
+            f"'{name}' is not a column on this dataset. Use {{CUBE}}.\"column\" for "
+            "a physical column or {member} for another dimension or measure."
+        )
 
 
 def _inside_subquery(node: exp.Expression, root: exp.Expression) -> bool:
