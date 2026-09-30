@@ -34,7 +34,9 @@ function loadConfig(query = () => { throw new Error('Unexpected database access'
             if (text.includes('to_regrole')) {
               catalog.probes += 1;
               assert.deepEqual(Array.from(values), ['scout_cube_catalog']);
-              return Promise.resolve({ rows: [{ present: catalog.roleExists }] });
+              if (catalog.probeError) return Promise.reject(new Error('synthetic probe failure'));
+              assert.match(text, /has_table_privilege\(to_regrole\(\$1\)::oid, 'semantic_cubeschema', 'SELECT'\)/);
+              return Promise.resolve({ rows: [{ ready: catalog.roleExists }] });
             }
             return query(text, values, this.options);
           }
@@ -243,10 +245,10 @@ test('before the migration creates the role, catalog reads use the owner and re-
   await config.queryRewrite({}, context());
   assert.equal(catalog.probes, 1, 'a missing role is not re-probed on every request');
   assert.equal(catalog.warnings.length, 1);
-  assert.match(catalog.warnings[0], /scout_cube_catalog does not exist yet/);
+  assert.match(catalog.warnings[0], /scout_cube_catalog cannot read semantic_cubeschema yet/);
   for (const options of seen) {
     assert.equal(options.options, undefined);
-    assert.equal(options.max, 1);
+    assert.equal(options.max, 3);
   }
 });
 
@@ -262,7 +264,7 @@ test('the readiness driver is time-bounded, read-only, and cannot resolve tenant
 test('every pool is capped and sheds idle connections', () => {
   const pools = [];
   const config = loadConfig(undefined, pools);
-  assert.equal(pools[0].max, 1);
+  assert.equal(pools[0].max, 3);
   for (const [ctx, max] of [[context(), 2], [{}, 1]]) {
     const driver = config.driverFactory(ctx);
     assert.equal(driver.config.maxPoolSize, max);
@@ -309,6 +311,21 @@ test('readiness connections stay outside the tenant limit', async () => {
   const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
   await config.driverFactory(context()).createConnection();
   assert.ok(await config.driverFactory({}).createConnection());
+});
+
+test('a failed role check falls back to the owner instead of failing the read', async () => {
+  const seen = [];
+  const catalog = { roleExists: true, probeError: true, probes: 0, warnings: [] };
+  const config = loadConfig(async (text, values, options) => {
+    seen.push(options);
+    return { rows: [{ data_revision: 'r' }] };
+  }, [], {}, catalog);
+  await config.queryRewrite({}, context());
+  await config.queryRewrite({}, context());
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].options, undefined);
+  assert.equal(catalog.warnings.length, 1, 'a failed check backs off instead of re-probing every request');
+  assert.match(catalog.warnings[0], /synthetic probe failure/);
 });
 
 test('a slot wait is bounded and a timed-out waiter leaves the queue', async () => {

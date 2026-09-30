@@ -17,6 +17,7 @@ const CATALOG_POOL_MAX = 3;
 // Created, with SELECT on semantic_cubeschema only, by semantic migration 0005.
 const CATALOG_ROLE = 'scout_cube_catalog';
 const CATALOG_ROLE_PROBE_INTERVAL_MS = 60000;
+const CATALOG_ROLE_PROBE_RETRY_MS = 5000;
 // Also the pool's acquireTimeoutMillis: generic-pool cannot time out a wait
 // inside its create factory, so the slot wait needs its own bound.
 const DRIVER_SLOT_WAIT_MS = 20000;
@@ -117,33 +118,46 @@ const catalogPoolOptions = {
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
   query_timeout: CATALOG_QUERY_TIMEOUT_MS,
 };
-const ownerPool = new Pool({ ...catalogPoolOptions, max: 1 });
+const ownerPool = new Pool({ ...catalogPoolOptions, max: CATALOG_POOL_MAX });
 let rolePool = null;
 let roleProbe = null;
 let nextRoleProbeAt = 0;
 
+// The role is cluster-wide but its SELECT grant is per database, and staging
+// shares the RDS instance, so check the grant in this database, not existence.
+const ROLE_READY_SQL = `
+  SELECT coalesce(
+    pg_has_role(current_user, to_regrole($1)::oid, 'MEMBER')
+      AND has_table_privilege(to_regrole($1)::oid, 'semantic_cubeschema', 'SELECT'),
+    false
+  ) AS ready
+`;
+
 // Cube deploys before the API applies migrations, so on the deploy that adds
-// the role it is missing for a few minutes. Until then, read as the owner, as
-// before; once the role exists every catalog read uses it, and a broken grant
-// fails closed rather than falling back.
+// the grant it is missing for a few minutes. Until then, read as the owner, as
+// before; once the grant exists every catalog read uses the role, and a later
+// broken grant fails closed rather than falling back.
 async function catalogPool() {
   if (rolePool) {
     return rolePool;
   }
   if (Date.now() >= nextRoleProbeAt) {
     roleProbe ??= ownerPool
-      .query('SELECT to_regrole($1) IS NOT NULL AS present', [CATALOG_ROLE])
+      .query(ROLE_READY_SQL, [CATALOG_ROLE])
       .then(({ rows }) => {
-        if (rows[0]?.present) {
+        if (rows[0]?.ready) {
           rolePool ??= new Pool({
             ...catalogPoolOptions,
             max: CATALOG_POOL_MAX,
             options: `-c role=${CATALOG_ROLE} -c default_transaction_read_only=on`,
           });
-        } else {
-          nextRoleProbeAt = Date.now() + CATALOG_ROLE_PROBE_INTERVAL_MS;
-          console.warn(`Cube catalog role ${CATALOG_ROLE} does not exist yet; reading semantic_cubeschema as the DATABASE_URL owner`);
+          return;
         }
+        nextRoleProbeAt = Date.now() + CATALOG_ROLE_PROBE_INTERVAL_MS;
+        console.warn(`Cube catalog role ${CATALOG_ROLE} cannot read semantic_cubeschema yet; reading it as the DATABASE_URL owner`);
+      }, (error) => {
+        nextRoleProbeAt = Date.now() + CATALOG_ROLE_PROBE_RETRY_MS;
+        console.warn(`Cube catalog role check failed (${error.message}); reading semantic_cubeschema as the DATABASE_URL owner`);
       })
       .finally(() => {
         roleProbe = null;

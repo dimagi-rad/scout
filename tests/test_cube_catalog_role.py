@@ -17,7 +17,11 @@ def _as_catalog_role(sql):
     with transaction.atomic(), connection.cursor() as cursor:
         cursor.execute(f"SET LOCAL ROLE {ROLE}")
         cursor.execute(sql)
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        # A released savepoint keeps SET LOCAL for the rest of the test transaction;
+        # on failure the savepoint rollback undoes it.
+        cursor.execute("RESET ROLE")
+    return rows
 
 
 def test_cube_js_connects_as_the_migrated_role():
@@ -57,3 +61,26 @@ def test_catalog_role_reads_semantic_cubeschema():
 def test_catalog_role_cannot_touch_anything_else(sql):
     with pytest.raises(ProgrammingError, match="permission denied"):
         _as_catalog_role(sql)
+
+
+def _role_ready_sql():
+    match = re.search(r"const ROLE_READY_SQL = `(.*?)`;", CUBE_JS.read_text(), re.DOTALL)
+    assert match
+    return match.group(1).replace("$1", "%s")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("role", "ready"), [(ROLE, True), ("scout_no_such_role", False)])
+def test_cube_js_readiness_check_follows_the_grant(role, ready):
+    with connection.cursor() as cursor:
+        cursor.execute(_role_ready_sql(), [role, role])
+        assert cursor.fetchall() == [(ready,)]
+
+
+@pytest.mark.django_db
+def test_cube_js_readiness_check_is_false_without_this_databases_grant():
+    with transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute(f"REVOKE SELECT ON semantic_cubeschema FROM {ROLE}")
+        cursor.execute(_role_ready_sql(), [ROLE, ROLE])
+        assert cursor.fetchall() == [(False,)]
+        transaction.set_rollback(True)
