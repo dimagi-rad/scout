@@ -26,6 +26,8 @@ def queued_jobs():
     before = set(ProcrastinateJob.objects.values_list("id", flat=True))
     yield
     added = set(ProcrastinateJob.objects.values_list("id", flat=True)) - before
+    if not added:
+        return
     with connection.cursor() as cursor:
         cursor.execute("DELETE FROM procrastinate_jobs WHERE id = ANY(%s)", [list(added)])
 
