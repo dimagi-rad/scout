@@ -53,7 +53,7 @@ Configuration lives in `.github/workflows/ocr.yml`:
 
 - Self-updates disabled with job-level `OCR_NO_UPDATE=1`, including the initial version check. Without this, the npm launcher can replace the pinned install while later workflow steps are using it.
 - OCR action pinned to commit `b3dbcb634cbb39344e0a3c48ccb1cef3ecd51532`, CLI `1.12.2`.
-- Anthropic Opus 5, adaptive thinking, high model effort; medium OCR review effort.
+- Anthropic Opus 5, adaptive thinking, high model effort; low OCR review effort (one review round per file group). OCR's medium effort runs a second full agent loop for every group whose first round found anything. Across ~270 runs that second round ran for about 240 groups and cost about a quarter of all OCR tokens. It added findings in about 100 groups. The logs do not say which round produced a finding, but three quarters of all OCR findings are low severity, and the Claude follow-up reviews the same diff afterwards.
 - Two concurrent OCR tasks, 15-minute per-task timeout, and a total-token budget scaled to PR size (500,000 to 4,000,000; see [Token budget and manual overrides](#token-budget-and-manual-overrides)).
 - `.github/ocr-rule.json` excludes tests (`tests/` directories, `test_*.py`, `conftest.py`, `*.test.cjs`) and `package-lock.json` from OCR. OCR's built-in test excludes only match `*_test.py`, so Scout's pytest files were reviewed and made up about 40% of selected files. The Claude follow-up still reviews tests. The rule file is snapshotted from the trusted workflow revision and is part of the policy fingerprint.
 - Native cross-push checkpoints enabled, subject to Scout’s accepted-state validation.

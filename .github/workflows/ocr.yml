@@ -143,7 +143,9 @@ jobs:
           # Snapshotted from the trusted workflow revision by prepareReview. OCR's
           # default test excludes miss Scout's test_*.py naming; Claude still reviews tests.
           rule: ${{ runner.temp }}/scout-ocr-policy/ocr-rule.json
-          effort: medium
+          # low = one review round per file group. medium re-ran the whole agent loop
+          # for every group with findings, about a quarter of all OCR tokens.
+          effort: low
           stream_progress: 'true'
           sticky_summary: 'true'
           incremental: 'true'
