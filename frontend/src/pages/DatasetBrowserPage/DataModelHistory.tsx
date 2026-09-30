@@ -77,6 +77,7 @@ export function DataModelHistory({
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next)
+    setConfirmingId(null)
     if (next) {
       setError(null)
       void load()

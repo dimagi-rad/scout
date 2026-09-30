@@ -53,6 +53,24 @@ describe("DataModelHistory", () => {
     expect(await screen.findByText("Undone")).toBeInTheDocument()
   })
 
+  it("disarms a pending undo confirmation when the panel closes", async () => {
+    vi.spyOn(api, "get").mockResolvedValue({
+      revisions: [revision({})],
+      can_undo: true,
+    } as never)
+
+    render(<DataModelHistory workspaceId={WORKSPACE_ID} onChanged={vi.fn()} />)
+    await userEvent.click(screen.getByTestId("data-model-history-btn"))
+    await userEvent.click(await screen.findByTestId("data-model-history-undo-rev-1"))
+    expect(screen.getByTestId("data-model-history-confirm-rev-1")).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId("data-model-history-btn"))
+    await userEvent.click(screen.getByTestId("data-model-history-btn"))
+
+    expect(await screen.findByTestId("data-model-history-undo-rev-1")).toBeInTheDocument()
+    expect(screen.queryByTestId("data-model-history-confirm-rev-1")).not.toBeInTheDocument()
+  })
+
   it("hides undo from read-only members", async () => {
     vi.spyOn(api, "get").mockResolvedValue({
       revisions: [revision({})],
