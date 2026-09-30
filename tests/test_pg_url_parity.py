@@ -10,6 +10,7 @@ import yaml
 from django.db.utils import ConnectionHandler
 from psycopg.conninfo import conninfo_to_dict
 
+from apps.common.db_urls import parse_pg_url
 from mcp_server.context import _parse_db_url
 from mcp_server.services.dbt_runner import generate_profiles_yml
 
@@ -125,3 +126,9 @@ EXPECTED = {
 )
 def test_builder_output(url, builder, tmp_path):
     assert BUILDERS[builder](url, tmp_path) == EXPECTED[url][builder]
+
+
+def test_malformed_url_error_does_not_echo_the_password():
+    with pytest.raises(ValueError) as excinfo:
+        parse_pg_url("postgresql://u:s3cret%zz@db.example/scout")
+    assert "s3cret" not in str(excinfo.value)

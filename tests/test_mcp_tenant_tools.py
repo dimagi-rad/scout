@@ -722,15 +722,11 @@ class TestParseDbUrl:
 
         assert params["sslmode"] == "require"
 
-    def test_bare_dbname_fallback(self):
-        """In dev, MANAGED_DATABASE_URL may be just a database name."""
+    def test_bare_dbname_is_rejected(self):
+        """libpq, which every other managed-DB connection uses, rejects a bare name."""
 
-        params = _parse_db_url("scout", "my_schema")
-
-        # urlparse("scout") gives path="scout", no host/port
-        assert params["host"] == "localhost"
-        assert params["port"] == 5432
-        assert params["dbname"] == "scout"
+        with pytest.raises(ValueError, match="Invalid Postgres connection URL"):
+            _parse_db_url("scout", "my_schema")
 
 
 # ---------------------------------------------------------------------------

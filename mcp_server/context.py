@@ -8,10 +8,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
 
 from django.conf import settings
 
+from apps.common.db_urls import pg_connection_identity
 from apps.common.errors import DataNotLoaded
 from apps.common.identifiers import readonly_role_name
 from apps.workspaces.models import SchemaState, TenantSchema, Workspace, WorkspaceViewSchema
@@ -148,17 +148,9 @@ def _parse_db_url(url: str, schema: str) -> dict:
     if not re.match(r"^[a-z][a-z0-9_]*$", schema):
         raise ValueError(f"Invalid schema name: {schema!r}")
 
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-    params = {
-        "host": parsed.hostname or "localhost",
-        "port": parsed.port or 5432,
-        "dbname": parsed.path.lstrip("/") or "scout",
-        "user": unquote(parsed.username or ""),
-        "password": unquote(parsed.password or ""),
-        # schema has been validated against ^[a-z][a-z0-9_]*$ above — safe to interpolate
-        "options": f"-c search_path={schema},public -c statement_timeout=30000",
-    }
-    sslmode = qs.get("sslmode", ["prefer"])[0]
-    params["sslmode"] = sslmode
+    params = pg_connection_identity(url)
+    params["dbname"] = params["dbname"] or "scout"
+    params.setdefault("sslmode", "prefer")
+    # schema has been validated against ^[a-z][a-z0-9_]*$ above — safe to interpolate
+    params["options"] = f"-c search_path={schema},public -c statement_timeout=30000"
     return params
