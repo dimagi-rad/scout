@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from apps.agents.tools.canvas_tool import create_canvas_tools
+from apps.agents.tools.canvas_tool import create_canvas_tools, destructive_deletions
+from apps.artifacts.models import Artifact
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
     RevisionUndoError,
@@ -370,3 +371,99 @@ async def test_read_only_member_cannot_undo_through_the_agent(
     assert (await SemanticDataset.objects.aget(name="raw_visits")).label == "Site"
     history = await reader_tools["canvas_history"].ainvoke({})
     assert history["revisions"][0]["id"] == revision_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_agent_delete_of_a_dataset_an_artifact_uses_waits_for_confirmation(
+    workspace, user, semantic_model, custom_sql
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tools = _tools(workspace, user, thread)
+    await tools["canvas_apply"].ainvoke(
+        {
+            "operations": [
+                {
+                    "op": "create",
+                    "object_type": "custom_dataset",
+                    "value": {
+                        "name": "visit_stats",
+                        "primary_key": "username",
+                        "definition_sql": "select username from raw_visits",
+                    },
+                }
+            ]
+        }
+    )
+    assert (await tools["canvas_commit"].ainvoke({}))["committed"]
+    await Artifact.objects.acreate(
+        workspace=workspace,
+        title="Weekly visits",
+        code="",
+        conversation_id=str(thread.id),
+        semantic_queries=[{"measures": ["visit_stats.count"], "dimensions": []}],
+    )
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [{"op": "delete_object", "object": "dataset/visit_stats"}]}
+    )
+
+    asked = await tools["canvas_commit"].ainvoke({})
+
+    assert asked["committed"] == []
+    assert asked["blocked"] is True
+    assert asked["confirmation_required"] == [
+        {"object": "dataset/visit_stats", "used_by_artifacts": ["Weekly visits"]}
+    ]
+    assert await SemanticDataset.objects.filter(name="visit_stats").aexists()
+
+    confirmed = await tools["canvas_commit"].ainvoke(
+        {"confirmed_deletions": ["dataset/visit_stats"]}
+    )
+
+    assert confirmed["committed"][0]["change_type"] == "delete"
+    assert not await SemanticDataset.objects.filter(name="visit_stats").aexists()
+    assert confirmed["revision"]["summary"] == "Deleted dataset visit_stats"
+
+
+@pytest.mark.django_db
+def test_deleting_a_field_no_artifact_uses_needs_no_confirmation(canvas, semantic_model, user):
+    _commit(
+        canvas,
+        user,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "total_amount",
+                    "field_type": "measure",
+                    "measure_type": "sum",
+                    "expression": "amount",
+                },
+            }
+        ],
+    )
+    Artifact.objects.create(
+        workspace=canvas.workspace,
+        title="Amounts",
+        code="",
+        conversation_id="c",
+        semantic_queries=[{"measures": ["raw_visits.total_amount_x"]}],
+    )
+    apply_operations(
+        canvas, [{"op": "delete_object", "object": "field/raw_visits.total_amount"}], user
+    )
+
+    assert destructive_deletions(canvas) == []
+
+    Artifact.objects.create(
+        workspace=canvas.workspace,
+        title="Totals",
+        code="",
+        conversation_id="c",
+        semantic_queries=[{"measures": ["raw_visits.total_amount"]}],
+    )
+    assert destructive_deletions(canvas) == [
+        {"object": "field/raw_visits.total_amount", "used_by_artifacts": ["Totals"]}
+    ]

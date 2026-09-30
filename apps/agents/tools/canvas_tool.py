@@ -12,7 +12,9 @@ loop's token churn stays out of the parent's context.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +22,7 @@ from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 from langchain_core.tools import tool
 
+from apps.artifacts.models import Artifact
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
     RevisionUndoError,
@@ -31,6 +34,7 @@ from apps.semantic.canvas import (
     resolve_thread_canvas,
     undo_revision,
 )
+from apps.semantic.models import SemanticCanvasChange, SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.sample_rows import sample_dataset_rows
 from apps.workspaces.access import aworkspace_read_allowed, workspace_write_allowed
@@ -53,6 +57,84 @@ FORBIDDEN_ERROR = {
 def can_write_canvas(workspace, user) -> bool:
     """Use the central minimum-role authorizer at the mutation boundary."""
     return workspace_write_allowed(user, workspace.id)
+
+
+def destructive_deletions(canvas) -> list[dict[str, Any]]:
+    """Pending deletes the agent may not commit on its own authority.
+
+    Other agent changes are saved without asking because each one is an
+    undoable revision (#714); deleting a whole dataset, or a field a saved
+    artifact queries, breaks things people rely on, so the user must confirm.
+    """
+    deletes = list(
+        canvas.changes.filter(
+            change_type=SemanticCanvasChange.ChangeType.DELETE,
+            object_type__in=[
+                SemanticCanvasChange.ObjectType.DATASET,
+                SemanticCanvasChange.ObjectType.FIELD,
+            ],
+        )
+    )
+    if not deletes:
+        return []
+    artifacts = [
+        (artifact.title, json.dumps([artifact.semantic_queries, artifact.semantic_query_manifest]))
+        for artifact in Artifact.objects.filter(workspace=canvas.workspace, is_deleted=False).only(
+            "title", "semantic_queries", "semantic_query_manifest"
+        )
+    ]
+    deletions = []
+    for change in deletes:
+        if change.object_type == SemanticCanvasChange.ObjectType.DATASET:
+            dataset = SemanticDataset.objects.filter(id=change.object_uuid).first()
+            if dataset is None:
+                continue
+            label = f"dataset/{dataset.name}"
+            member = re.compile(rf"(?<![\w.]){re.escape(dataset.name)}\.\w")
+        else:
+            field = (
+                SemanticField.objects.filter(id=change.object_uuid)
+                .select_related("dataset")
+                .first()
+            )
+            if field is None:
+                continue
+            label = f"field/{field.dataset.name}.{field.name}"
+            member = re.compile(
+                rf"(?<![\w.]){re.escape(field.dataset.name)}\.{re.escape(field.name)}(?!\w)"
+            )
+        used_by = list(dict.fromkeys(title for title, text in artifacts if member.search(text)))
+        if change.object_type == SemanticCanvasChange.ObjectType.DATASET or used_by:
+            deletions.append({"object": label, "used_by_artifacts": used_by[:10]})
+    return deletions
+
+
+def _confirmation_required(deletions: list[dict[str, Any]]) -> dict[str, Any]:
+    diagnostics = []
+    for deletion in deletions:
+        used_by = deletion["used_by_artifacts"]
+        usage = f" It is used by: {', '.join(used_by)}." if used_by else ""
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "CONFIRMATION_REQUIRED",
+                "object": deletion["object"],
+                "object_uuid": "",
+                "path": "",
+                "message": (
+                    f"Deleting {deletion['object']} needs the user's explicit confirmation."
+                    f"{usage} Nothing was saved. Ask the user; only after they confirm, "
+                    "commit again with this object in confirmed_deletions."
+                ),
+            }
+        )
+    return {
+        "committed": [],
+        "blocked": True,
+        "conflicts": [],
+        "blocking_diagnostics": diagnostics,
+        "confirmation_required": deletions,
+    }
 
 
 def _resolve_canvas_sync(workspace, user, conversation_id: str):
@@ -161,12 +243,17 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
         return await sync_to_async(_apply, thread_sensitive=True)()
 
     @tool
-    async def canvas_commit() -> dict[str, Any]:
+    async def canvas_commit(confirmed_deletions: list[str] | None = None) -> dict[str, Any]:
         """Persist the canvas changeset to the semantic model in one transaction.
 
         Blocked while error diagnostics remain. On success the Cube schema is
         rebuilt so new fields/datasets become queryable; committed objects stay
         on the canvas as the thread's working set.
+
+        Deleting a dataset, or a field an artifact uses, is blocked with
+        CONFIRMATION_REQUIRED until the user has explicitly confirmed it; then
+        pass the confirmed objects (e.g. "dataset/visit_stats") in
+        confirmed_deletions.
         """
 
         def _commit() -> dict[str, Any]:
@@ -176,6 +263,14 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
                 canvas = _resolve_canvas_sync(workspace, user, conversation_id)
             except SemanticCatalogUnavailable as exc:
                 return {"errors": [{"op_index": 0, "code": "UNAVAILABLE", "message": str(exc)}]}
+            confirmed = set(confirmed_deletions or [])
+            unconfirmed = [
+                deletion
+                for deletion in destructive_deletions(canvas)
+                if deletion["object"] not in confirmed
+            ]
+            if unconfirmed:
+                return _confirmation_required(unconfirmed)
             return commit_canvas(canvas, user)
 
         return await sync_to_async(_commit, thread_sensitive=True)()
