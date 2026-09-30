@@ -927,6 +927,11 @@ def refresh_oauth_token_result_sync(
     Mirrors ``refresh_oauth_token`` but uses ``requests`` + sync ORM so a loader
     running under ``asyncio.to_thread`` can renew a token mid-run (arch #252,
     finding 14#3). The rotated token must persist before any caller may use it.
+
+    Has no ``record_failure`` knob, deliberately: its only caller is the loader hook
+    the resolver attaches to the run owner's own credential, so a refused grant is
+    always the owner's to reconnect. ``record_failure=False`` exists for a manager
+    renewing someone else's token (1d4b2748); add it here if a caller like that appears.
     """
     try:
         preflight = _preflight_token(
