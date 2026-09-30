@@ -270,7 +270,7 @@ async def test_publishing_an_already_loaded_source_keeps_its_standing_skip(
         ],
     )
 
-    assert recorded["refresh"] == REUSED
+    assert recorded["refresh"] == SKIPPED
     (source,) = await aworkspace_source_freshness(workspace.id)
     assert source["not_refreshed"] is True
     assert source["error_code"] == ErrorCode.AUTH_TOKEN_EXPIRED
@@ -465,7 +465,7 @@ async def test_a_refused_sign_in_downgrades_only_that_members_own_refresh(
         "error_code": ErrorCode.AUTH_TOKEN_EXPIRED,
     }
 
-    await arecord_load_outcomes(workspace.id, [entry], str(user.id), refused=True)
+    await arecord_load_outcomes(workspace.id, [entry], str(user.id), partial=True)
 
     (source,) = await aworkspace_source_freshness(workspace.id)
     assert source["not_refreshed"] is same_member
@@ -492,3 +492,61 @@ async def test_a_headless_load_refused_for_an_expired_sign_in_records_the_skip(
 
     (source,) = await aworkspace_source_freshness(workspace.id, user.id)
     assert source["not_refreshed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_load_that_cannot_reach_a_source_keeps_another_members_refresh(
+    workspace, tenant, user, other_user
+):
+    """The unreachable entry is about the requester's membership, not the source."""
+    await WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).aupdate(
+        last_load={"refresh": REFRESHED, "at": timezone.now().isoformat(), "by": str(other_user.id)}
+    )
+    entry = {
+        "tenant": tenant.external_id,
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "success": False,
+        "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+    }
+
+    (recorded,) = await arecord_load_outcomes(workspace.id, [entry], str(user.id))
+
+    assert recorded["refresh"] == REFRESHED
+    (source,) = await aworkspace_source_freshness(workspace.id)
+    assert source["not_refreshed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_new_source_load_leaves_sources_it_never_meant_to_fetch(workspace, tenant):
+    await WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).aupdate(
+        last_load={"refresh": REFRESHED, "at": timezone.now().isoformat()}
+    )
+
+    assert await arecord_load_outcomes(workspace.id, [], partial=True) == []
+    (source,) = await aworkspace_source_freshness(workspace.id)
+    assert source["last_load"] == REFRESHED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_the_run_summary_reports_a_standing_skip_it_kept(workspace, tenant):
+    await _skip(workspace, tenant, ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    (recorded,) = await arecord_load_outcomes(
+        workspace.id,
+        [
+            {
+                "tenant": tenant.external_id,
+                "tenant_id": str(tenant.id),
+                "provider": tenant.provider,
+                "success": True,
+                "result": {"status": "already_loaded"},
+            }
+        ],
+    )
+
+    assert recorded["refresh"] == SKIPPED
+    assert RECONNECT_HQ in recorded["remedy"]

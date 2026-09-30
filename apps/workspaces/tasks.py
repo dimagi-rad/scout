@@ -127,7 +127,7 @@ from apps.workspaces.services.schema_manager import (
     ViewSchemaRetired,
     aview_schema_buildable,
 )
-from apps.workspaces.services.source_freshness import arecord_load_outcomes
+from apps.workspaces.services.source_freshness import REQUESTER_CODES, arecord_load_outcomes
 from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app
 from mcp_server.loaders.connect_base import ConnectExportError
@@ -714,16 +714,6 @@ async def _workspace_tenant_ids(workspace_id) -> list:
     ]
 
 
-_DENIAL_CODES_ABOUT_THE_SOURCE = frozenset(
-    {
-        ErrorCode.AUTH_TOKEN_EXPIRED,
-        ErrorCode.AUTH_CREDENTIAL_MISSING,
-        ErrorCode.AUTH_ACCESS_DENIED,
-        ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
-    }
-)
-
-
 async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
     """A load refused before it started still left some sources unrefreshed (#715).
 
@@ -732,12 +722,10 @@ async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
     inconclusive check says nothing about the source, so its record stands.
     """
     failed = [
-        entry
-        for entry in denial.get("tenants") or []
-        if entry.get("error_code") in _DENIAL_CODES_ABOUT_THE_SOURCE
+        entry for entry in denial.get("tenants") or [] if entry.get("error_code") in REQUESTER_CODES
     ]
     if failed:
-        await arecord_load_outcomes(workspace_id, failed, user_id, refused=True)
+        await arecord_load_outcomes(workspace_id, failed, user_id, partial=True)
     return denial
 
 
@@ -1294,7 +1282,9 @@ async def materialize_workspace_core(
         "cube_schema": cube_schema_outcome,
         "guidance": _credential_guidance(_summary_failures(guidance_sources)),
         "denied_mid_run": denied_mid_run,
-        "source_freshness": await arecord_load_outcomes(workspace.id, all_results, user_id),
+        "source_freshness": await arecord_load_outcomes(
+            workspace.id, all_results, user_id, partial=only_unserved
+        ),
     }
 
 

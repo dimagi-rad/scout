@@ -35,6 +35,11 @@ _PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 # A new sign-in by the member who ran the load fixes these; any member whose own
 # sign-in works can also refresh. Everything else is not about a credential.
 CREDENTIAL_CODES = frozenset({ErrorCode.AUTH_TOKEN_EXPIRED, ErrorCode.AUTH_CREDENTIAL_MISSING})
+# Skips that describe the member who ran the load rather than the source.
+REQUESTER_CODES = CREDENTIAL_CODES | {
+    ErrorCode.AUTH_ACCESS_DENIED,
+    ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+}
 
 
 def provider_label(provider: str) -> str:
@@ -117,14 +122,16 @@ async def _last_fetched(tenant_ids: Iterable) -> dict[str, datetime]:
 
 
 async def arecord_load_outcomes(
-    workspace_id, tenant_results: list[dict], user_id="", *, refused: bool = False
+    workspace_id, tenant_results: list[dict], user_id="", *, partial: bool = False
 ) -> list:
     """Persist what this load did with each source and return it for the run result.
 
     A source that was only published as already loaded keeps a standing skip:
-    nothing checked its credential, so "reused" must not clear it. A
-    source the load never reached (it was cancelled first) is recorded as skipped,
-    unless the load was ``refused``: a refusal lists only the sources it is about.
+    nothing checked its credential, so "reused" must not clear it. A skip caused
+    by the requester's own sign-in or membership does not overwrite another
+    member's refresh: that data is as fresh as their load. A source the load never
+    reached (it was cancelled first) is recorded as skipped, unless the load is
+    ``partial``: a refusal, or a new-source load, covers only some sources on purpose.
     Never raises: the load already happened, and its summary must still return.
     """
     try:
@@ -141,7 +148,7 @@ async def arecord_load_outcomes(
         for wt in workspace_tenants:
             tenant_id = str(wt.tenant_id)
             entry = entries.get(tenant_id)
-            if entry is None and refused:
+            if entry is None and partial:
                 continue
             if entry is None:
                 outcome = {"refresh": SKIPPED, "error_code": "", "not_reached": True}
@@ -152,15 +159,16 @@ async def arecord_load_outcomes(
                 (entry.get("result") or {}).get("status") == "already_loaded"
             )
             stored = wt.last_load if isinstance(wt.last_load, dict) else {}
-            # A refusal of one member's sign-in says nothing about data another
-            # member's working sign-in just refreshed.
-            refused_after_other_refresh = (
-                refused
+            requester_skip_after_other_refresh = (
+                outcome.get("error_code") in REQUESTER_CODES
                 and stored.get("refresh") in {REFRESHED, REUSED}
                 and stored.get("by") != outcome["by"]
             )
             keep_skip = only_published and stored.get("refresh") == SKIPPED
-            if not (keep_skip or refused_after_other_refresh):
+            if keep_skip or requester_skip_after_other_refresh:
+                # The summary says what still stands, not what this load did.
+                outcome = stored
+            else:
                 await WorkspaceTenant.objects.filter(id=wt.id).aupdate(last_load=outcome)
             last = fetched.get(tenant_id)
             source = {
