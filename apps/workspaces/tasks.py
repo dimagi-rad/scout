@@ -80,6 +80,7 @@ from apps.workspaces.services.data_recovery import recovery_query_surface
 from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE as _CREDENTIAL_GUIDANCE
 from apps.workspaces.services.failure_guidance import compose_failure_summary, credential_guidance
 from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
+from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.load_candidates import (
     Promotion,
     abandoned_workspace_candidates,
@@ -1208,20 +1209,11 @@ async def _await_in_progress_materializations(
     the pipeline drops & recreates ``raw_*`` tables, so concurrent runs corrupt
     each other. Best-effort: on timeout, log and return so the caller proceeds.
     """
-    tenant_ids = [
-        wt.tenant_id async for wt in WorkspaceTenant.objects.filter(workspace_id=workspace_id)
-    ]
-    if not tenant_ids:
-        return
     # Poll cross-process MaterializationRun state (another worker owns the run,
     # so no in-process Event to await). Bounded to keep a ceiling on the wait.
     max_polls = max(1, int(max_wait_seconds / poll_interval))
     for _ in range(max_polls):
-        in_progress = await MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=tenant_ids,
-            state__in=list(MaterializationRun.ACTIVE_STATES),
-        ).aexists()
-        if not in_progress:
+        if not await active_runs_for_workspaces([workspace_id]).aexists():
             return
         await asyncio.sleep(poll_interval)
     logger.warning(
