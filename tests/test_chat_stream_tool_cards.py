@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import ToolMessage
-from langgraph.prebuilt.tool_node import ToolRuntime
 
 from apps.chat import stream
 
@@ -376,6 +375,9 @@ def _make_tool_runtime():
     back to a plain non-serializable object if the internal signature shifts.
     """
     try:
+        # Import drift must fall back to _Opaque below, so keep this inside the try.
+        from langgraph.prebuilt.tool_node import ToolRuntime  # noqa: PLC0415
+
         return ToolRuntime(
             state={},
             context=None,

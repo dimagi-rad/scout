@@ -1,5 +1,4 @@
 import datetime
-import uuid
 import uuid as uuid_module
 
 import freezegun
@@ -87,7 +86,7 @@ def test_workspace_tenant_has_uuid_pk(workspace, tenant):
     """WorkspaceTenant must have a UUID primary key (Amendment A)."""
 
     wt = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-    assert isinstance(wt.id, uuid.UUID)
+    assert isinstance(wt.id, uuid_module.UUID)
 
 
 def test_workspace_view_schema_has_uuid_pk(workspace):

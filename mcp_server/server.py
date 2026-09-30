@@ -36,7 +36,6 @@ from django.core.exceptions import ValidationError as _ValidationError
 from django.db.models import Q, aprefetch_related_objects
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from watchfiles import watch
 
 from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import SemanticDataset
@@ -2131,6 +2130,8 @@ def _run_streamable_http(args: argparse.Namespace) -> None:
 
 def _run_with_reload(args: argparse.Namespace) -> None:
     """Run the server in a subprocess and restart it when files change."""
+    # Dev-only; watchfiles is transitive via uvicorn[standard], not a declared dependency.
+    from watchfiles import watch  # noqa: PLC0415
 
     watch_dirs = ["mcp_server", "apps"]
     cmd = [
