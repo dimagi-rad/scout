@@ -167,6 +167,21 @@ def test_an_earlier_successful_round_does_not_hide_a_missing_model():
     assert message == SEMANTIC_ESCALATION_MESSAGE
 
 
+def test_the_message_reads_the_same_streak_that_escalated():
+    """A success older than the matched streak, even in the same round, does not count."""
+    error = '{"success": false, "error": {"code": "SEMANTIC_MODEL_UNAVAILABLE", "message": "m"}}'
+    calls = [{"name": "t", "args": {}, "id": f"c{i}"} for i in range(4)]
+    messages = [
+        HumanMessage(content="q"),
+        AIMessage(content="", tool_calls=calls),
+        ToolMessage(content='{"success": true, "data": {}}', tool_call_id="c0"),
+        *(ToolMessage(content=error, tool_call_id=f"c{i}") for i in range(1, 4)),
+    ]
+    assert _should_escalate(messages)
+    message = _schema_escalation_message(messages, write_capable=True, interactive=True)
+    assert message == SEMANTIC_ESCALATION_MESSAGE
+
+
 def test_a_mixed_round_is_not_blamed_on_the_data_model():
     messages = _repeated(SEMANTIC_MODEL_UNAVAILABLE)
     messages.insert(

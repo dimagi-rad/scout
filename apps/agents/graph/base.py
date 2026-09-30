@@ -216,17 +216,13 @@ def _tool_message_error(content: Any) -> dict | None:
 
 
 def _schema_escalation_message(messages: list, *, write_capable: bool, interactive: bool) -> str:
-    """The escalation text for the trailing tool round's errors.
+    """The escalation text for the streak ``_should_escalate`` matched.
 
-    Only a round whose every result is a missing data model gets the rebuild text:
+    Only a streak whose every result is a missing data model gets the rebuild text:
     a reload fixes anything else, and parallel results arrive in no fixed order.
     """
-    trailing_codes = set()
-    for message in reversed(messages):
-        if not isinstance(message, ToolMessage):
-            break
-        trailing_codes.add(_tool_message_error_code(message.content))
-    if trailing_codes == {ErrorCode.SEMANTIC_MODEL_UNAVAILABLE}:
+    codes = {_tool_message_error_code(m.content) for m in _escalation_streak(messages)}
+    if codes == {ErrorCode.SEMANTIC_MODEL_UNAVAILABLE}:
         return (
             SEMANTIC_ESCALATION_MESSAGE if write_capable else READ_ONLY_SEMANTIC_ESCALATION_MESSAGE
         )
@@ -321,11 +317,8 @@ MODEL_STOPPED_MESSAGES = {
 FIXED_MESSAGE_NODES = frozenset({"escalate", "model_stopped"})
 
 
-def _should_escalate(messages: list) -> bool:
-    """Detect a panic loop: last N trailing tool messages all returned an
-    escalation error code. A successful tool call in between resets the streak.
-    Matches the structured ``error.code`` (06#1), not a substring.
-    """
+def _escalation_streak(messages: list) -> list[ToolMessage]:
+    """The newest ESCALATION_TRIGGER_COUNT tool results of the turn, across rounds."""
     streak: list[ToolMessage] = []
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
@@ -336,7 +329,15 @@ def _should_escalate(messages: list) -> bool:
             continue
         else:
             break
+    return streak
 
+
+def _should_escalate(messages: list) -> bool:
+    """Detect a panic loop: last N trailing tool messages all returned an
+    escalation error code. A successful tool call in between resets the streak.
+    Matches the structured ``error.code`` (06#1), not a substring.
+    """
+    streak = _escalation_streak(messages)
     if len(streak) < ESCALATION_TRIGGER_COUNT:
         return False
 

@@ -89,8 +89,12 @@ class DataNotLoaded(ExpectedStateError, ValueError):
     code = ErrorCode.DATA_NOT_LOADED
 
 
-def validation_error_code(exc: Exception) -> str:
-    """The code for a ValueError raised on a request: its own if it is unloaded data."""
+def validation_error_code(exc: ValueError) -> ErrorCode:
+    """The code for a ValueError a request-scoped loader raised: its own if unloaded data.
+
+    Not a general accessor (that is ``code_of``): every other ValueError from these
+    loaders is a bad request, so the emitted codes stay a closed set.
+    """
     return exc.code if isinstance(exc, DataNotLoaded) else ErrorCode.VALIDATION_ERROR
 
 
