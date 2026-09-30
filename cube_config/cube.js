@@ -180,7 +180,7 @@ module.exports = {
 
     const { rows } = await appPool.query(
       `
-        SELECT content_hash, updated_at
+        SELECT content_hash
         FROM semantic_cubeschema
         WHERE workspace_id = $1
           AND semantic_model_id = $2
@@ -194,7 +194,9 @@ module.exports = {
     if (!rows[0]) {
       return 'none';
     }
-    return `${rows[0].content_hash}:${rows[0].updated_at.toISOString()}`;
+    // Content only: re-promoting identical YAML must not recompile. Publication
+    // freshness is fenced per query by queryRewrite's data revision, not here.
+    return rows[0].content_hash;
   },
 
   scheduledRefreshTimer: false,
