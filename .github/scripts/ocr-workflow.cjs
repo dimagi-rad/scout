@@ -141,7 +141,7 @@ const FULL_RERUN_FLOOR = 2000000;
 function scaledBudget({ files, lines, full, firstReview }) {
   const count = Number.isFinite(files) && files > 0 ? files : 0;
   const changed = Number.isFinite(lines) && lines > 0 ? lines : 0;
-  const tier = BUDGET_TIERS.find(t => count < t.files && changed < t.lines) || BUDGET_TIERS.at(-1);
+  const tier = BUDGET_TIERS.find(t => count < t.files && changed < t.lines);
   // A repeat full review (policy change, blocked prior run) re-reads the whole PR.
   return full && !firstReview ? Math.max(tier.budget, FULL_RERUN_FLOOR) : tier.budget;
 }
@@ -175,16 +175,17 @@ async function prepareReview({ github, context, core, fs, env }) {
     fs.copyFileSync(path.join(env.GITHUB_WORKSPACE, file), path.join(snapshot, path.basename(file)));
   }
   const manualBudget = Number(env.MANUAL_BUDGET);
-  const budget = Number.isSafeInteger(manualBudget) && manualBudget > 0 ? manualBudget : scaledBudget({
+  const manual = Number.isSafeInteger(manualBudget) && manualBudget > 0;
+  const budget = manual ? manualBudget : scaledBudget({
     files: pr.changed_files, lines: (pr.additions || 0) + (pr.deletions || 0),
-    full: selection.full, firstReview: selection.reason === 'no accepted state',
+    full: selection.full, firstReview: previous === null,
   });
   for (const [key, value] of Object.entries({
     token_budget: String(budget), full_review: String(selection.full), checkpoint: selection.checkpoint || '',
     source_run: selection.sourceRun || '', claude_head: selection.claudeHead || '',
     policy, reason: selection.reason,
   })) core.setOutput(key, value);
-  core.info(`Review baseline: ${selection.reason}; token budget ${budget}${manualBudget > 0 ? ' (manual)' : ''}`);
+  core.info(`Review baseline: ${selection.reason}; token budget ${budget}${manual ? ' (manual)' : ''}`);
 }
 
 async function finishReview({ github, context, core, fs, execFileSync, env }) {

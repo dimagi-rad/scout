@@ -84,7 +84,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.authorized == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       # The npm launcher otherwise replaces its pinned install in the background.
       OCR_NO_UPDATE: "1"

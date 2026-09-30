@@ -427,3 +427,14 @@ test('prepareReview outputs a scaled budget unless a manual budget overrides it'
   await prepareReview(empty);
   assert.equal(empty.outputs.token_budget, '500000');
 });
+
+test('a repeat full review floors the budget, including a forced first review with no state', async () => {
+  const repeat = incremental(harness());
+  repeat.comments = [comment(state({ passed: false }))];
+  await prepareReview(repeat);
+  assert.equal(repeat.outputs.full_review, 'true');
+  assert.equal(repeat.outputs.token_budget, '2000000');
+  const forced = harness({ FORCE_FULL: 'true' });
+  await prepareReview(forced);
+  assert.equal(forced.outputs.token_budget, '500000');
+});
