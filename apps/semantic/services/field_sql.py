@@ -309,7 +309,7 @@ def compile_measure_filter_sql(value: str, *, columns: set[str]) -> str:
     )
 
 
-def compile_join_sql(value: str, *, columns: set[str] | None = None) -> str:
+def compile_join_sql(value: str, *, columns: set[str]) -> str:
     """Validate a relationship's join condition.
 
     ``columns`` are the owning (from) dataset's columns, which ``{CUBE}.column``
@@ -337,7 +337,7 @@ def _compile_member_sql(
     error: type[SemanticSQLValidationError],
     functions: frozenset[str] | None,
     allow_aggregates: bool,
-    columns: set[str] | None,
+    columns: set[str],
     allow_subqueries: bool = False,
     check_bare_columns: bool = True,
     max_length: int | None = _MAX_MEMBER_SQL_LENGTH,
@@ -386,21 +386,19 @@ def _compile_member_sql(
         # PostgreSQL reads rel.name as name(rel) when rel has no such column, so a
         # qualified name must be a real column of this dataset, never an arbitrary word.
         if column.table in references:
-            if references[column.table] != "CUBE" or columns is None:
-                raise _qualified_column_error(label, error, columns)
+            if references[column.table] != "CUBE":
+                raise _qualified_column_error(label, error)
             _require_dataset_column(column, columns, label=label, error=error)
             column.set("table", exp.Var(this="{CUBE}"))
         elif column.table:
-            raise _qualified_column_error(label, error, columns)
+            raise _qualified_column_error(label, error)
         elif column.name in references:
             reference = exp.Var(this="{" + references[column.name] + "}")
             if column is expression:
                 expression = reference
             else:
                 column.replace(reference)
-        elif (
-            check_bare_columns and columns is not None and not _inside_subquery(column, expression)
-        ):
+        elif check_bare_columns and not _inside_subquery(column, expression):
             _require_dataset_column(column, columns, label=label, error=error)
     sql = expression.sql(dialect="postgres", comments=False)
     # Anything left over sat somewhere other than a value or column qualifier.
@@ -410,9 +408,9 @@ def _compile_member_sql(
 
 
 def _qualified_column_error(
-    label: str, error: type[SemanticSQLValidationError], columns: set[str] | None
+    label: str, error: type[SemanticSQLValidationError]
 ) -> SemanticSQLValidationError:
-    if columns is None:
+    if error is JoinSQLValidationError:
         return error(
             f"The {label} can only qualify columns as {{CUBE}}.column of the owning "
             "dataset; write other members as {dataset.field}."

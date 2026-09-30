@@ -44,6 +44,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     all_datasets = list(model.datasets.prefetch_related("fields"))
     datasets = publishable_datasets(all_datasets)
     visible_ids = {dataset.id for dataset in datasets}
+    datasets_by_id = {dataset.id: dataset for dataset in all_datasets}
     known_references = {dataset.name for dataset in all_datasets} | {
         f"{dataset.name}.{field.name}" for dataset in all_datasets for field in dataset.fields.all()
     }
@@ -99,7 +100,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             join_sql = embed_cube_sql(
                 compile_join_sql(
                     relationship.join_expression,
-                    columns=dataset_column_names(relationship.from_dataset),
+                    columns=dataset_column_names(datasets_by_id[relationship.from_dataset_id]),
                 ),
                 references=join_references,
             )

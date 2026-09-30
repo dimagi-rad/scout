@@ -174,7 +174,9 @@ def test_measure_filter_sql_rejects_denied_sql(source):
 @pytest.mark.parametrize("source", [s for s in DENIED_SQL if s != "sum((SELECT 1))"])
 def test_join_sql_rejects_denied_sql(source):
     with pytest.raises(JoinSQLValidationError):
-        compile_join_sql(f"{{visits.user_id}} = {{users.id}} AND {source} IS NOT NULL")
+        compile_join_sql(
+            f"{{visits.user_id}} = {{users.id}} AND {source} IS NOT NULL", columns=set()
+        )
 
 
 @pytest.mark.parametrize(
@@ -278,7 +280,7 @@ def test_join_sql_accepts_generated_identity_joins():
         '(SELECT "id" FROM "raw_users" GROUP BY "id" HAVING COUNT(*) = 1) '
         "AND {visits.user_id} <> ''"
     )
-    assert compile_join_sql(source) == (
+    assert compile_join_sql(source, columns=set()) == (
         "{visits.user_id} = {users.id} AND ({users.id}) IN "
         '(SELECT "id" FROM "raw_users" GROUP BY "id" HAVING pg_catalog.COUNT(*) = 1) '
         "AND {visits.user_id} <> ''"
@@ -295,7 +297,7 @@ def test_join_sql_accepts_generated_identity_joins():
 )
 def test_join_sql_rejects_other_schemas_and_catalogs(source):
     with pytest.raises(JoinSQLValidationError):
-        compile_join_sql(source)
+        compile_join_sql(source, columns=set())
 
 
 @pytest.mark.parametrize(
@@ -336,9 +338,8 @@ def test_join_sql_qualifies_only_owning_dataset_columns():
     )
     for source in (
         "{CUBE}.not_a_column = {users.id}",
-        "{CUBE}.user_id = {users.id}",
         "{visits}.user_id = {users.id}",
         "{visits.user_id} IN (SELECT raw_users.id FROM raw_users)",
     ):
         with pytest.raises(JoinSQLValidationError):
-            compile_join_sql(source, columns={"user_id"} if "not_a" in source else None)
+            compile_join_sql(source, columns={"user_id"})
