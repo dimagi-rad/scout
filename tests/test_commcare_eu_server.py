@@ -19,6 +19,7 @@ from apps.common.commcare_servers import UnknownCommCareServer, server_for_provi
 from apps.common.identifiers import refresh_schema_name, tenant_schema_name
 from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.providers.commcare.provider import CommCareProvider
 from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 from apps.users.services.access_verification_providers import verify_provider
 from apps.users.services.access_verification_types import (
@@ -270,6 +271,7 @@ class TestAccessVerification:
         ("hq_production", ""),
         ("commcare_eu", "eu"),
         ("commcare_eu_prod", "eu"),
+        ("commcare_europe", ""),
     ],
 )
 def test_identity_server_follows_the_allauth_provider_id(provider_id, server):
@@ -286,24 +288,39 @@ def test_www_sign_in_endpoints_are_unchanged():
 
 
 class TestCrossServerSignInGuard:
-    @staticmethod
-    def _login(adapter_id, stored_id):
-        login = _make_sociallogin(stored_id, "a@dimagi.com")
-        login.provider = SimpleNamespace(id=adapter_id)
-        return login
-
     @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
     def test_an_eu_id_on_the_www_provider_is_refused(self):
+        login = _make_sociallogin("commcare_eu_prod", "a@dimagi.com", adapter_id="commcare")
         with pytest.raises(ImmediateHttpResponse):
-            EncryptingSocialAccountAdapter().pre_social_login(
-                _make_request(), self._login("commcare", "commcare_eu_prod")
-            )
+            EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login)
 
     @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
     @pytest.mark.parametrize("stored_id", ["commcare", "commcare_prod", "hq_production"])
     def test_www_ids_on_the_www_provider_pass(self, stored_id):
-        login = self._login("commcare", stored_id)
+        login = _make_sociallogin(stored_id, "a@dimagi.com", adapter_id="commcare")
         assert EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login) is None
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    def test_a_commcare_login_with_no_provider_fails_closed(self):
+        login = _make_sociallogin("commcare", "a@dimagi.com")
+        login.provider = None
+        with pytest.raises(ImmediateHttpResponse):
+            EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login)
+
+    @pytest.mark.django_db
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    def test_allauth_hands_the_guard_the_provider_that_signed_in(self):
+        app = SocialApp.objects.create(
+            provider="commcare", provider_id="commcare_eu_prod", name="HQ", client_id="c"
+        )
+        request = _make_request()
+        provider = CommCareProvider(request, app=app)
+        login = provider.sociallogin_from_response(
+            request, {"id": 7, "email": "a@dimagi.com", "username": "a"}
+        )
+        assert login.account.provider == "commcare_eu_prod"
+        with pytest.raises(ImmediateHttpResponse):
+            EncryptingSocialAccountAdapter().pre_social_login(request, login)
 
 
 def test_token_health_reads_the_credential_server():
