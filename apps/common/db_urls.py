@@ -1,9 +1,8 @@
 """The one parser for Postgres connection URLs, shared by Django code and the MCP server.
 
 Parsing goes through libpq (psycopg's ``conninfo_to_dict``), so a builder that
-hands psycopg or dbt individual fields sees exactly what a raw-URL
-``psycopg.connect`` would: percent-decoded credentials and the same query
-options. Must stay importable without Django setup.
+pulls individual fields out of a URL decodes them exactly as a raw-URL
+``psycopg.connect`` would. Must stay importable without Django setup.
 """
 
 from __future__ import annotations
@@ -17,6 +16,8 @@ from psycopg.conninfo import conninfo_to_dict
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 5432
 
+_INVALID = "Invalid Postgres connection URL"
+
 
 def parse_pg_url(url: str) -> dict[str, Any]:
     """Parse a ``postgresql://`` URL (or key=value conninfo) as libpq does."""
@@ -24,7 +25,7 @@ def parse_pg_url(url: str) -> dict[str, Any]:
         return conninfo_to_dict(url)
     except ProgrammingError:
         # libpq's message quotes the offending text, which can be the password.
-        raise ValueError("Invalid Postgres connection URL") from None
+        raise ValueError(_INVALID) from None
 
 
 def pg_connection_identity(url: str) -> dict[str, Any]:
@@ -33,11 +34,17 @@ def pg_connection_identity(url: str) -> dict[str, Any]:
     Other query options (``options``, ``connect_timeout``, ``application_name``)
     are dropped: callers of this set their own per-connection options. Host and
     port default to ``localhost:5432`` rather than libpq's Unix-socket default.
+    A multi-host URL is rejected. ``sslrootcert``/``sslcert``/``sslkey`` are
+    dropped too, so a ``verify-*`` sslmode needs its files at libpq's default paths.
     """
     parsed = parse_pg_url(url)
+    try:
+        port = int(parsed.get("port") or DEFAULT_PORT)
+    except ValueError:
+        raise ValueError(_INVALID) from None
     params: dict[str, Any] = {
         "host": parsed.get("host") or DEFAULT_HOST,
-        "port": int(parsed.get("port") or DEFAULT_PORT),
+        "port": port,
         "dbname": parsed.get("dbname") or "",
         "user": parsed.get("user") or "",
         "password": parsed.get("password") or "",
@@ -48,8 +55,16 @@ def pg_connection_identity(url: str) -> dict[str, Any]:
 
 
 def build_pg_url(*, host: str, port: int | str, dbname: str, user: str, password: str = "") -> str:
-    """A ``postgresql://`` URL with percent-encoded credentials and database name."""
+    """A ``postgresql://`` URL with percent-encoded credentials and database name.
+
+    ``host`` may be a Unix-socket directory or an IPv6 literal, as Django's
+    ``DATABASES["default"]["HOST"]`` allows.
+    """
     credentials = quote(user, safe="")
     if password:
         credentials += f":{quote(password, safe='')}"
+    if host.startswith("/"):
+        host = quote(host, safe="")
+    elif ":" in host:
+        host = f"[{host}]"
     return f"postgresql://{credentials}@{host}:{port}/{quote(dbname, safe='')}"

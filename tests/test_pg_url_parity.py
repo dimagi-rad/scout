@@ -146,3 +146,16 @@ def test_built_url_round_trips_special_characters():
         "user": "plat@form",
         "password": "p@ss/w:?#%",
     }
+
+
+@pytest.mark.parametrize("host", ["/var/run/postgresql", "::1"])
+def test_built_url_round_trips_socket_and_ipv6_hosts(host):
+    url = build_pg_url(host=host, port=5432, dbname="scout", user="u")
+    identity = pg_connection_identity(url)
+    assert (identity["host"], identity["port"], identity["dbname"]) == (host, 5432, "scout")
+
+
+@pytest.mark.parametrize("port", ["5432,5433", "notaport"])
+def test_unusable_port_raises_the_sanitised_error(port):
+    with pytest.raises(ValueError, match="^Invalid Postgres connection URL$"):
+        pg_connection_identity(f"host=h1,h2 port={port} dbname=scout")
