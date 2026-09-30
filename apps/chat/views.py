@@ -7,6 +7,7 @@ does not support async streaming responses.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import time
@@ -340,10 +341,16 @@ async def _start_turn(
     )
 
     async def _traced_stream():
+        # aclosing: nothing else closes the inner stream on disconnect, and its
+        # cleanup (stopping the run, saving the partial reply) must finish before
+        # the lease is released and another turn can take the thread.
         async with lease.held():
             with trace_ctx:
-                async for chunk in langgraph_to_ui_stream(agent, input_state, config):
-                    yield chunk
+                async with contextlib.aclosing(
+                    langgraph_to_ui_stream(agent, input_state, config)
+                ) as stream:
+                    async for chunk in stream:
+                        yield chunk
 
     response = StreamingHttpResponse(
         _traced_stream(),
