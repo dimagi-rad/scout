@@ -5,6 +5,7 @@ module imports the agent graph.
 """
 
 import uuid
+from collections import defaultdict
 from datetime import timedelta
 
 from django.db.models import Q
@@ -18,7 +19,9 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceDataRecovery,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
+from apps.workspaces.services.status import workspace_schema_status
 
 MATERIALIZE_TASK_NAME = "apps.workspaces.tasks.materialize_workspace"
 _QUEUED_OR_RUNNING = ("todo", "doing", "aborting")
@@ -45,30 +48,109 @@ async def aunserved_tenant_ids(workspace_id) -> set:
     return tenant_ids - served
 
 
-async def aworkspace_load_pending(workspace_id) -> bool:
-    """Whether a load covering this workspace is queued or running.
+def _pending_loads(workspace_ids):
+    """The run, recovery and queued-job querysets that each mean a load is under way.
 
     A MaterializationRun only exists once a worker has started the job, so a
     queued ``materialize_workspace`` job is read from the queue itself.
     """
-    if await MaterializationRun.objects.filter(
-        tenant_schema__tenant__workspace_tenants__workspace_id=workspace_id,
+    ids = [str(workspace_id) for workspace_id in workspace_ids]
+    runs = MaterializationRun.objects.filter(
+        tenant_schema__tenant__workspace_tenants__workspace_id__in=ids,
         state__in=list(MaterializationRun.ACTIVE_STATES),
-    ).aexists():
-        return True
-    if await WorkspaceDataRecovery.objects.filter(
-        workspace_id=workspace_id, state__in=list(WorkspaceDataRecovery.ACTIVE_STATES)
-    ).aexists():
-        return True
+    )
+    recoveries = WorkspaceDataRecovery.objects.filter(
+        workspace_id__in=ids, state__in=list(WorkspaceDataRecovery.ACTIVE_STATES)
+    )
     stalled_before = timezone.now() - _STALLED_AFTER
-    return await (
-        ProcrastinateJob.objects.filter(
-            task_name=MATERIALIZE_TASK_NAME,
-            status__in=_QUEUED_OR_RUNNING,
-            args__workspace_id=str(workspace_id),
+    jobs = ProcrastinateJob.objects.filter(
+        task_name=MATERIALIZE_TASK_NAME,
+        status__in=_QUEUED_OR_RUNNING,
+        args__workspace_id__in=ids,
+    ).filter(~Q(status__in=_STARTED) | Q(worker__last_heartbeat__gte=stalled_before))
+    return runs, recoveries, jobs
+
+
+async def aworkspace_load_pending(workspace_id) -> bool:
+    """Whether a load covering this workspace is queued or running."""
+    for pending in _pending_loads([workspace_id]):
+        if await pending.aexists():
+            return True
+    return False
+
+
+def workspace_ids_load_pending(workspace_ids) -> set:
+    """Of ``workspace_ids``, those with a load queued or running (three queries)."""
+    runs, recoveries, jobs = _pending_loads(workspace_ids)
+    pending = {
+        str(workspace_id)
+        for workspace_id in runs.values_list(
+            "tenant_schema__tenant__workspace_tenants__workspace_id", flat=True
         )
-        .filter(~Q(status__in=_STARTED) | Q(worker__last_heartbeat__gte=stalled_before))
-        .aexists()
+    }
+    pending |= {
+        str(workspace_id) for workspace_id in recoveries.values_list("workspace_id", flat=True)
+    }
+    pending |= {
+        str(workspace_id) for workspace_id in jobs.values_list("args__workspace_id", flat=True)
+    }
+    return {workspace_id for workspace_id in workspace_ids if str(workspace_id) in pending}
+
+
+def workspace_schema_statuses(workspace_ids) -> dict:
+    """``schema_status`` per workspace id, in a fixed number of queries however many."""
+    workspace_ids = list(workspace_ids)
+    if not workspace_ids:
+        return {}
+    tenants_by_workspace = defaultdict(set)
+    for workspace_id, tenant_id in WorkspaceTenant.objects.filter(
+        workspace_id__in=workspace_ids
+    ).values_list("workspace_id", "tenant_id"):
+        tenants_by_workspace[workspace_id].add(tenant_id)
+    all_tenant_ids = set().union(*tenants_by_workspace.values())
+    active = set(
+        TenantSchema.objects.filter(
+            tenant_id__in=all_tenant_ids, state=SchemaState.ACTIVE
+        ).values_list("tenant_id", flat=True)
+    )
+    view_states = dict(
+        WorkspaceViewSchema.objects.filter(workspace_id__in=workspace_ids).values_list(
+            "workspace_id", "state"
+        )
+    )
+    loading = workspace_ids_load_pending(workspace_ids)
+    return {
+        workspace_id: workspace_schema_status(
+            tenants_by_workspace[workspace_id],
+            active,
+            workspace_id in loading,
+            view_states.get(workspace_id),
+        )
+        for workspace_id in workspace_ids
+    }
+
+
+async def aworkspace_schema_status(workspace_id) -> str:
+    """``workspace_schema_statuses`` for one workspace, from async code."""
+    tenant_ids = {
+        tenant_id
+        async for tenant_id in WorkspaceTenant.objects.filter(
+            workspace_id=workspace_id
+        ).values_list("tenant_id", flat=True)
+    }
+    active = {
+        tenant_id
+        async for tenant_id in TenantSchema.objects.filter(
+            tenant_id__in=tenant_ids, state=SchemaState.ACTIVE
+        ).values_list("tenant_id", flat=True)
+    }
+    view_state = (
+        await WorkspaceViewSchema.objects.filter(workspace_id=workspace_id)
+        .values_list("state", flat=True)
+        .afirst()
+    )
+    return workspace_schema_status(
+        tenant_ids, active, await aworkspace_load_pending(workspace_id), view_state
     )
 
 
