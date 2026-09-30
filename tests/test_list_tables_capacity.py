@@ -12,7 +12,7 @@ from apps.common.capacity import CapacityExhausted, CapacityResource
 from apps.common.error_codes import ErrorCode
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-from mcp_server.server import list_tables
+from mcp_server.server import get_metadata, list_tables
 from mcp_server.services import metadata
 from mcp_server.services.metadata import _live_tables_in_schema, pipeline_list_tables
 
@@ -126,3 +126,18 @@ async def test_list_tables_does_not_mask_other_failures_as_busy(served_schema, r
         await list_tables()
 
     reported.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@override_settings(MANAGED_DATABASE_URL=MANAGED_URL)
+async def test_get_metadata_answers_busy_instead_of_reporting_zero_tables(
+    served_schema, refused_connection, reported
+):
+    context, pipeline = _tool_patches()
+    with context, pipeline:
+        result = await get_metadata()
+
+    assert result["success"] is False
+    assert result["error"]["code"] == ErrorCode.CAPACITY_EXHAUSTED
+    reported.assert_called_once()

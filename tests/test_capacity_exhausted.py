@@ -119,7 +119,7 @@ def test_each_exhaustion_signal_is_classified(exc, resource):
         CubeConnectionError("Cube is temporarily unavailable."),
         CubeServiceUnavailable("schema validation failed: HTTP 503"),
         ValueError("too many connections"),
-        # A pool that cannot even open means the database is down, not full.
+        # An untagged open timeout stays a down database; the pool tags a refusal itself.
         PoolTimeout("pool initialization incomplete after 10.0 sec"),
         # Scout's own per-process managed-pool cap is not a connection limit.
         PoolTimeout("all 4 managed-DB pool slots are in use"),

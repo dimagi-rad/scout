@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import logging
 import os
 import subprocess
@@ -134,13 +135,27 @@ MAX_WORKSPACE_DISCOVERY_LIMIT = 100
 MAX_DATASET_DISCOVERY_LIMIT = 100
 
 
-async def _busy_result(exc: Exception) -> dict | None:
-    """The retryable busy result if ``exc`` is connection-limit exhaustion, else ``None``."""
-    capacity = classify_capacity_error(exc)
-    if capacity is None:
-        return None
-    await sync_to_async(report_capacity_exhausted)(capacity.resource, str(exc), exc_info=exc)
-    return error_response(CAPACITY_EXHAUSTED, BUSY_MESSAGE)
+def busy_on_capacity(tool):
+    """Answer a tool that hit the DB connection limit with the retryable busy result.
+
+    Applied per tool rather than per call site: a catalog read several layers down
+    (pool checkout, cold open, information_schema probe) can refuse the connection.
+    """
+
+    @functools.wraps(tool)
+    async def guarded(*args, **kwargs):
+        try:
+            return await tool(*args, **kwargs)
+        except Exception as exc:
+            capacity = classify_capacity_error(exc)
+            if capacity is None:
+                raise
+            await sync_to_async(report_capacity_exhausted)(
+                capacity.resource, str(exc), exc_info=exc
+            )
+            return error_response(CAPACITY_EXHAUSTED, BUSY_MESSAGE)
+
+    return guarded
 
 
 class _WorkspaceAccessDenied(Exception):
@@ -206,6 +221,7 @@ def _pipeline_unresolved_response(exc: PipelineResolutionError) -> dict:
 
 
 @mcp.tool()
+@busy_on_capacity
 async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """List all tables in the workspace's database schema.
 
@@ -236,14 +252,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
                 schema_name=ctx.schema_name, state=SchemaState.ACTIVE
             ).aexists()
             if is_view_schema:
-                try:
-                    tables = await workspace_list_tables(ctx)
-                except Exception as exc:
-                    busy = await _busy_result(exc)
-                    if busy is None:
-                        raise
-                    tc["result"] = busy
-                    return busy
+                tables = await workspace_list_tables(ctx)
                 tc["result"] = success_response(
                     {"tables": tables, "note": None},
                     schema=ctx.schema_name,
@@ -267,14 +276,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             tc["result"] = _pipeline_unresolved_response(exc)
             return tc["result"]
 
-        try:
-            tables = await pipeline_list_tables(ts, pipeline_config)
-        except Exception as exc:
-            busy = await _busy_result(exc)
-            if busy is None:
-                raise
-            tc["result"] = busy
-            return busy
+        tables = await pipeline_list_tables(ts, pipeline_config)
 
         note = (
             "No completed materialization run found. Run run_materialization to load data."
@@ -290,6 +292,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
 
 
 @mcp.tool()
+@busy_on_capacity
 async def describe_table(
     table_name: str, workspace_id: str = "", user_id: str = "", thread_id: str = ""
 ) -> dict:
@@ -353,6 +356,7 @@ async def describe_table(
 
 
 @mcp.tool()
+@busy_on_capacity
 async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Get a complete metadata snapshot for the workspace's database.
 
@@ -1829,6 +1833,7 @@ async def _load_in_progress(workspace: Workspace) -> dict | None:
 
 
 @mcp.tool()
+@busy_on_capacity
 async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Check whether data has been loaded for this workspace.
 
@@ -1939,14 +1944,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 # the same call the multi-tenant branch below makes, so both
                 # branches now return identically-shaped entries.
                 pipeline_config = await _resolve_pipeline_config(ts, last_run)
-                try:
-                    tables = await pipeline_list_tables(ts, pipeline_config)
-                except Exception as exc:
-                    busy = await _busy_result(exc)
-                    if busy is None:
-                        raise
-                    tc["result"] = busy
-                    return busy
+                tables = await pipeline_list_tables(ts, pipeline_config)
 
             tc["result"] = success_response(
                 {

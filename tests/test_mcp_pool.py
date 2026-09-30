@@ -440,6 +440,8 @@ def test_pool_internals_the_capacity_tag_relies_on_still_exist():
 
     assert "pool_size" in pool.get_stats()
     assert inspect.iscoroutinefunction(AsyncConnectionPool._connect)
+    open_params = list(inspect.signature(AsyncConnectionPool.open).parameters.values())[1:3]
+    assert [p.kind for p in open_params] == [inspect.Parameter.POSITIONAL_OR_KEYWORD] * 2
     assert "timeout" in inspect.signature(AsyncConnectionPool._connect).parameters
 
 
