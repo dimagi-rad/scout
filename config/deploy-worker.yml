@@ -53,6 +53,10 @@ env:
     # access, so change it in all three deploy files together; "False" rolls back.
     # The staging overlays don't set it, so staging inherits this value.
     WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT: "True"
+    # Upstream access freshness (#548, closes #307 and #383). Same rule as above:
+    # all three services evaluate access, so change it in all three files together;
+    # "False" rolls back. The staging overlays don't set it, so staging inherits it.
+    UPSTREAM_ACCESS_FRESHNESS_ENFORCED: "True"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
