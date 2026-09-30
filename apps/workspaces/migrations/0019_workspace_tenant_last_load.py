@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("workspaces", "0017_protect_workspace_tenant_tenant"),
+        ("workspaces", "0018_retire_legacy_data_dictionary"),
     ]
 
     operations = [
