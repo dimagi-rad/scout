@@ -1,4 +1,4 @@
-"""Artifact export service for HTML, PNG, and PDF output."""
+"""Artifact export service for standalone HTML output."""
 
 from __future__ import annotations
 
@@ -247,12 +247,7 @@ MARKDOWN_HTML_TEMPLATE = """<!DOCTYPE html>
 
 class ArtifactExporter:
     """
-    Export artifacts to various formats.
-
-    Supports:
-    - HTML: Standalone HTML file with embedded libraries and data
-    - PNG: Screenshot of the rendered artifact (requires playwright)
-    - PDF: PDF version of the artifact (requires playwright)
+    Export artifacts as a standalone HTML file with embedded libraries and data.
     """
 
     def __init__(self, artifact: Artifact):
@@ -307,60 +302,6 @@ class ArtifactExporter:
             data_json=json.dumps(artifact.data or {}),
             code=artifact.code,
         )
-
-    async def export_png(self, width: int = 1200, height: int = 800) -> bytes:
-        """Export the artifact as a PNG image. Requires playwright."""
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError as e:
-            raise ImportError(
-                "playwright is required for PNG export. Install with: pip install playwright && playwright install chromium"
-            ) from e
-
-        html_content = self.export_html()
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch()
-            page = await browser.new_page(viewport={"width": width, "height": height})
-
-            await page.set_content(html_content)
-            # Give CDN libs and the React render time to settle.
-            await page.wait_for_timeout(1000)
-
-            screenshot = await page.screenshot(type="png", full_page=False)
-
-            await browser.close()
-
-        return screenshot
-
-    async def export_pdf(self, width: int = 1200, height: int = 800) -> bytes:
-        """Export the artifact as a PDF. Requires playwright."""
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError as e:
-            raise ImportError(
-                "playwright is required for PDF export. Install with: pip install playwright && playwright install chromium"
-            ) from e
-
-        html_content = self.export_html()
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch()
-            page = await browser.new_page(viewport={"width": width, "height": height})
-
-            await page.set_content(html_content)
-            # Give CDN libs and the React render time to settle.
-            await page.wait_for_timeout(1000)
-
-            pdf = await page.pdf(
-                format="A4",
-                print_background=True,
-                margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"},
-            )
-
-            await browser.close()
-
-        return pdf
 
     def get_download_filename(self, format: str) -> str:
         """Build a filesystem-safe download filename from the artifact title."""

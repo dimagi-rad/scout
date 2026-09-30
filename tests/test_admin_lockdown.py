@@ -4,7 +4,7 @@ Covers:
 - 11#3 — state-machine / identity fields readonly; SocialToken/SocialApp
   unregistered or hardened; UserAdmin privilege fields locked down.
 - 11#5 — read-only operator-model registrations; RecipeAdmin surfaces
-  Recipe.prompt and drops the dead RecipeStep scaffolding.
+  Recipe.prompt and exposes only the live field.
 - 11#6 — AgentLearningAdmin.confidence_badge renders real HTML (format_html).
 """
 
@@ -18,7 +18,6 @@ from apps.chat.models import Thread, ThreadJob
 from apps.knowledge.admin import AgentLearningAdmin
 from apps.knowledge.models import AgentLearning
 from apps.recipes.admin import RecipeAdmin
-from apps.recipes.models import RecipeStep
 from apps.transformations.models import TransformationRun
 from apps.users.admin_login import ThrottledAdminAuthenticationForm
 from apps.users.models import (
@@ -140,7 +139,7 @@ class TestOperatorModelsRegistered:
         assert "encrypted_credential" not in tuple(model_admin.list_display)
 
 
-# --- 11#5: RecipeAdmin surfaces the live prompt, drops dead RecipeStep ----- #
+# --- 11#5: RecipeAdmin surfaces the live prompt ----- #
 
 
 class TestRecipeAdmin:
@@ -150,14 +149,6 @@ class TestRecipeAdmin:
             for field in opts.get("fields", ()):
                 flat_fields.add(field)
         assert "prompt" in flat_fields, "RecipeAdmin must expose Recipe.prompt (the live field)"
-
-    def test_recipe_admin_drops_recipestep_inline(self):
-        assert not RecipeAdmin.inlines, "RecipeAdmin must not inline the dead RecipeStep model"
-
-    def test_recipestep_admin_unregistered(self):
-        assert RecipeStep not in admin.site._registry, (
-            "RecipeStep is vestigial; its admin should be removed"
-        )
 
 
 # --- 11#6: confidence_badge renders real HTML ----------------------------- #

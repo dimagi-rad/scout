@@ -15,6 +15,7 @@ from apps.workspaces.services.load_generations import (
     acapture_workspace_load_intent,
 )
 from apps.workspaces.services.query_state import (
+    included_tenant_snapshot_state,
     semantic_layer_state,
     synced_runs,
     workspace_query_surface,
@@ -171,6 +172,12 @@ async def _semantic_rebuild_needed(workspace, user) -> bool:
     missing = surface["recovery_action"] == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD
     failed = surface["status"] == "ready" and surface["semantic_status"] == "stale"
     if not (missing or failed) or surface["in_progress"]:
+        return False
+    # The surface checks the snapshot only for a missing catalog; a stale one over a
+    # failed load would just fail the rebuild again and hold the recovery slot.
+    if failed and (
+        await included_tenant_snapshot_state(workspace, surface["tenant_coverage"]) != "safe"
+    ):
         return False
     last_sync = await (
         synced_runs()

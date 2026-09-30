@@ -15,7 +15,6 @@ from apps.common.localized import localized_str
 from apps.transformations.services.commcare_staging import generate_system_assets
 from apps.transformations.services.connect_staging import generate_connect_assets
 from apps.users.models import Tenant
-from apps.workspaces.api import views
 
 DIGEST_NAME = r"unnamed_[0-9a-f]{8}"
 
@@ -42,11 +41,6 @@ def tenant():
 )
 def test_localized_str_unwraps_translations_and_rejects_non_strings(value, expected):
     assert localized_str(value) == expected
-
-
-def test_views_share_the_common_helper():
-    assert views.localized_str is localized_str
-    assert not hasattr(views, "_localized_str")
 
 
 def test_localized_case_type_generates_a_model(tenant):

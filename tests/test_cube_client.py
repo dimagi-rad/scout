@@ -3,12 +3,14 @@
 import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
+from apps.common.errors import ExpectedStateError
 from apps.semantic.services import cube_client as cube_client_module
 from apps.semantic.services.cube_client import CubeClient, CubeConnectionError, CubeQueryError
 
@@ -316,3 +318,172 @@ async def test_retry_exhaustion_is_reported_as_connection_not_validation(
     assert result["success"] is False
     assert result["error"]["code"] == code
     assert str(failure) in result["error"]["message"]
+
+
+def _schema_operation(operation):
+    client = CubeClient(base_url="http://cube.test", api_secret="secret")
+    if operation == "validate":
+        return client.validate_schema("cubes: []")
+    return client.invalidate_schema_cache(security_context={"workspaceId": "w1"})
+
+
+@pytest.fixture
+def validator_url(settings, monkeypatch):
+    settings.CUBE_VALIDATOR_URL = "http://validator.test"
+    monkeypatch.setattr(cube_client_module, "SCHEMA_RETRY_BASE_DELAY_SECONDS", 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["read_timeout", "disconnect", "connect", 502, 503, 504])
+async def test_validation_retries_transient_failures_then_succeeds(
+    monkeypatch, caplog, validator_url, failure
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            if failure == "read_timeout":
+                raise httpx.ReadTimeout("timed out", request=request)
+            if failure == "disconnect":
+                raise httpx.RemoteProtocolError(
+                    "Server disconnected without sending a response.", request=request
+                )
+            if failure == "connect":
+                raise httpx.ConnectError("refused", request=request)
+            return httpx.Response(failure, json={"valid": False, "errors": ["service error"]})
+        return httpx.Response(200, json={"valid": True, "errors": []})
+
+    _patched_async_client(monkeypatch, handler)
+    with caplog.at_level(logging.INFO, logger=cube_client_module.__name__):
+        await _schema_operation("validate")
+
+    assert len(calls) == 2
+    assert calls[0].url == calls[1].url
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+# Cube finishes a /meta compile after the client leaves, so the warm-up never retries.
+@pytest.mark.parametrize(("operation", "attempts"), [("validate", 3), ("invalidate", 1)])
+@pytest.mark.parametrize("failure", ["read_timeout", "disconnect", 503])
+async def test_schema_operations_give_up_after_bounded_attempts(
+    monkeypatch, caplog, validator_url, operation, attempts, failure
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if failure == "read_timeout":
+            raise httpx.ReadTimeout("timed out", request=request)
+        if failure == "disconnect":
+            raise httpx.RemoteProtocolError("Server disconnected", request=request)
+        return httpx.Response(503, json={"valid": False})
+
+    _patched_async_client(monkeypatch, handler)
+    with (
+        caplog.at_level(logging.INFO, logger=cube_client_module.__name__),
+        pytest.raises(CubeConnectionError) as raised,
+    ):
+        await _schema_operation(operation)
+
+    assert len(calls) == attempts
+    assert isinstance(raised.value, ExpectedStateError)
+    assert raised.value.__cause__ is not None
+    # The caller owns the single WARNING; retries themselves stay below Sentry.
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate", "invalidate"])
+@pytest.mark.parametrize("status", [400, 401, 403, 500])
+async def test_schema_operations_do_not_retry_permanent_errors(
+    monkeypatch, validator_url, operation, status
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": "nope"})
+
+    _patched_async_client(monkeypatch, handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        await _schema_operation(operation)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate", "invalidate"])
+async def test_schema_operations_fail_fast_when_cube_is_unreachable(
+    monkeypatch, validator_url, operation
+):
+    timeouts = []
+
+    def handler(request):
+        timeouts.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"valid": True})
+
+    _patched_async_client(monkeypatch, handler)
+    await _schema_operation(operation)
+
+    assert timeouts[0]["connect"] <= 10
+    assert timeouts[0]["read"] is not None
+
+
+@pytest.mark.asyncio
+async def test_slow_validator_failure_is_not_retried_past_the_budget(monkeypatch, validator_url):
+    monkeypatch.setattr(cube_client_module, "VALIDATE_BUDGET_SECONDS", 5.2)
+    read_timeouts = []
+
+    def handler(request):
+        read_timeouts.append(request.extensions["timeout"]["read"])
+        time.sleep(0.3)
+        return httpx.Response(503, json={"valid": False})
+
+    _patched_async_client(monkeypatch, handler)
+    with pytest.raises(cube_client_module.CubeServiceUnavailable, match="after 1 attempt"):
+        await _schema_operation("validate")
+
+    assert len(read_timeouts) == 1
+    assert read_timeouts[0] <= 5.2
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_reports_the_503_not_a_later_shortened_timeout(
+    monkeypatch, caplog, validator_url
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, json={"valid": False})
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    _patched_async_client(monkeypatch, handler)
+    with (
+        caplog.at_level(logging.INFO, logger=cube_client_module.__name__),
+        pytest.raises(cube_client_module.CubeServiceUnavailable, match="HTTP 503"),
+    ):
+        await _schema_operation("validate")
+    assert len(calls) == 3
+    # Each retry line names what that attempt actually hit.
+    assert "(ReadTimeout), retry 2/2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_reports_a_later_connect_failure_over_an_earlier_503(
+    monkeypatch, validator_url
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, json={"valid": False})
+        raise httpx.ConnectTimeout("validator gone", request=request)
+
+    _patched_async_client(monkeypatch, handler)
+    with pytest.raises(cube_client_module.CubeServiceUnavailable, match="ConnectTimeout"):
+        await _schema_operation("validate")
+    assert len(calls) == 3

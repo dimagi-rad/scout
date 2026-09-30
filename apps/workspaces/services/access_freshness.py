@@ -255,6 +255,7 @@ def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> Upstre
             # transaction: its row locks held across provider I/O, and the lease and
             # proofs invisible to other verifiers until commit. Recheck outside.
             return UpstreamAdmission(admitted=False, reason=VERIFICATION_IN_PROGRESS)
+        # Thread-bound caller (DRF); the async twin serves async callers.
         results = async_to_sync(_averify_stale)(user_id, check.stale, budget)
     return _admission_from(check, results)
 

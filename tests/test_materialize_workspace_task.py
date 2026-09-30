@@ -1,6 +1,7 @@
 """Tests for the procrastinate-backed materialize_workspace task and the
 ``/api/workspaces/<id>/materialization/cancel/`` endpoint."""
 
+import logging
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.access_freshness import CREDENTIAL_EXPIRED
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
+from apps.workspaces.services.schema_manager import NoActiveTenantSchema
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
@@ -1350,13 +1352,20 @@ async def _add_second_tenant(workspace, *, external_id="teammate-domain", provid
 
 
 async def _materialize_as(
-    user, workspace, *, pipeline=None, pipeline_side_effect=None, view_schema_coverage=None
+    user,
+    workspace,
+    *,
+    pipeline=None,
+    pipeline_side_effect=None,
+    view_schema_coverage=None,
+    view_schema_error=None,
 ):
     """Run the core as `user`, with the pipeline and both schema builds mocked."""
     if pipeline is None:
         pipeline = MagicMock(side_effect=pipeline_side_effect or completed_pipeline_run)
     schema_manager = MagicMock()
     schema_manager.build_view_schema.return_value.tenant_coverage = view_schema_coverage or {}
+    schema_manager.build_view_schema.side_effect = view_schema_error
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
@@ -1756,6 +1765,32 @@ async def test_cube_build_is_still_skipped_when_an_attempted_tenant_fails(
     mock_cube.assert_not_called()
     record_failure.assert_called_once()
     assert "safe tenant snapshot" in record_failure.call_args.args[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_view_build_with_no_served_source_is_not_logged_as_an_error(
+    multi_tenant_workspace, tenant_membership_obj, user, caplog
+):
+    """SCOUT-DJANGO-7: every load failed, so the build finds nothing to view. The
+    row records it and the resume reports it; an ERROR log would page Sentry."""
+
+    def fail_all(tenant_membership, *args):
+        raise RuntimeError("load blew up")
+
+    with caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"):
+        result, _ = await _materialize_as(
+            user,
+            multi_tenant_workspace,
+            pipeline_side_effect=fail_all,
+            view_schema_error=NoActiveTenantSchema(multi_tenant_workspace.id),
+        )
+
+    assert result["view_schema"]["ok"] is False
+    assert "no active schema" in result["view_schema"]["error"]
+    view_records = [r for r in caplog.records if "view schema" in r.getMessage()]
+    assert view_records
+    assert all(r.levelno < logging.ERROR for r in view_records)
 
 
 @pytest.mark.asyncio

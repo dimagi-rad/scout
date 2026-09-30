@@ -38,7 +38,11 @@ from apps.semantic.models import (
     SemanticRelationship,
 )
 from apps.semantic.services.catalog import _sync_fields
-from apps.semantic.services.cube_schema import build_and_promote_cube_schema
+from apps.semantic.services.cube_schema import (
+    INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS,
+    CubeValidatorUnavailableError,
+    build_and_promote_cube_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +114,19 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
 
     cube_outcome: dict[str, Any]
     try:
-        cube_schema = build_and_promote_cube_schema(canvas.workspace, model=canvas.semantic_model)
+        cube_schema = build_and_promote_cube_schema(
+            canvas.workspace,
+            model=canvas.semantic_model,
+            slot_wait_seconds=INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS,
+        )
         cube_outcome = {"ok": True, "content_hash": cube_schema.content_hash}
+    except CubeValidatorUnavailableError as exc:
+        logger.warning(
+            "Cube schema rebuild after canvas commit for workspace %s: %s",
+            canvas.workspace_id,
+            exc,
+        )
+        cube_outcome = {"ok": False, "error": str(exc)[:500]}
     except Exception as exc:
         logger.exception(
             "Cube schema rebuild failed after canvas commit for workspace %s",

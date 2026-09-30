@@ -803,7 +803,7 @@ async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_vie
         ) as rebuild,
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as resume,
         patch(
-            "apps.workspaces.tasks._fallback_views_buildable",
+            "apps.workspaces.tasks.aview_schema_buildable",
             new=AsyncMock(return_value=True),
         ),
     ):
