@@ -290,8 +290,9 @@ class KnowledgeExportView(APIView):
                 zf.writestr(filename, content)
 
         buf.seek(0)
-        tenant = workspace.tenant
-        safe_name = (tenant.external_id if tenant else str(workspace.id)).replace("/", "_")
+        tenants = list(workspace.tenants.all()[:2])
+        name = tenants[0].external_id if len(tenants) == 1 else str(workspace.id)
+        safe_name = name.replace("/", "_")
         response = HttpResponse(buf.read(), content_type="application/zip")
         response["Content-Disposition"] = f'attachment; filename="knowledge-{safe_name}.zip"'
         return response
