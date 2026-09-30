@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
@@ -30,6 +30,47 @@ describe("OnboardingWizard", () => {
 
     expect(await screen.findByTestId("onboarding-ocs")).toBeTruthy()
     expect(screen.queryByTestId("onboarding-ocs-needs-team")).toBeNull()
+  })
+
+  it("sends an API key to the CommCare server the user picks", async () => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(
+        path === "/api/auth/api-key-providers/"
+          ? [
+              {
+                id: "commcare",
+                fields: [
+                  {
+                    key: "server",
+                    options: [
+                      { value: "", label: "Global (www.commcarehq.org)" },
+                      { value: "eu", label: "EU (eu.commcarehq.org)" },
+                    ],
+                  },
+                ],
+              },
+            ]
+          : providers(null),
+      ),
+    )
+    vi.mocked(api.post).mockResolvedValue({ memberships: [] })
+    render(<OnboardingWizard />)
+
+    fireEvent.click(await screen.findByTestId("onboarding-api-key-option"))
+    fireEvent.change(await screen.findByTestId("onboarding-server"), { target: { value: "eu" } })
+    fireEvent.change(screen.getByTestId("onboarding-domain"), { target: { value: "dom" } })
+    fireEvent.change(screen.getByTestId("onboarding-username"), {
+      target: { value: "u@example.com" },
+    })
+    fireEvent.change(screen.getByTestId("onboarding-api-key"), { target: { value: "k" } })
+    fireEvent.submit(screen.getByTestId("onboarding-domain").closest("form")!)
+
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith("/api/auth/connections/", {
+        provider: "commcare",
+        fields: { server: "eu", domain: "dom", username: "u@example.com", api_key: "k" },
+      }),
+    )
   })
 
   it("says when sign-in options failed to load and retries", async () => {

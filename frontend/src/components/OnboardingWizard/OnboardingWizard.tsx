@@ -16,8 +16,20 @@ interface MembershipResult {
   tenant_name: string
 }
 
+interface ServerOption {
+  value: string
+  label: string
+}
+
+interface ApiKeyProviderSchema {
+  id: string
+  fields: { key: string; options?: ServerOption[] }[]
+}
+
 export function OnboardingWizard() {
   const [step, setStep] = useState<Step>("choose")
+  const [server, setServer] = useState("")
+  const [serverOptions, setServerOptions] = useState<ServerOption[]>([])
   const [domain, setDomain] = useState("")
   const [username, setUsername] = useState("")
   const [apiKey, setApiKey] = useState("")
@@ -49,6 +61,19 @@ export function OnboardingWizard() {
     void loadProviders()
   }, [loadProviders])
 
+  // The server list comes from the API-key schema so it cannot drift from the backend.
+  // Without it the key is checked against the default (www) server, as before.
+  useEffect(() => {
+    if (step !== "api-key") return
+    api
+      .get<ApiKeyProviderSchema[]>("/api/auth/api-key-providers/")
+      .then((schemas) => {
+        const commcare = schemas.find((s) => s.id === "commcare")
+        setServerOptions(commcare?.fields.find((f) => f.key === "server")?.options ?? [])
+      })
+      .catch(() => setServerOptions([]))
+  }, [step])
+
   async function handleApiKeySubmit(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
@@ -57,6 +82,7 @@ export function OnboardingWizard() {
       await api.post<{ memberships: MembershipResult[] }>("/api/auth/connections/", {
         provider: "commcare",
         fields: {
+          server,
           domain,
           username,
           api_key: apiKey,
@@ -84,6 +110,24 @@ export function OnboardingWizard() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleApiKeySubmit} className="space-y-4">
+              {serverOptions.length > 1 && (
+                <div className="space-y-2">
+                  <Label htmlFor="server">CommCare HQ server</Label>
+                  <select
+                    id="server"
+                    data-testid="onboarding-server"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={server}
+                    onChange={(e) => setServer(e.target.value)}
+                  >
+                    {serverOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label htmlFor="domain">CommCare Domain</Label>
                 <Input
