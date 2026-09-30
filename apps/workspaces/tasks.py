@@ -24,6 +24,7 @@ from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.common.capacity import CapacityExhausted, classify_capacity_error
 from apps.common.error_codes import ErrorCode, code_of
 from apps.semantic.services.cube_schema import (
     CubeSchemaBuildError,
@@ -2234,6 +2235,9 @@ async def rebuild_workspace_semantic_model_core(workspace_id: str) -> dict:
     except CubeSchemaBuildError as exc:
         logger.warning("Semantic model rebuild failed for workspace %s: %s", workspace_id, exc)
         return {"cube_schema": {"ok": False, "error": str(exc)[:500]}}
+    except CapacityExhausted as exc:
+        logger.warning("Semantic model rebuild refused at capacity for workspace %s", workspace_id)
+        return {"cube_schema": {"ok": False, "error": str(exc)[:500], "capacity_refused": True}}
     except Exception as exc:
         logger.exception("Semantic model rebuild failed for workspace %s", workspace_id)
         return {"cube_schema": {"ok": False, "error": str(exc)[:500]}}
@@ -2364,6 +2368,8 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             # failed rebuild. Serving that fallback is safe, but it must not
             # turn an unsuccessful recovery attempt into a reported success.
             cube_result = result.get("cube_schema") or {}
+            if cube_result.get("capacity_refused"):
+                result = {**result, CAPACITY_REFUSED_KEY: True}
             if (
                 final_surface["status"] != "ready"
                 or final_surface.get("recovery_action") is not None
@@ -2388,6 +2394,8 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             return {"status": "completed", "result": result}
     except Exception as exc:
         logger.exception("Workspace data recovery %s failed", recovery.id)
+        if classify_capacity_error(exc) is not None:
+            result = {**result, CAPACITY_REFUSED_KEY: True}
         error = str(exc)[:1000] or "Scout could not restore this artifact's data."
         await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
             state=WorkspaceDataRecovery.State.FAILED,
@@ -2399,6 +2407,9 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
 
 
 CHAT_RECOVERY_SOURCE = "chat"
+# Set on a recovery's result when the database refused it at its connection limit:
+# the attempt never ran, so it must not count as the member's one retry.
+CAPACITY_REFUSED_KEY = "capacity_refused"
 _CHAT_RECOVERY_NEEDS_RELOAD = (
     "The data model can't be rebuilt from the loaded data: it needs a data refresh first."
 )

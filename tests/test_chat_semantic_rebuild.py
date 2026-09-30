@@ -20,7 +20,9 @@ from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.agents.graph import base as graph_base
 from apps.agents.graph.base import _fetch_semantic_model_context
+from apps.common.capacity import CapacityExhausted, CapacityResource
 from apps.semantic.models import CubeSchema, SemanticModel
+from apps.semantic.services.cube_schema import CubeSchemaBuildError
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
@@ -32,7 +34,8 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.tasks import recover_workspace_data
+from apps.workspaces.services.thread_job_dispatch import CAPACITY_RETRY_COOLDOWN
+from apps.workspaces.tasks import CAPACITY_REFUSED_KEY, recover_workspace_data
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -363,3 +366,80 @@ async def test_a_stale_catalog_over_a_failed_load_is_left_for_a_refresh(agent_la
     await _chat(client, ws)
 
     assert await _rebuilds(ws) == []
+
+
+async def _run_rebuild_recovery(ws, user, build_error):
+    recovery = await WorkspaceDataRecovery.objects.acreate(
+        workspace=ws, requested_by=user, recovery_type=SEMANTIC_REBUILD, source_type="chat"
+    )
+    with patch("apps.workspaces.tasks.build_and_promote_cube_schema", side_effect=build_error):
+        await recover_workspace_data.func(
+            SimpleNamespace(
+                job=SimpleNamespace(id=920 + await WorkspaceDataRecovery.objects.acount())
+            ),
+            str(recovery.id),
+        )
+    await recovery.arefresh_from_db()
+    return recovery
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_capacity_refused_rebuild_is_retried_once_capacity_is_back(
+    agent_layer, queued_jobs
+):
+    ws, tenant, _schema = await _loaded_workspace("capacity-retry")
+    await _stale_catalog(ws)
+    user, client = await _member(ws, tenant, "capacity-retry@b.c")
+
+    refused = await _run_rebuild_recovery(
+        ws, user, CapacityExhausted(CapacityResource.DATABASE, "full")
+    )
+
+    assert refused.state == WorkspaceDataRecovery.State.FAILED
+    assert refused.result[CAPACITY_REFUSED_KEY] is True
+    await WorkspaceDataRecovery.objects.filter(id=refused.id).aupdate(
+        completed_at=timezone.now() - CAPACITY_RETRY_COOLDOWN - timedelta(seconds=1)
+    )
+
+    await _chat(client, ws)
+
+    retry = [r for r in await _rebuilds(ws) if r.id != refused.id]
+    assert len(retry) == 1
+    assert retry[0].state == WorkspaceDataRecovery.State.PENDING
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_sustained_capacity_refusal_is_not_redispatched_within_the_cooldown(
+    agent_layer, queued_jobs
+):
+    ws, tenant, _schema = await _loaded_workspace("capacity-bounded")
+    await _stale_catalog(ws)
+    user, client = await _member(ws, tenant, "capacity-bounded@b.c")
+
+    await _run_rebuild_recovery(ws, user, CapacityExhausted(CapacityResource.DATABASE, "full"))
+    await _chat(client, ws)
+    await _chat(client, ws)
+
+    assert len(await _rebuilds(ws)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_genuine_rebuild_failure_still_spends_the_one_retry(agent_layer, queued_jobs):
+    ws, tenant, _schema = await _loaded_workspace("genuine-failure")
+    await _stale_catalog(ws)
+    user, client = await _member(ws, tenant, "genuine-failure@b.c")
+
+    failed = await _run_rebuild_recovery(ws, user, CubeSchemaBuildError("Cube rejected schema"))
+
+    assert failed.state == WorkspaceDataRecovery.State.FAILED
+    assert CAPACITY_REFUSED_KEY not in failed.result
+    await WorkspaceDataRecovery.objects.filter(id=failed.id).aupdate(
+        completed_at=timezone.now() - CAPACITY_RETRY_COOLDOWN - timedelta(seconds=1)
+    )
+
+    await _chat(client, ws)
+
+    assert len(await _rebuilds(ws)) == 1
