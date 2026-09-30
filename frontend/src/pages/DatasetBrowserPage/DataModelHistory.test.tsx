@@ -89,6 +89,33 @@ describe("DataModelHistory", () => {
     })
   })
 
+  it("drops the previous workspace's revisions when the workspace changes", async () => {
+    const OTHER_ID = "22222222-2222-2222-2222-222222222222"
+    let resolveOther: (value: never) => void = () => {}
+    vi.spyOn(api, "get").mockImplementation((url: string) =>
+      url === BASE
+        ? Promise.resolve({ revisions: [revision({})], can_undo: true } as never)
+        : new Promise((resolve) => {
+            resolveOther = resolve
+          }),
+    )
+
+    const { rerender } = render(
+      <DataModelHistory workspaceId={WORKSPACE_ID} onChanged={vi.fn()} />,
+    )
+    await userEvent.click(screen.getByTestId("data-model-history-btn"))
+    expect(await screen.findByText("Created dataset visit_stats")).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId("data-model-history-btn"))
+
+    rerender(<DataModelHistory workspaceId={OTHER_ID} onChanged={vi.fn()} />)
+    await userEvent.click(screen.getByTestId("data-model-history-btn"))
+
+    expect(await screen.findByText("Loading history")).toBeInTheDocument()
+    expect(screen.queryByTestId("data-model-history-undo-rev-1")).not.toBeInTheDocument()
+    resolveOther({ revisions: [], can_undo: true } as never)
+    expect(await screen.findByText("No saved changes yet.")).toBeInTheDocument()
+  })
+
   it("warns when the undo saved but the query layer was not rebuilt", async () => {
     vi.spyOn(api, "get").mockResolvedValue({
       revisions: [revision({})],

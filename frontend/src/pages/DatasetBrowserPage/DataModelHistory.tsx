@@ -52,20 +52,22 @@ export function DataModelHistory({
 }) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [revisions, setRevisions] = useState<DataModelRevision[]>([])
-  const [canUndo, setCanUndo] = useState(false)
+  // Tagged with the URL it came from, so a workspace switch never shows (or undoes) the old list.
+  const [listing, setListing] = useState<(RevisionListResponse & { base: string }) | null>(null)
   const [undoingId, setUndoingId] = useState<string | null>(null)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [error, setError] = useState<{ message: string; details: string[] } | null>(null)
   const base = workspaceId ? `/api/workspaces/${workspaceId}/data-model/revisions/` : null
+  const current = listing && listing.base === base ? listing : null
+  const revisions = current?.revisions ?? []
+  const canUndo = current?.can_undo ?? false
 
   const load = useCallback(async () => {
     if (!base) return
     setLoading(true)
     try {
       const response = await api.get<RevisionListResponse>(base)
-      setRevisions(response.revisions)
-      setCanUndo(response.can_undo)
+      setListing({ ...response, base })
     } catch (err) {
       setError({ message: err instanceof Error ? err.message : "Could not load history.", details: [] })
     } finally {
