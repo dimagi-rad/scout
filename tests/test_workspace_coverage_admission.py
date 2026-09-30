@@ -430,9 +430,7 @@ class TestDirectAdd:
         assert conn.oauth_refresh_failure_fingerprint == ""
         assert conn.upstream_denied_at is None
 
-    @pytest.mark.parametrize(
-        ("status", "error"), [(400, "invalid_grant"), (401, "invalid_client"), (400, "other")]
-    )
+    @pytest.mark.parametrize(("status", "error"), [(400, "invalid_grant"), (400, "other")])
     def test_a_refused_renewal_marks_nothing_on_the_targets_credential(
         self, client, user, httpx_mock, t1, status, error
     ):
@@ -458,6 +456,30 @@ class TestDirectAdd:
         conn.refresh_from_db()
         assert conn.oauth_refresh_failure_fingerprint == ""
         assert conn.upstream_denied_at is None
+
+    def test_a_rejected_client_credential_is_a_retryable_outage_not_a_sign_in_prompt(
+        self, client, user, httpx_mock, t1
+    ):
+        """invalid_client is Scout's own fault (#759): asking the target to sign in can't help."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="late@example.com", password="pass")
+        conn = _oauth_identity(
+            target, token="tok-old", expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=get_token_url("commcare"),
+            status_code=401,
+            json={"error": "invalid_client"},
+        )
+        client.force_login(user)
+
+        body = self._add(client, ws, target.email).json()
+
+        assert body["result"] == "invite_awaiting_access"
+        assert body["needs_sign_in"] is False
+        conn.refresh_from_db()
+        assert conn.oauth_refresh_failure_fingerprint == ""
 
     @pytest.mark.parametrize(
         ("expires_in", "rediscovered"),

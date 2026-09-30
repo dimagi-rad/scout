@@ -15,6 +15,7 @@ from datetime import timedelta
 import httpx
 import pytest
 import requests
+import sentry_sdk
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
 from django.db import DatabaseError
@@ -154,9 +155,9 @@ CASES = [
         "invalid-client",
         _status(400, {"error": "invalid_client"}),
         None,
-        "TokenRefreshError",
-        True,
-        logging.WARNING,
+        "TokenRefreshUnavailable",
+        False,
+        logging.ERROR,
     ),
     ("other-4xx", _status(404), None, "TokenRefreshError", True, logging.WARNING),
     ("throttled-429", _status(429), None, "TokenRefreshUnavailable", False, logging.WARNING),
@@ -331,7 +332,14 @@ async def test_async_record_failure_false_keeps_the_verdict_but_leaves_no_marker
     ("status", "flags", "error", "marker", "level", "reason"),
     [
         (400, {"rejected": True}, TokenRefreshRejected, True, logging.WARNING, "invalid_grant"),
-        (401, {"misconfigured": True}, TokenRefreshError, True, logging.WARNING, "invalid_client"),
+        (
+            401,
+            {"misconfigured": True},
+            TokenRefreshUnavailable,
+            False,
+            logging.ERROR,
+            "invalid_client",
+        ),
         (404, {}, TokenRefreshError, True, logging.WARNING, "other"),
         (429, {"transient": True}, TokenRefreshUnavailable, False, logging.WARNING, "other"),
         (503, {"transient": True}, TokenRefreshUnavailable, False, logging.ERROR, "other"),
@@ -365,3 +373,32 @@ def test_classify_persist_failure(exc, grant_spent, error):
     classified, _message = classify_persist_failure(exc, grant_spent=grant_spent)
 
     assert type(classified) is error
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_invalid_client_alerts_ops_with_a_stable_fingerprint_and_no_marker(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch, caplog
+):
+    token, connection = oauth_identity
+    _register_provider(mode, _status(401, {"error": "invalid_client"}), httpx_mock, requests_mock)
+    fingerprints = []
+    real_logger_error = token_refresh.logger.error
+
+    def capture(*args, **kwargs):
+        fingerprints.append(sentry_sdk.get_current_scope()._fingerprint)
+        return real_logger_error(*args, **kwargs)
+
+    monkeypatch.setattr(token_refresh.logger, "error", capture)
+    caplog.set_level(logging.DEBUG, logger=token_refresh.logger.name)
+
+    result = await _run(mode, token)
+
+    assert type(result) is TokenRefreshUnavailable
+    assert await _marker_recorded(connection) is False
+    assert fingerprints == [["oauth-invalid-client", "commcare"]]
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "app-secret" not in errors[0].getMessage()
+    assert "old-refresh" not in errors[0].getMessage()
