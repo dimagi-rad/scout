@@ -195,7 +195,8 @@ def disconnect_provider_view(request, provider_id):
 
     Provider-wide by design: for a scoped provider this signs the user out of
     *all* their teams. Removing a single team is
-    ``DELETE /api/auth/connections/<id>/``.
+    ``DELETE /api/auth/connections/<id>/``. Each CommCare HQ server is its own
+    provider, so disconnecting one leaves the other signed in.
     """
     # Data providers may use configured allauth IDs such as commcare_prod.
     provider = canonical_provider(provider_id)

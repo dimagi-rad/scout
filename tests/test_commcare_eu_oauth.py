@@ -1,20 +1,24 @@
 """Signing in with CommCare HQ (EU) is its own OAuth provider, hidden until configured (#719)."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
+from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialLogin, SocialToken
 from allauth.socialaccount.providers import registry
 from django.contrib.sites.models import Site
 from django.core.management import call_command
-from django.test import Client
+from django.test import Client, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 from apps.users.providers.commcare_eu.views import CommCareEUOAuth2Adapter
 from apps.users.signals import resolve_tenant_on_social_login
+from tests.test_oauth_domain_restriction import _make_request, _make_sociallogin
 
 EU = "https://eu.commcarehq.org"
 
@@ -176,3 +180,23 @@ class TestSignIn:
             SocialToken.objects.filter(account__user=user).values_list("token", flat=True)
         ) == ["eu-access"]
         assert TenantConnection.objects.filter(pk=eu_conn.pk).exists()
+
+
+class TestSignInServerGuard:
+    @staticmethod
+    def _login(adapter_id, stored_id):
+        login = _make_sociallogin(stored_id, "a@dimagi.com")
+        login.provider = SimpleNamespace(id=adapter_id)
+        return login
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    def test_the_eu_provider_accepts_eu_ids(self):
+        login = self._login("commcare_eu", "commcare_eu")
+        assert EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login) is None
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    def test_the_eu_provider_refuses_a_www_id(self):
+        with pytest.raises(ImmediateHttpResponse):
+            EncryptingSocialAccountAdapter().pre_social_login(
+                _make_request(), self._login("commcare_eu", "commcare_prod")
+            )

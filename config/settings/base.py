@@ -257,7 +257,8 @@ SOCIALACCOUNT_PROVIDERS = {
 
 # OAuth email-domain restriction: provider id -> allowed domains (lowercase, exact).
 # A provider without its own entry inherits its canonical provider's, so CommCare
-# HQ (EU) is held to the "commcare" list unless given one. Absent/empty list = unrestricted; a non-empty list rejects out-of-list domains
+# HQ (EU) is held to the "commcare" list unless given one.
+# Absent/empty list = unrestricted; a non-empty list rejects out-of-list domains
 # AND rejects no-email logins (a missing email can't satisfy a configured
 # restriction — arch #258, finding 07#2). Unrestricted providers (e.g. the
 # deliberately-open Connect/OCS) still allow no-email logins.

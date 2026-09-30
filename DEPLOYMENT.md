@@ -117,8 +117,6 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 |--------|---------|
 | `COMMCARE_OAUTH_CLIENT_ID` | CommCare HQ OAuth |
 | `COMMCARE_OAUTH_CLIENT_SECRET` | CommCare HQ OAuth |
-| `COMMCARE_EU_OAUTH_CLIENT_ID` | CommCare HQ (EU) OAuth. Not yet created; see [Enabling CommCare HQ (EU) sign-in](#enabling-commcare-hq-eu-sign-in) |
-| `COMMCARE_EU_OAUTH_CLIENT_SECRET` | CommCare HQ (EU) OAuth. Not yet created; see below |
 | `CONNECT_OAUTH_CLIENT_ID` | CommCare Connect OAuth |
 | `CONNECT_OAUTH_CLIENT_SECRET` | CommCare Connect OAuth |
 | `SCOUT_LANGFUSE_SECRET_KEY` | Langfuse observability |
@@ -147,7 +145,7 @@ project spaces can still be connected with an API key. To turn EU sign-in on:
    `https://scout-staging.dimagi.com/accounts/commcare_eu/login/callback/`.
 2. Store the client ID and secret in AWS Secrets Manager as
    `COMMCARE_EU_OAUTH_CLIENT_ID` and `COMMCARE_EU_OAUTH_CLIENT_SECRET`, next to
-   `COMMCARE_OAUTH_*`.
+   `COMMCARE_OAUTH_*`, and add them to the secrets table above.
 3. In the same PR as the next deploy, add both names to the
    `kamal secrets fetch` list and the `extract` lines in `.kamal/secrets-common`,
    and to the API role's `env.secret` list in `config/deploy.yml` and
