@@ -55,9 +55,9 @@ export function StaleDataBanner({
   // Only a writer can act on a reconnect; a reader is told who can refresh instead.
   const reconnect = canWrite ? stale.reconnectProviders : []
   const showRefresh = canWrite && stale.refreshable
-  const expired = `Your ${reconnect.join(" and ")} sign-in expired`
   let callToAction = canWrite ? "Refresh it now?" : READ_ONLY_REFRESH_NOTE
   if (reconnect.length > 0) {
+    const expired = `Your ${reconnect.join(" and ")} sign-in expired`
     callToAction = showRefresh
       ? `Refresh it now? ${expired}, so some of it needs a reconnect first.`
       : `${expired}, so a refresh can't fetch it.`
