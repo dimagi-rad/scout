@@ -9,6 +9,7 @@ options. Must stay importable without Django setup.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from psycopg import ProgrammingError
 from psycopg.conninfo import conninfo_to_dict
@@ -44,3 +45,11 @@ def pg_connection_identity(url: str) -> dict[str, Any]:
     if parsed.get("sslmode"):
         params["sslmode"] = parsed["sslmode"]
     return params
+
+
+def build_pg_url(*, host: str, port: int | str, dbname: str, user: str, password: str = "") -> str:
+    """A ``postgresql://`` URL with percent-encoded credentials and database name."""
+    credentials = quote(user, safe="")
+    if password:
+        credentials += f":{quote(password, safe='')}"
+    return f"postgresql://{credentials}@{host}:{port}/{quote(dbname, safe='')}"

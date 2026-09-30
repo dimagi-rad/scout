@@ -10,7 +10,7 @@ import yaml
 from django.db.utils import ConnectionHandler
 from psycopg.conninfo import conninfo_to_dict
 
-from apps.common.db_urls import parse_pg_url
+from apps.common.db_urls import build_pg_url, parse_pg_url, pg_connection_identity
 from mcp_server.context import _parse_db_url
 from mcp_server.services.dbt_runner import generate_profiles_yml
 
@@ -132,3 +132,17 @@ def test_malformed_url_error_does_not_echo_the_password():
     with pytest.raises(ValueError) as excinfo:
         parse_pg_url("postgresql://u:s3cret%zz@db.example/scout")
     assert "s3cret" not in str(excinfo.value)
+
+
+def test_built_url_round_trips_special_characters():
+    # development.py derives MANAGED_DATABASE_URL from DATABASES with this.
+    url = build_pg_url(
+        host="db", port=5432, dbname="scout", user="plat@form", password="p@ss/w:?#%"
+    )
+    assert pg_connection_identity(url) == {
+        "host": "db",
+        "port": 5432,
+        "dbname": "scout",
+        "user": "plat@form",
+        "password": "p@ss/w:?#%",
+    }
