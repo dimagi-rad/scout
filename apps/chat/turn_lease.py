@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -43,18 +44,23 @@ TURN_LEASE_HEARTBEAT_SECONDS = 20
 class TurnLease:
     """A held lease on one thread."""
 
-    def __init__(self, thread_id, token: uuid.UUID):
+    def __init__(self, thread_id, token: uuid.UUID, renewed_at: float):
         self.thread_id = thread_id
         self.token = token
+        # time.monotonic() when the current expiry was requested; it runs a TTL from
+        # no later than this, which is what the heartbeat's give-up is measured from.
+        self.renewed_at = renewed_at
         self.lost = False
         self._released = False
 
     async def renew(self) -> bool:
-        return bool(
-            await Thread.objects.filter(id=self.thread_id, turn_lease_token=self.token).aupdate(
-                turn_lease_expires_at=Now() + TURN_LEASE_TTL
-            )
-        )
+        requested_at = time.monotonic()
+        renewed = await Thread.objects.filter(
+            id=self.thread_id, turn_lease_token=self.token
+        ).aupdate(turn_lease_expires_at=Now() + TURN_LEASE_TTL)
+        if renewed:
+            self.renewed_at = requested_at
+        return bool(renewed)
 
     async def release(self) -> None:
         """Clear the lease if this holder still has it; retried on the next call if it fails."""
@@ -100,10 +106,6 @@ class TurnLease:
             await self.release()
 
     async def _heartbeat(self, owner: asyncio.Task | None) -> None:
-        loop = asyncio.get_running_loop()
-        # A previous heartbeat (the view's, before the stream's) may have renewed up
-        # to one interval ago, so don't assume a full TTL of headroom.
-        last_renewed = loop.time() - TURN_LEASE_HEARTBEAT_SECONDS
         while True:
             await asyncio.sleep(TURN_LEASE_HEARTBEAT_SECONDS)
             try:
@@ -113,12 +115,11 @@ class TurnLease:
                     "turn lease: renew failed for thread %s", self.thread_id, exc_info=True
                 )
                 # Give up a heartbeat early: by the next one the lease may be claimable.
-                lapses_in = TURN_LEASE_TTL.total_seconds() - (loop.time() - last_renewed)
+                lapses_in = TURN_LEASE_TTL.total_seconds() - (time.monotonic() - self.renewed_at)
                 if lapses_in > TURN_LEASE_HEARTBEAT_SECONDS:
                     continue
                 renewed = False
             if renewed:
-                last_renewed = loop.time()
                 continue
             logger.error(
                 "turn lease: lost the lease on thread %s mid-run; cancelling the run",
@@ -133,12 +134,13 @@ class TurnLease:
 async def atry_acquire_turn_lease(thread_id) -> TurnLease | None:
     """Take the thread's lease if nobody holds a live one, else return None."""
     token = uuid.uuid4()
+    requested_at = time.monotonic()
     acquired = (
         await Thread.objects.filter(id=thread_id)
         .filter(Q(turn_lease_expires_at__isnull=True) | Q(turn_lease_expires_at__lt=Now()))
         .aupdate(turn_lease_token=token, turn_lease_expires_at=Now() + TURN_LEASE_TTL)
     )
-    return TurnLease(thread_id, token) if acquired else None
+    return TurnLease(thread_id, token, requested_at) if acquired else None
 
 
 async def aacquire_turn_lease(
