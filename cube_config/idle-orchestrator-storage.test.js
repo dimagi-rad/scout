@@ -177,11 +177,11 @@ test('a failed release is logged, not thrown', async () => {
   assert.equal(warnings[0][0].orchestratorId, 'a');
 });
 
-test('defaults keep upstream capacity and expire orchestrators idle for ten minutes', () => {
+test('defaults keep upstream capacity, expire idle orchestrators at ten minutes and outlast queued work', () => {
   const s = new IdleOrchestratorStorage();
   assert.equal(s.maxEntries, 100);
   assert.equal(s.idleTtlMs, 600000);
-  assert.equal(s.releaseGraceMs, 60000);
+  assert.equal(s.releaseGraceMs, 180000);
   const upstream = new IdleOrchestratorStorage({ compilerCacheSize: 7, maxCompilerCacheKeepAlive: 1234 });
   assert.equal(upstream.maxEntries, 7);
   assert.equal(upstream.idleTtlMs, 1234);

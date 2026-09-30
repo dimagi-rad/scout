@@ -45,8 +45,10 @@ idle expiry, and drops LRU-evicted ones without releasing their drivers. A secon
 maintained build-time patch (`patch-orchestrator-storage.js`, same pinning and
 hash checks as the cache patch below) swaps in `idle-orchestrator-storage.js`: an
 orchestrator unused for 10 minutes, or evicted by the 100-entry cap, is dropped
-and its driver released 60 seconds later, after any query it admitted has hit
-the 30-second statement timeout.
+and its driver released 3 minutes later. By then any job it queued has been
+dropped as orphaned (120 seconds unpolled) or has finished within the 20-second
+connection wait and 30-second statement timeout. Both patches share
+`pinned-patch.js`.
 
 Worst case per Cube process: 16 tenant + 1 readiness (+1 transient readiness
 probe) + 3 catalog = 21 connections. The owner pool serves catalog reads only

@@ -8,9 +8,10 @@ const DEFAULTS = Object.freeze({
   // Cube's queue drops a job nobody has polled for 120s (orphanedTimeout). So no
   // work can outlive 10 idle minutes.
   idleTtlMs: 10 * 60 * 1000,
-  // Covers the pool-size eviction path, where a query admitted just before can
-  // still be waiting for a connection (20s) or running (30s statement timeout).
-  releaseGraceMs: 60 * 1000,
+  // Covers the size-eviction path, which is not gated on idleness: a job still in
+  // Cube's queue is dropped once unpolled for 120s (orphanedTimeout), and then
+  // can wait 20s for a connection and run 30s (statement timeout).
+  releaseGraceMs: 3 * 60 * 1000,
   sweepIntervalMs: 60 * 1000,
 });
 
