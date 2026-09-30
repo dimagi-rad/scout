@@ -550,3 +550,30 @@ async def test_the_run_summary_reports_a_standing_skip_it_kept(workspace, tenant
 
     assert recorded["refresh"] == SKIPPED
     assert RECONNECT_HQ in recorded["remedy"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_old_refresh_by_another_member_does_not_hide_a_requester_skip(
+    workspace, tenant, user, other_user
+):
+    """Otherwise a source whose sign-ins have all expired would never be flagged."""
+    long_ago = timezone.now() - timedelta(days=30)
+    await WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).aupdate(
+        last_load={"refresh": REFRESHED, "at": long_ago.isoformat(), "by": str(other_user.id)}
+    )
+    await _serving_snapshot(tenant, long_ago)
+    entry = {
+        "tenant": tenant.external_id,
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "success": False,
+        "error_code": ErrorCode.AUTH_TOKEN_EXPIRED,
+    }
+
+    (recorded,) = await arecord_load_outcomes(workspace.id, [entry], str(user.id))
+
+    assert recorded["refresh"] == SKIPPED
+    (source,) = await aworkspace_source_freshness(workspace.id, other_user.id)
+    assert source["not_refreshed"] is True
+    assert "the member who ran the last load" in source["remedy"]

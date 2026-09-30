@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.db.models import Max
 from django.utils import timezone
@@ -35,6 +35,10 @@ _PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 # A new sign-in by the member who ran the load fixes these; any member whose own
 # sign-in works can also refresh. Everything else is not about a credential.
 CREDENTIAL_CODES = frozenset({ErrorCode.AUTH_TOKEN_EXPIRED, ErrorCode.AUTH_CREDENTIAL_MISSING})
+# Another member's refresh this recent outranks a skip about the requester alone;
+# an older one does not, or a source nobody can refresh would never be flagged.
+RECENT_REFRESH = timedelta(hours=24)
+
 # Skips that describe the member who ran the load rather than the source.
 REQUESTER_CODES = CREDENTIAL_CODES | {
     ErrorCode.AUTH_ACCESS_DENIED,
@@ -129,13 +133,15 @@ async def arecord_load_outcomes(
     A source that was only published as already loaded keeps a standing skip:
     nothing checked its credential, so "reused" must not clear it. A skip caused
     by the requester's own sign-in or membership does not overwrite another
-    member's refresh: that data is as fresh as their load. A source the load never
+    member's refresh from the last day: that data is as fresh as their load. A
+    source the load never
     reached (it was cancelled first) is recorded as skipped, unless the load is
     ``partial``: a refusal, or a new-source load, covers only some sources on purpose.
     Never raises: the load already happened, and its summary must still return.
     """
     try:
-        now = timezone.now().isoformat()
+        now_dt = timezone.now()
+        now = now_dt.isoformat()
         entries = {e["tenant_id"]: e for e in tenant_results if e.get("tenant_id")}
         workspace_tenants = [
             wt
@@ -159,10 +165,13 @@ async def arecord_load_outcomes(
                 (entry.get("result") or {}).get("status") == "already_loaded"
             )
             stored = wt.last_load if isinstance(wt.last_load, dict) else {}
+            stored_at = parse_datetime(str(stored.get("at") or ""))
             requester_skip_after_other_refresh = (
                 outcome.get("error_code") in REQUESTER_CODES
                 and stored.get("refresh") in {REFRESHED, REUSED}
                 and stored.get("by") != outcome["by"]
+                and stored_at is not None
+                and now_dt - stored_at < RECENT_REFRESH
             )
             keep_skip = only_published and stored.get("refresh") == SKIPPED
             if keep_skip or requester_skip_after_other_refresh:
@@ -179,7 +188,12 @@ async def arecord_load_outcomes(
                 **{k: v for k, v in outcome.items() if k not in {"at", "by"}},
             }
             if outcome["refresh"] == SKIPPED:
-                source["remedy"] = remedy(outcome, wt.tenant.provider)
+                loader = outcome.get("by") or ""
+                source["remedy"] = remedy(
+                    outcome,
+                    wt.tenant.provider,
+                    own_load=not loader or loader == str(user_id or ""),
+                )
             sources.append(source)
         return sources
     except Exception:
