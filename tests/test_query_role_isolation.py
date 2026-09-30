@@ -191,4 +191,5 @@ class TestCapacityClassification:
         )
 
         assert result["error"]["code"] == "CONNECTION_ERROR"
+        assert "Could not connect" in result["error"]["message"]
         report.assert_not_called()

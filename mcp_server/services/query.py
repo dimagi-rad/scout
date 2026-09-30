@@ -148,7 +148,10 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
 
 
 def _classify_error(exc: Exception) -> tuple[str, str]:
-    """Classify a database exception into an error code and user-safe message."""
+    """Classify a database exception into an error code and user-safe message.
+
+    Connection-limit exhaustion is classified by the caller, before this.
+    """
     if isinstance(exc, psycopg.errors.QueryCanceled):
         return QUERY_TIMEOUT, "Query timed out. Consider adding filters or limiting the data range."
 

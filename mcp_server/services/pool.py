@@ -78,15 +78,18 @@ class ManagedPoolExhausted(PoolTimeout):
 class ManagedPool(AsyncConnectionPool):
     """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy".
 
-    Only a checkout timeout is tagged: ``open()`` also raises ``PoolTimeout`` when
-    the database is down or refusing auth, which retrying would not fix.
+    Only a checkout timeout on a pool at ``max_size`` is tagged: ``open()`` also
+    raises ``PoolTimeout`` when the database is down or refusing auth, and so does
+    a checkout on a pool that cannot grow, which retrying would not fix.
     """
 
     async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
         try:
             return await super().getconn(timeout)
         except PoolTimeout as exc:
-            raise ManagedPoolExhausted(str(exc)) from exc
+            if self.get_stats().get("pool_size", 0) >= self.max_size:
+                raise ManagedPoolExhausted(str(exc)) from exc
+            raise
 
 
 @dataclass
@@ -213,7 +216,7 @@ async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
         # check keeps the pool from handing out a connection that died
         # underneath it (RDS restart / idle timeout) — the long-lived-process
         # analogue of the worker's connection hygiene (arch #253, 08#0).
-        check=AsyncConnectionPool.check_connection,
+        check=ManagedPool.check_connection,
         kwargs={"autocommit": True, "prepare_threshold": 0},
     )
     try:

@@ -344,13 +344,29 @@ async def test_close_all_pools_waits_for_an_open_in_flight_on_its_loop():
 
 
 @pytest.mark.asyncio
-async def test_checkout_timeout_is_tagged_as_capacity():
-    pool = pool_mod.ManagedPool(conninfo="host=localhost", open=False)
+async def test_checkout_timeout_on_a_full_pool_is_tagged_as_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
     timeout = PoolTimeout("couldn't get a connection after 30.00 sec")
     with (
         patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 3}),
         pytest.raises(pool_mod.ManagedPoolExhausted) as raised,
     ):
         await pool.getconn()
 
     assert classify_capacity_error(raised.value).resource == CapacityResource.DATABASE
+
+
+@pytest.mark.asyncio
+async def test_checkout_timeout_on_a_pool_that_cannot_grow_is_not_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    timeout = PoolTimeout("couldn't get a connection after 30.00 sec")
+    with (
+        patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 0}),
+        pytest.raises(PoolTimeout) as raised,
+    ):
+        await pool.getconn()
+
+    assert not isinstance(raised.value, pool_mod.ManagedPoolExhausted)
+    assert classify_capacity_error(raised.value) is None
