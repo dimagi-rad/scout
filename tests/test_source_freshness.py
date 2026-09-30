@@ -421,3 +421,19 @@ async def test_publishing_an_already_loaded_source_does_not_claim_a_refresh(work
 
     (source,) = await aworkspace_source_freshness(workspace.id)
     assert source["last_load"] == REUSED
+
+
+def test_another_members_unreachable_source_is_theirs_to_fix():
+    advice = remedy(
+        {"error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE}, "commcare", own_load=False
+    )
+
+    assert "a member whose CommCare HQ access works can refresh" in advice
+    assert "Connected Accounts" not in advice
+
+
+def test_a_mid_run_role_loss_is_not_told_to_just_retry():
+    advice = remedy({"error_code": ErrorCode.WORKSPACE_ROLE_INSUFFICIENT}, "commcare")
+
+    assert "write access" in advice
+    assert "refresh the data again" not in advice

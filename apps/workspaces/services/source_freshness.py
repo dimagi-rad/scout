@@ -71,6 +71,11 @@ def remedy(outcome: dict, provider: str, *, own_load: bool = True) -> str:
             f"Accounts, or a member whose {label} sign-in works can refresh the data"
         )
     if code == ErrorCode.WORKSPACE_TENANT_UNREACHABLE:
+        if not own_load:
+            return (
+                f"the member who ran the last load has no live {label} access to this "
+                f"source; a member whose {label} access works can refresh the data"
+            )
         return (
             f"connect or reconnect {label} in Connected Accounts if that account was "
             f"disconnected; if access was removed at {label}, reconnecting cannot restore "
@@ -84,6 +89,11 @@ def remedy(outcome: dict, provider: str, *, own_load: bool = True) -> str:
         )
     if code == ErrorCode.WORKSPACE_TENANT_SKIPPED:
         return "fix the other sources listed as not refreshed, then refresh the data"
+    if code == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
+        return (
+            "the member who ran the load lost write access during it; a workspace member "
+            "with read-write or manage access has to refresh the data"
+        )
     if code in {ErrorCode.AUTH_REFRESH_FAILED, ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE}:
         return "the sign-in could not be checked just now; refresh the data again shortly"
     if code == ErrorCode.PIPELINE_UNRESOLVED:
