@@ -30,7 +30,11 @@ from apps.users.services.access_verification_types import (
 )
 from apps.users.services.credential_resolver import aget_connection_token, aresolve_credential
 from apps.users.services.oauth_scope import account_scope
-from apps.users.services.tenant_resolution import resolve_commcare_domains
+from apps.users.services.tenant_resolution import (
+    TenantResolutionError,
+    _fetch_all_domains,
+    resolve_commcare_domains,
+)
 from apps.users.services.token_refresh import get_token_url, token_health
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
@@ -381,3 +385,31 @@ async def test_an_unbound_www_connection_never_falls_back_to_an_eu_token(user):
     )
 
     assert await aget_connection_token(conn) is None
+
+
+@pytest.mark.asyncio
+async def test_eu_discovery_never_follows_a_next_link_to_www(httpx_mock):
+    httpx_mock.add_response(
+        url=f"{EU}/api/user_domains/v1/",
+        json={"objects": [], "meta": {"next": f"{WWW}/api/user_domains/v1/?offset=1"}},
+    )
+
+    with pytest.raises(TenantResolutionError, match="left its server"):
+        await _fetch_all_domains("eu-token", f"{EU}/api/user_domains/v1/")
+
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.django_db
+@override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+def test_a_providerless_login_matching_two_apps_is_refused_not_a_500():
+    site, _ = Site.objects.get_or_create(id=1, defaults={"domain": "testserver"})
+    for provider_id in ("", "commcare"):
+        SocialApp.objects.create(
+            provider="commcare", provider_id=provider_id, name="HQ", client_id=provider_id or "x"
+        ).sites.add(site)
+    login = _make_sociallogin("commcare", "a@dimagi.com")
+    login.provider = None
+
+    with pytest.raises(ImmediateHttpResponse):
+        EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login)

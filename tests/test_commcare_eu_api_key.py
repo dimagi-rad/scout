@@ -123,6 +123,7 @@ async def test_a_domain_on_a_later_page_is_found(httpx_mock):
     [
         {"json": {"meta": {"next": None}}},
         {"text": "<html>maintenance</html>"},
+        {"json": {"objects": [], "meta": "page 1 of 2"}},
         {"json": {"objects": [], "meta": {"next": "https://evil.example/api/"}}},
     ],
 )

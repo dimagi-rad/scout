@@ -13,11 +13,16 @@ import logging
 
 from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
-from allauth.socialaccount.models import SocialApp, SocialToken
+from allauth.socialaccount.models import SocialToken
 from allauth.socialaccount.providers import registry as providers_registry
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.contrib import messages
+from django.core.exceptions import (
+    ImproperlyConfigured,
+    MultipleObjectsReturned,
+    ObjectDoesNotExist,
+)
 from django.shortcuts import redirect
 
 from apps.common.commcare_servers import server_for_provider
@@ -32,7 +37,8 @@ def _signed_in_provider_id(request, sociallogin) -> str | None:
     if provider is None:
         try:
             provider = sociallogin.account.get_provider(request)
-        except (SocialApp.DoesNotExist, SocialApp.MultipleObjectsReturned):
+        except (ObjectDoesNotExist, MultipleObjectsReturned, ImproperlyConfigured):
+            # No single app names it (none, or one per server), so refuse.
             return None
     return getattr(provider, "id", None)
 
