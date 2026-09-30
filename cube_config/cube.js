@@ -1,10 +1,65 @@
 const { Pool } = require('pg');
+const { PostgresDriver } = require('@cubejs-backend/postgres-driver');
 const { createHash } = require('node:crypto');
+const { createConnectionSlots, positiveIntegerFromEnv } = require('./connection-slots');
 
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
 const PUBLICATION_REVISION = Symbol('scoutPublicationRevision');
 const CATALOG_QUERY_TIMEOUT_MS = 5000;
 const DRIVER_STATEMENT_TIMEOUT_MS = 30000;
+// Prod and staging share one RDS instance that has already run out of
+// connections, so every pool here is capped and sheds idle connections quickly.
+// Cube's Postgres query queue runs two queries per orchestrator at a time.
+const DRIVER_POOL_MAX = 2;
+const DRIVER_IDLE_TIMEOUT_MS = 10000;
+const DRIVER_EVICTION_INTERVAL_MS = 5000;
+const CATALOG_POOL_MAX = 3;
+// Created, with SELECT on semantic_cubeschema only, by semantic migration 0005.
+const CATALOG_ROLE = 'scout_cube_catalog';
+const CATALOG_ROLE_PROBE_INTERVAL_MS = 60000;
+const CATALOG_ROLE_PROBE_RETRY_MS = 5000;
+// Also the pool's acquireTimeoutMillis: generic-pool cannot time out a wait
+// inside its create factory, so the slot wait needs its own bound.
+const DRIVER_SLOT_WAIT_MS = 20000;
+const driverSlots = createConnectionSlots(
+  positiveIntegerFromEnv(process.env, 'SCOUT_CUBE_MAX_DRIVER_CONNECTIONS', 16),
+  DRIVER_SLOT_WAIT_MS
+);
+
+// The limit hooks the driver's createConnection(); without it the cap would
+// silently do nothing, so refuse to start instead.
+if (typeof PostgresDriver.prototype.createConnection !== 'function') {
+  throw new Error('PostgresDriver.createConnection is missing; the tenant connection limit would be inert');
+}
+
+// Counts every tenant connection, including the unpooled one Cube opens for
+// testConnection(), against one process-wide limit.
+class SlottedPostgresDriver extends PostgresDriver {
+  async createConnection(poolConfig, poolName) {
+    const release = await driverSlots.acquire();
+    let client;
+    try {
+      client = await super.createConnection(poolConfig, poolName);
+    } catch (error) {
+      release();
+      throw error;
+    }
+    // release() is idempotent; a fatal socket error need not surface as 'end'.
+    client.once('end', release);
+    client.once('error', release);
+    return client;
+  }
+}
+
+function boundedPoolConfig(maxPoolSize) {
+  return {
+    maxPoolSize,
+    idleTimeoutMillis: DRIVER_IDLE_TIMEOUT_MS,
+    softIdleTimeoutMillis: DRIVER_IDLE_TIMEOUT_MS,
+    evictionRunIntervalMillis: DRIVER_EVICTION_INTERVAL_MS,
+    acquireTimeoutMillis: DRIVER_SLOT_WAIT_MS,
+  };
+}
 
 function sslConfigForUrl(rawUrl) {
   if (!rawUrl) {
@@ -64,13 +119,79 @@ function contextId(prefix, parts) {
 
 const appDatabaseUrl = process.env.DATABASE_URL || 'postgresql://platform:devpassword@platform-db:5432/agent_platform';
 const managedDatabaseUrl = process.env.MANAGED_DATABASE_URL || appDatabaseUrl;
-const appPool = new Pool({
+// Pin search_path: the default "$user", public resolves differently for the
+// owner and for the role, so the grant check and the reads could otherwise
+// see different semantic_cubeschema tables.
+const catalogPoolOptions = {
   connectionString: appDatabaseUrl,
+  options: '-c search_path=public',
   ssl: sslConfigForUrl(appDatabaseUrl),
   connectionTimeoutMillis: CATALOG_QUERY_TIMEOUT_MS,
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
   query_timeout: CATALOG_QUERY_TIMEOUT_MS,
-});
+};
+// pg.Pool re-emits an idle client's error (e.g. RDS dropping an idle connection)
+// on the pool, and an EventEmitter with no 'error' listener throws, killing Cube.
+function catalogPoolWithErrorHandler(options) {
+  const pool = new Pool(options);
+  pool.on('error', (error) => {
+    console.warn(`Idle Cube catalog connection failed and was discarded: ${error.message}`);
+  });
+  return pool;
+}
+
+const ownerPool = catalogPoolWithErrorHandler({ ...catalogPoolOptions, max: CATALOG_POOL_MAX });
+let rolePool = null;
+let roleProbe = null;
+let nextRoleProbeAt = 0;
+
+// The role is cluster-wide but its SELECT grant is per database, and staging
+// shares the RDS instance, so check the grant in this database, not existence.
+const ROLE_READY_SQL = `
+  SELECT coalesce(
+    pg_has_role(current_user, to_regrole($1)::oid, 'MEMBER')
+      AND has_table_privilege(to_regrole($1)::oid, 'public.semantic_cubeschema', 'SELECT'),
+    false
+  ) AS ready
+`;
+
+// Cube deploys before the API applies migrations, so on the deploy that adds
+// the grant it is missing for a few minutes. Until then, read as the owner, as
+// before; once the grant exists every catalog read uses the role, and a later
+// broken grant fails closed rather than falling back.
+async function catalogPool() {
+  if (rolePool) {
+    return rolePool;
+  }
+  if (Date.now() >= nextRoleProbeAt) {
+    roleProbe ??= ownerPool
+      .query(ROLE_READY_SQL, [CATALOG_ROLE])
+      .then(({ rows }) => {
+        if (rows[0]?.ready) {
+          rolePool ??= catalogPoolWithErrorHandler({
+            ...catalogPoolOptions,
+            max: CATALOG_POOL_MAX,
+            options: `-c role=${CATALOG_ROLE} -c search_path=public -c default_transaction_read_only=on`,
+          });
+          return;
+        }
+        nextRoleProbeAt = Date.now() + CATALOG_ROLE_PROBE_INTERVAL_MS;
+        console.warn(`Cube catalog role ${CATALOG_ROLE} cannot read semantic_cubeschema yet; reading it as the DATABASE_URL owner`);
+      }, (error) => {
+        nextRoleProbeAt = Date.now() + CATALOG_ROLE_PROBE_RETRY_MS;
+        console.warn(`Cube catalog role check failed (${error.message}); reading semantic_cubeschema as the DATABASE_URL owner`);
+      })
+      .finally(() => {
+        roleProbe = null;
+      });
+    await roleProbe;
+  }
+  return rolePool ?? ownerPool;
+}
+
+async function catalogQuery(text, values) {
+  return (await catalogPool()).query(text, values);
+}
 const managedConfig = connectionFromUrl(managedDatabaseUrl);
 
 module.exports = {
@@ -81,7 +202,7 @@ module.exports = {
     }
     // One authoritative lookup per request also supports JWTs from an older
     // API during Cube-first deployments. Never cache this across publications.
-    context[PUBLICATION_REVISION] ??= appPool.query(
+    context[PUBLICATION_REVISION] ??= catalogQuery(
       `
         SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS data_revision
         FROM semantic_cubeschema
@@ -125,26 +246,29 @@ module.exports = {
 
   dbType: () => 'postgres',
 
-  driverFactory: ({ securityContext }) => {
+  driverFactory: ({ securityContext, dataSource = 'default' }) => {
     const context = workspaceContext(securityContext);
     if (!context) {
       // Cube's standalone /readyz runs testConnection() through this driver, so
       // it must connect; there is no tenant role to downgrade to (#421). These are
       // session defaults, not enforcement: the guarantee is still that no model is
       // served for this context, and these only bound what one could reach.
-      return {
-        type: 'postgres',
+      // It stays outside the tenant slots so tenant load cannot fail readiness.
+      return new PostgresDriver({
         ...managedConfig,
+        ...boundedPoolConfig(1),
+        dataSource,
         options: `-c statement_timeout=${DRIVER_STATEMENT_TIMEOUT_MS} -c default_transaction_read_only=on -c search_path=pg_catalog`,
-      };
+      });
     }
 
     const [, , schemaName, readonlyRole] = context;
-    return {
-      type: 'postgres',
+    return new SlottedPostgresDriver({
       ...managedConfig,
+      ...boundedPoolConfig(DRIVER_POOL_MAX),
+      dataSource,
       options: `-c role=${readonlyRole} -c search_path=${schemaName},public -c statement_timeout=${DRIVER_STATEMENT_TIMEOUT_MS}`,
-    };
+    });
   },
 
   repositoryFactory: ({ securityContext }) => ({
@@ -153,7 +277,7 @@ module.exports = {
         return [];
       }
 
-      const { rows } = await appPool.query(
+      const { rows } = await catalogQuery(
         `
           SELECT filename, content
           FROM semantic_cubeschema
@@ -178,7 +302,7 @@ module.exports = {
       return 'healthcheck';
     }
 
-    const { rows } = await appPool.query(
+    const { rows } = await catalogQuery(
       `
         SELECT content_hash
         FROM semantic_cubeschema

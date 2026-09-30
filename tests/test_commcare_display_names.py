@@ -48,7 +48,7 @@ def test_fallback_identity_is_stable_and_distinct_for_each_form(tenant):
 
 
 @pytest.mark.parametrize("app_name", ['">  ', "日本語"])
-def test_duplicate_forms_with_non_slugifiable_app_label_stay_unique(tenant, app_name):
+def test_non_slugifiable_app_labels_never_reach_duplicate_form_names(tenant, app_name):
     forms = {
         f"urn:synthetic:{index}": {
             "name": "Registration",
@@ -59,9 +59,8 @@ def test_duplicate_forms_with_non_slugifiable_app_label_stay_unique(tenant, app_
         for index in range(3)
     }
     assets = generate_system_assets(tenant, {"form_definitions": forms})
-    assert assets[0].name == "stg_form_registration"
     assert len({asset.name for asset in assets}) == 3
-    assert all(re.fullmatch(r"[a-z][a-z0-9_]*", asset.name) for asset in assets)
+    assert all(re.fullmatch(r"stg_form_registration_[0-9a-f]{8}", a.name) for a in assets)
 
 
 def test_repeat_group_references_fallback_parent(tenant):

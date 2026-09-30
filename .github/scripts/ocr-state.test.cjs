@@ -39,6 +39,17 @@ test('missing, blocked, changed base/policy, forced full and same head reset ran
     assert.equal(choice.full, true); assert.equal(choice.checkpoint, null); assert.equal(choice.sourceRun, null);
   }
 });
+test('a moved base tip with an unchanged merge-base keeps the checkpoint', () => {
+  const moved = { ...current, base: C };
+  assert.equal(chooseReview(state(), { ...moved, mergeBaseUnchanged: true }).reason, 'accepted checkpoint');
+  for (const mergeBaseUnchanged of [false, 'true', 1, undefined]) {
+    assert.equal(chooseReview(state(), { ...moved, mergeBaseUnchanged }).reason, 'base changed');
+  }
+  for (const [previous, options] of [[state({ passed: false }), moved], [state(), { ...moved, forceFull: true }],
+    [state(), { ...moved, policy: 'e'.repeat(64) }]]) {
+    assert.equal(chooseReview(previous, { ...options, mergeBaseUnchanged: true }).full, true);
+  }
+});
 const expected = { head: C, mergeBase: B, checkpoint: A, sourceRun: '123', full: false, isAncestor: () => true };
 const delta = { mode: 'checkpoint', from: A, to: C, checkpointBefore: A, sourceRun: '123', ancestry: 'ancestor' };
 test('native full range empty or merge-base is normalized; delta verifies accepted source', () => {

@@ -2,7 +2,7 @@
 
 ``me_view`` recomputed onboarding from the DB on every ``/me`` poll and, when
 incomplete, eagerly re-hit all three provider APIs with no cache guard. Worse,
-``_atry_resolve_provider`` returned ``True`` whenever a token existed and the
+``_atry_onboarding_resolve_provider`` returned ``True`` whenever a token existed and the
 resolver didn't raise — even if it resolved zero memberships
 (``resolve_commcare_domains`` returns ``[]`` without raising) — so the flag
 flapped ``True`` transiently while the persisted state stayed incomplete, and
