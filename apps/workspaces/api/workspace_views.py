@@ -7,7 +7,6 @@ from typing import NamedTuple
 
 from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
@@ -81,7 +80,6 @@ from apps.workspaces.services.member_coverage import (
     requester_gaps,
 )
 from apps.workspaces.services.query_state import synced_runs
-from apps.workspaces.services.source_freshness import aworkspace_source_freshness, provider_label
 from apps.workspaces.services.status import (
     classify_tenant_schemas,
     workspace_schema_status,
@@ -754,29 +752,17 @@ class WorkspaceDetailView(APIView):
         )
         last_synced_at = last_run_at.isoformat() if last_run_at else None
         source_synced = last_synced_by_tenant(t.id for t in tenants)
-        # DRF APIView is sync; the freshness service is async and never raises.
-        freshness = {
-            s["tenant_id"]: s
-            for s in async_to_sync(aworkspace_source_freshness)(workspace.id, request.user.id)
-        }
-        sources = []
-        for t in tenants:
-            fresh = freshness.get(str(t.id), {})
-            sources.append(
-                {
-                    "tenant_id": str(t.id),
-                    "tenant_name": t.canonical_name,
-                    "provider": t.provider,
-                    "provider_label": provider_label(t.provider),
-                    "last_synced_at": (
-                        source_synced[t.id].isoformat() if t.id in source_synced else None
-                    ),
-                    "serving": bool(fresh.get("serving")),
-                    "last_load": fresh.get("last_load"),
-                    "not_refreshed": bool(fresh.get("not_refreshed")),
-                    "reconnect": bool(fresh.get("reconnect")),
-                }
-            )
+        sources = [
+            {
+                "tenant_id": str(t.id),
+                "tenant_name": t.canonical_name,
+                "provider": t.provider,
+                "last_synced_at": (
+                    source_synced[t.id].isoformat() if t.id in source_synced else None
+                ),
+            }
+            for t in tenants
+        ]
 
         return Response(
             {
@@ -796,7 +782,6 @@ class WorkspaceDetailView(APIView):
                 "created_at": workspace.created_at.isoformat(),
                 "updated_at": workspace.updated_at.isoformat(),
                 "last_synced_at": last_synced_at,
-                "stale_data_banner_hours": settings.STALE_DATA_BANNER_HOURS,
             }
         )
 

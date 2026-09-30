@@ -6,35 +6,22 @@ import { ApiError } from "@/api/client"
 import { jobsApi } from "@/api/jobs"
 import {
   workspaceApi,
-  type WorkspaceDetail,
+  type SourceFreshnessDetail,
+  type WorkspaceFreshness,
   type WorkspaceListItem,
-  type WorkspaceSourceFreshness,
 } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { READ_ONLY_REFRESH_NOTE, StaleDataBanner } from "./StaleDataBanner"
+import { freshness, freshSource } from "./testFixtures"
 
 const WS = "ws-1"
-const HOUR = 3600_000
 
-function source(hoursAgo: number, extra: Partial<WorkspaceSourceFreshness> = {}) {
-  return {
-    tenant_id: "t1",
-    tenant_name: "Alpha",
-    provider: "commcare",
-    provider_label: "CommCare HQ",
-    last_synced_at: new Date(Date.now() - hoursAgo * HOUR).toISOString(),
-    serving: true,
-    ...extra,
-  }
+function source(hoursAgo: number | null, extra: Partial<SourceFreshnessDetail> = {}) {
+  return freshSource("Alpha", hoursAgo, extra)
 }
 
-function mockDetail(sources: WorkspaceSourceFreshness[], extra: Partial<WorkspaceDetail> = {}) {
-  return vi.spyOn(workspaceApi, "getDetail").mockResolvedValue({
-    id: WS,
-    sources,
-    stale_data_banner_hours: 24,
-    ...extra,
-  } as WorkspaceDetail)
+function mockDetail(sources: SourceFreshnessDetail[], extra: Partial<WorkspaceFreshness> = {}) {
+  return vi.spyOn(workspaceApi, "getFreshness").mockResolvedValue(freshness(sources, extra))
 }
 
 function asRole(role: WorkspaceListItem["role"]) {
@@ -110,7 +97,7 @@ describe("StaleDataBanner", () => {
   })
 
   it("stays hidden when nothing is loaded yet", async () => {
-    const spy = mockDetail([{ ...source(0), last_synced_at: null, serving: false }])
+    const spy = mockDetail([source(null)])
     renderBanner()
 
     await vi.waitFor(() => expect(spy).toHaveBeenCalled())

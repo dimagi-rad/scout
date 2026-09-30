@@ -1,4 +1,5 @@
-import { useWorkspaceDetail } from "@/hooks/useWorkspaceDetail"
+import { workspaceApi } from "@/api/workspaces"
+import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { formatRelativeTime } from "@/lib/relativeTime"
 
 interface Props {
@@ -9,10 +10,10 @@ interface Props {
 
 /**
  * One "Data as of" line per source, so a stale source is not hidden by a fresh one.
- * Mount with `key={workspaceId}` (see useWorkspaceDetail).
+ * Mount with `key={workspaceId}` (see useRefetchOnLoadEnd).
  */
 export function SourceFreshness({ workspaceId, loading = false }: Props) {
-  const sources = useWorkspaceDetail(workspaceId, loading)?.sources ?? []
+  const sources = useRefetchOnLoadEnd(workspaceApi.getDetail, workspaceId, loading)?.sources ?? []
 
   if (sources.length === 0) return null
 

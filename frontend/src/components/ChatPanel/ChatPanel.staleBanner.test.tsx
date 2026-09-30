@@ -3,7 +3,8 @@ import { render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { workspaceApi, type WorkspaceDetail, type WorkspaceListItem } from "@/api/workspaces"
+import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
+import { freshness, freshSource } from "@/components/StaleDataBanner/testFixtures"
 import { useAppStore } from "@/store/store"
 import { ChatPanel } from "./ChatPanel"
 
@@ -45,20 +46,9 @@ beforeEach(() => {
     threads: [],
     threadsStatus: "loaded",
   })
-  vi.spyOn(workspaceApi, "getDetail").mockResolvedValue({
-    id: WS,
-    stale_data_banner_hours: 24,
-    sources: [
-      {
-        tenant_id: "t1",
-        tenant_name: "Alpha",
-        provider: "commcare",
-        provider_label: "CommCare HQ",
-        last_synced_at: new Date(Date.now() - 72 * 3600_000).toISOString(),
-        serving: true,
-      },
-    ],
-  } as WorkspaceDetail)
+  vi.spyOn(workspaceApi, "getFreshness").mockResolvedValue(
+    freshness([freshSource("Alpha", 72)]),
+  )
 })
 
 afterEach(() => {

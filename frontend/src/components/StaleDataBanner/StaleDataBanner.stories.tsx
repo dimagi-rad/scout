@@ -2,34 +2,16 @@ import { MemoryRouter } from "react-router-dom"
 import type { Meta, StoryObj } from "@storybook/react-vite"
 import {
   workspaceApi,
-  type WorkspaceDetail,
+  type SourceFreshnessDetail,
   type WorkspaceListItem,
-  type WorkspaceSourceFreshness,
 } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { StaleDataBanner } from "./StaleDataBanner"
-
-const HOUR = 3600_000
-
-function source(
-  name: string,
-  hoursAgo: number,
-  extra: Partial<WorkspaceSourceFreshness> = {},
-): WorkspaceSourceFreshness {
-  return {
-    tenant_id: name,
-    tenant_name: name,
-    provider: "commcare",
-    provider_label: "CommCare HQ",
-    last_synced_at: new Date(Date.now() - hoursAgo * HOUR).toISOString(),
-    serving: true,
-    ...extra,
-  }
-}
+import { freshness, freshSource as source } from "./testFixtures"
 
 interface FixtureArgs {
   role: WorkspaceListItem["role"]
-  sources: WorkspaceSourceFreshness[]
+  sources: SourceFreshnessDetail[]
 }
 
 // beforeEach serves the args as the detail payload; the key remounts per story.
@@ -49,17 +31,16 @@ const meta = {
   parameters: { layout: "fullscreen" },
   beforeEach: ({ args }) => {
     const previous = useAppStore.getState()
-    const getDetail = workspaceApi.getDetail
+    const getFreshness = workspaceApi.getFreshness
     useAppStore.setState({ domains: [{ id: "story-ws", role: args.role } as WorkspaceListItem] })
-    workspaceApi.getDetail = async () =>
-      ({ id: "story-ws", sources: args.sources, stale_data_banner_hours: 24 }) as WorkspaceDetail
+    workspaceApi.getFreshness = async () => freshness(args.sources)
     try {
       sessionStorage.removeItem("scout:stale-banner-dismissed:story-ws")
     } catch {
       // Storybook may run without storage; the story still renders.
     }
     return () => {
-      workspaceApi.getDetail = getDetail
+      workspaceApi.getFreshness = getFreshness
       useAppStore.setState(previous)
     }
   },

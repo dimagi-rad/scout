@@ -2,8 +2,9 @@ import { useState } from "react"
 import { Link } from "react-router-dom"
 import { Clock, RotateCw, X } from "lucide-react"
 import { jobsApi } from "@/api/jobs"
+import { workspaceApi } from "@/api/workspaces"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
-import { useWorkspaceDetail } from "@/hooks/useWorkspaceDetail"
+import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { dismissStaleBanner, isStaleBannerDismissed, staleData } from "./staleData"
@@ -24,12 +25,12 @@ interface Props {
  * `key={workspaceId}` so dismissal and fetched detail belong to one workspace.
  */
 export function StaleDataBanner({ workspaceId, loading = false, onRefreshStarted }: Props) {
-  const detail = useWorkspaceDetail(workspaceId, loading)
+  const freshness = useRefetchOnLoadEnd(workspaceApi.getFreshness, workspaceId, loading)
   const { canWrite } = useWorkspaceRole(workspaceId)
   const [dismissed, setDismissed] = useState(() => isStaleBannerDismissed(workspaceId))
   const refresh = useRetryableAction(REFRESH_FAILED, canWrite)
 
-  const stale = dismissed ? null : staleData(detail, { loading })
+  const stale = dismissed ? null : staleData(freshness, { loading })
   if (!stale) return null
 
   const handleRefresh = async () => {
