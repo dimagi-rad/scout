@@ -9,6 +9,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
+from apps.agents.graph.base import _fetch_semantic_model_context
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, load_physical_tables
 from apps.users.models import Tenant
 from apps.workspaces.models import (
@@ -169,3 +170,22 @@ def test_catalog_ignores_a_stranded_provisioning_first_source(workspace, tenant,
         tenant=tenant, schema_name="stranded", state=SchemaState.PROVISIONING
     )
     assert _catalog_status(workspace) == "not_loaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_read_only_prompt_says_a_writer_s_first_chat_starts_the_load(workspace):
+    prompt = await _fetch_semantic_model_context(workspace, write_capable=False)
+    assert "starts the load automatically" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_never_loaded_multi_source_prompt_asks_for_a_load(workspace):
+    other = await Tenant.objects.acreate(provider="commcare", external_id="prompt-second")
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+
+    prompt = await _fetch_semantic_model_context(workspace, write_capable=True)
+
+    assert "No data has been loaded yet" in prompt
+    assert "run_materialization" in prompt
