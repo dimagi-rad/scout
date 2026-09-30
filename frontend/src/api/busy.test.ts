@@ -62,6 +62,12 @@ describe("busy answers", () => {
     expect(busyRetryDelayMs("5", 1, () => 1)).toBeCloseTo(7000)
     expect(busyRetryDelayMs("0", 1, () => 0)).toBe(500)
     expect(busyRetryDelayMs("60", 1, () => 0)).toBe(60_000)
+    expect(busyRetryDelayMs("3600", 1, () => 0)).toBe(60_000)
+  })
+
+  it("keeps a proxy's huge Retry-After from hanging a request for hours", () => {
+    expect(busyRetryDelayMs("50", 1, () => 1)).toBe(60_000)
+    expect(busyRetryDelayMs(null, 10, () => 1)).toBe(30_000)
   })
 })
 
@@ -125,7 +131,7 @@ describe("fetchWithBusyRetry", () => {
     expect(tracker.isHoldingOff()).toBe(true)
   })
 
-  it("dismissing the notice hides it without re-arming retries", async () => {
+  it("dismissing the notice hides it for the episode without re-arming retries", async () => {
     const tracker = createBusyTracker()
     tracker.gaveUp()
     tracker.dismiss()
@@ -134,6 +140,26 @@ describe("fetchWithBusyRetry", () => {
     const send = vi.fn().mockResolvedValue(busyResponse("1"))
     await fetchWithBusyRetry(send, { autoRetry: true, tracker })
     expect(send).toHaveBeenCalledTimes(1)
+    // The next background poll that gives up must not bring the notice back.
+    expect(tracker.getSnapshot().stillBusy).toBe(false)
+
+    await fetchWithBusyRetry(vi.fn().mockResolvedValue(okResponse()), { autoRetry: true, tracker })
+    tracker.gaveUp()
+    expect(tracker.getSnapshot().stillBusy).toBe(true)
+  })
+
+  it("holds other reads off as soon as one sees busy", async () => {
+    const tracker = createBusyTracker()
+    const first = fetchWithBusyRetry(vi.fn().mockResolvedValue(busyResponse("5")), {
+      autoRetry: true,
+      tracker,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    const second = vi.fn().mockResolvedValue(busyResponse("5"))
+    await fetchWithBusyRetry(second, { autoRetry: true, tracker })
+    expect(second).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await first
   })
 
   it("stops backing off when the caller aborts", async () => {
