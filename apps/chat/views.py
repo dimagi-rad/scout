@@ -20,7 +20,7 @@ from langchain_core.messages import HumanMessage
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
-from apps.chat.checkpointer import ensure_checkpointer
+from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.helpers import (
     _resolve_chat_access,
     async_login_required,
@@ -210,6 +210,13 @@ async def chat_view(request):
     existing_thread = await Thread.objects.filter(id=thread_id).afirst()
     if existing_thread is not None and _is_foreign_thread(existing_thread, user, workspace):
         return _foreign_thread_response(existing_thread, user, workspace)
+    if existing_thread is None and await athread_has_checkpoint(thread_id):
+        logger.warning(
+            "Rejected chat POST reusing a deleted thread's id: thread_id=%s requesting_user=%s",
+            thread_id,
+            user.pk,
+        )
+        return JsonResponse({"error": "Thread not found"}, status=404)
 
     # A RUNNING resume job means a resume ainvoke is writing this thread's checkpoint;
     # a concurrent live turn is a second unsynchronized writer (no CAS), so reject it.
