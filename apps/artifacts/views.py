@@ -116,15 +116,31 @@ async def _current_artifact_data_state(artifact: Artifact) -> dict[str, Any]:
     return await artifact_data_state(artifact)
 
 
+# Must match the sandbox attribute on the iframe in ArtifactCanvas.tsx. The CSP
+# `sandbox` directive gives the document an opaque origin even when its URL is
+# opened outside that iframe; allow-same-origin must never be added here.
+SANDBOX_FLAGS = "allow-scripts allow-modals"
+
+
 def generate_csp_with_nonce(nonce: str) -> str:
-    """Build the sandbox CSP header allowing only nonce'd inline scripts."""
+    """Build the sandbox CSP header allowing only nonce'd inline scripts.
+
+    'unsafe-eval' stays because the renderer compiles artifact code at runtime
+    (Babel for JSX, then `new Function` for React and D3 artifacts).
+    """
     return (
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; "
         "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src data: blob:; "
         "font-src https://cdn.jsdelivr.net; "
-        "connect-src https://cdn.jsdelivr.net;"
+        "connect-src https://cdn.jsdelivr.net; "
+        "base-uri 'none'; "
+        "form-action 'none'; "
+        # Mirrors X-Frame-Options: SAMEORIGIN below. Cross-origin embeds
+        # (EMBED_ALLOWED_ORIGINS) would need their origins added here too.
+        "frame-ancestors 'self'; "
+        f"sandbox {SANDBOX_FLAGS};"
     )
 
 
