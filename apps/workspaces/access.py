@@ -475,7 +475,7 @@ def _no_sources_denied(user, workspace_id) -> WorkspaceAccess:
     return WorkspaceAccess(denied_reason=NO_SOURCES)
 
 
-def decide_local_access(
+def _decide_local_access(
     user,
     membership,
     *,
@@ -491,16 +491,17 @@ def decide_local_access(
     ``require_coverage=False`` (the sync remediation exemption) skips the source
     and coverage steps. The bulk listing passes ``log_coverage_denial=False``:
     an uncovered row in a listing is expected, so only the single gates log it.
-    Cache, upstream admission and freshness stay with the callers.
+    Cache, upstream admission and freshness stay with the callers, so a grant from
+    here alone is not the full gate; keep it private to this module.
     """
     if membership is None or membership.user_id != user.pk:
         return WorkspaceAccess(denied_reason=NOT_MEMBER)
     if require_coverage:
         if not has_sources:
             return _no_sources_denied(user, membership.workspace_id)
-        if missing and log_coverage_denial:
-            return _coverage_denied(user, membership.workspace_id, missing)
         if missing:
+            if log_coverage_denial:
+                return _coverage_denied(user, membership.workspace_id, missing)
             return WorkspaceAccess(denied_reason=TENANT_ACCESS_LOST, missing_tenants=missing)
     if not role_satisfies(membership.role, minimum_role):
         return WorkspaceAccess(denied_reason=INSUFFICIENT_ROLE)
@@ -523,7 +524,7 @@ def _resolve_local_access_ex(
         tenants = _workspace_tenants(wm.workspace)
         missing = missing_workspace_tenants(user, tenants)
         access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
-    return decide_local_access(
+    return _decide_local_access(
         user,
         wm,
         has_sources=bool(tenants),
@@ -547,7 +548,7 @@ async def _aresolve_local_access_ex(user, workspace_id, *, minimum_role: str) ->
         tenants = await _aworkspace_tenants(wm.workspace)
         missing = await amissing_workspace_tenants(user, tenants)
         access_cache.store(user, workspace_id, access_cache.COVERAGE, missing, since=since)
-    return decide_local_access(
+    return _decide_local_access(
         user, wm, has_sources=bool(tenants), missing=missing, minimum_role=minimum_role
     )
 
@@ -719,7 +720,7 @@ async def aresolve_local_access_many(
     # row for the same workspace can never overwrite the caller's own result.
     results = {m.workspace_id: WorkspaceAccess(denied_reason=NOT_MEMBER) for m in memberships}
     for m in own:
-        results[m.workspace_id] = decide_local_access(
+        results[m.workspace_id] = _decide_local_access(
             user,
             m,
             has_sources=bool(tenants_by_ws[m.workspace_id]),
