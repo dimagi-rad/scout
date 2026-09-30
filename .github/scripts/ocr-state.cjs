@@ -62,9 +62,9 @@ function chooseReview(previous, { head, base, policy, forceFull, mergeBaseUnchan
   if (forceFull) reason = 'explicit full review';
   else if (!validState(previous)) reason = 'no accepted state';
   else if (!previous.passed) reason = 'previous review blocked or incomplete';
-  else if (previous.base !== base && mergeBaseUnchanged !== true) reason = 'base changed';
   else if (previous.policy !== policy) reason = 'review policy changed';
   else if (previous.head === head) reason = 'same-head rerun';
+  else if (previous.base !== base && mergeBaseUnchanged !== true) reason = 'base changed';
   if (reason) return { full: true, checkpoint: null, sourceRun: null, claudeHead: null, reason };
   return { full: false, checkpoint: previous.head, sourceRun: previous.run, claudeHead: previous.claudeHead, reason: 'accepted checkpoint' };
 }

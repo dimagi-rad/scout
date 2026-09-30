@@ -158,10 +158,10 @@ async function mergeBaseOf(github, context, base, head) {
 // Any doubt reviews the full PR. OCR's own checkpoint also rejects a moved merge-base.
 async function sameMergeBase(github, context, core, previous, env) {
   try {
-    const [before, now] = await Promise.all([
+    const [before, now] = await retryRead('the merge-base compare', () => Promise.all([
       mergeBaseOf(github, context, previous.base, previous.head),
       mergeBaseOf(github, context, env.REVIEW_BASE, env.REVIEW_HEAD),
-    ]);
+    ]), { core });
     return before === now;
   } catch (error) {
     core.warning(`Could not compare merge bases (${safeErrorSummary(error)}); reviewing the full PR.`);
@@ -180,11 +180,12 @@ async function prepareReview({ github, context, core, fs, env }) {
   const claudeReusable = previous?.claudeHead && receipt?.status === 'verified'
     && receipt.run === previous.run && receipt.head === previous.claudeHead && receipt.base === previous.base;
   const accepted = previous && !claudeReusable ? { ...previous, claudeHead: null } : previous;
-  const mergeBaseUnchanged = previous?.passed === true && previous.base !== env.REVIEW_BASE
-    && await sameMergeBase(github, context, core, previous, env);
-  let selection = chooseReview(accepted, {
-    head: env.REVIEW_HEAD, base: env.REVIEW_BASE, policy, forceFull: env.FORCE_FULL === 'true', mergeBaseUnchanged,
-  });
+  const current = { head: env.REVIEW_HEAD, base: env.REVIEW_BASE, policy, forceFull: env.FORCE_FULL === 'true' };
+  let selection = chooseReview(accepted, current);
+  // Only worth two API calls when a moved base tip is the sole reason for a full review.
+  if (selection.reason === 'base changed' && await sameMergeBase(github, context, core, previous, env)) {
+    selection = chooseReview(accepted, { ...current, mergeBaseUnchanged: true });
+  }
   if (!selection.full && !nativeCheckpointMatches(comments, {
     head: selection.checkpoint, run: selection.sourceRun, pr: env.PR_NUMBER,
   })) {

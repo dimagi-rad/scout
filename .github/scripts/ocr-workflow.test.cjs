@@ -38,7 +38,7 @@ function harness(overrides = {}) {
       POSTING_FAILED: '0', SAME_REPO: 'true', GITHUB_SERVER_URL: 'https://github.com',
       GITHUB_REPOSITORY: 'owner/repo', GITHUB_RUN_ATTEMPT: '1', ...overrides },
     context: { repo: { owner: 'owner', repo: 'repo' }, runId: 20 },
-    comments: [], outputs: {}, outputHistory: [], writes: [], copies: [], gitCalls: [], failures: [],
+    comments: [], outputs: {}, outputHistory: [], writes: [], copies: [], gitCalls: [], failures: [], compares: [],
     result: report(), pr: { state: 'open', head: { sha: HEAD }, base: { sha: BASE } },
     files: new Map(policyFiles.map(file => [`/workspace/${file}`, `trusted ${file}`])),
   };
@@ -66,6 +66,10 @@ function harness(overrides = {}) {
   h.github = {
     paginate: async () => h.comments,
     rest: { pulls: { get: async () => ({ data: h.pr }) },
+      repos: { compareCommitsWithBasehead: async ({ basehead }) => {
+        h.compares.push(basehead);
+        return { data: { merge_base_commit: { sha: MERGE } } };
+      } },
       issues: { listComments() {}, updateComment: publish, createComment: publish } },
   };
   h.execFileSync = (command, args) => {
@@ -143,15 +147,17 @@ test('a moved base tip keeps the checkpoint only when the merge-base is unchange
   }
 });
 
-test('an unchanged base tip or a blocked prior review never compares merge bases', async () => {
-  for (const [base, passed] of [[BASE, true], ['f'.repeat(40), false]]) {
-    const h = harness({ REVIEW_BASE: base });
+test('merge bases are compared only when a moved base tip is the sole full-review reason', async () => {
+  const MOVED = 'f'.repeat(40);
+  for (const [base, prior, force, full] of [[BASE, {}, 'false', 'false'], [MOVED, { passed: false }, 'false', 'true'],
+    [MOVED, {}, 'true', 'true'], [MOVED, { policy: 'e'.repeat(64) }, 'false', 'true'], [MOVED, { head: HEAD }, 'false', 'true']]) {
+    const h = harness({ REVIEW_BASE: base, FORCE_FULL: force });
     h.pr.base.sha = base;
-    h.github.rest.repos = { compareCommitsWithBasehead: async () => assert.fail('unexpected compare') };
     await prepareReview(h);
-    h.comments = [comment(state({ policy: h.outputs.policy, passed })), nativeComment()];
+    h.comments = [comment(state({ policy: h.outputs.policy, ...prior })), nativeComment()];
     await prepareReview(h);
-    assert.equal(h.outputs.full_review, passed ? 'false' : 'true');
+    assert.deepEqual(h.compares, []);
+    assert.equal(h.outputs.full_review, full);
   }
 });
 
