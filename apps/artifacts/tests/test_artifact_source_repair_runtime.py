@@ -330,7 +330,7 @@ async def test_older_ready_surface_cannot_hide_current_explicit_missing_view(
     defer = AsyncMock(return_value=SimpleNamespace(id=1704))
     with (
         patch(
-            "apps.artifacts.services.query_state.workspace_query_surface",
+            "apps.semantic.services.query_readiness.workspace_query_surface",
             new=AsyncMock(return_value=full_surface),
         ),
         patch("apps.artifacts.views.recover_workspace_data.defer_async", new=defer),
