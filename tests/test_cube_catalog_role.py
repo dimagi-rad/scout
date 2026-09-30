@@ -29,11 +29,15 @@ def test_cube_js_connects_as_the_migrated_role():
 
 
 @pytest.mark.django_db
-def test_migration_creates_a_nologin_role_the_owner_can_assume():
+def test_migration_creates_a_nologin_role_granted_to_the_owner():
+    # Read pg_auth_members directly: pg_has_role() is always true for a superuser,
+    # which is what CI's database user is.
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT rolcanlogin, pg_has_role(current_user, oid, 'MEMBER') "
-            "FROM pg_roles WHERE rolname = %s",
+            "SELECT r.rolcanlogin, EXISTS ("
+            "  SELECT 1 FROM pg_auth_members m JOIN pg_roles u ON u.oid = m.member"
+            "  WHERE m.roleid = r.oid AND u.rolname = current_user"
+            ") FROM pg_roles r WHERE r.rolname = %s",
             [ROLE],
         )
         assert cursor.fetchall() == [(False, True)]
