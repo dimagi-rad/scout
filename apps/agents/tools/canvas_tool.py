@@ -23,7 +23,7 @@ from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 from langchain_core.tools import tool
 
-from apps.artifacts.models import Artifact
+from apps.artifacts.models import Artifact, ArtifactSemanticQuery
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
     apply_operations,
@@ -116,12 +116,7 @@ def _deletions_needing_confirmation(workspace, targets) -> list[dict[str, Any]]:
     """``targets`` are ``(dataset, field-or-None)``; any dataset qualifies, a field only when used."""
     if not targets:
         return []
-    artifacts = [
-        (artifact.title, json.dumps([artifact.semantic_queries, artifact.semantic_query_manifest]))
-        for artifact in Artifact.objects.filter(workspace=workspace, is_deleted=False).only(
-            "title", "semantic_queries", "semantic_query_manifest"
-        )
-    ]
+    artifacts = _artifact_member_texts(workspace)
     deletions = []
     for dataset_name, field_name in targets:
         if field_name is None:
@@ -136,6 +131,37 @@ def _deletions_needing_confirmation(workspace, targets) -> list[dict[str, Any]]:
         if field_name is None or used_by:
             deletions.append({"object": label, "used_by_artifacts": used_by[:10]})
     return deletions
+
+
+def _artifact_member_texts(workspace) -> list[tuple[str, str]]:
+    """``(title, searchable text)`` per current artifact version.
+
+    Stories saved before manifests existed keep their members only in
+    ``data.story_doc``, so it is scanned too, along with the normalized query rows.
+    """
+    current = Artifact.objects.filter(
+        workspace=workspace, is_deleted=False, child_versions__isnull=True
+    ).only("title", "data", "semantic_queries", "semantic_query_manifest")
+    members: dict[Any, list] = {}
+    for artifact_id, query_members in ArtifactSemanticQuery.objects.filter(
+        workspace=workspace
+    ).values_list("artifact_id", "members"):
+        members.setdefault(artifact_id, []).append(query_members)
+    return [
+        (
+            artifact.title,
+            json.dumps(
+                [
+                    artifact.semantic_queries,
+                    artifact.semantic_query_manifest,
+                    artifact.data.get("story_doc") if isinstance(artifact.data, dict) else None,
+                    members.get(artifact.id, []),
+                ],
+                default=str,
+            ),
+        )
+        for artifact in current
+    ]
 
 
 def _confirmation_required(deletions: list[dict[str, Any]], *, retry: str) -> dict[str, Any]:

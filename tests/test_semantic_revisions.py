@@ -523,3 +523,21 @@ def test_deleting_a_field_no_artifact_uses_needs_no_confirmation(canvas, semanti
     assert destructive_deletions(canvas) == [
         {"object": "field/raw_visits.total_amount", "used_by_artifacts": ["Totals"]}
     ]
+
+    old_story = Artifact.objects.create(
+        workspace=canvas.workspace,
+        title="Old story",
+        code="",
+        conversation_id="c",
+        data={"story_doc": {"blocks": [{"query": {"measures": ["raw_visits.total_amount"]}}]}},
+    )
+    assert sorted(destructive_deletions(canvas)[0]["used_by_artifacts"]) == ["Old story", "Totals"]
+
+    Artifact.objects.create(
+        workspace=canvas.workspace,
+        title="Old story v2",
+        code="",
+        conversation_id="c",
+        parent_artifact=old_story,
+    )
+    assert destructive_deletions(canvas)[0]["used_by_artifacts"] == ["Totals"]
