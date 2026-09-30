@@ -35,6 +35,14 @@ waits for another to close, so under load queries queue rather than fail, up to
 Cube's 20-second pool acquisition timeout. An idle tenant driver holds no
 connections after about 15 seconds.
 
+Cube 1.6.39 keeps up to 100 orchestrators, each owning a tenant driver, with no
+idle expiry, and drops LRU-evicted ones without releasing their drivers. A second
+maintained build-time patch (`patch-orchestrator-storage.js`, same pinning and
+hash checks as the cache patch below) swaps in `idle-orchestrator-storage.js`: an
+orchestrator unused for 10 minutes, or evicted by the 100-entry cap, is dropped
+and its driver released 60 seconds later, after any query it admitted has hit
+the 30-second statement timeout.
+
 Worst case per Cube process: 16 tenant + 1 readiness (+1 transient readiness
 probe) + 3 catalog = 21 connections. Production and staging together: 42.
 

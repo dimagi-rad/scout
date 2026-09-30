@@ -1,4 +1,4 @@
-"""DB-free check that cube.js drivers load and stay bounded inside the real Cube image.
+"""DB-free check that Cube drivers and orchestrators stay bounded inside the real image.
 
 Requires SCOUT_CUBE_COMPILER_CONTAINER naming an existing local Cube container. The
 script loads /cube/conf/cube.js in a separate Node process with an unreachable database,
@@ -18,6 +18,7 @@ const { createRequire } = require('node:module');
 const { realpathSync } = require('node:fs');
 const serverRequire = createRequire(realpathSync('/cube/node_modules/.bin/cubejs-server'));
 const { isDriver } = serverRequire('@cubejs-backend/server-core/dist/src/core/DriverResolvers');
+const { OrchestratorStorage } = serverRequire('@cubejs-backend/server-core/dist/src/core/OrchestratorStorage');
 const config = require('/cube/conf/cube.js');
 
 const tenant = {
@@ -31,6 +32,7 @@ const tenant = {
 };
 
 async function run() {
+  assert.equal(new OrchestratorStorage().idleTtlMs, 600000);
   const driver = config.driverFactory(tenant);
   const readiness = config.driverFactory({ dataSource: 'default' });
   assert.equal(isDriver(driver), true);
@@ -44,7 +46,9 @@ async function run() {
   }
   await driver.release();
   await readiness.release();
-  process.stdout.write(JSON.stringify({ tenantMax: 2, readinessMax: 1, slotReleased: true }));
+  process.stdout.write(JSON.stringify({
+    tenantMax: 2, readinessMax: 1, slotReleased: true, idleOrchestratorsExpire: true,
+  }));
 }
 run().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });
 """
@@ -81,4 +85,9 @@ def test_real_cube_drivers_are_bounded_and_return_slots():
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"tenantMax": 2, "readinessMax": 1, "slotReleased": True}
+    assert json.loads(result.stdout) == {
+        "tenantMax": 2,
+        "readinessMax": 1,
+        "slotReleased": True,
+        "idleOrchestratorsExpire": True,
+    }
