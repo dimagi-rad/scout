@@ -1,0 +1,44 @@
+import { act, renderHook } from "@testing-library/react"
+import { describe, expect, it } from "vitest"
+
+import { useRefetchOnLoadEnd } from "./useRefetchOnLoadEnd"
+
+function deferredFetcher() {
+  const pending: Array<(value: string) => void> = []
+  const fetcher = () =>
+    new Promise<string>((resolve) => {
+      pending.push(resolve)
+    })
+  return { fetcher, pending }
+}
+
+describe("useRefetchOnLoadEnd", () => {
+  it("keeps the response already in flight when a load starts", async () => {
+    const { fetcher, pending } = deferredFetcher()
+    const { result, rerender } = renderHook(
+      ({ loading }) => useRefetchOnLoadEnd(fetcher, "ws-1", loading),
+      { initialProps: { loading: false } },
+    )
+    rerender({ loading: true })
+
+    await act(async () => pending[0]("before load"))
+
+    expect(result.current).toBe("before load")
+  })
+
+  it("does not let an older response overwrite a newer one", async () => {
+    const { fetcher, pending } = deferredFetcher()
+    const { result, rerender } = renderHook(
+      ({ loading }) => useRefetchOnLoadEnd(fetcher, "ws-1", loading),
+      { initialProps: { loading: false } },
+    )
+    rerender({ loading: true })
+    rerender({ loading: false })
+    expect(pending).toHaveLength(2)
+
+    await act(async () => pending[1]("after load"))
+    await act(async () => pending[0]("before load"))
+
+    expect(result.current).toBe("after load")
+  })
+})

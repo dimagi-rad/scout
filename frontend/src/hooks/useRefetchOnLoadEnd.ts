@@ -14,6 +14,7 @@ export function useRefetchOnLoadEnd<T>(
 ): T | null {
   const [data, setData] = useState<T | null>(null)
   const mountedRef = useRef(true)
+  const latestRequestRef = useRef(0)
 
   useEffect(() => {
     mountedRef.current = true
@@ -22,12 +23,14 @@ export function useRefetchOnLoadEnd<T>(
     }
   }, [])
 
-  // A load starting mid-fetch must not discard the response already on its way.
+  // A load starting mid-fetch must not discard the response already on its way
+  // (so no per-effect cancel), but an older response must not overwrite a newer one.
   useEffect(() => {
     if (loading) return
+    const request = ++latestRequestRef.current
     fetcher(workspaceId)
       .then((next) => {
-        if (mountedRef.current) setData(next)
+        if (mountedRef.current && request === latestRequestRef.current) setData(next)
       })
       .catch(() => {})
   }, [fetcher, workspaceId, loading])
