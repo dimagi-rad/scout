@@ -57,7 +57,7 @@ Configuration lives in `.github/workflows/ocr.yml`:
 - Two concurrent OCR tasks, 15-minute per-task timeout, and a total-token budget scaled to PR size (500,000 to 4,000,000; see [Token budget and manual overrides](#token-budget-and-manual-overrides)).
 - Native cross-push checkpoints enabled, subject to Scout’s accepted-state validation.
 - Low-severity findings go to the summary; their severity is still evaluated by the gate. The review prompt asks for demonstrated defects rather than speculative API mismatches or style/test-coverage requests without a concrete failure.
-- 45-minute job timeout, including the Claude follow-up.
+- 90-minute job timeout, including the Claude follow-up.
 - Claude follow-up uses Opus 5 with a $10 CLI budget.
 
 The OCR token limit stops further dispatch after it is exceeded; in-flight work can overshoot. It is not a hard dollar spending limit. Configure an Anthropic workspace spending limit for a billing ceiling. Both review stages consume API quota; low/medium-only PRs still receive both reviews. The limit gates whether each file group may start rather than capping spend; see [How the token budget works](#how-the-token-budget-works-size-prs-by-file-groups-not-lines).
