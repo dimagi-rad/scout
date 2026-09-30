@@ -173,6 +173,10 @@ RESUME_TIMEOUT_MESSAGE = (
 RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your answer. Please retry."
 logger = logging.getLogger(__name__)
 
+# Set on a recovery's result when the database refused it at its connection limit:
+# the attempt never ran, so it must not count as the member's one retry.
+CAPACITY_REFUSED_KEY = "capacity_refused"
+
 
 def _set_tenant_display_names(summaries: list[dict]) -> None:
     providers_by_name: dict[str, set[str]] = {}
@@ -2171,6 +2175,18 @@ async def rebuild_workspace_view_schema(workspace_id: str, revive_retired: bool 
             "tenant_coverage": tenant_coverage,
             "cube_schema": {"ok": False, "error": str(exc)[:500]},
         }
+    except CapacityExhausted as exc:
+        logger.warning(
+            "Semantic Cube schema build refused at capacity after view schema rebuild for "
+            "workspace %s",
+            workspace_id,
+        )
+        return {
+            "status": "active",
+            "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
+            "cube_schema": {"ok": False, "error": str(exc)[:500], CAPACITY_REFUSED_KEY: True},
+        }
     except Exception as exc:
         logger.exception(
             "Semantic Cube schema build failed after view schema rebuild for workspace %s",
@@ -2237,7 +2253,7 @@ async def rebuild_workspace_semantic_model_core(workspace_id: str) -> dict:
         return {"cube_schema": {"ok": False, "error": str(exc)[:500]}}
     except CapacityExhausted as exc:
         logger.warning("Semantic model rebuild refused at capacity for workspace %s", workspace_id)
-        return {"cube_schema": {"ok": False, "error": str(exc)[:500], "capacity_refused": True}}
+        return {"cube_schema": {"ok": False, "error": str(exc)[:500], CAPACITY_REFUSED_KEY: True}}
     except Exception as exc:
         logger.exception("Semantic model rebuild failed for workspace %s", workspace_id)
         return {"cube_schema": {"ok": False, "error": str(exc)[:500]}}
@@ -2368,7 +2384,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             # failed rebuild. Serving that fallback is safe, but it must not
             # turn an unsuccessful recovery attempt into a reported success.
             cube_result = result.get("cube_schema") or {}
-            if cube_result.get("capacity_refused"):
+            if cube_result.get(CAPACITY_REFUSED_KEY):
                 result = {**result, CAPACITY_REFUSED_KEY: True}
             if (
                 final_surface["status"] != "ready"
@@ -2407,9 +2423,6 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
 
 
 CHAT_RECOVERY_SOURCE = "chat"
-# Set on a recovery's result when the database refused it at its connection limit:
-# the attempt never ran, so it must not count as the member's one retry.
-CAPACITY_REFUSED_KEY = "capacity_refused"
 _CHAT_RECOVERY_NEEDS_RELOAD = (
     "The data model can't be rebuilt from the loaded data: it needs a data refresh first."
 )

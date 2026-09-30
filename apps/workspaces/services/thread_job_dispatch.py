@@ -40,7 +40,7 @@ CHAT_LOAD_START_DELAY_SECONDS = 30
 
 # A rebuild refused at the connection limit doesn't spend the member's retry, but a
 # sustained outage must not queue one per message: wait this long after a refusal.
-CAPACITY_RETRY_COOLDOWN = timedelta(minutes=2)
+CAPACITY_RETRY_COOLDOWN = timedelta(minutes=5)
 
 
 @sync_to_async

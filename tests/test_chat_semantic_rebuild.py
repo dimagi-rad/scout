@@ -35,7 +35,11 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.thread_job_dispatch import CAPACITY_RETRY_COOLDOWN
-from apps.workspaces.tasks import CAPACITY_REFUSED_KEY, recover_workspace_data
+from apps.workspaces.tasks import (
+    CAPACITY_REFUSED_KEY,
+    rebuild_workspace_view_schema,
+    recover_workspace_data,
+)
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -443,3 +447,42 @@ async def test_a_genuine_rebuild_failure_still_spends_the_one_retry(agent_layer,
     await _chat(client, ws)
 
     assert len(await _rebuilds(ws)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_another_members_capacity_refusal_holds_this_member_off_for_the_cooldown(
+    agent_layer, queued_jobs
+):
+    ws, tenant, _schema = await _loaded_workspace("capacity-shared")
+    await _stale_catalog(ws)
+    other, _other_client = await _member(ws, tenant, "capacity-other@b.c")
+    _user, client = await _member(ws, tenant, "capacity-this@b.c")
+
+    await _run_rebuild_recovery(ws, other, CapacityExhausted(CapacityResource.DATABASE, "full"))
+    await _chat(client, ws)
+
+    assert len(await _rebuilds(ws)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_capacity_refused_view_rebuild_cube_build_is_flagged():
+    ws, _tenant, _schema = await _loaded_workspace("view-capacity")
+    view_schema = SimpleNamespace(schema_name="ws_view", tenant_coverage={})
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager.build_view_schema", return_value=view_schema),
+        patch(
+            "apps.workspaces.tasks._included_tenant_snapshot_state",
+            AsyncMock(return_value="safe"),
+        ),
+        patch(
+            "apps.workspaces.tasks.build_and_promote_cube_schema",
+            side_effect=CapacityExhausted(CapacityResource.DATABASE, "full"),
+        ),
+    ):
+        result = await rebuild_workspace_view_schema.func(str(ws.id))
+
+    assert result["cube_schema"][CAPACITY_REFUSED_KEY] is True
+    assert result["cube_schema"]["ok"] is False
