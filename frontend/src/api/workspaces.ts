@@ -51,7 +51,15 @@ export interface WorkspaceSourceFreshness {
   tenant_id: string
   tenant_name: string
   provider: string
+  provider_label?: string
   last_synced_at: string | null
+  // In what the workspace queries (a multi-source workspace needs its view).
+  serving?: boolean
+  last_load?: "refreshed" | "reused" | "skipped" | null
+  // The latest load skipped it and nothing has fetched it since.
+  not_refreshed?: boolean
+  // Skipped over this viewer's own expired sign-in: a refresh cannot fix it.
+  reconnect?: boolean
 }
 
 export interface WorkspaceDetail {
@@ -70,6 +78,7 @@ export interface WorkspaceDetail {
   tenant_count: number
   member_count: number
   last_synced_at: string | null
+  stale_data_banner_hours?: number
   created_at: string
   updated_at: string
 }

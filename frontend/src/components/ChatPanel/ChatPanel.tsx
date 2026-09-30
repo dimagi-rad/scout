@@ -6,6 +6,7 @@ import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
 import { SourceFreshness } from "@/components/SourceFreshness"
+import { StaleDataBanner } from "@/components/StaleDataBanner"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
@@ -78,6 +79,16 @@ export function ChatPanel() {
         workspaceId={activeDomainId}
       />
     ))
+  const workspaceLoading =
+    Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0
+  const staleBanner = activeDomainId && (
+    <StaleDataBanner
+      key={activeDomainId}
+      workspaceId={activeDomainId}
+      loading={workspaceLoading}
+      onRefreshStarted={notifyJobLikelyStarted}
+    />
+  )
   const currentThread = threads.find((thread) => thread.id === threadId)
   const threadTitle = currentThread?.title ?? "Untitled"
   const titleIsCustom = currentThread?.title_is_custom ?? false
@@ -317,6 +328,7 @@ export function ChatPanel() {
     return (
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
+        {staleBanner}
         <div className="min-h-0 flex-1">
           <ChatEmptyState
             input={input}
@@ -373,12 +385,13 @@ export function ChatPanel() {
           )}
 
         {loadBanners}
+        {staleBanner}
 
         {activeDomainId && (
           <SourceFreshness
             key={activeDomainId}
             workspaceId={activeDomainId}
-            loading={Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0}
+            loading={workspaceLoading}
           />
         )}
 

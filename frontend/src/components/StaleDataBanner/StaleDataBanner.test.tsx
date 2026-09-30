@@ -1,0 +1,207 @@
+import { act, fireEvent, render, screen } from "@testing-library/react"
+import { MemoryRouter } from "react-router-dom"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { ApiError } from "@/api/client"
+import { jobsApi } from "@/api/jobs"
+import {
+  workspaceApi,
+  type WorkspaceDetail,
+  type WorkspaceListItem,
+  type WorkspaceSourceFreshness,
+} from "@/api/workspaces"
+import { useAppStore } from "@/store/store"
+import { READ_ONLY_REFRESH_NOTE, StaleDataBanner } from "./StaleDataBanner"
+
+const WS = "ws-1"
+const HOUR = 3600_000
+
+function source(hoursAgo: number, extra: Partial<WorkspaceSourceFreshness> = {}) {
+  return {
+    tenant_id: "t1",
+    tenant_name: "Alpha",
+    provider: "commcare",
+    provider_label: "CommCare HQ",
+    last_synced_at: new Date(Date.now() - hoursAgo * HOUR).toISOString(),
+    serving: true,
+    ...extra,
+  }
+}
+
+function mockDetail(sources: WorkspaceSourceFreshness[], extra: Partial<WorkspaceDetail> = {}) {
+  return vi.spyOn(workspaceApi, "getDetail").mockResolvedValue({
+    id: WS,
+    sources,
+    stale_data_banner_hours: 24,
+    ...extra,
+  } as WorkspaceDetail)
+}
+
+function asRole(role: WorkspaceListItem["role"]) {
+  useAppStore.setState({ domains: [{ id: WS, role } as WorkspaceListItem] })
+}
+
+function renderBanner(props: Partial<Parameters<typeof StaleDataBanner>[0]> = {}) {
+  return render(
+    <MemoryRouter>
+      <StaleDataBanner workspaceId={WS} {...props} />
+    </MemoryRouter>,
+  )
+}
+
+beforeEach(() => {
+  sessionStorage.clear()
+  asRole("read_write")
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  useAppStore.setState({ domains: [] })
+})
+
+describe("StaleDataBanner", () => {
+  it("offers a refresh when the data is past the threshold", async () => {
+    mockDetail([source(72)])
+    renderBanner()
+
+    expect(await screen.findByTestId("stale-data-banner-message")).toHaveTextContent(
+      "This data was last refreshed 3 days ago. Refresh it now?",
+    )
+    expect(screen.getByTestId("stale-data-banner-refresh")).toBeEnabled()
+  })
+
+  it("shows hours under 48 hours", async () => {
+    mockDetail([source(30)])
+    renderBanner()
+
+    expect(await screen.findByTestId("stale-data-banner-message")).toHaveTextContent(
+      "last refreshed 30 hours ago",
+    )
+  })
+
+  it("stays hidden for fresh data", async () => {
+    const spy = mockDetail([source(2)])
+    renderBanner()
+
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled())
+    expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+  })
+
+  it("stays hidden while a load is in progress", async () => {
+    const spy = mockDetail([source(72)], { in_progress: true })
+    renderBanner()
+
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled())
+    expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+  })
+
+  it("hides when a load starts and does not refetch until it ends", async () => {
+    const spy = mockDetail([source(72)])
+    const { rerender } = renderBanner()
+    await screen.findByTestId("stale-data-banner")
+
+    rerender(
+      <MemoryRouter>
+        <StaleDataBanner workspaceId={WS} loading />
+      </MemoryRouter>,
+    )
+    expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it("stays hidden when nothing is loaded yet", async () => {
+    const spy = mockDetail([{ ...source(0), last_synced_at: null, serving: false }])
+    renderBanner()
+
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled())
+    expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+  })
+
+  it("refreshes through the same endpoint as Retry", async () => {
+    mockDetail([source(72)])
+    const retry = vi
+      .spyOn(jobsApi, "retryMaterialization")
+      .mockResolvedValue({ status: "started" })
+    const onRefreshStarted = vi.fn()
+    renderBanner({ onRefreshStarted })
+
+    fireEvent.click(await screen.findByTestId("stale-data-banner-refresh"))
+
+    await vi.waitFor(() => expect(onRefreshStarted).toHaveBeenCalled())
+    expect(retry).toHaveBeenCalledWith(WS, {})
+    expect(screen.getByTestId("stale-data-banner-refresh")).toBeDisabled()
+  })
+
+  it("shows the server's reason when the refresh is refused", async () => {
+    mockDetail([source(72)])
+    vi.spyOn(jobsApi, "retryMaterialization").mockRejectedValue(
+      new ApiError(403, "Your CommCare sign-in expired.", {
+        error: "Your CommCare sign-in expired.",
+      }),
+    )
+    renderBanner()
+
+    fireEvent.click(await screen.findByTestId("stale-data-banner-refresh"))
+
+    expect(await screen.findByTestId("stale-data-banner-error")).toHaveTextContent(
+      "Your CommCare sign-in expired.",
+    )
+  })
+
+  it("shows read-only members the age without a Refresh button", async () => {
+    asRole("read")
+    mockDetail([source(72)])
+    renderBanner()
+
+    expect(await screen.findByTestId("stale-data-banner-message")).toHaveTextContent(
+      `last refreshed 3 days ago. ${READ_ONLY_REFRESH_NOTE}`,
+    )
+    expect(screen.queryByTestId("stale-data-banner-refresh")).toBeNull()
+  })
+
+  it("says reconnect instead of refresh when the viewer's sign-in expired", async () => {
+    mockDetail([source(72, { reconnect: true, not_refreshed: true, last_load: "skipped" })])
+    renderBanner()
+
+    const link = await screen.findByTestId("stale-data-banner-reconnect")
+    expect(link).toHaveTextContent("Reconnect CommCare HQ")
+    expect(link).toHaveAttribute("href", "/settings/connections")
+    expect(screen.queryByTestId("stale-data-banner-refresh")).toBeNull()
+  })
+
+  it("remembers a dismiss for the workspace this session", async () => {
+    const spy = mockDetail([source(72)])
+    const first = renderBanner()
+
+    fireEvent.click(await screen.findByTestId("stale-data-banner-dismiss"))
+    expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+    first.unmount()
+
+    renderBanner()
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(2))
+    expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+  })
+
+  it("does not carry a dismiss over to another workspace", async () => {
+    sessionStorage.setItem("scout:stale-banner-dismissed:other-ws", "1")
+    mockDetail([source(72)])
+    renderBanner()
+
+    expect(await screen.findByTestId("stale-data-banner")).toBeInTheDocument()
+  })
+
+  it("still dismisses when session storage is unavailable", async () => {
+    mockDetail([source(72)])
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("denied")
+    })
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("denied")
+    })
+    renderBanner()
+
+    const dismiss = await screen.findByTestId("stale-data-banner-dismiss")
+    act(() => dismiss.click())
+    expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+  })
+})
