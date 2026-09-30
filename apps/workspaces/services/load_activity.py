@@ -56,7 +56,9 @@ def active_runs_for_workspaces(workspace_ids):
     """Unevaluated: the active runs on any tenant of these workspaces, owned or not.
 
     Tenants are shared, so a sibling's run counts here; ``owned_run_q`` narrows to the
-    workspace's own. The join also lets a caller read the workspace id per run.
+    workspace's own. The join also lets a caller read the workspace id per run; with
+    several ids a run on a tenant shared by two of them yields one row per
+    (run, workspace), so collapse to a set rather than counting rows.
     """
     return MaterializationRun.objects.filter(
         tenant_schema__tenant__workspace_tenants__workspace_id__in=[
