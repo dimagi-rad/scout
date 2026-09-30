@@ -7,6 +7,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # Deploy only once 0018 is live everywhere: pre-0018 processes still SELECT and
+        # INSERT these columns and fail without them (dimagi-rad/scout#733).
         # 0018 removed these fields from state only, so RemoveField can't drop them.
         # IF EXISTS keeps the drop idempotent for databases where the columns are
         # already gone. The reverse re-adds empty nullable columns (data is not restored) so
