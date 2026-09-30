@@ -50,49 +50,48 @@ export function ChatErrorNotice({ error, onStartNewThread }: ChatErrorNoticeProp
   )
 }
 
-interface ChatOverloadNoticeProps {
+interface RetryNoticeProps {
   onRetry: () => void
 }
 
-export function ChatOverloadNotice({ onRetry }: ChatOverloadNoticeProps) {
+function RetryNotice({
+  message,
+  testId,
+  onRetry,
+}: RetryNoticeProps & { message: string; testId: string }) {
   return (
     <div
       className="text-sm text-muted-foreground bg-muted rounded-lg px-4 py-3 space-y-2"
-      data-testid="chat-overload-notice"
+      role="status"
+      data-testid={`${testId}-notice`}
     >
-      <p>The assistant is busy right now. Please try again in a moment.</p>
+      <p>{message}</p>
       <Button
         type="button"
         variant="outline"
         size="sm"
         onClick={onRetry}
-        data-testid="chat-overload-retry"
+        data-testid={`${testId}-retry`}
       >
         Retry
       </Button>
     </div>
+  )
+}
+
+export function ChatOverloadNotice({ onRetry }: RetryNoticeProps) {
+  return (
+    <RetryNotice
+      message="The assistant is busy right now. Please try again in a moment."
+      testId="chat-overload"
+      onRetry={onRetry}
+    />
   )
 }
 
 /** Scout hit a connection limit and the automatic retries are spent. */
-export function ChatBusyNotice({ onRetry }: ChatOverloadNoticeProps) {
-  return (
-    <div
-      className="text-sm text-muted-foreground bg-muted rounded-lg px-4 py-3 space-y-2"
-      data-testid="chat-busy-notice"
-    >
-      <p>{BUSY_MESSAGE}</p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={onRetry}
-        data-testid="chat-busy-retry"
-      >
-        Retry
-      </Button>
-    </div>
-  )
+export function ChatBusyNotice({ onRetry }: RetryNoticeProps) {
+  return <RetryNotice message={BUSY_MESSAGE} testId="chat-busy" onRetry={onRetry} />
 }
 
 export function ChatStoppedNotice() {

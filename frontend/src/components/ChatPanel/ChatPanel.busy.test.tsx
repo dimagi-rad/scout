@@ -117,10 +117,16 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// A busy 503 comes before the turn is checkpointed, so it gets the full retry
+// budget; a busy stream part comes after, so it gets the overload path's one retry.
 describe.each([
-  ["a busy stream part", busyStreamResponse],
-  ["a busy 503", () => Response.json(BUSY_BODY, { status: 503, headers: { "Retry-After": "5" } })],
-])("a chat turn answered with %s", (_label, busyAnswer) => {
+  ["a busy stream part", busyStreamResponse, 2],
+  [
+    "a busy 503",
+    () => Response.json(BUSY_BODY, { status: 503, headers: { "Retry-After": "5" } }),
+    4,
+  ],
+])("a chat turn answered with %s", (_label, busyAnswer, postsBeforeNotice) => {
   it("retries a few times, then offers a manual Retry that recovers", async () => {
     const api = mockChat(busyAnswer)
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
@@ -133,7 +139,7 @@ describe.each([
 
     const notice = await screen.findByTestId("chat-busy-notice")
     expect(notice).toHaveTextContent("Scout is busy right now")
-    expect(api.chatPosts).toHaveLength(4)
+    expect(api.chatPosts).toHaveLength(postsBeforeNotice)
     expect(screen.queryByTestId("chat-error")).toBeNull()
     expect(busyTracker.getSnapshot().retrying).toBe(0)
 
@@ -143,8 +149,26 @@ describe.each([
     })
 
     await screen.findByText(REPLY)
-    expect(api.chatPosts).toHaveLength(5)
+    expect(api.chatPosts).toHaveLength(postsBeforeNotice + 1)
     await waitFor(() => expect(screen.queryByTestId("chat-busy-notice")).toBeNull())
+    consoleError.mockRestore()
+  })
+
+  it("drops the busy notice when the user opens another thread", async () => {
+    const api = mockChat(busyAnswer)
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await waitFor(() => expect(api.messageLoads).toHaveLength(1))
+    await act(async () => {})
+    await send("How many visits last week?")
+    await screen.findByTestId("chat-busy-notice")
+
+    await act(async () => {
+      useAppStore.setState({ threadId: "cccccccc-cccc-cccc-cccc-cccccccccccc" })
+    })
+
+    await waitFor(() => expect(screen.queryByTestId("chat-busy-notice")).toBeNull())
+    expect(api.chatPosts).toHaveLength(postsBeforeNotice)
     consoleError.mockRestore()
   })
 })

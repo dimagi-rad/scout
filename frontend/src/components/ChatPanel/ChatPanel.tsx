@@ -136,8 +136,13 @@ export function ChatPanel() {
     cancelBusyRetry()
   }
 
-  // A pending busy retry belongs to this thread; never replay it into another.
-  useEffect(() => cancelBusyRetry, [threadId, cancelBusyRetry])
+  // A pending busy retry, or a notice whose Retry would regenerate, belongs to this
+  // thread; never replay it into another.
+  useEffect(() => () => {
+    cancelBusyRetry()
+    setBusyNotice(false)
+    setOverloadNotice(false)
+  }, [threadId, cancelBusyRetry])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -284,14 +289,17 @@ export function ChatPanel() {
       (prev === "streaming" || prev === "submitted") && (status === "ready" || status === "error")
     if (!justFinished) return
 
-    // Busy arrives either as a stream part or, before streaming starts, as a 503.
-    // The chat view raises it before the agent runs or writes a checkpoint, and the
-    // thread upsert is idempotent, so resending the turn is safe.
-    const busy = busyHitRef.current ?? (busyError ? { retryAfter: null } : null)
+    // A busy 503 is raised before the agent runs or writes a checkpoint, so resending
+    // is safe and gets the full budget. A busy stream part comes after the turn was
+    // checkpointed (and maybe after tools ran), and each regenerate appends the user
+    // message again, so it gets the single retry the overload path allows.
+    const streamBusy = busyHitRef.current
     busyHitRef.current = null
+    const busy = streamBusy ?? (busyError ? { retryAfter: null } : null)
+    const maxBusyRetries = streamBusy ? 1 : BUSY_MAX_AUTO_RETRIES
     if (busy) {
       hitRetryableRef.current = false
-      if (busyAttemptsRef.current < BUSY_MAX_AUTO_RETRIES) {
+      if (busyAttemptsRef.current < maxBusyRetries) {
         busyAttemptsRef.current += 1
         busyTracker.startRetry(busyToken)
         busyTimerRef.current = setTimeout(() => {
