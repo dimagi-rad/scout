@@ -518,6 +518,25 @@ async def test_a_full_connection_pool_is_retried_then_reported_as_capacity(
 
 
 @pytest.mark.asyncio
+async def test_a_full_pool_stays_capacity_when_a_later_retry_fails_differently(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) < 3:
+            return httpx.Response(400, json={"error": "sorry, too many clients already"})
+        raise httpx.ConnectError("offline", request=request)
+
+    _patched_async_client(monkeypatch, handler)
+    monkeypatch.setattr(cube_client_module, "RETRY_BASE_DELAY_SECONDS", 0)
+    with pytest.raises(CubeConnectionError) as raised:
+        await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
+            {}, security_context={"workspaceId": "w1"}
+        )
+    assert raised.value.capacity_resource == "cube"
+
+
+@pytest.mark.asyncio
 async def test_an_ordinary_outage_is_not_reported_as_capacity(monkeypatch):
     def handler(request):
         return httpx.Response(500, json={"error": "connection terminated unexpectedly"})

@@ -37,7 +37,6 @@ TRANSIENT_ERROR_MARKERS = (
     "econnrefused",
     "etimedout",
     "eai_again",
-    "too many clients already",
     "the database system is starting up",
     "the database system is shutting down",
 )
@@ -159,6 +158,7 @@ class CubeClient:
         deadline: float,
     ) -> dict[str, Any]:
         transient_failures = 0
+        saw_capacity = False
         async with httpx.AsyncClient(timeout=30.0) as client:
             while True:
                 remaining = deadline - time.monotonic()
@@ -226,11 +226,13 @@ class CubeClient:
                     last_error = exc
 
                 transient_failures += 1
+                # A later transport blip must not hide that the pool was full.
+                saw_capacity = saw_capacity or retry_reason == "capacity"
                 if transient_failures >= MAX_TRANSIENT_ATTEMPTS:
                     logger.warning("Cube query exhausted transient retries (%s)", retry_reason)
                     raise CubeConnectionError(
                         "Cube is temporarily unavailable. Please retry the query.",
-                        capacity_exhausted=retry_reason == "capacity",
+                        capacity_exhausted=saw_capacity,
                     ) from last_error
                 # This is a read-only /load operation despite using POST. Keep
                 # the identical query and authorization context across retries.
@@ -247,7 +249,7 @@ class CubeClient:
                 if delay >= deadline - time.monotonic():
                     raise CubeConnectionError(
                         "Cube retry delay exceeds the remaining query timeout budget. Please retry later.",
-                        capacity_exhausted=retry_reason == "capacity",
+                        capacity_exhausted=saw_capacity,
                     ) from last_error
                 await asyncio.sleep(delay)
 
