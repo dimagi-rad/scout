@@ -15,10 +15,62 @@ query-time parameter, so the fence needs no recompile.
 the authenticated workspace and semantic model. It overrides any token claim and
 preserves microseconds. Concurrent queries in one REST request share the lookup;
 different requests do not. Missing active schemas or catalog failures fail closed.
-The extra catalog roundtrip uses the existing shared pool (default maximum ten
+The extra catalog roundtrip uses the existing shared catalog pool (at most three
 connections), with five-second acquisition, client-query, and server-statement
 timeouts. It does not allocate an orchestrator, driver, or connection pool per
 publication; existing workspace/schema/read-only-role isolation remains unchanged.
+
+## Database connection bounds
+
+Production and staging share one RDS instance, which has already run out of
+connections once, so every Cube pool is capped (#421):
+
+| Pool | Cap | Idle release |
+|---|---|---|
+| Catalog (`semantic_cubeschema` reads, as `scout_cube_catalog`) | 3 | pg default, 10 s |
+| Catalog owner (grant check; reads only until the grant exists) | 3 | pg default, 10 s |
+| Readiness driver (`/readyz`) | 1 | 10 s |
+| Each tenant driver (one per workspace/schema/role orchestrator) | 2 | 10 s |
+| All tenant drivers together, including `testConnection()` probes | `SCOUT_CUBE_MAX_DRIVER_CONNECTIONS`, default 16 | |
+
+A tenant driver's cap matches Cube's Postgres query-queue concurrency of two. The
+process-wide tenant limit is what bounds the total: without it the per-driver cap
+multiplies by the number of active workspaces. A connection that would exceed it
+waits for another to close, so under load queries queue rather than fail, for
+up to 20 seconds (the same bound as Cube's pool acquisition timeout). An idle tenant driver holds no
+connections after about 15 seconds.
+
+Cube 1.6.39 keeps up to 100 orchestrators, each owning a tenant driver, with no
+idle expiry, and drops LRU-evicted ones without releasing their drivers. A second
+maintained build-time patch (`patch-orchestrator-storage.js`, same pinning and
+hash checks as the cache patch below) swaps in `idle-orchestrator-storage.js`: an
+orchestrator unused for 10 minutes, or evicted by the 100-entry cap, is dropped
+and its driver released 3 minutes later. By then any job it queued has been
+dropped as orphaned (120 seconds unpolled) or has finished within the 20-second
+connection wait and 30-second statement timeout. Both patches share
+`pinned-patch.js`.
+
+Worst case per Cube process: 16 tenant + 1 readiness (+1 transient readiness
+probe) + 3 catalog = 21 connections. The owner pool serves catalog reads only
+until the role pool takes over, and its connections close within 10 seconds of
+that one-time switch, so the transient ceiling is 24. Production and staging
+together: 42, or 48 transiently.
+
+### Catalog role
+
+The catalog pool reads `semantic_cubeschema` as `scout_cube_catalog`, a `NOLOGIN`
+role with `SELECT` on that table only, by passing `-c role=` at connection
+startup, as tenant drivers do with their read-only roles. Semantic migration
+0005 creates the role, grants it to the migrating (`DATABASE_URL`) user, and
+grants the `SELECT`, so it needs no new credential or deploy setting.
+
+Cube deploys before the API runs migrations, so on the first deploy with this
+change the grant is briefly missing. The role is cluster-wide and staging may
+have created it already, so Cube checks that the role can read this database's
+`semantic_cubeschema`, not just that it exists. Until it can, Cube reads the
+catalog as the owner, as before, re-checking every 60 seconds (5 seconds after a
+failed check) and logging a warning. Once it can, every catalog read uses the
+role, and a later broken grant fails closed instead of falling back.
 
 ## Bounded query-result retention without CubeStore
 

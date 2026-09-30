@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from django.conf import settings
 
+from apps.common.errors import DataNotLoaded
 from apps.common.identifiers import readonly_role_name
 from apps.workspaces.models import SchemaState, TenantSchema, Workspace, WorkspaceViewSchema
 
@@ -68,9 +69,7 @@ async def load_tenant_context(tenant_id: str, provider: str, server: str = "") -
     ).afirst()
 
     if ts is None:
-        raise ValueError(
-            f"No active schema for tenant '{tenant_id}'. Run materialization first to load data."
-        )
+        raise DataNotLoaded(f"No active data schema for tenant '{tenant_id}'.")
 
     await ts.atouch()
 
@@ -125,10 +124,7 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
             state=SchemaState.ACTIVE,
         )
     except WorkspaceViewSchema.DoesNotExist:
-        raise ValueError(
-            f"No active view schema for workspace '{workspace_id}'. "
-            "Trigger a rebuild via POST /api/workspaces/<id>/tenants/ or a data refresh."
-        ) from None
+        raise DataNotLoaded(f"No active data schema for workspace '{workspace_id}'.") from None
 
     await vs.atouch()
 

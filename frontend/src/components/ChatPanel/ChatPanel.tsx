@@ -5,7 +5,10 @@ import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
+import { workspaceApi } from "@/api/workspaces"
 import { SourceFreshness } from "@/components/SourceFreshness"
+import { StaleDataBanner } from "@/components/StaleDataBanner"
+import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
@@ -17,13 +20,25 @@ import {
   type ThreadArtifactSummary,
 } from "./ChatThreadSidePanel"
 import {
+  ChatBusyNotice,
   ChatErrorNotice,
   ChatOverloadNotice,
   ChatStoppedNotice,
   ChatThinkingIndicator,
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
-import { decideOverloadAction, isRetryableErrorPart } from "./overloadRetry"
+import {
+  busyRetryAfter,
+  decideOverloadAction,
+  isBusyChatError,
+  isRetryableErrorPart,
+} from "./overloadRetry"
+import {
+  BUSY_MAX_AUTO_RETRIES,
+  BUSY_RETRY_AFTER_SECONDS,
+  busyRetryDelayMs,
+  busyTracker,
+} from "@/api/busy"
 
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -49,6 +64,12 @@ export function ChatPanel() {
   const retriedRef = useRef(false)
   const prevRetryStatusRef = useRef<string>("")
   const [overloadNotice, setOverloadNotice] = useState(false)
+  // Connection-limit "busy" turns; the shared BusyNotice shows their progress.
+  const busyHitRef = useRef<{ retryAfter: number | null } | null>(null)
+  const busyAttemptsRef = useRef(0)
+  const busyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [busyToken] = useState(() => Symbol("chat-busy"))
+  const [busyNotice, setBusyNotice] = useState(false)
   const [stoppedNotice, setStoppedNotice] = useState(false)
 
   const {
@@ -78,6 +99,30 @@ export function ChatPanel() {
         workspaceId={activeDomainId}
       />
     ))
+  const workspaceLoading =
+    Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0
+  // Fetched here, not in the banner and the data-as-of lines, so both read one
+  // response and it survives the switch between the empty and thread layouts.
+  const [freshness, refetchFreshness] = useRefetchOnLoadEnd(
+    workspaceApi.getFreshness,
+    activeDomainId,
+    workspaceLoading,
+  )
+  // A refresh queues a job the load poll cannot see until a worker starts it;
+  // the freshness endpoint does, so the banner hides instead of re-offering Refresh.
+  const handleRefreshStarted = useCallback(() => {
+    notifyJobLikelyStarted()
+    refetchFreshness()
+  }, [notifyJobLikelyStarted, refetchFreshness])
+  const staleBanner = activeDomainId && (
+    <StaleDataBanner
+      key={activeDomainId}
+      workspaceId={activeDomainId}
+      freshness={freshness}
+      loading={workspaceLoading}
+      onRefreshStarted={handleRefreshStarted}
+    />
+  )
   const currentThread = threads.find((thread) => thread.id === threadId)
   const threadTitle = currentThread?.title ?? "Untitled"
   const titleIsCustom = currentThread?.title_is_custom ?? false
@@ -100,15 +145,37 @@ export function ChatPanel() {
   const { messages, sendMessage, status, stop, error, setMessages, regenerate } = useChat({
     transport,
     onData: (part) => {
-      if (isRetryableErrorPart(part)) hitRetryableRef.current = true
+      const retryAfter = busyRetryAfter(part)
+      if (retryAfter !== undefined) busyHitRef.current = { retryAfter }
+      else if (isRetryableErrorPart(part)) hitRetryableRef.current = true
     },
   })
+  const busyError = error !== undefined && isBusyChatError(error)
+
+  const cancelBusyRetry = useCallback(() => {
+    if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
+    busyTimerRef.current = null
+    busyHitRef.current = null
+    busyAttemptsRef.current = 0
+    busyTracker.settle(busyToken)
+  }, [busyToken])
 
   function resetOverloadState() {
     hitRetryableRef.current = false
     retriedRef.current = false
     setOverloadNotice(false)
+    setBusyNotice(false)
+    cancelBusyRetry()
   }
+
+  // A pending busy retry, or a notice whose Retry would regenerate, belongs to this
+  // thread; never replay it into another. threadId is the trigger: this cleanup runs
+  // on every thread change, so the dependency must stay even though it isn't read.
+  useEffect(() => () => {
+    cancelBusyRetry()
+    setBusyNotice(false)
+    setOverloadNotice(false)
+  }, [threadId, cancelBusyRetry])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -251,9 +318,43 @@ export function ChatPanel() {
   useEffect(() => {
     const prev = prevRetryStatusRef.current
     prevRetryStatusRef.current = status
-    const justFinished =
-      (prev === "streaming" || prev === "submitted") && status === "ready"
-    if (!justFinished) return
+    const wasRunning = prev === "streaming" || prev === "submitted"
+    // "error" counts only for a busy 503; a hard failure after an overload part must
+    // keep its error notice, not be silently re-posted.
+    // submitted -> streaming is mid-run; acting on it would drop a busy part that
+    // arrived before the first streaming render.
+    if (!wasRunning || (status !== "ready" && status !== "error")) return
+    // Any finished run releases this thread's "retrying" slot, hard errors included.
+    busyTracker.settle(busyToken)
+    if (status === "error" && !busyError) {
+      busyHitRef.current = null
+      return
+    }
+
+    // A busy 503 is raised before the agent runs or writes a checkpoint, so resending
+    // is safe and gets the full budget. A busy stream part comes after the turn was
+    // checkpointed (and maybe after tools ran), and each regenerate appends the user
+    // message again, so it gets the single retry the overload path allows.
+    const streamBusy = busyHitRef.current
+    busyHitRef.current = null
+    const busy = streamBusy ?? (busyError ? { retryAfter: BUSY_RETRY_AFTER_SECONDS } : null)
+    const maxBusyRetries = streamBusy ? 1 : BUSY_MAX_AUTO_RETRIES
+    if (busy) {
+      hitRetryableRef.current = false
+      if (busyAttemptsRef.current < maxBusyRetries) {
+        busyAttemptsRef.current += 1
+        busyTracker.startRetry(busyToken)
+        busyTimerRef.current = setTimeout(() => {
+          busyTimerRef.current = null
+          void regenerate()
+        }, busyRetryDelayMs(busy.retryAfter, busyAttemptsRef.current))
+      } else {
+        busyAttemptsRef.current = 0
+        setBusyNotice(true)
+      }
+      return
+    }
+    busyAttemptsRef.current = 0
 
     const action = decideOverloadAction({
       hitRetryable: hitRetryableRef.current,
@@ -267,7 +368,7 @@ export function ChatPanel() {
       retriedRef.current = false
       setOverloadNotice(true)
     }
-  }, [status, regenerate])
+  }, [status, regenerate, busyToken, busyError])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -283,6 +384,7 @@ export function ChatPanel() {
 
   function handleStop() {
     setStoppedNotice(true)
+    cancelBusyRetry()
     void stop()
   }
 
@@ -317,6 +419,7 @@ export function ChatPanel() {
     return (
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
+        {staleBanner}
         <div className="min-h-0 flex-1">
           <ChatEmptyState
             input={input}
@@ -357,8 +460,11 @@ export function ChatPanel() {
           ))}
           {isStreaming && <ChatThinkingIndicator />}
           {stoppedNotice && <ChatStoppedNotice />}
-          {error && <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />}
+          {error && !busyError && (
+            <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />
+          )}
           {overloadNotice && <ChatOverloadNotice onRetry={handleOverloadRetry} />}
+          {busyNotice && <ChatBusyNotice onRetry={handleOverloadRetry} />}
         </div>
 
         {/* Materialization progress banner — always visible when a job is active for this thread */}
@@ -373,14 +479,8 @@ export function ChatPanel() {
           )}
 
         {loadBanners}
-
-        {activeDomainId && (
-          <SourceFreshness
-            key={activeDomainId}
-            workspaceId={activeDomainId}
-            loading={Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0}
-          />
-        )}
+        {staleBanner}
+        <SourceFreshness freshness={freshness} />
 
         {/* Input area */}
         <div className="border-t p-4">

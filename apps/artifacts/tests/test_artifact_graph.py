@@ -41,11 +41,12 @@ def workspace(db):
 
 @pytest.fixture
 def member_user(db, workspace):
+    tenant = workspace.tenants.get()
     user = User.objects.create_user(email="graph@example.com", password="pass")
     TenantMembership.objects.create(
         user=user,
-        tenant=workspace.tenant,
-        connection=usable_connection(user, workspace.tenant.provider),
+        tenant=tenant,
+        connection=usable_connection(user, tenant.provider),
     )
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user

@@ -78,6 +78,27 @@ class ExpectedStateError(Exception):
     """
 
 
+class DataNotLoaded(ExpectedStateError, ValueError):
+    """No ACTIVE schema serves the data a caller wants to read.
+
+    Expected: a workspace before its first load, or after its data expired. The
+    caller surfaces the code (the agent prompt and query errors carry the load
+    guidance). A ValueError so existing validation-failure paths still catch it.
+    """
+
+    code = ErrorCode.DATA_NOT_LOADED
+
+
+def validation_error_code(exc: Exception) -> ErrorCode:
+    """The code for a bad-request error a loader raised: its own if unloaded data.
+
+    For the MCP tools' ``except (ValueError, ValidationError)`` handlers and the query
+    path's context load. Not a general accessor (that is ``code_of``): anything else
+    those raise is a bad request, so the emitted codes stay a closed set.
+    """
+    return exc.code if isinstance(exc, DataNotLoaded) else ErrorCode.VALIDATION_ERROR
+
+
 class TokenRefreshError(Exception):
     """OAuth refresh failed; unclassified defects remain reportable."""
 

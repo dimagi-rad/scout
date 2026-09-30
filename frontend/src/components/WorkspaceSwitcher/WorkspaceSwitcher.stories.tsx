@@ -9,7 +9,7 @@ const workspaces: WorkspaceListItem[] = [
   { id: "recorded", display_name: "Example — recorded load", schema_status: "available" },
   { id: "loading", display_name: "Example — loading data", schema_status: "provisioning" },
   { id: "failed", display_name: "Example — setup failed", schema_status: "failed" },
-  { id: "unavailable", display_name: "Example — setup unavailable", schema_status: "unavailable" },
+  { id: "not-loaded", display_name: "Example — no data loaded", schema_status: "not_loaded" },
   { id: "undated", display_name: "Example — no load time recorded", schema_status: "available" },
 ].map((state, index) => ({
   ...state,
@@ -19,7 +19,7 @@ const workspaces: WorkspaceListItem[] = [
   role: "manage",
   tenants: [{ id: `tenant-${index}`, tenant_name: "Illustrative source", provider: index % 2 ? "ocs" : "commcare" }],
   member_count: 1,
-  last_synced_at: state.id === "undated" ? null : "2026-04-16T12:00:00Z",
+  last_synced_at: state.id === "undated" || state.id === "not-loaded" ? null : "2026-04-16T12:00:00Z",
   created_at: "2026-01-01T12:00:00Z",
 }))
 

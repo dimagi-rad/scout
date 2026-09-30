@@ -99,3 +99,13 @@ def test_production_services_agree_on_the_all_of_access_rule():
     # Equal, not pinned: a rollback flips all three and needs no test change.
     assert len(set(values.values())) == 1, values
     assert None not in values.values(), values
+
+
+def test_production_services_agree_on_upstream_access_freshness():
+    values = {
+        name: _load_config(name)["env"]["clear"].get("UPSTREAM_ACCESS_FRESHNESS_ENFORCED")
+        for name in ("deploy.yml", "deploy-worker.yml", "deploy-mcp.yml")
+    }
+    # Equal, not pinned: a rollback flips all three and needs no test change.
+    assert len(set(values.values())) == 1, values
+    assert None not in values.values(), values

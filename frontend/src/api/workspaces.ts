@@ -18,7 +18,8 @@ export interface MissingTenant {
   remedy: string
 }
 
-export type SchemaStatus = "available" | "provisioning" | "unavailable" | "failed"
+// "unavailable" is only in payloads from servers older than "not_loaded" (#249).
+export type SchemaStatus = "available" | "provisioning" | "not_loaded" | "unavailable" | "failed"
 
 // Workspace list item — lighter shape returned by GET /api/workspaces/
 export interface WorkspaceListItem {
@@ -47,11 +48,25 @@ export interface WorkspaceListItem {
   created_at: string
 }
 
-export interface WorkspaceSourceFreshness {
+// GET /api/workspaces/<id>/freshness/ — one source's serving data age and latest load.
+export interface SourceFreshnessDetail {
   tenant_id: string
-  tenant_name: string
+  name: string
   provider: string
-  last_synced_at: string | null
+  provider_label: string
+  // True when this source's data is part of what the workspace currently queries.
+  serving: boolean
+  last_fetched_at: string | null
+  // Skipped over this viewer's own expired sign-in: a refresh cannot fix it.
+  reconnect: boolean
+}
+
+export interface WorkspaceFreshness {
+  // Absent from a server that predates the setting.
+  stale_data_banner_hours?: number
+  // A load covering the workspace is queued or running, whoever started it.
+  in_progress: boolean
+  sources: SourceFreshnessDetail[]
 }
 
 export interface WorkspaceDetail {
@@ -66,7 +81,6 @@ export interface WorkspaceDetail {
   missing_tenants?: MissingTenant[]
   schema_status: SchemaStatus
   in_progress?: boolean
-  sources?: WorkspaceSourceFreshness[]
   tenant_count: number
   member_count: number
   last_synced_at: string | null
@@ -133,7 +147,13 @@ export interface WorkspaceTenant {
 }
 
 /** Recorded load/setup state, not a current query-readiness check. */
-export type WorkspaceLoadState = "loading" | "recorded" | "unavailable" | "failed" | "unknown"
+export type WorkspaceLoadState =
+  | "loading"
+  | "recorded"
+  | "not_loaded"
+  | "unavailable"
+  | "failed"
+  | "unknown"
 
 /**
  * Keep explicit setup problems/progress visible alongside load history.
@@ -148,6 +168,7 @@ export function workspaceLoadState(ws: {
   last_synced_at?: string | null
 }): WorkspaceLoadState {
   if (ws.in_progress || ws.schema_status === "provisioning") return "loading"
+  if (ws.schema_status === "not_loaded") return "not_loaded"
   if (ws.schema_status === "unavailable") return "unavailable"
   if (ws.schema_status === "failed") return "failed"
   return workspaceHasRecordedLoad(ws) ? "recorded" : "unknown"
@@ -178,6 +199,9 @@ export const workspaceApi = {
 
   getDetail: (workspaceId: string) =>
     api.get<WorkspaceDetail>(`/api/workspaces/${workspaceId}/`),
+
+  getFreshness: (workspaceId: string) =>
+    api.get<WorkspaceFreshness>(`/api/workspaces/${workspaceId}/freshness/`),
 
   retryAccessVerification: (workspaceId: string) =>
     api.post<{ has_access: true }>(`/api/workspaces/${workspaceId}/access/verify/`, {}),

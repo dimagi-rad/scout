@@ -9,7 +9,7 @@ from django.core.cache import cache
 from django.test import AsyncClient
 from django.utils import timezone
 
-from apps.users.auth_views import _atry_resolve_provider
+from apps.users.auth_views import _atry_onboarding_resolve_provider
 from apps.users.models import TenantMembership
 from apps.users.services.tenant_resolution import resolve_connect_opportunities
 from apps.users.services.token_refresh import get_token_url
@@ -49,7 +49,7 @@ async def test_lazy_discovery_preserves_memberships_with_expired_access_token(
 
     httpx_mock.add_callback(upstream, is_reusable=True)
     if caller == "onboarding":
-        await _atry_resolve_provider(
+        await _atry_onboarding_resolve_provider(
             user, "commcare_connect", resolve_connect_opportunities, "Connect"
         )
     elif caller == "tenant_list":

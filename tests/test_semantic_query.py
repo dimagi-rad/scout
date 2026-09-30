@@ -353,13 +353,11 @@ async def test_run_semantic_query_executes_via_cube(monkeypatch, workspace, sema
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_run_semantic_query_returns_validation_error_for_expired_schema(
+async def test_run_semantic_query_keeps_validation_error_for_other_context_errors(
     monkeypatch, workspace, semantic_model
 ):
-    async def expired_context(_workspace_id):
-        raise ValueError(
-            "No active schema for tenant '1529'. Run materialization first to load data."
-        )
+    async def context_error(_workspace_id):
+        raise ValueError("Workspace 'x' has no tenants")
 
     class UnexpectedCubeClient:
         async def execute_query(self, cube_query, *, security_context):
@@ -368,7 +366,7 @@ async def test_run_semantic_query_returns_validation_error_for_expired_schema(
     monkeypatch.setattr(
         query_service, "get_active_semantic_model", lambda _workspace: semantic_model
     )
-    monkeypatch.setattr(query_service, "load_workspace_context", expired_context)
+    monkeypatch.setattr(query_service, "load_workspace_context", context_error)
     monkeypatch.setattr(query_service, "CubeClient", UnexpectedCubeClient)
 
     result = await query_service.run_semantic_query(
@@ -378,10 +376,7 @@ async def test_run_semantic_query_returns_validation_error_for_expired_schema(
 
     assert result["success"] is False
     assert result["error"]["code"] == "VALIDATION_ERROR"
-    assert (
-        result["error"]["message"]
-        == "No active schema for tenant '1529'. Run materialization first to load data."
-    )
+    assert result["error"]["message"] == "Workspace 'x' has no tenants"
     assert result["error"]["category"] == "data_unavailable"
     assert result["error"]["retryable"] is False
 
