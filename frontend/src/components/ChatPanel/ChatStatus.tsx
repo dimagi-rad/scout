@@ -1,5 +1,6 @@
 import { useEffect } from "react"
 
+import { isBusyBody } from "@/api/busy"
 import { ApiError } from "@/api/client"
 import { Button } from "@/components/ui/button"
 
@@ -7,6 +8,15 @@ function isStaleThreadError(error: Error | undefined): boolean {
   if (!error) return false
   if (error instanceof ApiError && error.status === 404) return true
   return error.message.includes("Thread not found")
+}
+
+/** useChat surfaces a failed POST's raw body as the error message. */
+function isBusyError(error: Error): boolean {
+  try {
+    return isBusyBody(JSON.parse(error.message))
+  } catch {
+    return false
+  }
 }
 
 interface ChatErrorNoticeProps {
@@ -20,9 +30,21 @@ interface ChatErrorNoticeProps {
  */
 export function ChatErrorNotice({ error, onStartNewThread }: ChatErrorNoticeProps) {
   const stale = isStaleThreadError(error)
+  const busy = isBusyError(error)
   useEffect(() => {
-    console.error("[Scout] Chat error:", error)
-  }, [error])
+    if (!busy) console.error("[Scout] Chat error:", error)
+  }, [error, busy])
+
+  if (busy) {
+    return (
+      <p
+        className="text-sm text-muted-foreground bg-muted rounded-lg px-4 py-3"
+        data-testid="chat-busy-notice"
+      >
+        Scout is busy right now. Please try again in a few seconds.
+      </p>
+    )
+  }
 
   return (
     <div

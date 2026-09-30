@@ -33,3 +33,20 @@ export function isRetryableErrorPart(part: { type?: string; data?: unknown }): b
     (part.data as { kind?: unknown }).kind === "retryable-error"
   )
 }
+
+/**
+ * The backend's "busy" retryable-error (a connection limit was hit; see
+ * apps/common/capacity.py) carries its own backoff hint. Returns that part's
+ * `retryAfter` seconds, `null` when it has none, or `undefined` for any other part.
+ */
+export function busyRetryAfter(part: { type?: string; data?: unknown }): number | null | undefined {
+  if (!isRetryableErrorPart(part)) return undefined
+  const data = part.data as { reason?: unknown; retryAfter?: unknown }
+  if (data.reason !== "busy") return undefined
+  return typeof data.retryAfter === "number" ? data.retryAfter : null
+}
+
+/** After a busy turn: back off and resend a few times, then hand the user a Retry. */
+export function decideBusyAction(args: { attempts: number; maxAttempts: number }): "retry" | "manual" {
+  return args.attempts < args.maxAttempts ? "retry" : "manual"
+}

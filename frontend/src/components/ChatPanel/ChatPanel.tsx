@@ -23,7 +23,18 @@ import {
   ChatThinkingIndicator,
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
-import { decideOverloadAction, isRetryableErrorPart } from "./overloadRetry"
+import {
+  busyRetryAfter,
+  decideBusyAction,
+  decideOverloadAction,
+  isRetryableErrorPart,
+} from "./overloadRetry"
+import {
+  BUSY_MAX_AUTO_RETRIES,
+  busyRetryDelayMs,
+  busyTracker,
+  fetchWithBusyRetry,
+} from "@/api/busy"
 
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -49,6 +60,11 @@ export function ChatPanel() {
   const retriedRef = useRef(false)
   const prevRetryStatusRef = useRef<string>("")
   const [overloadNotice, setOverloadNotice] = useState(false)
+  // Connection-limit "busy" turns; the shared BusyNotice shows their progress.
+  const busyHitRef = useRef<{ retryAfter: number | null } | null>(null)
+  const busyAttemptsRef = useRef(0)
+  const busyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [busyToken] = useState(() => Symbol("chat-busy"))
   const [stoppedNotice, setStoppedNotice] = useState(false)
 
   const {
@@ -94,13 +110,18 @@ export function ChatPanel() {
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: contextRef.current }),
+        // A busy 503 is raised before the agent runs or writes a checkpoint, and
+        // the thread upsert is idempotent, so resending the turn is safe.
+        fetch: (input, init) => fetchWithBusyRetry(() => fetch(input, init), { autoRetry: true }),
       }),
   )
 
   const { messages, sendMessage, status, stop, error, setMessages, regenerate } = useChat({
     transport,
     onData: (part) => {
-      if (isRetryableErrorPart(part)) hitRetryableRef.current = true
+      const retryAfter = busyRetryAfter(part)
+      if (retryAfter !== undefined) busyHitRef.current = { retryAfter }
+      else if (isRetryableErrorPart(part)) hitRetryableRef.current = true
     },
   })
 
@@ -108,7 +129,23 @@ export function ChatPanel() {
     hitRetryableRef.current = false
     retriedRef.current = false
     setOverloadNotice(false)
+    busyHitRef.current = null
+    busyAttemptsRef.current = 0
+    if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
+    busyTimerRef.current = null
+    busyTracker.release(busyToken)
   }
+
+  // A pending busy retry belongs to this thread; never replay it into another.
+  useEffect(() => {
+    return () => {
+      if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
+      busyTimerRef.current = null
+      busyHitRef.current = null
+      busyAttemptsRef.current = 0
+      busyTracker.release(busyToken)
+    }
+  }, [threadId, busyToken])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -255,6 +292,32 @@ export function ChatPanel() {
       (prev === "streaming" || prev === "submitted") && status === "ready"
     if (!justFinished) return
 
+    const busy = busyHitRef.current
+    busyHitRef.current = null
+    if (busy) {
+      hitRetryableRef.current = false
+      const busyAction = decideBusyAction({
+        attempts: busyAttemptsRef.current,
+        maxAttempts: BUSY_MAX_AUTO_RETRIES,
+      })
+      if (busyAction === "retry") {
+        busyAttemptsRef.current += 1
+        busyTracker.startRetry(busyToken)
+        busyTimerRef.current = setTimeout(() => {
+          busyTimerRef.current = null
+          busyTracker.settle(busyToken)
+          void regenerate()
+        }, busyRetryDelayMs(busy.retryAfter, busyAttemptsRef.current))
+      } else {
+        busyAttemptsRef.current = 0
+        void busyTracker.awaitManualRetry(busyToken).then((decision) => {
+          if (decision === "retry") void regenerate()
+        })
+      }
+      return
+    }
+    busyAttemptsRef.current = 0
+
     const action = decideOverloadAction({
       hitRetryable: hitRetryableRef.current,
       alreadyRetried: retriedRef.current,
@@ -267,7 +330,7 @@ export function ChatPanel() {
       retriedRef.current = false
       setOverloadNotice(true)
     }
-  }, [status, regenerate])
+  }, [status, regenerate, busyToken])
 
   useEffect(() => {
     if (scrollRef.current) {
