@@ -217,6 +217,31 @@ def test_undo_of_a_deleted_custom_dataset_restores_its_fields_and_joins(
     assert SemanticRelationship.objects.get().to_dataset_id == restored.id
 
 
+def test_a_revision_put_back_by_undoing_its_undo_can_be_undone_again(
+    canvas, semantic_model, workspace, user
+):
+    _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
+    original = SemanticModelRevision.objects.get()
+    undo = undo_revision(workspace, original.id, user)["revision"]["id"]
+    undo_revision(workspace, undo, user)
+    assert semantic_model.datasets.get(name="raw_visits").label == "One"
+
+    undone = {item["id"]: item["undone"] for item in list_revisions(workspace)}
+    assert undone[str(original.id)] is False
+    assert undone[undo] is True
+    assert undo_revision(workspace, undo, user)["refused"]["code"] == "ALREADY_UNDONE"
+
+    result = undo_revision(workspace, original.id, user)
+
+    assert result["undone"]["id"] == str(original.id)
+    assert result["revision"]["summary"] == "Undid: Edited dataset raw_visits"
+    assert semantic_model.datasets.get(name="raw_visits").label == "Visits"
+    assert {item["id"]: item["undone"] for item in list_revisions(workspace)}[
+        str(original.id)
+    ] is True
+    assert undo_revision(workspace, original.id, user)["refused"]["code"] == "ALREADY_UNDONE"
+
+
 def test_undo_refuses_to_overwrite_a_later_edit(canvas, semantic_model, workspace, user):
     _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
     first = SemanticModelRevision.objects.get()

@@ -238,26 +238,57 @@ def list_revisions(workspace, limit: int = 50) -> list[dict[str, Any]]:
         .select_related("created_by")
         .order_by("-created_at")[:limit]
     )
-    undone_ids = set(
-        SemanticModelRevision.objects.filter(reverts__in=revisions).values_list(
-            "reverts_id", flat=True
+    reverter = _reverters([rev.id for rev in revisions])
+    return [serialize_revision(rev, undone=_is_undone(rev.id, reverter)) for rev in revisions]
+
+
+def _reverters(revision_ids) -> dict[Any, Any]:
+    """Map each revision to the undo that reverted it, following undo-of-undo chains."""
+    reverter: dict[Any, Any] = {}
+    frontier = list(revision_ids)
+    while frontier:
+        pairs = list(
+            SemanticModelRevision.objects.filter(reverts_id__in=frontier).values_list(
+                "reverts_id", "id"
+            )
         )
-    )
-    return [serialize_revision(rev, undone=rev.id in undone_ids) for rev in revisions]
+        reverter.update(pairs)
+        frontier = [undo_id for _reverted, undo_id in pairs]
+    return reverter
+
+
+def _is_undone(revision_id, reverter: dict[Any, Any]) -> bool:
+    """Undone while its undo stands; undoing that undo puts the revision back in effect."""
+    undone = False
+    while revision_id in reverter:
+        undone = not undone
+        revision_id = reverter[revision_id]
+    return undone
 
 
 def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str, Any]:
     """Reverse one revision atomically, or return ``refused(...)`` having written nothing."""
     with transaction.atomic():
-        revision = (
+        requested = (
             SemanticModelRevision.objects.select_for_update()
             .filter(id=revision_id, workspace=workspace)
             .first()
         )
-        if revision is None:
+        if requested is None:
             return refused("NOT_FOUND", "No such data model revision in this workspace.")
-        if SemanticModelRevision.objects.filter(reverts=revision).exists():
+        reverter = _reverters([requested.id])
+        if _is_undone(requested.id, reverter):
             return refused("ALREADY_UNDONE", "This revision has already been undone.")
+        # Undone and then re-applied: a revision is undone at most once (``reverts``
+        # is one-to-one), so reverse the latest re-application, which has its effect.
+        head_id = requested.id
+        while head_id in reverter:
+            head_id = reverter[head_id]
+        revision = (
+            requested
+            if head_id == requested.id
+            else SemanticModelRevision.objects.select_for_update().get(id=head_id)
+        )
         model = _lock_model(workspace)
         if model is None:
             return refused(
@@ -320,10 +351,10 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
             user=user,
             thread_id=thread_id,
             reverts=revision,
-            summary=f"Undid: {revision.summary}"[:500],
+            summary=f"Undid: {requested.summary}"[:500],
         )
     return {
-        "undone": serialize_revision(revision, undone=True),
+        "undone": serialize_revision(requested, undone=True),
         "revision": serialize_revision(undo, undone=False),
     }
 
