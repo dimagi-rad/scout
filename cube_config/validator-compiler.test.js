@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
-const { createWorkerCompiler, DEFAULT_MAX_QUEUE_WAIT_MS } = require('./validator-compiler');
+const { createWorkerCompiler, defaultMaxQueueWaitMs } = require('./validator-compiler');
 
 class FakeWorker extends EventEmitter {
   constructor() {
@@ -22,7 +22,7 @@ class FakeWorker extends EventEmitter {
   reply(index, body) { this.emit('message', { id: this.posted[index].id, ...body }); }
 }
 
-function harness(options = {}) {
+function harness({ failRestart = false, ...options } = {}) {
   let time = 0;
   const timers = [];
   const workers = [];
@@ -31,12 +31,11 @@ function harness(options = {}) {
     timeoutMs: 1000,
     maxQueueWaitMs: 5000,
     workerFactory: () => {
-      if (options.failRestart && workers.length === 1) throw new Error('synthetic restart failure');
+      if (failRestart && workers.length === 1) throw new Error('synthetic restart failure');
       const worker = new FakeWorker();
       workers.push(worker);
       return worker;
     },
-    now: () => time,
     setTimeout: (callback, ms) => { const timer = { callback, at: time + ms }; timers.push(timer); return timer; },
     clearTimeout: (timer) => { timer.cleared = true; },
     exit: (code) => exits.push(code),
@@ -118,16 +117,16 @@ test('a late reply from a timed-out compile is ignored', async () => {
   assert.equal(await next, 'fresh');
 });
 
-test('a request that waited past its deadline is rejected without compiling', async () => {
+test('a queued request is rejected promptly at its queue deadline, without compiling', async () => {
   const h = harness({ maxQueueWaitMs: 500 });
   const first = h.compile('a');
   const stale = outcome(h.compile('stale'));
   const [worker] = h.workers;
-  h.advance(600);
+  h.advance(500);
+  assert.deepEqual(await stale, { error: 'Cube schema validation waited 500ms without starting' });
   const fresh = h.compile('fresh');
   worker.reply(0, { result: 'a' });
   await first;
-  assert.deepEqual(await stale, { error: 'Cube schema validation waited at least 500ms to start' });
   assert.deepEqual(worker.posted.map((m) => m.schema), ['a', 'fresh']);
   worker.reply(1, { result: 'fresh' });
   assert.equal(await fresh, 'fresh');
@@ -151,19 +150,53 @@ test('an unexpected worker exit rejects everything and exits the process', async
   assert.equal(errors.length, 1);
 });
 
-test('a request that has queued for exactly the limit is not compiled', async () => {
+test('a dispatched request is no longer subject to its queue deadline', async () => {
   const h = harness({ maxQueueWaitMs: 500 });
   const first = h.compile('a');
-  const stale = outcome(h.compile('stale'));
-  h.advance(500);
+  const second = h.compile('b');
+  h.advance(400);
   h.workers[0].reply(0, { result: 'a' });
   await first;
-  assert.match((await stale).error, /waited at least 500ms/);
-  assert.equal(h.workers[0].posted.length, 1);
+  h.advance(900);
+  h.workers[0].reply(1, { result: 'b' });
+  assert.equal(await second, 'b');
 });
 
-test('queueing is capped well inside the caller budget by default', () => {
-  assert.equal(DEFAULT_MAX_QUEUE_WAIT_MS, 10000);
+test('the default queue deadline leaves a full compile inside the caller budget', () => {
+  assert.equal(defaultMaxQueueWaitMs(60000) + 60000, 70000);
+  assert.equal(defaultMaxQueueWaitMs(30000), 40000);
+  assert.equal(defaultMaxQueueWaitMs(90000), 1000);
+});
+
+test('malformed timeout settings fail startup instead of disabling the bounds', () => {
+  for (const name of ['CUBE_VALIDATOR_COMPILE_TIMEOUT_MS', 'CUBE_VALIDATOR_MAX_QUEUE_WAIT_MS']) {
+    for (const value of ['abc', '0', '-5', '1.5']) {
+      process.env[name] = value;
+      try {
+        assert.throws(() => createWorkerCompiler({ workerFactory: () => new FakeWorker() }), new RegExp(name));
+      } finally {
+        delete process.env[name];
+      }
+    }
+  }
+});
+
+test('a request that arrives after the worker could not restart is rejected, not left hanging', async () => {
+  const h = harness({ failRestart: true });
+  const original = console.error;
+  console.error = () => {};
+  try {
+    const slow = outcome(h.compile('slow'));
+    h.advance(1000);
+    await slow;
+    const during = outcome(h.compile('during restart'));
+    await settle();
+    await settle();
+    assert.match((await during).error, /synthetic restart failure|not running/);
+    assert.deepEqual(await outcome(h.compile('after')), { error: 'Cube validator worker is not running' });
+  } finally {
+    console.error = original;
+  }
 });
 
 test('a failed restart exits and dispatches nothing to a missing worker', async () => {

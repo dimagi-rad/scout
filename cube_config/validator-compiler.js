@@ -3,10 +3,26 @@ const crypto = require('crypto');
 const { Worker } = require('worker_threads');
 
 const DEFAULT_COMPILE_TIMEOUT_MS = 60 * 1000;
-// Scout's client gives a validation 70s in all (VALIDATE_BUDGET_SECONDS), and a
-// dispatched compile may take the full 60s, so only the first 10s of queueing
-// can still produce an answer the caller receives.
-const DEFAULT_MAX_QUEUE_WAIT_MS = 10 * 1000;
+// VALIDATE_BUDGET_SECONDS in apps/semantic/services/cube_client.py. Queueing
+// longer than the budget minus a full compile cannot answer that request, so it
+// gets a prompt 503 instead, which the client retries as a fresh request.
+const CALLER_BUDGET_MS = 70 * 1000;
+const MIN_QUEUE_WAIT_MS = 1000;
+
+function positiveIntegerFromEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new Error(`${name} must be a positive integer number of milliseconds`);
+  }
+  return Number(raw);
+}
+
+function defaultMaxQueueWaitMs(timeoutMs) {
+  return Math.max(MIN_QUEUE_WAIT_MS, CALLER_BUDGET_MS - timeoutMs);
+}
 
 // Compiles run one at a time on a single worker thread, and each request's
 // timer starts when its compile is dispatched. Timing from enqueue let
@@ -15,10 +31,9 @@ const DEFAULT_MAX_QUEUE_WAIT_MS = 10 * 1000;
 function createWorkerCompiler(options = {}) {
   const workerFactory = options.workerFactory || (() => new Worker(path.join(__dirname, 'validator-worker.js')));
   const timeoutMs = options.timeoutMs
-    ?? Number(process.env.CUBE_VALIDATOR_COMPILE_TIMEOUT_MS || DEFAULT_COMPILE_TIMEOUT_MS);
+    ?? positiveIntegerFromEnv('CUBE_VALIDATOR_COMPILE_TIMEOUT_MS', DEFAULT_COMPILE_TIMEOUT_MS);
   const maxQueueWaitMs = options.maxQueueWaitMs
-    ?? Number(process.env.CUBE_VALIDATOR_MAX_QUEUE_WAIT_MS || DEFAULT_MAX_QUEUE_WAIT_MS);
-  const now = options.now || Date.now;
+    ?? positiveIntegerFromEnv('CUBE_VALIDATOR_MAX_QUEUE_WAIT_MS', defaultMaxQueueWaitMs(timeoutMs));
   const schedule = options.setTimeout || setTimeout;
   const unschedule = options.clearTimeout || clearTimeout;
   const exit = options.exit || ((code) => process.exit(code));
@@ -29,6 +44,9 @@ function createWorkerCompiler(options = {}) {
 
   function rejectAll(error) {
     const requests = active ? [active, ...queue] : [...queue];
+    for (const request of queue) {
+      unschedule(request.queueTimeout);
+    }
     if (active) {
       unschedule(active.timeout);
     }
@@ -102,9 +120,7 @@ function createWorkerCompiler(options = {}) {
       .catch((error) => exitAfterWorkerFailure(error))
       .finally(() => {
         restarting = null;
-        if (worker) {
-          dispatchNext();
-        }
+        dispatchNext();
       });
   }
 
@@ -119,11 +135,12 @@ function createWorkerCompiler(options = {}) {
 
   function dispatchNext() {
     while (!active && !restarting && queue.length) {
-      const request = queue.shift();
-      if (now() - request.enqueuedAt >= maxQueueWaitMs) {
-        request.reject(new Error(`Cube schema validation waited at least ${maxQueueWaitMs}ms to start`));
-        continue;
+      if (!worker) {
+        rejectAll(new Error('Cube validator worker is not running'));
+        return;
       }
+      const request = queue.shift();
+      unschedule(request.queueTimeout);
       active = request;
       request.timeout = schedule(() => timeOut(request), timeoutMs);
       try {
@@ -140,10 +157,18 @@ function createWorkerCompiler(options = {}) {
 
   return function compileSchema(schema) {
     return new Promise((resolve, reject) => {
-      queue.push({ id: crypto.randomUUID(), schema, resolve, reject, enqueuedAt: now() });
+      const request = { id: crypto.randomUUID(), schema, resolve, reject };
+      request.queueTimeout = schedule(() => {
+        const index = queue.indexOf(request);
+        if (index !== -1) {
+          queue.splice(index, 1);
+          reject(new Error(`Cube schema validation waited ${maxQueueWaitMs}ms without starting`));
+        }
+      }, maxQueueWaitMs);
+      queue.push(request);
       dispatchNext();
     });
   };
 }
 
-module.exports = { createWorkerCompiler, DEFAULT_COMPILE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_WAIT_MS };
+module.exports = { createWorkerCompiler, defaultMaxQueueWaitMs, DEFAULT_COMPILE_TIMEOUT_MS };
