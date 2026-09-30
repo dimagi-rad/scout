@@ -14,6 +14,7 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -358,15 +359,48 @@ async def test_checkout_timeout_on_a_full_pool_is_tagged_as_capacity():
 
 
 @pytest.mark.asyncio
-async def test_checkout_timeout_on_a_pool_that_cannot_grow_is_not_capacity():
+async def test_checkout_timeout_after_a_slot_refusal_is_capacity():
     pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
     timeout = PoolTimeout("couldn't get a connection after 30.00 sec")
     with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=refusal),
         patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
-        patch.object(pool, "get_stats", return_value={"pool_size": 0}),
+        patch.object(pool, "get_stats", return_value={"pool_size": 2}),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 2}),
+        pytest.raises(pool_mod.ManagedPoolExhausted),
+    ):
+        await pool.getconn()
+
+
+@pytest.mark.asyncio
+async def test_checkout_timeout_on_an_unreachable_database_is_not_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    down = psycopg.OperationalError("connection refused")
+    timeout = PoolTimeout("couldn't get a connection after 30.00 sec")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=down),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 1}),
         pytest.raises(PoolTimeout) as raised,
     ):
         await pool.getconn()
 
     assert not isinstance(raised.value, pool_mod.ManagedPoolExhausted)
     assert classify_capacity_error(raised.value) is None
+
+
+def test_pool_internals_the_capacity_tag_relies_on_still_exist():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+
+    assert "pool_size" in pool.get_stats()
+    assert callable(AsyncConnectionPool._connect)
