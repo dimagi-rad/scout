@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
         # State-only: deploys are rolling, and not-yet-replaced API/MCP/worker
         # processes still SELECT and INSERT these columns on every Workspace query.
         # The columns are nullable, so new code omitting them is valid; the physical
-        # drop is 0019, per dimagi-rad/scout#733. RemoveField here only edits state.
+        # drop is 0020, per dimagi-rad/scout#733. RemoveField here only edits state.
         migrations.SeparateDatabaseAndState(
             state_operations=[
                 migrations.RemoveField(model_name="workspace", name="data_dictionary"),

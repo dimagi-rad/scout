@@ -3,7 +3,7 @@ from django.db import migrations
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("workspaces", "0018_retire_legacy_data_dictionary"),
+        ("workspaces", "0019_workspace_tenant_last_load"),
     ]
 
     operations = [
