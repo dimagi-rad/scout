@@ -1230,3 +1230,38 @@ def test_undo_refuses_to_restore_measure_sql_naming_a_member_removed_since(
     assert "total_amount" in refusal["conflicts"][0]["message"]
     scaled = semantic_model.datasets.get(name="raw_visits").fields.get(name="scaled")
     assert scaled.metadata["cube_sql"] == "{other_total} / 2"
+
+
+def test_undo_refuses_to_restore_a_measure_filter_naming_a_member_removed_since(
+    canvas, semantic_model, workspace, user
+):
+    _commit(
+        canvas,
+        user,
+        [
+            _measure_op("total_amount", measure_type="sum", expression="amount"),
+            _measure_op("other_total", measure_type="sum", expression="amount"),
+        ],
+    )
+    _commit(
+        canvas,
+        user,
+        [
+            _measure_op(
+                "big_visits",
+                measure_type="count",
+                filters=[{"sql": "{total_amount} > 10"}],
+            )
+        ],
+    )
+    target = "field/raw_visits.big_visits/filters"
+    _commit(
+        canvas, user, [{"op": "set", "target": target, "value": [{"sql": "{other_total} > 10"}]}]
+    )
+    edit = SemanticModelRevision.objects.order_by("-created_at").first()
+    _commit(canvas, user, [{"op": "delete_object", "object": "field/raw_visits.total_amount"}])
+
+    refusal = undo_revision(workspace, edit.id, user)["refused"]
+
+    assert refusal["code"] == "INVALID"
+    assert "total_amount" in refusal["conflicts"][0]["message"]
