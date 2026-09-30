@@ -183,12 +183,11 @@ class TestSyncRefreshLogLevels:
 
     def test_the_sync_path_matches_the_async_twin(self):
         """The defect was a divergence between the two, so pin them together."""
-        # Both must branch on 4xx before falling through to logger.exception.
+        # The 4xx-vs-exception decision lives in one classifier; a private copy is the drift.
         for fn in (
             token_refresh.refresh_oauth_token_result,
             token_refresh.refresh_oauth_token_result_sync,
         ):
-            body = inspect.getsource(fn)
-            assert "400 <= " in body or "<= 499" in body or "< 500" in body, (
-                f"{fn.__name__} must branch 4xx away from logger.exception"
+            assert "classify_http_failure(" in inspect.getsource(fn), (
+                f"{fn.__name__} must take its 4xx log level from classify_http_failure"
             )

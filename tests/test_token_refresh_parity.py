@@ -23,7 +23,12 @@ from django.utils import timezone
 from apps.users.models import TenantConnection
 from apps.users.services import token_refresh
 from apps.users.services.token_refresh import (
+    TokenRefreshDeadlineExceeded,
     TokenRefreshError,
+    TokenRefreshRejected,
+    TokenRefreshUnavailable,
+    classify_http_failure,
+    classify_persist_failure,
     refresh_oauth_token_result,
     refresh_oauth_token_result_sync,
 )
@@ -320,3 +325,43 @@ async def test_async_record_failure_false_keeps_the_verdict_but_leaves_no_marker
 
     assert type(excinfo.value).__name__ == outcome
     assert await _marker_recorded(connection) is False
+
+
+@pytest.mark.parametrize(
+    ("status", "flags", "error", "marker", "level", "reason"),
+    [
+        (400, {"rejected": True}, TokenRefreshRejected, True, logging.WARNING, "invalid_grant"),
+        (401, {"misconfigured": True}, TokenRefreshError, True, logging.WARNING, "invalid_client"),
+        (404, {}, TokenRefreshError, True, logging.WARNING, "other"),
+        (429, {"transient": True}, TokenRefreshUnavailable, False, logging.WARNING, "other"),
+        (503, {"transient": True}, TokenRefreshUnavailable, False, logging.ERROR, "other"),
+        (None, {}, TokenRefreshError, True, logging.ERROR, "other"),
+        (None, {"transient": True}, TokenRefreshUnavailable, False, logging.ERROR, "other"),
+    ],
+)
+def test_classify_http_failure(status, flags, error, marker, level, reason):
+    verdict = classify_http_failure(
+        status,
+        transient=flags.get("transient", False),
+        rejected=flags.get("rejected", False),
+        misconfigured=flags.get("misconfigured", False),
+        cause=RuntimeError("boom"),
+    )
+
+    assert type(verdict.error) is error
+    assert (verdict.record_marker, verdict.log_level, verdict.reason) == (marker, level, reason)
+
+
+@pytest.mark.parametrize(
+    ("exc", "grant_spent", "error"),
+    [
+        (token_refresh._RefreshDeadlineExceeded(), True, TokenRefreshRejected),
+        (token_refresh._RefreshDeadlineExceeded(), False, TokenRefreshDeadlineExceeded),
+        (DatabaseError("down"), True, TokenRefreshUnavailable),
+        (DatabaseError("down"), False, TokenRefreshUnavailable),
+    ],
+)
+def test_classify_persist_failure(exc, grant_spent, error):
+    classified, _message = classify_persist_failure(exc, grant_spent=grant_spent)
+
+    assert type(classified) is error

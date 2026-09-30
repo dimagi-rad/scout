@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
+from typing import NamedTuple
 
 import httpx
 import requests
@@ -333,6 +334,67 @@ def _is_deadline_error(exc: BaseException) -> bool:
     if sqlstate is None:
         sqlstate = getattr(exc.__cause__, "sqlstate", None)
     return sqlstate in _DEADLINE_SQLSTATES
+
+
+class HttpFailureVerdict(NamedTuple):
+    error: TokenRefreshError
+    #: Whether the failure means "reconnect". Transient failures never do (#551 review M1).
+    record_marker: bool
+    log_level: int
+    #: Log-safe label for the provider's answer; never derived from the response body.
+    reason: str
+
+
+def classify_http_failure(
+    status: int | None,
+    *,
+    transient: bool,
+    rejected: bool,
+    misconfigured: bool,
+    cause: BaseException,
+) -> HttpFailureVerdict:
+    """Decide what a failed provider round trip means; shared by both renewal transports.
+
+    ``status`` is None when no HTTP answer arrived. Callers compute ``transient``
+    themselves because a status-less transport error and a status-less HTTP error are
+    judged differently (:func:`is_transient_status` vs a client exception type).
+    """
+    if rejected:
+        error: TokenRefreshError = TokenRefreshRejected(
+            "OAuth refresh grant was rejected as invalid."
+        )
+    elif transient:
+        error = TokenRefreshUnavailable(f"Failed to refresh OAuth token: {cause}")
+    else:
+        error = TokenRefreshError(f"Failed to refresh OAuth token: {cause}")
+    # A 4xx is an expected outcome (typically 400 invalid_grant on a dead refresh
+    # token), not a bug worth a Sentry event.
+    log_level = logging.WARNING if status is not None and 400 <= status < 500 else logging.ERROR
+    reason = "invalid_grant" if rejected else "invalid_client" if misconfigured else "other"
+    return HttpFailureVerdict(error, not transient, log_level, reason)
+
+
+def classify_persist_failure(
+    exc: BaseException, *, grant_spent: bool
+) -> tuple[TokenRefreshError, str]:
+    """Map a failed credential write to the error to raise and the warning to log."""
+    deadline = _is_deadline_error(exc)
+    if deadline and grant_spent:
+        return (
+            TokenRefreshRejected(
+                "The refreshed OAuth credential could not be stored in time; reconnect required."
+            ),
+            "Timed out persisting a rotated OAuth token",
+        )
+    if deadline:
+        return (
+            TokenRefreshDeadlineExceeded("Timed out storing refreshed OAuth credentials."),
+            "Failed to persist refreshed OAuth token",
+        )
+    return (
+        TokenRefreshUnavailable("Failed to persist refreshed OAuth token."),
+        "Failed to persist refreshed OAuth token",
+    )
 
 
 def _ensure_before_deadline(deadline, clock) -> None:
@@ -734,21 +796,26 @@ async def refresh_oauth_token_result(
             )
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
-        # A 4xx (typically 400 invalid_grant on a dead refresh token) is an
-        # expected outcome, not a bug. Keep provider response bodies out of logs.
-        rejected = _is_invalid_grant(e.response)
-        misconfigured = _is_invalid_client(e.response)
-        if 400 <= e.response.status_code < 500:
-            logger.warning(
+        # Keep provider response bodies out of logs.
+        status = e.response.status_code
+        verdict = classify_http_failure(
+            status,
+            transient=is_transient_status(status),
+            rejected=_is_invalid_grant(e.response),
+            misconfigured=_is_invalid_client(e.response),
+            cause=e,
+        )
+        if verdict.log_level >= logging.ERROR:
+            logger.exception("Token refresh failed for app %s", social_token.app.client_id)
+        else:
+            logger.log(
+                verdict.log_level,
                 "Token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
-                e.response.status_code,
-                "invalid_grant" if rejected else "invalid_client" if misconfigured else "other",
+                status,
+                verdict.reason,
             )
-        else:
-            logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        transient = is_transient_status(e.response.status_code)
-        if record_failure and not transient:
+        if record_failure and verdict.record_marker:
             try:
                 # Deliberately not the caller's deadline: it may already be exhausted, and
                 # starving the marker is how a diagnosable failure becomes a silent one.
@@ -760,15 +827,17 @@ async def refresh_oauth_token_result(
                 )
             except TokenRefreshUnavailable:
                 logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-        if rejected:
-            raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
-        if transient:
-            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
-        raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
+        raise verdict.error from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
-        transient = _is_transient_error(e)
-        if record_failure and not transient:
+        verdict = classify_http_failure(
+            None,
+            transient=_is_transient_error(e),
+            rejected=False,
+            misconfigured=False,
+            cause=e,
+        )
+        if record_failure and verdict.record_marker:
             try:
                 await _arecord_refresh_failure(
                     preflight,
@@ -779,9 +848,7 @@ async def refresh_oauth_token_result(
             except TokenRefreshUnavailable:
                 # Losing the marker must not erase the real cause; it is already logged.
                 logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-        if transient:
-            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
-        raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
+        raise verdict.error from e
 
     refreshed = _validate_refresh_response(response, preflight)
     try:
@@ -793,17 +860,11 @@ async def refresh_oauth_token_result(
             clock=clock,
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
-        if _is_deadline_error(exc) and _grant_was_spent(preflight, refreshed):
-            logger.warning("Timed out persisting a rotated OAuth token", exc_info=True)
-            raise TokenRefreshRejected(
-                "The refreshed OAuth credential could not be stored in time; reconnect required."
-            ) from exc
-        logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
-        if _is_deadline_error(exc):
-            raise TokenRefreshDeadlineExceeded(
-                "Timed out storing refreshed OAuth credentials."
-            ) from exc
-        raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
+        error, message = classify_persist_failure(
+            exc, grant_spent=_grant_was_spent(preflight, refreshed)
+        )
+        logger.warning(message, exc_info=True)
+        raise error from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
     if result.status is TokenRefreshStatus.SUPERSEDED:
         logger.warning(
@@ -893,24 +954,26 @@ def refresh_oauth_token_result_sync(
         )
         response.raise_for_status()
     except requests.HTTPError as e:
-        # Mirrors the async twin above: a 4xx (typically 400 invalid_grant on a
-        # dead refresh token) is an expected outcome, not a bug. Keep provider
-        # response bodies out of logs. The sync path never got this treatment,
-        # so every routine dead-token refresh raised a Sentry event (#373).
+        # Keep provider response bodies out of logs.
         status = e.response.status_code if e.response is not None else None
-        rejected = _is_invalid_grant(e.response)
-        misconfigured = _is_invalid_client(e.response)
-        if status is not None and 400 <= status < 500:
-            logger.warning(
+        verdict = classify_http_failure(
+            status,
+            transient=is_transient_status(status),
+            rejected=_is_invalid_grant(e.response),
+            misconfigured=_is_invalid_client(e.response),
+            cause=e,
+        )
+        if verdict.log_level >= logging.ERROR:
+            logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
+        else:
+            logger.log(
+                verdict.log_level,
                 "Sync token refresh rejected for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 status,
-                "invalid_grant" if rejected else "invalid_client" if misconfigured else "other",
+                verdict.reason,
             )
-        else:
-            logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        transient = is_transient_status(status)
-        if not transient:
+        if verdict.record_marker:
             try:
                 _record_refresh_failure(
                     preflight,
@@ -920,15 +983,17 @@ def refresh_oauth_token_result_sync(
                 )
             except TokenRefreshUnavailable:
                 logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-        if rejected:
-            raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
-        if transient:
-            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
-        raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
+        raise verdict.error from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
-        transient = _is_transient_error(e)
-        if not transient:
+        verdict = classify_http_failure(
+            None,
+            transient=_is_transient_error(e),
+            rejected=False,
+            misconfigured=False,
+            cause=e,
+        )
+        if verdict.record_marker:
             try:
                 _record_refresh_failure(
                     preflight,
@@ -939,9 +1004,7 @@ def refresh_oauth_token_result_sync(
             except TokenRefreshUnavailable:
                 # Losing the marker must not erase the real cause; it is already logged.
                 logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-        if transient:
-            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
-        raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
+        raise verdict.error from e
 
     refreshed = _validate_refresh_response(response, preflight)
     try:
@@ -953,17 +1016,11 @@ def refresh_oauth_token_result_sync(
             clock=clock,
         )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
-        if _is_deadline_error(exc) and _grant_was_spent(preflight, refreshed):
-            logger.warning("Timed out persisting a rotated OAuth token", exc_info=True)
-            raise TokenRefreshRejected(
-                "The refreshed OAuth credential could not be stored in time; reconnect required."
-            ) from exc
-        logger.warning("Failed to persist refreshed OAuth token", exc_info=True)
-        if _is_deadline_error(exc):
-            raise TokenRefreshDeadlineExceeded(
-                "Timed out storing refreshed OAuth credentials."
-            ) from exc
-        raise TokenRefreshUnavailable("Failed to persist refreshed OAuth token.") from exc
+        error, message = classify_persist_failure(
+            exc, grant_spent=_grant_was_spent(preflight, refreshed)
+        )
+        logger.warning(message, exc_info=True)
+        raise error from exc
     _apply_persisted_snapshot(social_token, result.snapshot)
     if result.status is TokenRefreshStatus.SUPERSEDED:
         logger.warning(
