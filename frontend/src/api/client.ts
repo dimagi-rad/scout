@@ -106,11 +106,11 @@ export const api = {
   delete: <T>(url: string) => request<T>(url, { method: "DELETE" }),
   upload: <T>(url: string, formData: FormData) =>
     request<T>(url, { method: "POST", body: formData, rawBody: true }),
-  getBlob: async (url: string): Promise<Blob> => {
+  getBlob: async (url: string, signal?: AbortSignal): Promise<Blob> => {
     const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
     const res = await fetchWithBusyRetry(
-      () => fetch(prefixedUrl, { credentials: "include" }),
-      { autoRetry: true },
+      () => fetch(prefixedUrl, { credentials: "include", signal }),
+      { autoRetry: true, signal },
     )
     if (!res.ok) {
       throw await responseError(res)

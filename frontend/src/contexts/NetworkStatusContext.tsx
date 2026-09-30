@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react"
 import { withBasePath } from "@/config"
+import { isBusyHealthBody } from "@/api/busy"
 
 export type NetworkStatus = "online" | "offline" | "reconnecting"
 
@@ -15,8 +16,7 @@ const NetworkStatusContext = createContext<NetworkStatusContextValue>({
 
 async function isBusyHealth(res: Response): Promise<boolean> {
   if (res.status !== 503) return false
-  const body: unknown = await res.json().catch(() => undefined)
-  return typeof body === "object" && body !== null && (body as { status?: unknown }).status === "busy"
+  return isBusyHealthBody(await res.json().catch(() => undefined))
 }
 
 const POLL_INTERVAL = 5000

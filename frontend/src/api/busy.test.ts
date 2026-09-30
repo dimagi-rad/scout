@@ -12,7 +12,7 @@ import {
 } from "./busy"
 
 const BUSY = { error: "busy", code: "CAPACITY_EXHAUSTED", message: BUSY_MESSAGE }
-const noJitter = () => 0.5
+const noJitter = () => 0
 
 function busyResponse(retryAfter: string | null = "5", body: unknown = BUSY) {
   return new Response(JSON.stringify(body), {
@@ -33,7 +33,7 @@ function okResponse(body: unknown = { ok: true }) {
 
 beforeEach(() => {
   vi.useFakeTimers()
-  vi.spyOn(Math, "random").mockReturnValue(0.5)
+  vi.spyOn(Math, "random").mockReturnValue(0)
 })
 afterEach(() => {
   busyTracker.recovered()
@@ -57,9 +57,10 @@ describe("busy answers", () => {
     expect(busyRetryDelayMs("3600", 1, noJitter)).toBe(30_000)
   })
 
-  it("spreads clients that were turned away together", () => {
-    expect(busyRetryDelayMs("5", 1, () => 0)).toBeCloseTo(4000)
-    expect(busyRetryDelayMs("5", 1, () => 1)).toBeCloseTo(6000)
+  it("spreads clients out without ever retrying before the server asked", () => {
+    expect(busyRetryDelayMs("5", 1, () => 0)).toBeCloseTo(5000)
+    expect(busyRetryDelayMs("5", 1, () => 1)).toBeCloseTo(7000)
+    expect(busyRetryDelayMs("0", 1, () => 0)).toBe(500)
   })
 })
 
@@ -101,7 +102,25 @@ describe("fetchWithBusyRetry", () => {
 
     expect((await fetchWithBusyRetry(send, { autoRetry: false, tracker })).status).toBe(503)
     expect(send).toHaveBeenCalledTimes(1)
-    expect(tracker.getSnapshot().stillBusy).toBe(true)
+    // The write's caller shows busy itself; the global notice is for reads that gave up.
+    expect(tracker.getSnapshot().stillBusy).toBe(false)
+  })
+
+  it("stops retrying reads while an earlier read has already given up", async () => {
+    const tracker = createBusyTracker()
+    tracker.gaveUp()
+    const send = vi.fn().mockResolvedValue(busyResponse("1"))
+
+    expect((await fetchWithBusyRetry(send, { autoRetry: true, tracker })).status).toBe(503)
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it("treats any non-busy answer as the server being back", async () => {
+    const tracker = createBusyTracker()
+    tracker.gaveUp()
+    const notFound = new Response(JSON.stringify({ error: "Not found" }), { status: 404 })
+    await fetchWithBusyRetry(vi.fn().mockResolvedValue(notFound), { autoRetry: true, tracker })
+    expect(tracker.getSnapshot().stillBusy).toBe(false)
   })
 
   it("stops backing off when the caller aborts", async () => {

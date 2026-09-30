@@ -12,6 +12,7 @@
 export const BUSY_MAX_AUTO_RETRIES = 3
 export const BUSY_MESSAGE = "Scout is busy right now. Please try again in a few seconds."
 const BASE_DELAY_MS = 1000
+const MIN_DELAY_MS = 500
 const MAX_DELAY_MS = 30_000
 
 export interface BusySnapshot {
@@ -29,9 +30,19 @@ export function isBusyBody(body: unknown): boolean {
   )
 }
 
+/** `/health/` has its own `{status, checks}` shape; "busy" means reachable but full. */
+export function isBusyHealthBody(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { status?: unknown }).status === "busy"
+  )
+}
+
 /**
  * Honour the server's `Retry-After` (seconds); otherwise back off exponentially.
- * Jitter spreads out clients that were all turned away in the same instant.
+ * Jitter only ever adds delay, so no retry lands before the server asked, and
+ * spreads out clients that were all turned away in the same instant.
  */
 export function busyRetryDelayMs(
   retryAfter: string | number | null | undefined,
@@ -42,7 +53,7 @@ export function busyRetryDelayMs(
   const base = Number.isFinite(seconds) && seconds >= 0
     ? seconds * 1000
     : BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)
-  return Math.min(base * (0.8 + random() * 0.4), MAX_DELAY_MS)
+  return Math.min(Math.max(base, MIN_DELAY_MS) * (1 + random() * 0.4), MAX_DELAY_MS)
 }
 
 type Listener = () => void
@@ -90,15 +101,19 @@ export type BusyTracker = ReturnType<typeof createBusyTracker>
 
 export const busyTracker = createBusyTracker()
 
+function abortReason(signal?: AbortSignal | null): unknown {
+  return signal?.reason ?? new DOMException("The operation was aborted.", "AbortError")
+}
+
 function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason)
+      reject(abortReason(signal))
       return
     }
     const onAbort = () => {
       clearTimeout(timer)
-      reject(signal?.reason)
+      reject(abortReason(signal))
     }
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort)
@@ -118,6 +133,9 @@ export async function isBusyResponse(res: Response): Promise<boolean> {
  * Run `send`, backing off and retrying up to BUSY_MAX_AUTO_RETRIES times while
  * the answer is "busy" (only when `autoRetry` is set). Returns the last response
  * either way, so the caller's normal error handling sees a busy failure.
+ *
+ * Once a read has given up, later reads fail at once until any non-busy answer
+ * arrives: overlapping polls must not multiply load on a server that is full.
  */
 export async function fetchWithBusyRetry(
   send: () => Promise<Response>,
@@ -128,16 +146,17 @@ export async function fetchWithBusyRetry(
   }: { autoRetry: boolean; signal?: AbortSignal | null; tracker?: BusyTracker },
 ): Promise<Response> {
   const token = Symbol("busy-request")
-  const maxRetries = autoRetry ? BUSY_MAX_AUTO_RETRIES : 0
+  const maxRetries = autoRetry && !tracker.getSnapshot().stillBusy ? BUSY_MAX_AUTO_RETRIES : 0
   try {
     for (let retries = 0; ; retries += 1) {
       const res = await send()
       if (!(await isBusyResponse(res))) {
-        if (res.ok) tracker.recovered()
+        tracker.recovered()
         return res
       }
       if (retries >= maxRetries) {
-        tracker.gaveUp()
+        // A write never retries, so its busy answer is its caller's to show.
+        if (autoRetry) tracker.gaveUp()
         return res
       }
       tracker.startRetry(token)
