@@ -397,14 +397,18 @@ class PersistFailureVerdict(NamedTuple):
     record_marker: bool
 
 
-def classify_persist_failure(exc: BaseException, *, grant_spent: bool) -> PersistFailureVerdict:
+def classify_persist_failure(
+    exc: BaseException, *, grant_spent: bool, after_database_error: bool = False
+) -> PersistFailureVerdict:
     """Map a failed credential write to what to raise, log, and whether to retry or mark.
 
     With the grant spent the stored refresh token is dead at the provider, so no later
     refresh can succeed: that is a reconnect, never a retryable outage (#758). A plain
     database error is retried first, because the new tokens are still in memory, and
-    marked for reconnect if it persists. A deadline gets neither: the budget is gone, and
-    the marker write would queue behind the same contended lock that exhausted it.
+    marked for reconnect if it persists. A deadline alone gets neither: the budget is
+    gone, and the marker write would queue behind the same contended lock that
+    exhausted it. ``after_database_error`` says an earlier attempt already hit a plain
+    error, so a retry that then ran out of budget still marks.
     """
     deadline = _is_deadline_error(exc)
     if grant_spent:
@@ -416,7 +420,7 @@ def classify_persist_failure(exc: BaseException, *, grant_spent: bool) -> Persis
             if deadline
             else "Failed to persist a rotated OAuth token",
             retry=not deadline,
-            record_marker=not deadline,
+            record_marker=not deadline or after_database_error,
         )
     if deadline:
         return PersistFailureVerdict(
@@ -698,6 +702,12 @@ def _persist_refresh_response(
                     credential_advanced=False,
                 )
             snapshot = _persisted_snapshot(current)
+            if (snapshot.access_token, snapshot.refresh_token) == (
+                refreshed.access_token,
+                refreshed.refresh_token,
+            ):
+                # A retry after a commit that landed but reported failure (#758).
+                return TokenRefreshResult(TokenRefreshStatus.APPLIED, snapshot)
             advanced = snapshot.access_token != preflight.access_token
             if not advanced:
                 # Nobody else refreshed, so the credential we just rotated away is
@@ -792,6 +802,121 @@ async def _arecord_refresh_failure(
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         logger.warning("Failed to persist OAuth refresh failure", exc_info=True)
         raise TokenRefreshUnavailable("Failed to persist OAuth refresh failure.") from exc
+
+
+def _retry_pause(attempt: int, deadline, clock) -> float | None:
+    """The pause before persist attempt ``attempt + 1``, or None when there is none.
+
+    A pause that would outlast the persist budget is not taken: the retry could only
+    fail on the deadline, and the wait would eat time the caller did not grant.
+    """
+    if attempt > len(SPENT_GRANT_PERSIST_RETRY_DELAYS):
+        return None
+    delay = SPENT_GRANT_PERSIST_RETRY_DELAYS[attempt - 1]
+    if deadline is not None and clock() + delay >= deadline:
+        return None
+    return delay
+
+
+def _persist_with_retry(
+    social_token,
+    preflight: _TokenPreflight,
+    refreshed: _ValidatedRefresh,
+    fingerprint: str,
+    *,
+    deadline,
+    db_timeout,
+    clock,
+) -> TokenRefreshResult:
+    grant_spent = _grant_was_spent(preflight, refreshed)
+    saw_database_error = False
+    attempt = 1
+    while True:
+        try:
+            return _persist_refresh_response(
+                preflight, refreshed, fingerprint, deadline=deadline, clock=clock
+            )
+        except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+            verdict = classify_persist_failure(
+                exc, grant_spent=grant_spent, after_database_error=saw_database_error
+            )
+            saw_database_error = saw_database_error or verdict.retry
+            delay = _retry_pause(attempt, deadline, clock) if verdict.retry else None
+            if delay is not None:
+                logger.warning(
+                    "%s (sync) for app %s (attempt %s); retrying",
+                    verdict.message,
+                    social_token.app.client_id,
+                    attempt,
+                    exc_info=True,
+                )
+                time.sleep(delay)
+                _discard_broken_connection()
+                attempt += 1
+                continue
+            logger.warning(verdict.message, exc_info=True)
+            if verdict.record_marker:
+                try:
+                    _record_refresh_failure(
+                        preflight,
+                        fingerprint,
+                        deadline=_phase_deadline(None, db_timeout, clock),
+                        clock=clock,
+                    )
+                except TokenRefreshUnavailable:
+                    logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
+            raise verdict.error from exc
+
+
+async def _apersist_with_retry(
+    social_token,
+    preflight: _TokenPreflight,
+    refreshed: _ValidatedRefresh,
+    fingerprint: str,
+    *,
+    deadline,
+    db_timeout,
+    clock,
+    record_failure: bool,
+) -> TokenRefreshResult:
+    grant_spent = _grant_was_spent(preflight, refreshed)
+    saw_database_error = False
+    attempt = 1
+    while True:
+        try:
+            return await _apersist_refresh_response(
+                preflight, refreshed, fingerprint, deadline=deadline, clock=clock
+            )
+        except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+            verdict = classify_persist_failure(
+                exc, grant_spent=grant_spent, after_database_error=saw_database_error
+            )
+            saw_database_error = saw_database_error or verdict.retry
+            delay = _retry_pause(attempt, deadline, clock) if verdict.retry else None
+            if delay is not None:
+                logger.warning(
+                    "%s for app %s (attempt %s); retrying",
+                    verdict.message,
+                    social_token.app.client_id,
+                    attempt,
+                    exc_info=True,
+                )
+                await asyncio.sleep(delay)
+                await sync_to_async(_discard_broken_connection)()
+                attempt += 1
+                continue
+            logger.warning(verdict.message, exc_info=True)
+            if record_failure and verdict.record_marker:
+                try:
+                    await _arecord_refresh_failure(
+                        preflight,
+                        fingerprint,
+                        deadline=_phase_deadline(None, db_timeout, clock),
+                        clock=clock,
+                    )
+                except TokenRefreshUnavailable:
+                    logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
+            raise verdict.error from exc
 
 
 async def refresh_oauth_token_result(
@@ -905,39 +1030,20 @@ async def refresh_oauth_token_result(
         raise verdict.error from e
 
     refreshed = _validate_refresh_response(response, preflight)
-    grant_spent = _grant_was_spent(preflight, refreshed)
-    persist_deadline = _phase_deadline(deadline, db_timeout, clock)
-    for attempt, delay in enumerate((*SPENT_GRANT_PERSIST_RETRY_DELAYS, None), start=1):
-        try:
-            result = await _apersist_refresh_response(
-                preflight, refreshed, fingerprint, deadline=persist_deadline, clock=clock
-            )
-            break
-        except (DatabaseError, _RefreshDeadlineExceeded) as exc:
-            verdict = classify_persist_failure(exc, grant_spent=grant_spent)
-            if verdict.retry and delay is not None:
-                logger.warning(
-                    "%s for app %s (attempt %s); retrying",
-                    verdict.message,
-                    social_token.app.client_id,
-                    attempt,
-                    exc_info=True,
-                )
-                await asyncio.sleep(delay)
-                await sync_to_async(_discard_broken_connection)()
-                continue
-            logger.warning(verdict.message, exc_info=True)
-            if record_failure and verdict.record_marker:
-                try:
-                    await _arecord_refresh_failure(
-                        preflight,
-                        fingerprint,
-                        deadline=_phase_deadline(None, db_timeout, clock),
-                        clock=clock,
-                    )
-                except TokenRefreshUnavailable:
-                    logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-            raise verdict.error from exc
+    # Shielded: past this point the provider may have rotated the grant, so a caller's
+    # timeout must not cancel the write (or the retry and marker) and lose it.
+    result = await asyncio.shield(
+        _apersist_with_retry(
+            social_token,
+            preflight,
+            refreshed,
+            fingerprint,
+            deadline=_phase_deadline(deadline, db_timeout, clock),
+            db_timeout=db_timeout,
+            clock=clock,
+            record_failure=record_failure,
+        )
+    )
     _apply_persisted_snapshot(social_token, result.snapshot)
     if result.status is TokenRefreshStatus.SUPERSEDED:
         logger.warning(
@@ -1090,39 +1196,15 @@ def refresh_oauth_token_result_sync(
         raise verdict.error from e
 
     refreshed = _validate_refresh_response(response, preflight)
-    grant_spent = _grant_was_spent(preflight, refreshed)
-    persist_deadline = _phase_deadline(deadline, db_timeout, clock)
-    for attempt, delay in enumerate((*SPENT_GRANT_PERSIST_RETRY_DELAYS, None), start=1):
-        try:
-            result = _persist_refresh_response(
-                preflight, refreshed, fingerprint, deadline=persist_deadline, clock=clock
-            )
-            break
-        except (DatabaseError, _RefreshDeadlineExceeded) as exc:
-            verdict = classify_persist_failure(exc, grant_spent=grant_spent)
-            if verdict.retry and delay is not None:
-                logger.warning(
-                    "%s (sync) for app %s (attempt %s); retrying",
-                    verdict.message,
-                    social_token.app.client_id,
-                    attempt,
-                    exc_info=True,
-                )
-                time.sleep(delay)
-                _discard_broken_connection()
-                continue
-            logger.warning(verdict.message, exc_info=True)
-            if verdict.record_marker:
-                try:
-                    _record_refresh_failure(
-                        preflight,
-                        fingerprint,
-                        deadline=_phase_deadline(None, db_timeout, clock),
-                        clock=clock,
-                    )
-                except TokenRefreshUnavailable:
-                    logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
-            raise verdict.error from exc
+    result = _persist_with_retry(
+        social_token,
+        preflight,
+        refreshed,
+        fingerprint,
+        deadline=_phase_deadline(deadline, db_timeout, clock),
+        db_timeout=db_timeout,
+        clock=clock,
+    )
     _apply_persisted_snapshot(social_token, result.snapshot)
     if result.status is TokenRefreshStatus.SUPERSEDED:
         logger.warning(

@@ -9,8 +9,10 @@ the reconnect marker on the connection, and the severity of what was logged.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
+from unittest import mock
 
 import httpx
 import pytest
@@ -102,21 +104,39 @@ def _install_persist_hook(mode, hook, token, monkeypatch):
         "database_error_once": DatabaseError("persist failed"),
         "deadline": token_refresh._RefreshDeadlineExceeded(),
     }.get(hook)
+    # One failure per attempt, for hooks whose failure changes between attempts.
+    sequence = {
+        "database_error_then_deadline": [
+            DatabaseError("persist failed"),
+            token_refresh._RefreshDeadlineExceeded(),
+        ],
+    }.get(hook)
+    committed_then_failed = hook == "commit_then_error"
     changes = {
         "advance": {"token": "winner-access", "token_secret": "winner-refresh"},
         "touch_expiry": {"expires_at": timezone.now() + timedelta(hours=1)},
     }.get(hook, {})
 
-    def should_fail():
+    def failure():
         attempts.append(hook)
-        return error is not None and (hook != "database_error_once" or len(attempts) == 1)
+        if sequence:
+            return sequence[min(len(attempts), len(sequence)) - 1]
+        if error is not None and (hook != "database_error_once" or len(attempts) == 1):
+            return error
+        return None
 
     if mode == "async":
         original = token_refresh._apersist_refresh_response
 
         async def persist(*args, **kwargs):
-            if should_fail():
-                raise error
+            if committed_then_failed:
+                attempts.append(hook)
+                result = await original(*args, **kwargs)
+                if len(attempts) == 1:
+                    raise DatabaseError("commit reported as failed")
+                return result
+            if (exc := failure()) is not None:
+                raise exc
             if changes:
                 await SocialToken.objects.filter(pk=token.pk).aupdate(**changes)
             return await original(*args, **kwargs)
@@ -126,8 +146,14 @@ def _install_persist_hook(mode, hook, token, monkeypatch):
         original = token_refresh._persist_refresh_response
 
         def persist(*args, **kwargs):
-            if should_fail():
-                raise error
+            if committed_then_failed:
+                attempts.append(hook)
+                result = original(*args, **kwargs)
+                if len(attempts) == 1:
+                    raise DatabaseError("commit reported as failed")
+                return result
+            if (exc := failure()) is not None:
+                raise exc
             if changes:
                 SocialToken.objects.filter(pk=token.pk).update(**changes)
             return original(*args, **kwargs)
@@ -222,6 +248,22 @@ CASES = [
         "persist-database-error-spent-grant-recovers",
         _status(200, ROTATED),
         "database_error_once",
+        "applied:advanced=True",
+        False,
+        logging.WARNING,
+    ),
+    (
+        "persist-database-error-then-deadline-spent-grant",
+        _status(200, ROTATED),
+        "database_error_then_deadline",
+        "TokenRefreshRejected",
+        True,
+        logging.WARNING,
+    ),
+    (
+        "persist-commit-landed-but-reported-failed",
+        _status(200, ROTATED),
+        "commit_then_error",
         "applied:advanced=True",
         False,
         logging.WARNING,
@@ -358,6 +400,79 @@ async def test_spent_grant_stored_on_retry_holds_the_rotated_credential(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_cancelling_the_caller_mid_retry_still_stores_the_rotated_credential(
+    oauth_identity, httpx_mock, monkeypatch
+):
+    token, _connection = oauth_identity
+    monkeypatch.setattr(token_refresh, "SPENT_GRANT_PERSIST_RETRY_DELAYS", (0.2, 0.2))
+    _register_provider("async", _status(200, ROTATED), httpx_mock, None)
+    original = token_refresh._apersist_refresh_response
+    failed, stored = asyncio.Event(), asyncio.Event()
+
+    async def persist(*args, **kwargs):
+        if not failed.is_set():
+            failed.set()
+            raise DatabaseError("persist failed")
+        result = await original(*args, **kwargs)
+        stored.set()
+        return result
+
+    monkeypatch.setattr(token_refresh, "_apersist_refresh_response", persist)
+    task = asyncio.ensure_future(refresh_oauth_token_result(token, URL))
+    await asyncio.wait_for(failed.wait(), timeout=5)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.wait_for(stored.wait(), timeout=5)
+    persisted = await SocialToken.objects.aget(pk=token.pk)
+    assert (persisted.token, persisted.token_secret) == ("new-access", "new-refresh")
+
+
+@pytest.mark.parametrize(
+    ("attempt", "budget", "pause"),
+    [
+        (1, None, 0.1),
+        (2, None, 0.5),
+        (3, None, None),
+        (1, 10.0, 0.1),
+        (1, 0.05, None),
+        (2, 0.4, None),
+    ],
+)
+def test_retry_pause_never_outlasts_the_persist_budget(attempt, budget, pause, monkeypatch):
+    monkeypatch.setattr(token_refresh, "SPENT_GRANT_PERSIST_RETRY_DELAYS", (0.1, 0.5))
+    deadline = None if budget is None else 100.0 + budget
+
+    assert token_refresh._retry_pause(attempt, deadline, lambda: 100.0) == pause
+
+
+@pytest.mark.parametrize(
+    ("in_atomic_block", "connected", "usable", "closed"),
+    [
+        (False, True, False, True),
+        (False, True, True, False),
+        (True, True, False, False),
+        (False, False, False, False),
+    ],
+    ids=["broken", "healthy", "inside-callers-transaction", "never-connected"],
+)
+def test_discard_broken_connection_closes_only_a_broken_connection_it_owns(
+    in_atomic_block, connected, usable, closed, monkeypatch
+):
+    connection = mock.Mock(in_atomic_block=in_atomic_block)
+    connection.connection = object() if connected else None
+    connection.is_usable.return_value = usable
+    monkeypatch.setattr(token_refresh, "django_connection", connection)
+
+    token_refresh._discard_broken_connection()
+
+    assert connection.close.called is closed
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_async_record_failure_false_leaves_no_marker_for_an_unstorable_spent_grant(
     oauth_identity, httpx_mock, monkeypatch
 ):
@@ -465,8 +580,13 @@ def test_classify_http_failure(status, flags, error, marker, level, reason):
         (DatabaseError("down"), False, TokenRefreshUnavailable, False, False),
     ],
 )
-def test_classify_persist_failure(exc, grant_spent, error, retry, marker):
-    verdict = classify_persist_failure(exc, grant_spent=grant_spent)
+@pytest.mark.parametrize("after_database_error", [False, True])
+def test_classify_persist_failure(exc, grant_spent, error, retry, marker, after_database_error):
+    verdict = classify_persist_failure(
+        exc, grant_spent=grant_spent, after_database_error=after_database_error
+    )
+    # An earlier plain error keeps a spent grant marked even when the last try timed out.
+    marker = marker or (grant_spent and after_database_error)
 
     assert type(verdict.error) is error
     assert (verdict.retry, verdict.record_marker) == (retry, marker)
