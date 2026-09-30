@@ -6,6 +6,7 @@ that was never loaded, or a source whose load died mid-way, showed a permanent
 """
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.users.models import Tenant
@@ -13,10 +14,12 @@ from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
+    Workspace,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
 from apps.workspaces.tasks import materialize_workspace
+from mcp_server.server import get_schema_status
 from tests.tenant_access import grant_tenant_access
 from tests.test_chat_first_load import queued_jobs  # noqa: F401 (registers the fixture)
 
@@ -105,3 +108,39 @@ def test_serving_data_stays_available_during_a_refresh(user, workspace, tenant):
     TenantSchema.objects.create(tenant=tenant, schema_name="serving", state=SchemaState.ACTIVE)
     _running_load(tenant)
     assert _statuses(user, workspace) == ("available", "available")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_reports_not_loaded_for_a_never_loaded_multi_source_workspace():
+    user = await get_user_model().objects.acreate_user(email="mcp-nl@b.c", password="x")
+    workspace = await Workspace.objects.acreate(name="Never loaded", created_by=user)
+    for external_id in ("alpha", "bravo"):
+        tenant = await Tenant.objects.acreate(provider="commcare", external_id=external_id)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+
+    result = await get_schema_status(workspace_id=str(workspace.id))
+
+    assert result["success"] is True
+    assert result["data"]["exists"] is False
+    assert result["data"]["state"] == "not_loaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_reports_provisioning_while_a_first_load_runs():
+    user = await get_user_model().objects.acreate_user(email="mcp-prov@b.c", password="x")
+    workspace = await Workspace.objects.acreate(name="Loading", created_by=user)
+    tenant = await Tenant.objects.acreate(provider="commcare", external_id="loading")
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="loading", state=SchemaState.PROVISIONING
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema, pipeline="commcare_sync", state=LOADING
+    )
+
+    result = await get_schema_status(workspace_id=str(workspace.id))
+
+    assert result["success"] is True
+    assert result["data"]["state"] == "provisioning"

@@ -743,7 +743,7 @@ class TestGetSchemaStatusTool:
     @pytest.mark.django_db
     async def test_returns_not_found_when_workspace_missing(self):
         # 07#7: a non-existent workspace is NOT the same as an existing-but-
-        # unprovisioned one. Returning the empty 'not_provisioned' success
+        # unloaded one. Returning the empty 'not_loaded' success
         # envelope for a phantom workspace invited the agent to materialize
         # against a workspace that doesn't exist. Surface a NOT_FOUND error so
         # the agent stops instead of looping on a non-existent target.
@@ -754,10 +754,9 @@ class TestGetSchemaStatusTool:
         assert result["error"]["code"] == NOT_FOUND
 
     @pytest.mark.django_db(transaction=True)
-    async def test_returns_not_provisioned_when_workspace_exists_without_schema(self):
-        # An existing workspace with no tenants/schema is genuinely
-        # unprovisioned — that path must still report not_provisioned so the
-        # agent can offer to materialize.
+    async def test_returns_not_loaded_when_workspace_exists_without_schema(self):
+        # An existing workspace with no tenants/schema is genuinely unloaded, and
+        # must report not_loaded so the agent can offer to materialize.
 
         User = get_user_model()
         user = await User.objects.acreate_user(email="noschema@b.c", password="x")
@@ -767,7 +766,7 @@ class TestGetSchemaStatusTool:
 
         assert result["success"] is True
         assert result["data"]["exists"] is False
-        assert result["data"]["state"] == "not_provisioned"
+        assert result["data"]["state"] == "not_loaded"
 
     @pytest.mark.django_db(transaction=True)
     async def test_returns_failed_with_error_for_failed_view_schema(self):
@@ -1299,7 +1298,7 @@ async def test_schema_status_reports_which_source_an_in_flight_load_is_on(user):
 
 @pytest.mark.django_db(transaction=True)
 async def test_schema_status_reports_a_first_load_before_any_schema_is_active(user):
-    """#411: a first load used to read as plain "not_provisioned" while it ran."""
+    """#411: a first load used to read as plain "not provisioned" while it ran."""
     workspace = await Workspace.objects.acreate(name="First load", created_by=user)
     tenant = await _tenant_in(workspace, "solo")
     await _run(
@@ -1312,7 +1311,7 @@ async def test_schema_status_reports_a_first_load_before_any_schema_is_active(us
     result = await get_schema_status(workspace_id=str(workspace.id))
 
     assert result["success"] is True
-    assert result["data"]["state"] == "not_provisioned"
+    assert result["data"]["state"] == "provisioning"
     in_flight = result["data"]["load_in_progress"]
     assert in_flight["sources_total"] == 1
     assert "source 1 of 1" in in_flight["message"]

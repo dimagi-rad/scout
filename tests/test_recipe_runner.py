@@ -93,7 +93,7 @@ async def test_execute_async_builds_real_graph_and_flows_workspace_id(recipe, us
       here means the runner regressed;
     - mcp_tools are loaded and attached, so get_schema_status exists (drift #3);
     - workspace_id flows from initial_state through the real injecting node into the
-      real MCP server (drift #2) — proven by a not_provisioned success envelope rather
+      real MCP server (drift #2) — proven by a not_loaded success envelope rather
       than a VALIDATION_ERROR (which is what an empty workspace_id returns).
     """
     values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
@@ -125,9 +125,9 @@ async def test_execute_async_builds_real_graph_and_flows_workspace_id(recipe, us
     step = run.step_results[0]
     assert step["success"] is True
     assert "get_schema_status" in step["tools_used"]
-    # Positive proof workspace_id reached the server: a real not_provisioned envelope,
+    # Positive proof workspace_id reached the server: a real not_loaded envelope,
     # never the VALIDATION_ERROR that an empty workspace_id would have produced.
-    assert "not_provisioned" in step["response"]
+    assert "not_loaded" in step["response"]
     assert "VALIDATION_ERROR" not in step["response"]
 
 
