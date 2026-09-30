@@ -12,6 +12,8 @@ import contextlib
 import logging
 
 from django.conf import settings
+from langfuse import Langfuse, propagate_attributes
+from langfuse.langchain import CallbackHandler
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +43,6 @@ def get_langfuse_callback(
         return None
 
     try:
-        from langfuse import Langfuse
-        from langfuse.langchain import CallbackHandler
-
         Langfuse(secret_key=secret_key, public_key=public_key, host=host)
         return CallbackHandler()
     except Exception:
@@ -66,8 +65,6 @@ def langfuse_trace_context(
         return contextlib.nullcontext()
 
     try:
-        from langfuse import propagate_attributes
-
         return propagate_attributes(
             session_id=session_id,
             user_id=user_id,
