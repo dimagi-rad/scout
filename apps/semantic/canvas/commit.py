@@ -18,6 +18,7 @@ from typing import Any
 from django.db import OperationalError, transaction
 from django.utils import timezone
 
+from apps.semantic.canvas import history
 from apps.semantic.canvas.objects import (
     FIELD_METADATA_KEYS,
     is_canvas_created,
@@ -35,6 +36,7 @@ from apps.semantic.models import (
     SemanticDataset,
     SemanticField,
     SemanticModel,
+    SemanticModelRevision,
     SemanticRelationship,
 )
 from apps.semantic.services.catalog import _sync_fields
@@ -87,7 +89,7 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
         }
 
     try:
-        committed = _commit_transaction(canvas, pending, user)
+        committed, revision = _commit_transaction(canvas, pending, user)
     except _CatalogChanged:
         return {
             "committed": [],
@@ -112,35 +114,48 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
             "conflicts": exc.conflicts,
         }
 
-    cube_outcome: dict[str, Any]
-    try:
-        cube_schema = build_and_promote_cube_schema(
-            canvas.workspace,
-            model=canvas.semantic_model,
-            slot_wait_seconds=INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS,
-        )
-        cube_outcome = {"ok": True, "content_hash": cube_schema.content_hash}
-    except CubeValidatorUnavailableError as exc:
-        logger.warning(
-            "Cube schema rebuild after canvas commit for workspace %s: %s",
-            canvas.workspace_id,
-            exc,
-        )
-        cube_outcome = {"ok": False, "error": str(exc)[:500]}
-    except Exception as exc:
-        logger.exception(
-            "Cube schema rebuild failed after canvas commit for workspace %s",
-            canvas.workspace_id,
-        )
-        cube_outcome = {"ok": False, "error": str(exc)[:500]}
-
     return {
         "committed": committed,
         "blocked": False,
         "blocking_diagnostics": [],
         "conflicts": [],
-        "cube_schema": cube_outcome,
+        "cube_schema": rebuild_cube_schema(canvas.workspace, canvas.semantic_model),
+        "revision": {"id": str(revision.id), "summary": revision.summary},
     }
+
+
+def rebuild_cube_schema(workspace, model) -> dict[str, Any]:
+    """Promote Cube after a committed model write; failures are reported, not raised."""
+    try:
+        cube_schema = build_and_promote_cube_schema(
+            workspace,
+            model=model,
+            slot_wait_seconds=INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS,
+        )
+        return {"ok": True, "content_hash": cube_schema.content_hash}
+    except CubeValidatorUnavailableError as exc:
+        logger.warning(
+            "Cube schema rebuild after data model change for workspace %s: %s",
+            workspace.id,
+            exc,
+        )
+        return {"ok": False, "error": str(exc)[:500]}
+    except Exception as exc:
+        logger.exception(
+            "Cube schema rebuild failed after data model change for workspace %s",
+            workspace.id,
+        )
+        return {"ok": False, "error": str(exc)[:500]}
+
+
+def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str, Any]:
+    """Undo one data model revision, then promote Cube as a commit does.
+
+    Raises ``history.RevisionUndoError``, having written nothing, when it cannot be undone.
+    """
+    result = history.undo_revision(workspace, revision_id, user=user, thread_id=thread_id)
+    model = SemanticModel.objects.get(workspace=workspace)
+    return {**result, "cube_schema": rebuild_cube_schema(workspace, model)}
 
 
 def _is_pending(canvas, change) -> bool:
@@ -160,8 +175,11 @@ def _conflict_entry(canvas, change) -> dict[str, Any]:
     }
 
 
-def _commit_transaction(canvas, pending: list[SemanticCanvasChange], user) -> list[dict[str, Any]]:
+def _commit_transaction(
+    canvas, pending: list[SemanticCanvasChange], user
+) -> tuple[list[dict[str, Any]], SemanticModelRevision]:
     committed: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     now = timezone.now()
     with transaction.atomic():
         custom_drafts = [
@@ -196,13 +214,23 @@ def _commit_transaction(canvas, pending: list[SemanticCanvasChange], user) -> li
                 obj = _commit_create(canvas, model, workspace, change, user)
                 name = getattr(obj, "name", "") or name
                 _settle_as_membership(change, obj)
+                object_type = _history_type(change.object_type)
+                before = None
+                after = history.snapshot_object(object_type, obj, deep=True)
             elif change.change_type == ChangeType.DELETE:
-                name = _commit_delete(canvas, model, workspace, change) or name
+                object_type = _history_type(change.object_type)
+                deleted_name, before, after = _commit_delete(canvas, model, workspace, change)
+                name = deleted_name or name
                 change.delete()
             else:
-                obj = _commit_update(canvas, model, workspace, change)
+                object_type = _history_type(change.object_type)
+                obj, before = _commit_update(canvas, model, workspace, change)
                 name = getattr(obj, "name", "") or name
                 _settle_as_membership(change, obj)
+                after = history.snapshot_object(object_type, obj)
+            entries.append(
+                history.change_entry(object_type, change.object_uuid, change_type, before, after)
+            )
             committed.append(
                 {
                     "object_type": change.object_type,
@@ -213,7 +241,19 @@ def _commit_transaction(canvas, pending: list[SemanticCanvasChange], user) -> li
             )
         canvas.committed_at = now
         canvas.save(update_fields=["committed_at", "updated_at"])
-    return committed
+        revision = history.record_revision(
+            workspace,
+            entries,
+            source=SemanticModelRevision.Source.CANVAS_COMMIT,
+            user=user,
+            thread_id=canvas.thread_id,
+        )
+    return committed, revision
+
+
+def _history_type(object_type: str) -> str:
+    # A committed custom dataset is a SemanticDataset like any other.
+    return history.DATASET if object_type == ObjectType.CUSTOM_DATASET else object_type
 
 
 def _locked_base(canvas, change):
@@ -231,6 +271,7 @@ def _locked_base(canvas, change):
 
 def _commit_update(canvas, model, workspace, change):
     obj = _locked_base(canvas, change)
+    before = history.snapshot_object(_history_type(change.object_type), obj)
     metadata = dict(obj.metadata or {})
     curated = set(metadata.get("curated_fields", []))
     for key, value in change.fields.items():
@@ -246,12 +287,16 @@ def _commit_update(canvas, model, workspace, change):
     obj.metadata = metadata
     obj.save()
     obj.refresh_from_db(fields=["updated_at"])
-    return obj
+    return obj, before
 
 
-def _commit_delete(canvas, model, workspace, change) -> str:
+def _commit_delete(canvas, model, workspace, change) -> tuple[str, dict, dict | None]:
+    """Returns the object's name and its before/after history snapshots."""
     obj = _locked_base(canvas, change)
     name = getattr(obj, "name", "")
+    object_type = _history_type(change.object_type)
+    before = history.snapshot_object(object_type, obj, deep=True)
+    after = None
     if change.object_type == ObjectType.DATASET:
         # Only custom (CTE) datasets reach here (enforced at op time).
         custom = obj.custom_dataset
@@ -264,9 +309,10 @@ def _commit_delete(canvas, model, workspace, change) -> str:
         and not is_canvas_created(obj)
     ):
         _hide_custom_dataset_field(obj)
+        after = history.snapshot_object(object_type, obj)
     else:
         obj.delete()
-    return name
+    return name, before, after
 
 
 def _hide_custom_dataset_field(field: SemanticField) -> None:
