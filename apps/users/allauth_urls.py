@@ -81,8 +81,13 @@ def _provider_urlpatterns():
     """allauth's ``build_provider_urlpatterns``, with each provider's routes gated."""
     patterns = []
     for provider_class in registry.get_class_list():
-        module = import_module(f"{provider_class.get_package()}.urls")
-        patterns += _gate(getattr(module, "urlpatterns", []), provider_class.id)
+        module_patterns = getattr(
+            import_module(f"{provider_class.get_package()}.urls"), "urlpatterns", []
+        )
+        # Appless providers build without a SocialApp (allauth's get_provider skips get_app).
+        if provider_class.uses_apps:
+            module_patterns = _gate(module_patterns, provider_class.id)
+        patterns += module_patterns
     return patterns
 
 
