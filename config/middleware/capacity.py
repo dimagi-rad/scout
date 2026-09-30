@@ -16,5 +16,9 @@ class CapacityExhaustedMiddleware(MiddlewareMixin):
         capacity = classify_capacity_error(exception)
         if capacity is None:
             return None
-        report_capacity_exhausted(capacity.resource, str(capacity))
+        report_capacity_exhausted(
+            capacity.resource,
+            f"{request.method} {request.path}: {capacity}",
+            exc_info=exception,
+        )
         return busy_response()

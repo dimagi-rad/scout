@@ -17,9 +17,10 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import OperationalError
 from django.test import AsyncClient, RequestFactory
-from psycopg_pool import PoolTimeout
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from apps.chat import stream
+from apps.chat.checkpointer import CheckpointerPool, CheckpointerPoolExhausted
 from apps.common import capacity
 from apps.common.capacity import (
     ALERT_MESSAGE,
@@ -68,7 +69,7 @@ EXHAUSTION_SIGNALS = {
         CapacityResource.DATABASE,
     ),
     "checkpointer_pool_timeout": (
-        PoolTimeout("couldn't get a connection after 30.00 sec"),
+        CheckpointerPoolExhausted("couldn't get a connection after 30.00 sec"),
         CapacityResource.CHECKPOINTER_POOL,
     ),
     "cube_slot_wait": (
@@ -118,10 +119,37 @@ def test_each_exhaustion_signal_is_classified(exc, resource):
         CubeConnectionError("Cube is temporarily unavailable."),
         CubeServiceUnavailable("schema validation failed: HTTP 503"),
         ValueError("too many connections"),
+        # A pool that cannot even open means the database is down, not full.
+        PoolTimeout("pool initialization incomplete after 10.0 sec"),
+        # Scout's own per-process managed-pool cap is not a connection limit.
+        PoolTimeout("all 4 managed-DB pool slots are in use"),
     ],
 )
 def test_other_failures_are_not_capacity(exc):
     assert classify_capacity_error(exc) is None
+
+
+def test_a_bug_raised_while_handling_capacity_stays_a_bug():
+    try:
+        try:
+            raise _django_wrapped("FATAL:  sorry, too many clients already")
+        except OperationalError:
+            raise KeyError("recovery bug")  # noqa: B904 -- the implicit context is the point
+    except KeyError as bug:
+        assert classify_capacity_error(bug) is None
+
+
+@pytest.mark.asyncio
+async def test_the_checkpointer_pool_tags_a_checkout_timeout_as_capacity():
+    pool = CheckpointerPool("dbname=unused", open=False)
+    with patch.object(
+        AsyncConnectionPool,
+        "getconn",
+        AsyncMock(side_effect=PoolTimeout("couldn't get a connection")),
+    ):
+        with pytest.raises(CheckpointerPoolExhausted) as raised:
+            await pool.getconn(timeout=0.1)
+    assert classify_capacity_error(raised.value).resource == CapacityResource.CHECKPOINTER_POOL
 
 
 @pytest.mark.parametrize(("exc", "resource"), EXHAUSTION_SIGNALS.values(), ids=EXHAUSTION_SIGNALS)
@@ -231,7 +259,7 @@ class _RaisingAgent:
 
 @pytest.mark.asyncio
 async def test_the_chat_stream_sends_a_busy_event_instead_of_an_error(sentry):
-    agent = _RaisingAgent(PoolTimeout("couldn't get a connection after 30.00 sec"))
+    agent = _RaisingAgent(CheckpointerPoolExhausted("couldn't get a connection after 30.00 sec"))
     chunks = [c async for c in stream.langgraph_to_ui_stream(agent, {}, {"configurable": {}})]
     events = [json.loads(c.removeprefix("data: ").strip()) for c in chunks if c.startswith("data:")]
 
@@ -273,7 +301,9 @@ async def _chat_member(slug):
 @pytest.mark.django_db(transaction=True)
 async def test_a_full_checkpointer_pool_answers_chat_with_busy_not_500(sentry):
     ws, client = await _chat_member("pool-full")
-    ensure = AsyncMock(side_effect=PoolTimeout("couldn't get a connection after 30.00 sec"))
+    ensure = AsyncMock(
+        side_effect=CheckpointerPoolExhausted("couldn't get a connection after 30.00 sec")
+    )
     with (
         patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("apps.chat.views.ensure_checkpointer", ensure),
