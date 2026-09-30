@@ -360,8 +360,11 @@ def test_revision_api_refuses_undo_for_read_only_members(
     assert semantic_model.datasets.get(name="raw_visits").label == "One"
 
 
-def _tools(workspace, user, thread):
-    return {t.name: t for t in create_canvas_tools(workspace, user, str(thread.id))}
+def _tools(workspace, user, thread, human_turn=1):
+    return {
+        t.name: t
+        for t in create_canvas_tools(workspace, user, str(thread.id), human_turn=human_turn)
+    }
 
 
 @pytest.mark.asyncio
@@ -457,7 +460,15 @@ async def test_agent_delete_of_a_dataset_an_artifact_uses_waits_for_confirmation
     ]
     assert await SemanticDataset.objects.filter(name="visit_stats").aexists()
 
-    confirmed = await tools["canvas_commit"].ainvoke(
+    # The agent cannot confirm in the turn it was told to ask.
+    self_confirmed = await tools["canvas_commit"].ainvoke(
+        {"confirmed_deletions": ["dataset/visit_stats"]}
+    )
+    assert self_confirmed["confirmation_required"]
+    assert await SemanticDataset.objects.filter(name="visit_stats").aexists()
+
+    next_turn = _tools(workspace, user, thread, human_turn=2)
+    confirmed = await next_turn["canvas_commit"].ainvoke(
         {"confirmed_deletions": ["dataset/visit_stats"]}
     )
 
@@ -466,13 +477,15 @@ async def test_agent_delete_of_a_dataset_an_artifact_uses_waits_for_confirmation
     assert confirmed["revision"]["summary"] == "Deleted dataset visit_stats"
 
     # Undoing the delete re-creates it; undoing that re-creation is a delete again.
-    restored = await tools["canvas_undo"].ainvoke({"revision_id": confirmed["revision"]["id"]})
-    asked_again = await tools["canvas_undo"].ainvoke({"revision_id": restored["revision"]["id"]})
+    restored = await next_turn["canvas_undo"].ainvoke({"revision_id": confirmed["revision"]["id"]})
+    asked_again = await next_turn["canvas_undo"].ainvoke(
+        {"revision_id": restored["revision"]["id"], "confirmed_deletions": ["dataset/visit_stats"]}
+    )
 
     assert asked_again["confirmation_required"][0]["object"] == "dataset/visit_stats"
     assert await SemanticDataset.objects.filter(name="visit_stats").aexists()
 
-    await tools["canvas_undo"].ainvoke(
+    await _tools(workspace, user, thread, human_turn=3)["canvas_undo"].ainvoke(
         {
             "revision_id": restored["revision"]["id"],
             "confirmed_deletions": ["dataset/visit_stats"],

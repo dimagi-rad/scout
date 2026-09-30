@@ -42,6 +42,7 @@ from apps.agents.prompts.artifact_prompt import (
 )
 from apps.agents.prompts.base_system import select_base_system_prompt
 from apps.agents.subagents.events import (
+    HUMAN_TURN_PARAM,
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
     reset_subagent_event_queue,
@@ -51,6 +52,7 @@ from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
+from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import view_name
 from apps.knowledge.services.retriever import KnowledgeRetriever
@@ -141,8 +143,19 @@ INJECTED_TOOL_PARAMS = frozenset(
         "thread_id",
         "tool_call_id",
         SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+        HUMAN_TURN_PARAM,
     }
 )
+
+
+def human_turn_count(messages: list) -> int:
+    """Messages the user actually typed; resume notices are synthetic HumanMessages."""
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, HumanMessage)
+        and not str(message.content).startswith(SYSTEM_RESUME_MARKER)
+    )
 
 
 # Adaptive thinking counts toward max_tokens, so 4096 could cut a turn off
@@ -846,6 +859,8 @@ def _make_injecting_tool_node(
                     extra = {"tool_call_id": tc_id}
                     if tc["name"] in SUBAGENT_TOOL_NAMES:
                         extra[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] = event_queue
+                    if tc["name"] == "canvas_manager":
+                        extra[HUMAN_TURN_PARAM] = human_turn_count(messages)
                     tc = {**tc, "args": {**args, **extra}}
                 else:
                     persistable_tc = tc
@@ -1439,9 +1454,10 @@ Deletions are the exception. Deleting a dataset, or a field a saved artifact
 uses (including by undoing the revision that created it), needs the user's
 explicit confirmation of that specific deletion first; the commit or undo is
 refused until then. Ask, naming what will be deleted and the
-artifacts that use it. Only after the user says yes, tell `canvas_manager`
-which objects they confirmed. A chart request or a general "go ahead" is not
-confirmation of a deletion.
+artifacts that use it, and end your turn. Only when the user's next message
+says yes, tell `canvas_manager` which objects they confirmed; a confirmation
+is accepted only in the user turn right after the question. A chart request
+or a general "go ahead" is not confirmation of a deletion.
 """)
     elif interactive:
         stable_sections.append("""

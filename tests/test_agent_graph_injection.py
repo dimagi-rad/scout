@@ -4,8 +4,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from apps.agents.graph.base import SUBAGENT_EVENT_QUEUE_CONFIG_KEY, _make_injecting_tool_node
+from apps.agents.graph.base import (
+    SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    _make_injecting_tool_node,
+    human_turn_count,
+)
 from apps.agents.graph.state import AgentState
+from apps.agents.subagents.events import HUMAN_TURN_PARAM
+from apps.chat.constants import SYSTEM_RESUME_MARKER
 
 
 def test_agent_state_has_thread_id_field():
@@ -184,3 +190,37 @@ def test_make_injecting_tool_node_warns_on_missing_tool_call_id(monkeypatch, cap
         asyncio.run(node(state))
 
     assert any("has no id" in r.message for r in caplog.records)
+
+
+def test_canvas_manager_gets_the_user_turn_count_not_resume_notices():
+    captured_messages: list = []
+    base_node = MagicMock()
+
+    async def fake_ainvoke(payload, **kwargs):
+        captured_messages.append(payload["messages"])
+        return {"messages": []}
+
+    base_node.ainvoke = AsyncMock(side_effect=fake_ainvoke)
+    node = _make_injecting_tool_node(base_node, {})
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "canvas_manager",
+                "id": "tc-canvas",
+                "args": {"task": "delete visit_stats", HUMAN_TURN_PARAM: 99},
+            }
+        ],
+    )
+    messages = [
+        HumanMessage(content="build a dashboard"),
+        HumanMessage(content=f"{SYSTEM_RESUME_MARKER} data loaded"),
+        HumanMessage(content="yes, delete it"),
+        ai_msg,
+    ]
+
+    asyncio.run(node({"messages": messages}))
+
+    forwarded_args = captured_messages[0][-1].tool_calls[0]["args"]
+    assert forwarded_args[HUMAN_TURN_PARAM] == 2
+    assert human_turn_count(messages) == 2

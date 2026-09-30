@@ -74,6 +74,7 @@ class CanvasManagerInput(BaseModel):
     # Injected by the parent graph; hidden from the model-facing schema.
     tool_call_id: str | None = None
     subagent_event_queue: Any | None = None
+    human_turn: int | None = None
 
 
 CANVAS_MANAGER_SYSTEM_PROMPT = """
@@ -242,6 +243,7 @@ def create_canvas_manager_tool(
         intent: str | None = None,
         tool_call_id: str | None = None,
         subagent_event_queue: Any | None = None,
+        human_turn: int | None = None,
     ) -> dict[str, Any]:
         """Delegate semantic canvas work (dataset edits, new fields/measures,
         relationships, CTE datasets, commits, undoing a data model revision)
@@ -272,7 +274,9 @@ def create_canvas_manager_tool(
         unfinished_commits: set[str] = set()
         try:
             await forwarder.status(phase="running", message="Canvas Manager started.")
-            graph = _build_canvas_manager_graph(workspace, user, mcp_tools, conversation_id)
+            graph = _build_canvas_manager_graph(
+                workspace, user, mcp_tools, conversation_id, human_turn=human_turn
+            )
             async for event in graph.astream_events(input_state, config=config, version="v2"):
                 await forwarder.forward(event)
                 output = event.get("data", {}).get("output")
@@ -338,8 +342,11 @@ def _build_canvas_manager_graph(
     user: User | None,
     mcp_tools: list,
     conversation_id: str | None,
+    human_turn: int | None = None,
 ):
-    canvas_tools = create_canvas_tools(workspace, user, conversation_id or "")
+    canvas_tools = create_canvas_tools(
+        workspace, user, conversation_id or "", human_turn=human_turn
+    )
     nested_mcp_tools = [
         tool_obj
         for tool_obj in mcp_tools

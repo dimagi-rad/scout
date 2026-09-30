@@ -36,7 +36,7 @@ async def test_canvas_manager_receives_the_current_reporting_clock(monkeypatch):
 
     prefix = "apps.agents.tools.canvas_manager_agent"
     monkeypatch.setattr(f"{prefix}.ChatAnthropic", lambda **kwargs: Model())
-    monkeypatch.setattr(f"{prefix}.create_canvas_tools", lambda *args: [])
+    monkeypatch.setattr(f"{prefix}.create_canvas_tools", lambda *args, **kwargs: [])
     monkeypatch.setattr(f"{prefix}.agent_date_context", lambda: "\nReporting clock: 2026-09-24 UTC")
     graph = _build_canvas_manager_graph(SimpleNamespace(id="workspace"), None, [], None)
     await graph.ainvoke({"messages": [HumanMessage(content="Inspect dates")]})
@@ -339,7 +339,7 @@ async def test_real_nested_graph_step_limit_preserves_partial_commit_and_closes_
     )
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent.create_canvas_tools",
-        lambda *args: [canvas_apply, canvas_commit],
+        lambda *args, **kwargs: [canvas_apply, canvas_commit],
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")
@@ -552,7 +552,7 @@ async def test_canvas_manager_failed_result_closes_lifecycle_as_failed(monkeypat
 
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
-        lambda *_args: FailedGraph(),
+        lambda *_args, **_kwargs: FailedGraph(),
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")
@@ -581,7 +581,7 @@ async def test_canvas_manager_failure_before_confirmed_commit_is_truthful(
 
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
-        lambda *args: FailingGraph(),
+        lambda *args, **kwargs: FailingGraph(),
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")

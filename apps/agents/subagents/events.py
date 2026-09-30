@@ -12,6 +12,9 @@ from contextvars import ContextVar
 from typing import Any
 
 SUBAGENT_EVENT_QUEUE_CONFIG_KEY = "subagent_event_queue"
+# Injected into canvas_manager: how many user turns the parent thread has seen,
+# so a deletion is confirmed only by a user turn after the agent asked.
+HUMAN_TURN_PARAM = "human_turn"
 
 # Parent-facing subagent tools. The graph injects the event queue into these
 # calls, the SSE stream flushes their buffered child events, and the message

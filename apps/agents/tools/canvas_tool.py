@@ -12,7 +12,6 @@ loop's token churn stays out of the parent's context.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import re
@@ -178,8 +177,9 @@ def _confirmation_required(deletions: list[dict[str, Any]], *, retry: str) -> di
                 "path": "",
                 "message": (
                     f"Deleting {deletion['object']} needs the user's explicit confirmation."
-                    f"{usage} Nothing was saved. Ask the user; only after they confirm, "
-                    f"{retry} again with this object in confirmed_deletions."
+                    f"{usage} Nothing was saved. Report this so the user is asked, and end "
+                    "the turn: a confirmation counts only if it comes in a later user message, "
+                    f"then {retry} again with this object in confirmed_deletions."
                 ),
             }
         )
@@ -190,6 +190,44 @@ def _confirmation_required(deletions: list[dict[str, Any]], *, retry: str) -> di
         "blocking_diagnostics": diagnostics,
         "confirmation_required": deletions,
     }
+
+
+def _gate_deletions(
+    canvas, deletions, confirmed_deletions, human_turn: int | None, *, retry: str
+) -> dict[str, Any] | None:
+    """Refuse unconfirmed deletions, or clear the ones confirmed; None lets the write run.
+
+    A label in ``confirmed_deletions`` counts only in the user turn right after
+    the one where the agent was told to ask, so it cannot ask and confirm in one
+    turn or lean on a stale question. That the user said yes still rests on the
+    agent's reading of the reply.
+    """
+    pending = dict(canvas.pending_confirmations or {})
+    confirmed = set(confirmed_deletions or [])
+
+    def accepted(label: str) -> bool:
+        asked_at = pending.get(label)
+        return (
+            label in confirmed
+            and isinstance(asked_at, int)
+            and human_turn is not None
+            and asked_at == human_turn - 1
+        )
+
+    unconfirmed = [deletion for deletion in deletions if not accepted(deletion["object"])]
+    if unconfirmed:
+        for deletion in unconfirmed:
+            if human_turn is not None:
+                pending[deletion["object"]] = human_turn
+        canvas.pending_confirmations = pending
+        canvas.save(update_fields=["pending_confirmations", "updated_at"])
+        return _confirmation_required(unconfirmed, retry=retry)
+    if any(deletion["object"] in pending for deletion in deletions):
+        for deletion in deletions:
+            pending.pop(deletion["object"], None)
+        canvas.pending_confirmations = pending
+        canvas.save(update_fields=["pending_confirmations", "updated_at"])
+    return None
 
 
 def _resolve_canvas_sync(workspace, user, conversation_id: str):
@@ -230,8 +268,18 @@ def create_canvas_read_tool(workspace: Workspace, user: User | None, conversatio
     return canvas_read
 
 
-def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id: str) -> list:
-    """The full canvas toolset for the Canvas Manager subagent."""
+def create_canvas_tools(
+    workspace: Workspace,
+    user: User | None,
+    conversation_id: str,
+    *,
+    human_turn: int | None = None,
+) -> list:
+    """The full canvas toolset for the Canvas Manager subagent.
+
+    ``human_turn`` is the parent thread's user-turn count; without it no
+    deletion can be confirmed.
+    """
 
     canvas_read = create_canvas_read_tool(workspace, user, conversation_id)
 
@@ -318,15 +366,14 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
                 canvas = _resolve_canvas_sync(workspace, user, conversation_id)
             except SemanticCatalogUnavailable as exc:
                 return {"errors": [{"op_index": 0, "code": "UNAVAILABLE", "message": str(exc)}]}
-            confirmed = set(confirmed_deletions or [])
-            unconfirmed = [
-                deletion
-                for deletion in destructive_deletions(canvas)
-                if deletion["object"] not in confirmed
-            ]
-            if unconfirmed:
-                return _confirmation_required(unconfirmed, retry="commit")
-            return commit_canvas(canvas, user)
+            refusal = _gate_deletions(
+                canvas,
+                destructive_deletions(canvas),
+                confirmed_deletions,
+                human_turn,
+                retry="commit",
+            )
+            return refusal or commit_canvas(canvas, user)
 
         return await sync_to_async(_commit, thread_sensitive=True)()
 
@@ -366,22 +413,20 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
                 revision_uuid = uuid.UUID(str(revision_id))
             except ValueError:
                 return {"errors": [{"code": "NOT_FOUND", "message": "Unknown revision id."}]}
-            confirmed = set(confirmed_deletions or [])
-            unconfirmed = [
-                deletion
-                for deletion in undo_deletions(workspace, revision_uuid)
-                if deletion["object"] not in confirmed
-            ]
-            if unconfirmed:
-                return _confirmation_required(unconfirmed, retry="undo")
-            thread_id = None
-            with contextlib.suppress(ValueError):
-                thread_id = (
-                    Thread.objects.filter(id=uuid.UUID(str(conversation_id)), workspace=workspace)
-                    .values_list("id", flat=True)
-                    .first()
-                )
-            result = undo_revision(workspace, revision_uuid, user, thread_id=thread_id)
+            try:
+                canvas = _resolve_canvas_sync(workspace, user, conversation_id)
+            except SemanticCatalogUnavailable as exc:
+                return {"errors": [{"code": "UNAVAILABLE", "message": str(exc)}]}
+            refusal = _gate_deletions(
+                canvas,
+                undo_deletions(workspace, revision_uuid),
+                confirmed_deletions,
+                human_turn,
+                retry="undo",
+            )
+            if refusal:
+                return refusal
+            result = undo_revision(workspace, revision_uuid, user, thread_id=canvas.thread_id)
             if refusal := result.get("refused"):
                 return {"errors": [refusal]}
             return result

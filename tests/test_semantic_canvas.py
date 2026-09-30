@@ -1489,7 +1489,7 @@ async def test_canvas_manager_reports_clean_canvas_only_operations_as_completed(
 
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
-        lambda *_args: CleanGraph(),
+        lambda *_args, **_kwargs: CleanGraph(),
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(workspace, user, [], str(canvas.thread_id))
