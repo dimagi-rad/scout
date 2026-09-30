@@ -11,7 +11,6 @@ lose that edit.
 from __future__ import annotations
 
 import logging
-import re
 from functools import cached_property
 from typing import Any
 
@@ -49,7 +48,6 @@ UPDATE = "update"
 DELETE = "delete"
 CANVAS_SOURCE = "canvas"
 CURATED_KEY = "metadata.curated_fields"
-_QUALIFIED_MEMBER_RE = re.compile(r"\{([^{}.]+)\.([^{}.]+)\}")
 
 DATASET_COLUMNS = (
     "name",
@@ -291,8 +289,8 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
         except _InvalidRestore as invalid:
             return refused(
                 "INVALID",
-                "What this revision replaced no longer passes the current data model's "
-                "rules, so restoring it would break it. Edit the objects directly instead.",
+                "What this revision replaced no longer passes the current field rules, so "
+                "restoring it would break the data model. Edit the objects directly instead.",
                 invalid.problems,
             )
         if undo_entries is None:
@@ -345,7 +343,7 @@ def _apply_undo(workspace, model, entries) -> list[dict[str, Any]] | None:
     try:
         with transaction.atomic():
             undone = [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
-            if problems := [*_restored_field_problems(entries), *_restored_join_problems(entries)]:
+            if problems := _restored_field_problems(entries):
                 raise _InvalidRestore(problems)
             return undone
     except IntegrityError:
@@ -383,43 +381,6 @@ def _restored_field_problems(entries: list[dict[str, Any]]) -> list[dict[str, An
             }
             for diagnostic in saved_field_diagnostics(field)
         )
-    return problems
-
-
-def _restored_join_problems(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Joins this undo brought back must still name members that exist.
-
-    A join cascaded away with its dataset escapes the commit gate's reference
-    check, so the members it names may have been removed since.
-    """
-    restored: set[str] = set()
-    for entry in entries:
-        before = entry.get("before")
-        if before is None or entry.get("after") is not None:
-            continue
-        if entry["object_type"] == RELATIONSHIP:
-            restored.add(entry["object_uuid"])
-        elif entry["object_type"] == DATASET:
-            restored.update(rel["id"] for rel in before.get("relationships") or [])
-    problems = []
-    for relationship in SemanticRelationship.objects.filter(id__in=restored):
-        expression = normalize_member_references(relationship.join_expression or "")
-        for dataset_name, field_name in _QUALIFIED_MEMBER_RE.findall(expression):
-            exists = SemanticField.objects.filter(
-                dataset__workspace_id=relationship.workspace_id,
-                dataset__name=dataset_name,
-                name=field_name,
-            ).exists()
-            if not exists:
-                problems.append(
-                    {
-                        "object": f"relationship/{relationship.name}",
-                        "object_uuid": str(relationship.id),
-                        "message": f"It joins on {dataset_name}.{field_name}, which no longer "
-                        "exists.",
-                    }
-                )
-                break
     return problems
 
 
