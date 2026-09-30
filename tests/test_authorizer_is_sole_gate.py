@@ -17,11 +17,13 @@ inline ``# authz-exempt`` comment on or just above the call.
 This is a narrow lint, not proof of coverage. Not recognised: ``Q`` objects,
 ``**kwargs``, ``__in`` lookups, aliased managers, a query built up across
 statements, multi-hop traversals (``workspace__memberships__user``) and an owning
-row pinned by anything but ``id``/``pk``. An owning ``id`` that appears only in
-``.exclude()`` pins nothing ("the user's other workspaces" is a listing). Filtering
-by user alone (listing a user's workspaces) or by workspace alone (listing
-members) is not an access decision and is not flagged. ``.memberships`` is also the related name of
-``Tenant`` and ``TenantConnection`` memberships; a user-filtered read of those
+row pinned by anything but ``id``/``pk``. On a reverse traversal, an owning ``id``
+that appears only in ``.exclude()`` pins nothing ("the user's other workspaces" is
+a listing); on a membership manager ``.exclude()`` keywords still count, so
+``workspace.memberships.exclude(user=u)`` needs an exemption. Filtering by user
+alone (listing a user's workspaces) or by workspace alone (listing members) is not
+an access decision and is not flagged. ``.memberships`` is also the related name
+of ``Tenant`` and ``TenantConnection`` memberships; a user-filtered read of those
 is flagged too and needs an exemption saying so.
 """
 
@@ -143,12 +145,7 @@ def _production_files():
 # Known bypasses left in place deliberately, keyed by file and the flagged line's
 # text so an unrelated edit moving them does not matter. Each needs a follow-up, and
 # an entry must go once its line does (the test fails on an unmatched entry).
-KNOWN_BYPASSES = {
-    # Membership-and-role checks with no coverage; the whole Transformations HTTP
-    # API is being removed rather than fixed (#760), so they are not rerouted here.
-    ("apps/transformations/views.py", "has_write = user.workspace_memberships.filter("),
-    ("apps/transformations/views.py", "workspace = Workspace.objects.filter("),
-}
+KNOWN_BYPASSES: set[tuple[str, str]] = set()
 
 
 def test_workspace_access_resolved_only_in_authorizer():
