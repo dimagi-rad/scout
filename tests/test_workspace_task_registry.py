@@ -39,7 +39,9 @@ EXPECTED_SIGNATURES = {
         "(context, schema_id: str, membership_id: str, actor_user_id: str = '', "
         "workspace_id: str = '') -> dict"
     ),
-    "resume_thread_after_materialization": "(context, thread_job_id: str) -> dict",
+    "resume_thread_after_materialization": (
+        "(context, thread_job_id: str, busy_attempt: int = 0) -> dict"
+    ),
     "sweep_workspace_load_candidates": "(timestamp: int = 0) -> dict",
     "teardown_schema": "(schema_id: str, attempt: int = 0) -> None",
     "teardown_view_schema_task": "(view_schema_id: str) -> None",

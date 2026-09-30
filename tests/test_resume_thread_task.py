@@ -23,9 +23,13 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.failure_guidance import credential_guidance
-from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD
+from apps.workspaces.services.reconciliation import (
+    STALE_JOB_THRESHOLD,
+    SYNTHETIC_MESSAGE_TIMEOUT_SECONDS,
+)
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
+    RESUME_SETUP_BUDGET_SECONDS,
     RESUME_TIMEOUT_MESSAGE,
     TENANT_NOT_RUN,
     _aggregate_materialization_state,
@@ -1857,3 +1861,14 @@ def test_resume_timeout_leaves_room_for_thinking_but_beats_the_stale_reconcile()
     flip a healthy, still-running resume to FAILED."""
     assert dj_settings.AGENT_RESUME_TIMEOUT_S >= 300
     assert STALE_JOB_THRESHOLD.total_seconds() > dj_settings.AGENT_RESUME_TIMEOUT_S
+
+
+def test_the_whole_resume_deadline_beats_the_stale_reconcile():
+    """The resume's outer deadline plus its bounded failure write is how long a
+    resume can legitimately stay RUNNING; the sweep must not fail it sooner."""
+    longest_resume = (
+        dj_settings.AGENT_RESUME_TIMEOUT_S
+        + RESUME_SETUP_BUDGET_SECONDS
+        + SYNTHETIC_MESSAGE_TIMEOUT_SECONDS
+    )
+    assert STALE_JOB_THRESHOLD.total_seconds() > longest_resume

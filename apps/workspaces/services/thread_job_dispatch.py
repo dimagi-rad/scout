@@ -32,10 +32,9 @@ from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-# The resume can't tell a live turn is still streaming on the same thread, and a
-# load refused in preflight settles in about a second. The delay usually lets
-# the chat's one-sentence acknowledgement finish first; it narrows the race
-# rather than closing it (a slow or tool-calling turn can still overlap).
+# A load refused in preflight settles in about a second. The resume waits out a
+# still-streaming turn via the thread's turn lease (apps/chat/turn_lease.py);
+# this delay just spares it the retry backoff in the common case.
 CHAT_LOAD_START_DELAY_SECONDS = 30
 
 # A rebuild refused at the connection limit doesn't spend the member's retry, but a

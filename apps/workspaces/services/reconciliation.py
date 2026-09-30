@@ -8,6 +8,7 @@ Nothing here may import ``apps.workspaces.tasks``: the resume task is reached by
 its registered name instead (see ``tests/test_workspace_task_registry.py``).
 """
 
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -21,6 +22,7 @@ from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.models import ThreadJob
+from apps.chat.turn_lease import atry_acquire_turn_lease
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -116,6 +118,32 @@ _PROCRASTINATE_FAILED_STATUSES = frozenset({"failed", "aborted", "cancelled"})
 _PROCRASTINATE_SUCCEEDED_STATUS = "succeeded"
 
 
+async def _resume_in_flight(thread_job_id) -> bool:
+    """True when a live resume of this ThreadJob is queued or running.
+
+    A resume whose worker died stays ``doing`` forever, so stalled jobs don't
+    count. When the lookup fails this answers False: a duplicate resume is
+    harmless (the claim CAS and queueing lock absorb it), a stuck spinner is not.
+    """
+    try:
+        job_ids = {
+            job_id
+            async for job_id in ProcrastinateJob.objects.filter(
+                task_name=RESUME_TASK_NAME,
+                args__thread_job_id=str(thread_job_id),
+                status__in=list(_PROCRASTINATE_INFLIGHT_STATUSES),
+            ).values_list("id", flat=True)
+        }
+    except Exception:
+        logger.warning(
+            "Could not check for a queued resume of %s; reconciling as if none",
+            thread_job_id,
+            exc_info=True,
+        )
+        return False
+    return bool(job_ids and job_ids - await _stalled_procrastinate_job_ids())
+
+
 async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
     """Reconcile one stale active ThreadJob against its procrastinate job.
 
@@ -202,7 +230,11 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         )
         return None
     # PENDING job whose materialization SUCCEEDED but was never claimed — safe to
-    # defer a fresh resume; the resume task flips the state.
+    # defer a fresh resume; the resume task flips the state. A resume already
+    # queued or running (e.g. backing off a busy thread) covers it; another would
+    # restart the backoff count and churn the queue on every poll.
+    if await _resume_in_flight(tj.id):
+        return None
     try:
         await app.configure_task(RESUME_TASK_NAME).defer_async(thread_job_id=str(tj.id))
     except Exception:
@@ -571,7 +603,13 @@ async def build_agent_for_resume(workspace, user, conversation_id=None):
     )
 
 
-async def persist_synthetic_failure_message(thread_job, text: str) -> None:
+# Bounds how long the synthetic write keeps the thread from the user's chat.
+SYNTHETIC_MESSAGE_TIMEOUT_SECONDS = 120
+
+
+async def persist_synthetic_failure_message(
+    thread_job, text: str, *, holds_turn_lease: bool = False
+) -> None:
     """Append a plain-text AIMessage to the LangGraph checkpointer for
     ``thread_job.thread`` so the chat UI shows a user-visible explanation when
     the agent never produced one.
@@ -584,22 +622,38 @@ async def persist_synthetic_failure_message(thread_job, text: str) -> None:
 
     Failures here are logged but never re-raised — the caller has already
     decided this is a terminal failure and a synthetic message is a UX nicety,
-    not a correctness invariant.
+    not a correctness invariant. For the same reason it is skipped, not
+    waited for, while another run holds the thread's turn lease: the ThreadJob's
+    error card still reports the failure.
     """
     try:
-        agent = await build_agent_for_resume(
-            thread_job.thread.workspace,
-            thread_job.thread.user,
-            conversation_id=str(thread_job.thread.id),
-        )
-        config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
-        await agent.aupdate_state(
-            config,
-            {"messages": [AIMessage(content=text)]},
-        )
+        if holds_turn_lease:
+            async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
+                await _append_synthetic_message(thread_job, text)
+            return
+        lease = await atry_acquire_turn_lease(thread_job.thread_id)
+        if lease is None:
+            logger.info(
+                "resume: thread %s busy; skipped synthetic failure message for tj=%s",
+                thread_job.thread_id,
+                thread_job.id,
+            )
+            return
+        async with lease.held(), asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
+            await _append_synthetic_message(thread_job, text)
     except Exception:
         logger.warning(
             "resume: failed to persist synthetic failure message for tj=%s",
             thread_job.id,
             exc_info=True,
         )
+
+
+async def _append_synthetic_message(thread_job, text: str) -> None:
+    agent = await build_agent_for_resume(
+        thread_job.thread.workspace,
+        thread_job.thread.user,
+        conversation_id=str(thread_job.thread.id),
+    )
+    config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
+    await agent.aupdate_state(config, {"messages": [AIMessage(content=text)]})

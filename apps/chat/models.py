@@ -23,6 +23,9 @@ class Thread(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_viewed_at = models.DateTimeField(null=True, blank=True)
+    # The agent run currently writing this thread's checkpoint; see apps/chat/turn_lease.py.
+    turn_lease_token = models.UUIDField(null=True, blank=True)
+    turn_lease_expires_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [
