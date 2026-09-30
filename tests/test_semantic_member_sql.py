@@ -117,7 +117,7 @@ def test_free_text_reaches_cube_yaml_as_literal_text(model):
     content = cube_schema_yaml(generate_cube_schema(model))
 
     # Cube renders a model file as Jinja only when it sees template delimiters.
-    assert not re.search(r"\{%|%\}|\{\{|\}\}", content)
+    assert not re.search(r"\{%|%\}|\{\{|\}\}|\{#|#\}", content)
     visits_cube = next(c for c in yaml.safe_load(content)["cubes"] if c["name"] == "visits")
     escaped = embed_cube_sql(_TEMPLATE_TEXT)
     assert not any(char in escaped for char in "{}$`")
@@ -128,3 +128,9 @@ def test_free_text_reaches_cube_yaml_as_literal_text(model):
     amount = next(d for d in visits_cube["dimensions"] if d["name"] == "amount")
     assert amount["description"] == escaped
     assert amount["sql"] == '{CUBE}."amount"'
+
+
+@pytest.mark.parametrize("sql", ["{{ x }}", "{% x %}", "{# x #}"])
+def test_cube_yaml_refuses_template_delimiters(sql):
+    with pytest.raises(ValueError, match="template delimiters"):
+        cube_schema_yaml({"cubes": [{"name": "visits", "sql": sql}]})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from enum import StrEnum
 from typing import Any
 
@@ -37,6 +38,7 @@ class DroppedJoin(StrEnum):
 
 
 DROPPED_JOIN_CODES = frozenset(DroppedJoin)
+_JINJA_DELIMITERS = re.compile(r"\{%|%\}|\{\{|\}\}|\{#|#\}")
 
 
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
@@ -217,11 +219,15 @@ def cube_member_references(references: set[str], dataset) -> set[str]:
 
 def cube_schema_yaml(schema: dict[str, Any]) -> str:
     """Serialize a generated schema's cubes; model info and diagnostics stay out of Cube."""
-    return yaml.safe_dump(
+    content = yaml.safe_dump(
         {"cubes": _literal_text_properties(schema["cubes"])},
         sort_keys=False,
         allow_unicode=False,
     )
+    # Cube renders any model file containing these as a Jinja template.
+    if _JINJA_DELIMITERS.search(content):
+        raise ValueError("Generated Cube schema contains template delimiters.")
+    return content
 
 
 def _literal_text_properties(value: Any, key: str = "") -> Any:
