@@ -730,3 +730,49 @@ async def test_a_confirmation_counts_a_few_turns_later_but_not_long_after(
 
     later = await _tools(workspace, user, thread, human_turn=7)["canvas_commit"].ainvoke(confirmed)
     assert later["committed"][0]["change_type"] == "delete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_renaming_a_used_field_waits_for_confirmation_and_redefining_it_is_reported(
+    workspace, user, semantic_model
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tools = _tools(workspace, user, thread)
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [_measure_op("total_amount", measure_type="sum", expression="amount")]}
+    )
+    assert (await tools["canvas_commit"].ainvoke({}))["committed"]
+    await Artifact.objects.acreate(
+        workspace=workspace,
+        title="Totals",
+        code="",
+        conversation_id=str(thread.id),
+        semantic_queries=[{"measures": ["raw_visits.total_amount"]}],
+    )
+    field = "field/raw_visits.total_amount"
+
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [{"op": "set", "target": f"{field}/measure_type", "value": "max"}]}
+    )
+    redefined = await tools["canvas_commit"].ainvoke({})
+
+    assert redefined["committed"]
+    assert redefined["redefined_fields_used_by_artifacts"] == [
+        {"object": field, "used_by_artifacts": ["Totals"], "change": "redefine"}
+    ]
+
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [{"op": "set", "target": f"{field}/name", "value": "amount_total"}]}
+    )
+    asked = await tools["canvas_commit"].ainvoke({})
+
+    assert asked["confirmation_required"][0]["change"] == "rename"
+    assert asked["blocking_diagnostics"][0]["message"].startswith(f"Renaming {field}")
+    assert await SemanticField.objects.filter(name="total_amount").aexists()
+
+    confirmed = await _tools(workspace, user, thread, human_turn=2)["canvas_commit"].ainvoke(
+        {"confirmed_deletions": [field]}
+    )
+    assert confirmed["committed"]
+    assert await SemanticField.objects.filter(name="amount_total").aexists()

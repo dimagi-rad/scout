@@ -33,6 +33,7 @@ from apps.semantic.canvas import (
     resolve_thread_canvas,
     undo_revision,
 )
+from apps.semantic.canvas.objects import FIELD_CURATION_KEYS
 from apps.semantic.models import (
     SemanticCanvasChange,
     SemanticDataset,
@@ -66,35 +67,50 @@ def can_write_canvas(workspace, user) -> bool:
 
 
 def destructive_deletions(canvas) -> list[dict[str, Any]]:
-    """Pending deletes the agent may not commit on its own authority.
+    """Pending deletes and renames the agent may not commit on its own authority.
 
     Other agent changes are saved without asking because each one is an
-    undoable revision (#714); deleting a whole dataset, or a field a saved
-    artifact queries, breaks things people rely on, so the user must confirm.
+    undoable revision (#714); deleting a whole dataset, or deleting or renaming
+    a field a saved artifact queries, breaks things people rely on, so the user
+    must confirm.
     """
-    deletes = list(
-        canvas.changes.filter(
-            change_type=SemanticCanvasChange.ChangeType.DELETE,
-            object_type__in=[
-                SemanticCanvasChange.ObjectType.DATASET,
-                SemanticCanvasChange.ObjectType.FIELD,
-            ],
-        )
+    return [item for item in _pending_impact(canvas) if item.get("change") != "redefine"]
+
+
+def _pending_impact(canvas) -> list[dict[str, Any]]:
+    """Destructive changes, plus ``redefine`` entries for used fields whose meaning changes."""
+    changes = canvas.changes.filter(
+        object_type__in=[
+            SemanticCanvasChange.ObjectType.DATASET,
+            SemanticCanvasChange.ObjectType.FIELD,
+        ],
+        change_type__in=[
+            SemanticCanvasChange.ChangeType.DELETE,
+            SemanticCanvasChange.ChangeType.UPDATE,
+        ],
     )
     targets = []
-    for change in deletes:
+    for change in changes:
+        is_delete = change.change_type == SemanticCanvasChange.ChangeType.DELETE
         if change.object_type == SemanticCanvasChange.ObjectType.DATASET:
             dataset = SemanticDataset.objects.filter(id=change.object_uuid).first()
-            if dataset is not None:
-                targets.append((dataset.name, None))
-        else:
-            field = (
-                SemanticField.objects.filter(id=change.object_uuid)
-                .select_related("dataset")
-                .first()
-            )
-            if field is not None:
-                targets.append((field.dataset.name, field.name))
+            if is_delete and dataset is not None:
+                targets.append((dataset.name, None, "delete"))
+            continue
+        edited = set(change.fields or {})
+        if not is_delete and not edited - FIELD_CURATION_KEYS:
+            continue
+        field = (
+            SemanticField.objects.filter(id=change.object_uuid).select_related("dataset").first()
+        )
+        if field is None:
+            continue
+        if is_delete:
+            targets.append((field.dataset.name, field.name, "delete"))
+        elif "name" in edited and change.fields["name"] != field.name:
+            targets.append((field.dataset.name, field.name, "rename"))
+        elif edited - FIELD_CURATION_KEYS - {"name"}:
+            targets.append((field.dataset.name, field.name, "redefine"))
     return _deletions_needing_confirmation(canvas.workspace, targets)
 
 
@@ -107,19 +123,20 @@ def undo_deletions(workspace, revision_id) -> list[dict[str, Any]]:
         if entry.get("before") is not None or not after:
             continue
         if entry["object_type"] == "dataset":
-            targets.append((after["name"], None))
+            targets.append((after["name"], None, "delete"))
         elif entry["object_type"] == "field":
-            targets.append((after["dataset_name"], after["name"]))
+            targets.append((after["dataset_name"], after["name"], "delete"))
     return _deletions_needing_confirmation(workspace, targets)
 
 
 def _deletions_needing_confirmation(workspace, targets) -> list[dict[str, Any]]:
-    """``targets`` are ``(dataset, field-or-None)``; any dataset qualifies, a field only when used."""
+    """``targets`` are ``(dataset, field-or-None, change)``; any dataset qualifies, a field
+    only when used. Changes other than ``delete`` are named in a ``change`` key."""
     if not targets:
         return []
     artifacts = _artifact_member_texts(workspace)
     deletions = []
-    for dataset_name, field_name in targets:
+    for dataset_name, field_name, change in targets:
         if field_name is None:
             label = f"dataset/{dataset_name}"
             member = re.compile(rf"(?<![\w.]){re.escape(dataset_name)}\.\w")
@@ -130,7 +147,10 @@ def _deletions_needing_confirmation(workspace, targets) -> list[dict[str, Any]]:
             )
         used_by = list(dict.fromkeys(title for title, text in artifacts if member.search(text)))
         if field_name is None or used_by:
-            deletions.append({"object": label, "used_by_artifacts": used_by[:10]})
+            item = {"object": label, "used_by_artifacts": used_by[:10]}
+            if change != "delete":
+                item["change"] = change
+            deletions.append(item)
     return deletions
 
 
@@ -173,6 +193,7 @@ def _confirmation_required(deletions: list[dict[str, Any]], *, retry: str) -> di
     for deletion in deletions:
         used_by = deletion["used_by_artifacts"]
         usage = f" It is used by: {', '.join(used_by)}." if used_by else ""
+        verb = "Renaming" if deletion.get("change") == "rename" else "Deleting"
         diagnostics.append(
             {
                 "severity": "error",
@@ -181,7 +202,7 @@ def _confirmation_required(deletions: list[dict[str, Any]], *, retry: str) -> di
                 "object_uuid": "",
                 "path": "",
                 "message": (
-                    f"Deleting {deletion['object']} needs the user's explicit confirmation."
+                    f"{verb} {deletion['object']} needs the user's explicit confirmation."
                     f"{usage} Nothing was saved. Report this so the user is asked, and end "
                     "the turn: a confirmation counts only if it comes in a later user message, "
                     f"then {retry} again with this object in confirmed_deletions."
@@ -380,7 +401,8 @@ def create_canvas_tools(
                 canvas = _resolve_canvas_sync(workspace, user, conversation_id)
             except SemanticCatalogUnavailable as exc:
                 return {"errors": [{"op_index": 0, "code": "UNAVAILABLE", "message": str(exc)}]}
-            deletions = destructive_deletions(canvas)
+            impact = _pending_impact(canvas)
+            deletions = [item for item in impact if item.get("change") != "redefine"]
             refusal = _gate_deletions(
                 canvas, deletions, confirmed_deletions, human_turn, retry="commit"
             )
@@ -389,6 +411,8 @@ def create_canvas_tools(
             report = commit_canvas(canvas, user)
             if "revision" in report:
                 _clear_confirmations(canvas, deletions)
+                if redefined := [item for item in impact if item.get("change") == "redefine"]:
+                    report["redefined_fields_used_by_artifacts"] = redefined
             return report
 
         return await sync_to_async(_commit, thread_sensitive=True)()

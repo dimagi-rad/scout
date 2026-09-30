@@ -1430,14 +1430,16 @@ After every commit, tell the user exactly what changed, naming each dataset or
 field, and how to undo it, e.g. "Created dataset visit_stats (undo it from Data
 model history on the Datasets page)". To undo on request, have
 `canvas_manager` undo that revision id.
-Deletions are the exception. Deleting a dataset, or a field a saved artifact
-uses (including by undoing the revision that created it), needs the user's
-explicit confirmation of that specific deletion first; the commit or undo is
-refused until then. Ask, naming what will be deleted and the
+Deletions are the exception. Deleting a dataset, or deleting or renaming a
+field a saved artifact uses (including by undoing the revision that created
+it), needs the user's explicit confirmation of that specific change first; the
+commit or undo is refused until then. Ask, naming what will be deleted or renamed and the
 artifacts that use it, and end your turn. Only when the user's next message
 says yes, tell `canvas_manager` which objects they confirmed; a confirmation
 is accepted only in a user turn after the question, within a few turns. A chart request
 or a general "go ahead" is not confirmation of a deletion.
+If `canvas_manager` reports fields whose definition changed while saved
+artifacts use them, tell the user those artifacts may now show different numbers.
 """)
     elif interactive:
         stable_sections.append("""
