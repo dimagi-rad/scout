@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { BASE_PATH } from "@/config"
 import { oauthConnectUrl, type OAuthProvider } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
@@ -30,6 +30,11 @@ export function OnboardingWizard() {
   const [step, setStep] = useState<Step>("choose")
   const [server, setServer] = useState("")
   const [serverOptions, setServerOptions] = useState<ServerOption[]>([])
+  const [serverOptionsState, setServerOptionsState] = useState<
+    "idle" | "loading" | "loaded" | "failed"
+  >("idle")
+  const [serverAttempt, setServerAttempt] = useState(0)
+  const serverOptionsLoaded = useRef(false)
   const [domain, setDomain] = useState("")
   const [username, setUsername] = useState("")
   const [apiKey, setApiKey] = useState("")
@@ -69,17 +74,32 @@ export function OnboardingWizard() {
   }, [loadProviders])
 
   // The server list comes from the API-key schema so it cannot drift from the backend.
-  // Without it the key is checked against the default (www) server, as before.
+  const loadServerOptions = useCallback(async (isCurrent: () => boolean) => {
+    setServerOptionsState("loading")
+    try {
+      const schemas = await api.get<ApiKeyProviderSchema[]>("/api/auth/api-key-providers/")
+      if (!isCurrent()) return
+      const commcare = schemas.find((s) => s.id === "commcare")
+      setServerOptions(commcare?.fields.find((f) => f.key === "server")?.options ?? [])
+      setServerOptionsState("loaded")
+      serverOptionsLoaded.current = true
+    } catch (err) {
+      if (!isCurrent()) return
+      console.error("Failed to load CommCare HQ servers", err)
+      setServerOptionsState("failed")
+    }
+  }, [])
+
+  // Fetched once per wizard; a failure is shown with a retry rather than silently
+  // leaving the key to be checked on www.
   useEffect(() => {
-    if (step !== "api-key") return
-    api
-      .get<ApiKeyProviderSchema[]>("/api/auth/api-key-providers/")
-      .then((schemas) => {
-        const commcare = schemas.find((s) => s.id === "commcare")
-        setServerOptions(commcare?.fields.find((f) => f.key === "server")?.options ?? [])
-      })
-      .catch(() => setServerOptions([]))
-  }, [step])
+    if (step !== "api-key" || serverOptionsLoaded.current) return
+    let current = true
+    void loadServerOptions(() => current)
+    return () => {
+      current = false
+    }
+  }, [step, serverAttempt, loadServerOptions])
 
   async function handleApiKeySubmit(e: FormEvent) {
     e.preventDefault()
@@ -117,6 +137,22 @@ export function OnboardingWizard() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleApiKeySubmit} className="space-y-4">
+              {serverOptionsState === "failed" && (
+                <div className="space-y-1" data-testid="onboarding-server-error">
+                  <p className="text-sm text-destructive">
+                    Couldn&apos;t load the CommCare HQ servers, so the key will be checked on
+                    Global (www.commcarehq.org).
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setServerAttempt((n) => n + 1)}
+                  >
+                    Try again
+                  </Button>
+                </div>
+              )}
               {serverOptions.length > 1 && (
                 <div className="space-y-2">
                   <Label htmlFor="server">CommCare HQ server</Label>

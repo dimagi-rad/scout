@@ -13,6 +13,7 @@ from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.catalog import ensure_semantic_model
@@ -47,6 +48,14 @@ VALIDATOR_SLOT_POLL_SECONDS = 1.0
 
 class CubeSchemaBuildError(RuntimeError):
     """Raised when generated Cube schema content cannot be promoted."""
+
+    code = ErrorCode.SCHEMA_BUILD_FAILED
+
+
+class NoActiveCubeSchema(ExpectedStateError, CubeSchemaBuildError):
+    """The workspace has no ACTIVE Cube schema, so the semantic layer cannot answer."""
+
+    code = ErrorCode.SEMANTIC_MODEL_UNAVAILABLE
 
 
 class CubeValidatorUnavailableError(CubeSchemaBuildError, ExpectedStateError):
@@ -134,7 +143,7 @@ def get_active_cube_schema(workspace, *, model: SemanticModel) -> CubeSchema:
         .first()
     )
     if active is None:
-        raise CubeSchemaBuildError("No active Cube schema is available. Refresh workspace data.")
+        raise NoActiveCubeSchema("No active Cube schema is available.")
     return active
 
 

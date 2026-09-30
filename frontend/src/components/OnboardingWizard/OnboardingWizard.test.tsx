@@ -129,6 +129,37 @@ describe("OnboardingWizard", () => {
     )
   })
 
+  it("says when the server list failed to load and retries", async () => {
+    let schemaCalls = 0
+    vi.mocked(api.get).mockImplementation((path) => {
+      if (path !== "/api/auth/api-key-providers/") return Promise.resolve(providers(null))
+      schemaCalls += 1
+      if (schemaCalls === 1) return Promise.reject(new Error("503"))
+      return Promise.resolve([
+        {
+          id: "commcare",
+          fields: [
+            {
+              key: "server",
+              options: [
+                { value: "", label: "Global (www.commcarehq.org)" },
+                { value: "eu", label: "EU (eu.commcarehq.org)" },
+              ],
+            },
+          ],
+        },
+      ])
+    })
+    render(<OnboardingWizard />)
+
+    fireEvent.click(await screen.findByTestId("onboarding-api-key-option"))
+    const failure = await screen.findByTestId("onboarding-server-error")
+    fireEvent.click(failure.querySelector("button")!)
+
+    expect(await screen.findByTestId("onboarding-server")).toBeTruthy()
+    expect(screen.queryByTestId("onboarding-server-error")).toBeNull()
+  })
+
   it("says when sign-in options failed to load and retries", async () => {
     vi.mocked(api.get).mockRejectedValueOnce(new Error("503"))
     vi.mocked(api.get).mockResolvedValueOnce(providers(null))

@@ -84,7 +84,8 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.authorized == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Longest executed review in ~300 runs: 31 minutes (OCR 20 + Claude 11).
+    timeout-minutes: 45
     env:
       # The npm launcher otherwise replaces its pinned install in the background.
       OCR_NO_UPDATE: "1"
@@ -136,10 +137,15 @@ jobs:
           # groups always run however many tokens they burn; only later groups
           # can be skipped. Size PRs by file groups, not lines: see
           # docs/development/automated-code-review.md ("How the token budget works").
-          review_concurrency: '2'
+          review_concurrency: '4'
           review_task_timeout: '15'
           max_tokens_budget: ${{ steps.baseline.outputs.token_budget }}
-          effort: medium
+          # Snapshotted from the trusted workflow revision by prepareReview. OCR's
+          # default test excludes miss Scout's test_*.py naming; Claude still reviews tests.
+          rule: ${{ runner.temp }}/scout-ocr-policy/ocr-rule.json
+          # low = one review round per file group. medium re-ran the whole agent loop
+          # for every group with findings, about a quarter of all OCR tokens.
+          effort: low
           stream_progress: 'true'
           sticky_summary: 'true'
           incremental: 'true'

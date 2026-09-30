@@ -61,8 +61,11 @@ def _user_response(user, *, onboarding_complete=False):
     }
 
 
-async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
+async def _atry_onboarding_resolve_provider(user, provider, resolve_fn, provider_name):
     """Best-effort lazy OAuth onboarding resolution for a provider.
+
+    Only ``me_view`` calls it, and only before onboarding completes; it is not
+    a way to revalidate access for an onboarded user.
 
     Returns ``True`` only when the resolver actually persisted at least one
     membership. A bare "token exists and the resolver didn't raise" is NOT
@@ -110,6 +113,12 @@ def csrf_view(request):
 async def me_view(request):
     """Return current user info or 401.
 
+    Also a lazy *onboarding* hook, not a revalidation path: while the user has no
+    connection-backed membership, it resolves their provider tenants inline so
+    onboarding can finish. Once onboarded it never calls a provider, so it does
+    not refresh or re-check upstream access; that is the freshness gate's job
+    (``UPSTREAM_ACCESS_FRESHNESS_ENFORCED``).
+
     ``onboarding_complete`` is always the *persisted* membership state, never a
     transient "the resolver ran" signal (arch #254, 07#4). The whole
     computation — including the expensive provider re-resolution — is cached for
@@ -125,15 +134,17 @@ async def me_view(request):
 
     onboarding_complete = await _aonboarding_complete(user)
 
-    # If the user just completed OAuth but tenant resolution hasn't run yet,
-    # resolve now so onboarding can complete. Providers are tried independently —
+    # Onboarding only: if the user just completed OAuth but tenant resolution
+    # hasn't run yet, resolve now so onboarding can complete. Providers are tried independently —
     # a successful CommCare resolution must not skip Connect.
     if not onboarding_complete:
-        await _atry_resolve_provider(user, "commcare", resolve_commcare_domains, "CommCare")
-        await _atry_resolve_provider(
+        await _atry_onboarding_resolve_provider(
+            user, "commcare", resolve_commcare_domains, "CommCare"
+        )
+        await _atry_onboarding_resolve_provider(
             user, "commcare_connect", resolve_connect_opportunities, "Connect"
         )
-        await _atry_resolve_provider(user, "ocs", resolve_ocs_chatbots, "OCS")
+        await _atry_onboarding_resolve_provider(user, "ocs", resolve_ocs_chatbots, "OCS")
         # Authoritative flag = persisted state after the resolution attempt. This
         # is True only if a provider actually created a connection-backed
         # membership, so the flag can't flap True for a token-but-no-tenant user.

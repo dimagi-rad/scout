@@ -1787,7 +1787,7 @@ async def test_view_build_with_no_served_source_is_not_logged_as_an_error(
         )
 
     assert result["view_schema"]["ok"] is False
-    assert "no active schema" in result["view_schema"]["error"]
+    assert "No active data schema" in result["view_schema"]["error"]
     view_records = [r for r in caplog.records if "view schema" in r.getMessage()]
     assert view_records
     assert all(r.levelno < logging.ERROR for r in view_records)

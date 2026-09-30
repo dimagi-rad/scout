@@ -588,7 +588,7 @@ class TestBuildViewSchemaTenantCoverage:
             patch(
                 "apps.workspaces.services.schema_manager.get_managed_db_connection"
             ) as mock_connection,
-            pytest.raises(ValueError, match="no active schema"),
+            pytest.raises(ValueError, match="No active data schema"),
         ):
             SchemaManager().build_view_schema(workspace)
 
@@ -601,7 +601,7 @@ class TestBuildViewSchemaTenantCoverage:
         )
         with (
             patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
-            pytest.raises(ValueError, match="no active schema") as raised,
+            pytest.raises(ValueError, match="No active data schema") as raised,
         ):
             SchemaManager().build_view_schema(workspace)
 
@@ -617,7 +617,7 @@ class TestBuildViewSchemaTenantCoverage:
             patch(
                 "apps.workspaces.services.schema_manager.get_managed_db_connection"
             ) as mock_connection,
-            pytest.raises(ValueError, match="no active schema"),
+            pytest.raises(ValueError, match="No active data schema"),
         ):
             mock_connection.return_value.closed = False
             SchemaManager().build_view_schema(workspace)
@@ -636,7 +636,7 @@ class TestBuildViewSchemaTenantCoverage:
         assert "DROP SCHEMA IF EXISTS" in statements[1]
         view_schema = WorkspaceViewSchema.objects.get(workspace=workspace)
         assert view_schema.state == SchemaState.FAILED
-        assert "no active schema" in view_schema.last_error
+        assert "No active data schema" in view_schema.last_error
         assert view_schema.tenant_coverage == {
             "included_tenants": [],
             "excluded_tenants": [

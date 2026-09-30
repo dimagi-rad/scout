@@ -5,6 +5,7 @@ call is counted rather than sent.
 """
 
 import asyncio
+import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -39,6 +40,8 @@ from tests.upstream_proofs import (
     grant_fresh_upstream_access,
     make_proof_stale,
 )
+
+FRESHNESS_DENIAL_EVENT = "workspace_access_denied_freshness"
 
 
 def _proof(user, tenant):
@@ -386,3 +389,30 @@ def test_covered_callers_of_exempt_paths_still_pass_freshness(
 
     assert resp.status_code == 403
     assert resp.json()["reason"] == VERIFICATION_UNAVAILABLE
+
+
+@pytest.mark.django_db(transaction=True)
+def test_freshness_denials_leave_an_operator_log_line(
+    user, workspace, tenant, upstream_provider, caplog
+):
+    caplog.set_level(logging.INFO, logger="apps.workspaces.access")
+    make_proof_stale(user, tenant)
+    upstream_provider.failure = httpx.ConnectError("provider down")
+
+    denied = resolve_workspace_access_ex(user, workspace.id)
+
+    assert denied.denied_reason == VERIFICATION_UNAVAILABLE
+    [record] = [r for r in caplog.records if r.getMessage().startswith(FRESHNESS_DENIAL_EVENT)]
+    assert record.levelno == logging.INFO
+    assert record.user_id == user.pk
+    assert record.workspace_id == str(workspace.id)
+    assert record.reason == VERIFICATION_UNAVAILABLE
+    assert user.email not in record.getMessage()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_granted_access_logs_no_freshness_denial(user, workspace, upstream_provider, caplog):
+    caplog.set_level(logging.INFO, logger="apps.workspaces.access")
+
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    assert not [r for r in caplog.records if r.getMessage().startswith(FRESHNESS_DENIAL_EVENT)]

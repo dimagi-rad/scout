@@ -76,6 +76,16 @@ interface Props {
   onSaved: () => void | Promise<void>
 }
 
+/** A select's shown default is submitted too, so the payload matches what the user saw. */
+function initialValues(schema: ProviderSchema | undefined, mode: "add" | "edit") {
+  const values: Record<string, string> = {}
+  if (mode !== "add") return values
+  for (const f of schema?.fields ?? []) {
+    if (f.type === "select" && f.options?.length) values[f.key] = f.options[0].value
+  }
+  return values
+}
+
 export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: Props) {
   const [schemas, setSchemas] = useState<ProviderSchema[]>([])
   const [providerId, setProviderId] = useState<string>("")
@@ -92,7 +102,7 @@ export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: P
         const initial =
           mode === "edit" && editing ? editing.provider : (data[0]?.id ?? "")
         setProviderId(initial)
-        setValues({})
+        setValues(initialValues(data.find((s) => s.id === initial), mode))
         setError(null)
       })
       .catch(() => setError("Failed to load provider list."))
@@ -159,7 +169,11 @@ export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: P
                       name="api-connection-provider"
                       value={s.id}
                       checked={providerId === s.id}
-                      onChange={() => setProviderId(s.id)}
+                      onChange={() => {
+                        // A key typed for one provider must not be posted to another.
+                        setProviderId(s.id)
+                        setValues(initialValues(s, mode))
+                      }}
                       data-testid={`api-connection-provider-${s.id}`}
                     />
                     <span>{s.display_name}</span>
@@ -176,7 +190,7 @@ export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: P
                 <select
                   id={`field-${f.key}`}
                   className={SELECT_CLASSES}
-                  value={values[f.key] ?? f.options?.[0]?.value ?? ""}
+                  value={values[f.key] ?? ""}
                   onChange={(e) =>
                     setValues((prev) => ({ ...prev, [f.key]: e.target.value }))
                   }

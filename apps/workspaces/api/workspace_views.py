@@ -49,14 +49,12 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
-    TenantSchema,
     Workspace,
     WorkspaceInvite,
     WorkspaceInviteStatus,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
-    WorkspaceViewSchema,
     default_invite_expiry,
 )
 from apps.workspaces.services.credential_coverage import (
@@ -71,7 +69,8 @@ from apps.workspaces.services.invite_notifications import (
     notify_role_changed,
     send_pending_invite_email,
 )
-from apps.workspaces.services.load_progress import last_synced_by_tenant, workspace_ids_in_progress
+from apps.workspaces.services.load_activity import workspace_schema_statuses
+from apps.workspaces.services.load_progress import workspace_ids_in_progress
 from apps.workspaces.services.member_coverage import (
     MembersLackTenant,
     add_tenant_covered_by_members,
@@ -81,10 +80,6 @@ from apps.workspaces.services.member_coverage import (
     requester_gaps,
 )
 from apps.workspaces.services.query_state import synced_runs
-from apps.workspaces.services.status import (
-    classify_tenant_schemas,
-    workspace_schema_status,
-)
 from apps.workspaces.services.workspace_service import (
     LastWorkspaceTenant,
     load_new_workspace,
@@ -478,43 +473,6 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
         return None
 
 
-def _schema_status_for_workspaces(workspaces):
-    """Compute schema_status for many workspaces with bulk queries (no N+1).
-
-    ``workspaces`` must have ``workspace_tenants__tenant`` prefetched. Returns a
-    dict mapping workspace id -> status string.
-    """
-    workspace_ids = [w.id for w in workspaces]
-    if not workspace_ids:
-        return {}
-
-    # All tenant ids across these workspaces.
-    tenant_ids = {wt.tenant_id for w in workspaces for wt in w.workspace_tenants.all()}
-
-    active_tenants, provisioning_tenants = classify_tenant_schemas(
-        TenantSchema.objects.filter(tenant_id__in=tenant_ids).values_list("tenant_id", "state")
-        if tenant_ids
-        else ()
-    )
-
-    # Multi-tenant workspaces' view schema states (one bulk query).
-    view_states = dict(
-        WorkspaceViewSchema.objects.filter(workspace_id__in=workspace_ids).values_list(
-            "workspace_id", "state"
-        )
-    )
-
-    statuses = {}
-    for w in workspaces:
-        statuses[w.id] = workspace_schema_status(
-            [wt.tenant_id for wt in w.workspace_tenants.all()],
-            active_tenants,
-            provisioning_tenants,
-            view_states.get(w.id),
-        )
-    return statuses
-
-
 def _workspace_delete_refusal(user, workspace, *, last_source=False) -> Response | None:
     """Why the manager ``user`` may not delete ``workspace``, or None if they may.
 
@@ -588,7 +546,7 @@ class WorkspaceListView(APIView):
             .order_by("-workspace__created_at", "-workspace_id")
         )
         memberships = list(memberships)
-        schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
+        schema_statuses = workspace_schema_statuses(m.workspace_id for m in memberships)
         loading_ids = workspace_ids_in_progress(m.workspace_id for m in memberships)
 
         # Surfaced per row (rather than filtering rows out) so the client can keep
@@ -622,7 +580,7 @@ class WorkspaceListView(APIView):
                     "has_access": bool(workspace_tenants) and not missing,
                     "missing_tenants": missing_tenants_payload(missing),
                     "member_count": m.member_count,
-                    "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),
+                    "schema_status": schema_statuses[m.workspace_id],
                     "in_progress": m.workspace_id in loading_ids,
                     "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
                     "created_at": m.workspace.created_at.isoformat(),
@@ -733,19 +691,7 @@ class WorkspaceDetailView(APIView):
         missing = missing_tenants_for_member(request.user, workspace)
 
         tenants = list(workspace.tenants.all())
-        view_schema_state = None
-        if len(tenants) > 1:
-            try:
-                view_schema_state = workspace.view_schema.state
-            except WorkspaceViewSchema.DoesNotExist:
-                view_schema_state = None
-
-        active, provisioning = classify_tenant_schemas(
-            TenantSchema.objects.filter(tenant__in=tenants).values_list("tenant_id", "state")
-        )
-        schema_status = workspace_schema_status(
-            [tenant.id for tenant in tenants], active, provisioning, view_schema_state
-        )
+        schema_status = workspace_schema_statuses([workspace.id])[workspace.id]
 
         last_run_at = (
             synced_runs()
@@ -754,18 +700,6 @@ class WorkspaceDetailView(APIView):
             .first()
         )
         last_synced_at = last_run_at.isoformat() if last_run_at else None
-        source_synced = last_synced_by_tenant(t.id for t in tenants)
-        sources = [
-            {
-                "tenant_id": str(t.id),
-                "tenant_name": t.canonical_name,
-                "provider": t.provider,
-                "last_synced_at": (
-                    source_synced[t.id].isoformat() if t.id in source_synced else None
-                ),
-            }
-            for t in tenants
-        ]
 
         return Response(
             {
@@ -779,7 +713,6 @@ class WorkspaceDetailView(APIView):
                 "missing_tenants": missing_tenants_payload(missing),
                 "schema_status": schema_status,
                 "in_progress": bool(workspace_ids_in_progress([workspace.id])),
-                "sources": sources,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
                 "created_at": workspace.created_at.isoformat(),

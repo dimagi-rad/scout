@@ -31,6 +31,17 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "NOT_FOUND"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     SCHEMA_BUILD_FAILED = "SCHEMA_BUILD_FAILED"
+    # A shared connection limit (Postgres, the checkpointer pool, Cube) is full.
+    # Scout is healthy, just busy: the request is safe to retry shortly.
+    CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
+
+    # One code per axis for "nothing active to query" (#251). Physical: no
+    # ACTIVE tenant schema or view schema serves the data, so a load is the
+    # remedy. Semantic: the data may serve, but no ACTIVE semantic model or Cube
+    # schema describes it, so a rebuild is. Neither is a malformed request, so
+    # neither may be reported as VALIDATION_ERROR.
+    DATA_NOT_LOADED = "DATA_NOT_LOADED"
+    SEMANTIC_MODEL_UNAVAILABLE = "SEMANTIC_MODEL_UNAVAILABLE"
 
     # No materialization pipeline could be resolved for a tenant's provider.
     # Distinct from SCHEMA_BUILD_FAILED: the schema may be perfectly healthy —

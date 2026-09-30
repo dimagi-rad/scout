@@ -106,7 +106,7 @@ async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace, t
     assert not [r for r in task_records if r.levelno >= logging.ERROR]
     vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
     assert vs.state == SchemaState.FAILED
-    assert "has no active schema for any tenant" in vs.last_error
+    assert "No active data schema for any tenant" in vs.last_error
     assert "error" in result
     assert result["tenant_coverage"] == {
         "included_tenants": [],

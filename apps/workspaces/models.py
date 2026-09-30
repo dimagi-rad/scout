@@ -268,11 +268,6 @@ class Workspace(models.Model):
         return self.name
 
     @property
-    def tenant(self):
-        """Single-tenant compatibility: returns the first associated tenant."""
-        return self.tenants.first()
-
-    @property
     def display_name(self) -> str:
         """Human-facing label; also the source of the URL slug (``workspacePath``)."""
         return self.display_name_for(list(self.tenants.all()))
@@ -290,18 +285,6 @@ class Workspace(models.Model):
         if len(tenants) == 1:
             return tenants[0].format_display_name(self.name)
         return f"{self.name} \u00b7 {len(tenants)} sources"
-
-    @property
-    def external_tenant_id(self):
-        """Compatibility shim: returns the external_id of the first tenant."""
-        t = self.tenant
-        return t.external_id if t else None
-
-    @property
-    def tenant_name(self):
-        """Compatibility shim: returns the canonical_name of the first tenant."""
-        t = self.tenant
-        return t.canonical_name if t else ""
 
 
 class WorkspaceTenant(models.Model):

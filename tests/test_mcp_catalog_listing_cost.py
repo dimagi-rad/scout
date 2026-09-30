@@ -143,6 +143,4 @@ async def test_datasets_listing_names_each_workspace_without_a_queryable_model()
         str(workspaces["Draft"].id),
     ]
     assert {e["schema_status"] for e in errors} == {"unavailable"}
-    assert {e["error"] for e in errors} == {
-        "No active semantic model is available. Refresh workspace data."
-    }
+    assert {e["error"] for e in errors} == {"No active semantic model is available."}

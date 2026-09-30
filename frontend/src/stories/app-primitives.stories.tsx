@@ -51,7 +51,7 @@ const workspaces: WorkspaceListItem[] = [
     role: "read",
     tenants: [{ id: "tenant-3", tenant_name: "Open Chat Studio", provider: "ocs" }],
     member_count: 3,
-    schema_status: "unavailable",
+    schema_status: "not_loaded",
     last_synced_at: null,
     created_at: "2026-03-14T12:00:00Z",
   },

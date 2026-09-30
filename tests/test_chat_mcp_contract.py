@@ -22,7 +22,7 @@ assertion plus ``@pytest.mark.xfail(strict=False)`` so CI stays green and an xpa
 signals the moment the blocking issue is fixed.
 
 DB note: tools are exercised against the platform Django test DB only. ``list_pipelines``
-needs no DB; ``get_schema_status`` returns ``not_provisioned`` for a workspace whose
+needs no DB; ``get_schema_status`` returns ``not_loaded`` for a workspace whose
 schema was never materialized, so no managed schema/role creation is required here and
 the tests are hermetic.
 """
@@ -280,12 +280,12 @@ async def test_list_pipelines_round_trip_shape():
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_get_schema_status_round_trip_not_provisioned(db):
+async def test_get_schema_status_round_trip_not_loaded(db):
     """get_schema_status round-trips for a never-materialized workspace.
 
     Hits the platform DB for real (no mock at the ORM boundary) and returns the
     documented ``exists/state/last_materialized_at/tables`` shape with
-    ``state == "not_provisioned"``. This is the card the frontend renders; pinning
+    ``state == "not_loaded"``. This is the card the frontend renders; pinning
     the shape guards the get_metadata/status "0 tables" class (10#4, tracked
     elsewhere under #246/#251).
     """
@@ -300,9 +300,9 @@ async def test_get_schema_status_round_trip_not_provisioned(db):
     assert env["success"] is True
     data = env["data"]
     assert set(data) >= {"exists", "state", "last_materialized_at", "tables"}
-    # No tenants/schema yet => not_provisioned, empty tables (never None).
+    # No tenants/schema yet => not_loaded, empty tables (never None).
     assert data["exists"] is False
-    assert data["state"] == "not_provisioned"
+    assert data["state"] == "not_loaded"
     assert data["tables"] == []
 
 
@@ -416,9 +416,9 @@ async def test_injecting_tool_node_flows_workspace_id_to_real_server(db):
     env = parse_tool_result(tool_messages[-1].content)
 
     # If injection failed, the server would reject empty workspace_id with
-    # VALIDATION_ERROR. A successful not_provisioned envelope proves the id arrived.
+    # VALIDATION_ERROR. A successful not_loaded envelope proves the id arrived.
     assert env["success"] is True, f"workspace_id did not reach the server: {env}"
-    assert env["data"]["state"] == "not_provisioned"
+    assert env["data"]["state"] == "not_loaded"
 
 
 @pytest.mark.django_db(transaction=True)

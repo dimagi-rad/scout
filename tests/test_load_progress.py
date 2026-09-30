@@ -1,14 +1,11 @@
 """A load's progress and freshness reach every workspace member (#369, #411)."""
 
-from datetime import timedelta
-
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
-from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant, TenantMembership
@@ -255,28 +252,6 @@ def test_list_and_detail_expose_in_progress(user, workspace, tenant):
     busy = client.get("/api/workspaces/").json()
     assert next(w for w in busy if w["id"] == str(workspace.id))["in_progress"] is True
     assert client.get(f"/api/workspaces/{workspace.id}/").json()["in_progress"] is True
-
-
-@pytest.mark.django_db
-def test_detail_reports_per_source_last_synced(user, workspace, tenant):
-    schema = TenantSchema.objects.create(
-        tenant=tenant, schema_name="synced_x", state=SchemaState.ACTIVE
-    )
-    completed_at = timezone.now() - timedelta(hours=1)
-    run = MaterializationRun.objects.create(
-        tenant_schema=schema, pipeline="commcare_sync", state=RunState.COMPLETED
-    )
-    MaterializationRun.objects.filter(pk=run.pk).update(completed_at=completed_at)
-    never = Tenant.objects.create(provider="commcare", external_id="never", canonical_name="Never")
-    WorkspaceTenant.objects.create(workspace=workspace, tenant=never)
-
-    client = Client()
-    client.force_login(user)
-    sources = client.get(f"/api/workspaces/{workspace.id}/").json()["sources"]
-
-    by_id = {s["tenant_id"]: s for s in sources}
-    assert by_id[str(tenant.id)]["last_synced_at"] == completed_at.isoformat()
-    assert by_id[str(never.id)]["last_synced_at"] is None
 
 
 @pytest.mark.django_db
