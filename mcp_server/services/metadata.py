@@ -295,6 +295,12 @@ async def pipeline_describe_table(
         else {}
     )
     jsonb_annotations = _build_jsonb_annotations(table_name, tenant_metadata)
+    pipeline_column_notes = {
+        column: note
+        for source in (pipeline_config.sources if pipeline_config is not None else [])
+        if source.physical_table_name == table_name
+        for column, note in source.column_descriptions.items()
+    }
 
     columns = []
     for row in result["rows"]:
@@ -305,7 +311,8 @@ async def pipeline_describe_table(
                 "type": data_type,
                 "nullable": is_nullable == "YES",
                 "default": default,
-                "description": jsonb_annotations.get(col_name, ""),
+                "description": jsonb_annotations.get(col_name)
+                or pipeline_column_notes.get(col_name, ""),
             }
         )
 

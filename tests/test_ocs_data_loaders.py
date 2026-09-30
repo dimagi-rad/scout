@@ -11,7 +11,7 @@ import pytest
 
 from mcp_server.loaders.ocs_base import OCSAuthError, OCSExportError
 from mcp_server.loaders.ocs_experiments import OCSExperimentLoader
-from mcp_server.loaders.ocs_messages import OCSMessageLoader
+from mcp_server.loaders.ocs_messages import OCSMessageLoader, map_session_messages
 from mcp_server.loaders.ocs_participants import OCSParticipantLoader
 from mcp_server.loaders.ocs_sessions import OCSSessionLoader
 
@@ -53,7 +53,8 @@ def test_session_loader_paginates_and_filters_by_experiment():
             {
                 "id": "sess-1",
                 "experiment": "exp-1",
-                "participant": {"identifier": "p1", "platform": "web", "remote_id": "r1"},
+                "platform": "web",
+                "participant": {"identifier": "p1", "remote_id": "r1"},
                 "created_at": "2026-04-01T00:00:00Z",
                 "updated_at": "2026-04-01T01:00:00Z",
                 "tags": ["a", "b"],
@@ -156,6 +157,7 @@ def test_message_loader_flattens_messages_with_composite_pk():
                 "message_version": digest(original_messages[0]),
                 "session_id": "sess-1",
                 "message_index": 0,
+                "is_synthetic_summary": False,
                 "role": "user",
                 "content": "hi",
                 "created_at": "2026-04-01T00:00:00Z",
@@ -168,6 +170,7 @@ def test_message_loader_flattens_messages_with_composite_pk():
                 "message_version": digest(original_messages[1]),
                 "session_id": "sess-1",
                 "message_index": 1,
+                "is_synthetic_summary": False,
                 "role": "assistant",
                 "content": "hello",
                 "created_at": "2026-04-01T00:00:01Z",
@@ -451,3 +454,71 @@ def test_participant_loader_yields_first_page_count():
     with patch.object(loader._session, "get", return_value=page):
         pages = list(loader.load_pages())
     assert [total for _, total in pages] == [42]
+
+
+# OCS yields each message followed (newest-first) by its in-memory summary, then reverses,
+# so a summary precedes the message it summarises and shares that message's created_at.
+OCS_SESSION_DETAIL_MESSAGES = [
+    {
+        "created_at": "2026-04-01T00:00:00Z",
+        "role": "user",
+        "content": "hi",
+        "metadata": {},
+        "tags": [],
+        "attachments": [],
+    },
+    {
+        "created_at": "2026-04-01T00:00:05Z",
+        "role": "assistant",
+        "content": "hello",
+        "metadata": {"compression_marker": "summarize"},
+        "tags": [],
+        "attachments": [],
+    },
+    {
+        "created_at": "2026-04-01T00:10:00Z",
+        "role": "system",
+        "content": "The user greeted the bot.",
+        "metadata": {"compression_marker": "summarize"},
+        "tags": [],
+        "attachments": [],
+    },
+    {
+        "created_at": "2026-04-01T00:10:00Z",
+        "role": "user",
+        "content": "what next?",
+        "metadata": {},
+        "tags": [],
+        "attachments": [],
+    },
+    {
+        "created_at": "2026-04-01T00:11:00Z",
+        "role": "system",
+        "content": "A real, saved system message",
+        "metadata": {},
+        "tags": [],
+        "attachments": [],
+    },
+]
+
+
+def test_message_mapping_flags_only_synthetic_summaries():
+    rows = map_session_messages("sess-1", OCS_SESSION_DETAIL_MESSAGES)
+    assert [r["is_synthetic_summary"] for r in rows] == [False, False, True, False, False]
+
+
+def test_message_mapping_tolerates_non_dict_metadata():
+    rows = map_session_messages("sess-1", [{"role": "system", "content": "x", "metadata": "oops"}])
+    assert rows[0]["is_synthetic_summary"] is False
+
+
+def test_message_loader_logs_only_real_messages(caplog):
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    with (
+        patch.object(loader, "_paginate", return_value=iter([([{"id": "sess-1"}], None)])),
+        patch.object(loader, "_get_json", return_value={"messages": OCS_SESSION_DETAIL_MESSAGES}),
+        caplog.at_level(logging.INFO, logger="mcp_server.loaders.ocs_messages"),
+    ):
+        rows = loader.load()
+    assert len(rows) == 5
+    assert "Fetched 4 messages across 1 sessions" in caplog.text
