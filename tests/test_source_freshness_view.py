@@ -2,8 +2,10 @@
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import AsyncClient
 from django.utils import timezone
+from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.common.error_codes import ErrorCode
 from apps.workspaces.models import (
@@ -12,8 +14,20 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceTenant,
 )
+from apps.workspaces.tasks import materialize_workspace
 
 User = get_user_model()
+
+
+@pytest.fixture
+def queued_jobs():
+    """Real queue rows, removed afterwards: procrastinate_jobs is unmanaged, so the
+    transactional test flush would leave them behind."""
+    before = set(ProcrastinateJob.objects.values_list("id", flat=True))
+    yield
+    added = set(ProcrastinateJob.objects.values_list("id", flat=True)) - before
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM procrastinate_jobs WHERE id = ANY(%s)", [list(added)])
 
 
 async def _client(user):
@@ -99,6 +113,17 @@ async def test_reports_a_running_load(user, workspace, tenant):
         tenant_schema=schema,
         pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
+    )
+
+    assert (await _get(user, workspace)).json()["in_progress"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reports_a_load_queued_but_not_yet_started(user, workspace, queued_jobs):
+    # The banner's own Refresh defers the job with no run until a worker picks it up.
+    await materialize_workspace.defer_async(
+        workspace_id=str(workspace.id), user_id="", notify_thread=False
     )
 
     assert (await _get(user, workspace)).json()["in_progress"] is True

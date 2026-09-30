@@ -4,7 +4,7 @@ from django.conf import settings
 from django.http import JsonResponse
 
 from apps.users.decorators import async_login_required
-from apps.workspaces.models import MaterializationRun
+from apps.workspaces.services.load_activity import aworkspace_load_pending
 from apps.workspaces.services.source_freshness import aworkspace_source_freshness, provider_label
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -13,8 +13,8 @@ from apps.workspaces.workspace_resolver import aresolve_workspace
 async def source_freshness_view(request, workspace_id):
     """GET /api/workspaces/<workspace_id>/freshness/
 
-    Each source's data age and latest load outcome, whether any load is running
-    on the workspace's sources, and the age past which the chat offers a refresh.
+    Each source's data age and latest load outcome, whether a load covering the
+    workspace is queued or running, and the age past which the chat offers a refresh.
     """
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -25,10 +25,7 @@ async def source_freshness_view(request, workspace_id):
         return err
 
     sources = await aworkspace_source_freshness(workspace.id, user.id)
-    in_progress = await MaterializationRun.objects.filter(
-        state__in=MaterializationRun.ACTIVE_STATES,
-        tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
-    ).aexists()
+    in_progress = await aworkspace_load_pending(workspace.id)
     return JsonResponse(
         {
             "stale_data_banner_hours": settings.STALE_DATA_BANNER_HOURS,
