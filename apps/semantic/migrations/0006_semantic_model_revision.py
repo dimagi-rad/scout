@@ -10,7 +10,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("chat", "0010_remove_thread_sharing"),
-        ("semantic", "0004_expand_measure_types"),
+        ("semantic", "0005_cube_catalog_role"),
         ("workspaces", "0020_drop_workspace_data_dictionary_columns"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
