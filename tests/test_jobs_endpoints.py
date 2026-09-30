@@ -27,11 +27,8 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.tasks import (
-    _materialization_write_denial,
-    _resume_records,
-    reconcile_stale_thread_job,
-)
+from apps.workspaces.services.reconciliation import reconcile_stale_thread_job
+from apps.workspaces.tasks import _materialization_write_denial, _resume_records
 from tests.tenant_access import acovered_source, agrant_tenant_access, ausable_connection
 from tests.upstream_proofs import amake_proof_stale
 
@@ -1031,11 +1028,11 @@ async def test_active_jobs_flips_stale_job_whose_procrastinate_job_failed():
 
     with (
         patch(
-            "apps.workspaces.tasks._procrastinate_job_status",
+            "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="failed"),
         ),
         patch(
-            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            "apps.workspaces.services.reconciliation.persist_synthetic_failure_message",
             new=AsyncMock(return_value=None),
         ),
     ):
@@ -1064,19 +1061,19 @@ async def test_active_jobs_defers_resume_for_stale_job_whose_procrastinate_job_s
 
     with (
         patch(
-            "apps.workspaces.tasks._procrastinate_job_status",
+            "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
-        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
     ):
-        resume.defer_async = AsyncMock(return_value=None)
+        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         client = AsyncClient()
         await client.alogin(email="stalesucc@b.c", password="x")
         resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
 
     assert resp.status_code == 200
     body = resp.json()
-    resume.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+    configure_resume.return_value.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
     assert len(body["jobs"]) == 1
     assert body["jobs"][0]["state"] == "pending"
 
@@ -1105,7 +1102,7 @@ async def test_active_jobs_does_not_reconcile_fresh_jobs():
     )
 
     with patch(
-        "apps.workspaces.tasks._procrastinate_job_status",
+        "apps.workspaces.services.reconciliation._procrastinate_job_status",
         new=AsyncMock(return_value="failed"),
     ) as status_mock:
         client = AsyncClient()
@@ -1131,7 +1128,7 @@ async def test_active_jobs_throttles_reconcile_across_rapid_polls():
     _user, ws, _tj = await _make_stale_pending_job("throttle@b.c", 50009)
 
     with patch(
-        "apps.workspaces.api.jobs_views.workspace_tasks.reconcile_stale_thread_job",
+        "apps.workspaces.api.jobs_views.reconciliation.reconcile_stale_thread_job",
         new=AsyncMock(return_value=None),
     ) as reconcile_mock:
         client = AsyncClient()
@@ -1188,11 +1185,11 @@ async def test_reconcile_flips_stale_running_job_straight_to_failed():
         # Terminal procrastinate status (succeeded) — NOT todo/doing — so the
         # reconcile proceeds; tj.state==RUNNING selects the worker-crash branch.
         patch(
-            "apps.workspaces.tasks._procrastinate_job_status",
+            "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
         patch(
-            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            "apps.workspaces.services.reconciliation.persist_synthetic_failure_message",
             new=AsyncMock(return_value=None),
         ) as persist,
     ):
@@ -1237,7 +1234,7 @@ async def test_reconcile_leaves_fresh_running_resume_alone_even_when_job_termina
     await tj.arefresh_from_db()
 
     with patch(
-        "apps.workspaces.tasks._procrastinate_job_status",
+        "apps.workspaces.services.reconciliation._procrastinate_job_status",
         new=AsyncMock(return_value="succeeded"),
     ):
         action = await reconcile_stale_thread_job(tj)

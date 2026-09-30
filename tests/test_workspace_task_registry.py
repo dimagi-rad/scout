@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from apps.workspaces import tasks as workspace_tasks
+from apps.workspaces.services.reconciliation import RESUME_TASK_NAME
 from config.procrastinate import app
 
 TASK_PREFIX = f"{workspace_tasks.__name__}."
@@ -67,6 +68,10 @@ def test_registered_task_names_and_signatures_are_pinned():
     )
 
 
+def test_reconciliation_reaches_the_resume_task_by_its_registered_name():
+    assert app.tasks[RESUME_TASK_NAME] is workspace_tasks.resume_thread_after_materialization
+
+
 def test_periodic_schedules_are_pinned():
     scheduled = {
         name.removeprefix(TASK_PREFIX): periodic.cron
@@ -79,7 +84,7 @@ def test_periodic_schedules_are_pinned():
 
 # Modules that own logic on behalf of the task wrappers; a task import here would
 # recreate the queue -> service -> queue cycle the wrappers exist to avoid.
-TASK_INDEPENDENT_SERVICES = ["data_operation", "data_recovery"]
+TASK_INDEPENDENT_SERVICES = ["data_operation", "data_recovery", "reconciliation"]
 SERVICES_DIR = Path(__file__).resolve().parent.parent / "apps" / "workspaces" / "services"
 
 

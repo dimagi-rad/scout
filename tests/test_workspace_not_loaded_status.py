@@ -25,8 +25,8 @@ from apps.workspaces.services.load_activity import (
     REBUILD_VIEW_TASK_NAME,
     workspace_schema_statuses,
 )
+from apps.workspaces.services.reconciliation import _VIEW_BUILD_TASK_NAMES
 from apps.workspaces.tasks import (
-    _VIEW_BUILD_TASK_NAMES,
     materialize_workspace,
     rebuild_workspace_view_schema,
 )

@@ -32,11 +32,11 @@ from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceDataRecovery, WorkspaceRole
 from apps.workspaces.services.data_recovery import artifact_data_state
-from apps.workspaces.tasks import (
+from apps.workspaces.services.reconciliation import (
     STALE_JOB_THRESHOLD,
     reconcile_workspace_data_recovery,
-    recover_workspace_data,
 )
+from apps.workspaces.tasks import recover_workspace_data
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 
 from .models import Artifact, ArtifactSemanticQuery, ArtifactType

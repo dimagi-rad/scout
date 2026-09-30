@@ -9,7 +9,6 @@ from django.utils import timezone
 
 from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
-from apps.workspaces import tasks as workspace_tasks
 from apps.workspaces.access import (
     access_denied_body,
     aresolve_workspace_access_ex,
@@ -17,6 +16,7 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
+from apps.workspaces.services import reconciliation
 from apps.workspaces.services.failure_guidance import (
     BLOCKS_IMMEDIATE_RETRY,
     summary_failures,
@@ -153,15 +153,15 @@ async def active_jobs_view(request, workspace_id):
     reconcile_gate_key = f"jobs_reconcile_gate:{workspace.id}"
     may_reconcile = await cache.aadd(reconcile_gate_key, 1, RECONCILE_THROTTLE_SECONDS)
     if may_reconcile:
-        stale_cutoff = timezone.now() - workspace_tasks.STALE_JOB_THRESHOLD
+        stale_cutoff = timezone.now() - reconciliation.STALE_JOB_THRESHOLD
         reconciled = False
         for tj in jobs:
             # Anchor on the resume phase for RUNNING jobs so a healthy long resume
             # isn't falsely reconciled (finding 02#9).
-            if workspace_tasks._staleness_anchor(tj) >= stale_cutoff:
+            if reconciliation.staleness_anchor(tj) >= stale_cutoff:
                 continue
             try:
-                action = await workspace_tasks.reconcile_stale_thread_job(tj)
+                action = await reconciliation.reconcile_stale_thread_job(tj)
             except Exception:
                 logger.exception("active_jobs: reconcile failed for ThreadJob %s", tj.id)
                 continue

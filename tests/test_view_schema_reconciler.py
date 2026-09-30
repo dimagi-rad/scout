@@ -21,9 +21,11 @@ from apps.workspaces.services.data_operation import (
     tenant_data_lock,
     workspace_data_lock_if_free,
 )
-from apps.workspaces.tasks import (
+from apps.workspaces.services.reconciliation import (
     MATERIALIZATION_STALLED_HEARTBEAT_SECONDS,
     ORPHANED_VIEW_BUILD_ERROR,
+)
+from apps.workspaces.tasks import (
     materialize_workspace,
     rebuild_workspace_view_schema,
     reconcile_stale_materialization_runs,
