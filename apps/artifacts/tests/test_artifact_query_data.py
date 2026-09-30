@@ -8,13 +8,15 @@ import pytest
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
 from django.core.cache import cache
+from django.db import OperationalError
 from django.test import AsyncClient
 from freezegun import freeze_time
 
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.artifacts.views import _artifact_query_cache_key
-from apps.semantic.services.query_outcomes import query_readiness_error
+from apps.semantic.services.query import CAPACITY_EXHAUSTED_CATEGORY
+from apps.semantic.services.query_outcomes import query_error, query_readiness_error
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from tests.tenant_access import usable_connection
@@ -107,6 +109,40 @@ async def test_inspector_bounds_concurrent_queries(member_client, workspace, liv
     assert response.status_code == 200
     assert len(response.json()["queries"]) == 9
     assert 2 <= peak <= 4
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        query_error(
+            "CONNECTION_ERROR",
+            "Cube is at its database connection limit.",
+            category=CAPACITY_EXHAUSTED_CATEGORY,
+            retryable=True,
+        ),
+        OperationalError("FATAL:  sorry, too many clients already"),
+    ],
+    ids=["cube_pool_full", "database_full"],
+)
+async def test_a_full_connection_limit_makes_the_panel_retryable(
+    member_client, workspace, live_artifact, outcome
+):
+    if isinstance(outcome, Exception):
+        run = AsyncMock(side_effect=outcome)
+    else:
+        run = AsyncMock(return_value=outcome)
+    with (
+        patch("apps.artifacts.views.run_semantic_query", new=run),
+        patch("apps.common.capacity.sentry_sdk"),
+    ):
+        response = await member_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
+        )
+    assert response.status_code == 503
+    assert response["Retry-After"]
+    assert response.json()["error"] == "busy"
 
 
 @pytest.mark.django_db(transaction=True)

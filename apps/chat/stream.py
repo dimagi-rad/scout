@@ -35,6 +35,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from anthropic import APIStatusError, InternalServerError, RateLimitError
+from asgiref.sync import sync_to_async
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import FIXED_MESSAGE_NODES, INJECTED_TOOL_PARAMS
@@ -42,6 +43,13 @@ from apps.agents.graph.state import TRUNCATED_TOOL_CALLS_NODE
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
+)
+from apps.common.capacity import (
+    BUSY_ERROR,
+    BUSY_MESSAGE,
+    RETRY_AFTER_SECONDS,
+    classify_capacity_error,
+    report_capacity_exhausted,
 )
 
 logger = logging.getLogger(__name__)
@@ -542,7 +550,22 @@ async def langgraph_to_ui_stream(
         await _persist_stopped_response(agent, config, "".join(streamed_text))
         raise
     except Exception as exc:
-        if _is_transient_overload(exc):
+        capacity = classify_capacity_error(exc)
+        if capacity is not None:
+            await sync_to_async(report_capacity_exhausted)(capacity.resource, str(capacity))
+            yield _sse(
+                {
+                    "type": "data-chat-status",
+                    "data": {
+                        "kind": "retryable-error",
+                        "reason": BUSY_ERROR,
+                        "message": BUSY_MESSAGE,
+                        "retryAfter": RETRY_AFTER_SECONDS,
+                    },
+                    "transient": True,
+                }
+            )
+        elif _is_transient_overload(exc):
             # Anthropic was momentarily overloaded / rate-limited -- a transient
             # upstream condition, not a bug. Log at WARNING (so it does not page
             # via Sentry's ERROR-level capture) and emit a transient data part

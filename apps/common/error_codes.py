@@ -31,6 +31,9 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "NOT_FOUND"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     SCHEMA_BUILD_FAILED = "SCHEMA_BUILD_FAILED"
+    # A shared connection limit (Postgres, the checkpointer pool, Cube) is full.
+    # Scout is healthy, just busy: the request is safe to retry shortly.
+    CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
 
     # One code per axis for "nothing active to query" (#251). Physical: no
     # ACTIVE tenant schema or view schema serves the data, so a load is the

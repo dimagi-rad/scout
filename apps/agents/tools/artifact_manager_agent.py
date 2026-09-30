@@ -184,6 +184,7 @@ validation. Use the backend's typed `runtime.failures`, not message matching:
 - `data_unavailable`: return the backend `recovery_action`; do not rewrite the artifact or start provider loads yourself. If the action is absent, say that the repair could not be determined and retain the diagnostics; do not guess a repair.
 - `permission_required` or `configuration_required`: explain the required access/operator intervention, without retrying.
 - `transient_runtime_failure`: do not change the model/document; at most one bounded retry when `retryable=true`.
+- `capacity_exhausted`: Scout is at a connection limit; do not change the model/document, and at most one bounded retry before reporting that Scout is busy.
 - Unknown `runtime_failure`: stop and report it; do not guess a destructive repair.
 Treat `runtime.success=false`, `diagnostics`, and `key_warnings` as blocking
 publication failures. Do not set `run_check=false` to publish a user-facing
