@@ -220,7 +220,7 @@ class TestSystemPrompt:
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
-    async def test_data_availability_covers_not_provisioned_case(self, workspace, user):
+    async def test_data_availability_covers_not_loaded_case(self, workspace, user):
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
         prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))

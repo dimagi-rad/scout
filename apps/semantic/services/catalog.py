@@ -34,6 +34,7 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.load_activity import workspace_schema_statuses
 from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     aresolve_pipeline_config,
@@ -354,16 +355,10 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
             schema_status="failed",
         ) from exc
     except Exception as exc:
-        tenant = workspace.tenant
-        schema_status = "unavailable"
-        if (
-            tenant is not None
-            and TenantSchema.objects.filter(
-                tenant=tenant,
-                state=SchemaState.PROVISIONING,
-            ).exists()
-        ):
-            schema_status = "provisioning"
+        schema_status = workspace_schema_statuses([workspace.id])[workspace.id]
+        if schema_status == "available":
+            # Serving by its schema rows, yet its tables could not be read.
+            schema_status = "unavailable"
         raise SemanticCatalogUnavailable(
             "Data unavailable. Please refresh workspace data.",
             schema_status=schema_status,
