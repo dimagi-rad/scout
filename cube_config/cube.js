@@ -14,6 +14,9 @@ const DRIVER_POOL_MAX = 2;
 const DRIVER_IDLE_TIMEOUT_MS = 10000;
 const DRIVER_EVICTION_INTERVAL_MS = 5000;
 const CATALOG_POOL_MAX = 3;
+// Created, with SELECT on semantic_cubeschema only, by semantic migration 0005.
+const CATALOG_ROLE = 'scout_cube_catalog';
+const CATALOG_ROLE_PROBE_INTERVAL_MS = 60000;
 const driverSlots = createConnectionSlots(
   positiveIntegerFromEnv(process.env, 'SCOUT_CUBE_MAX_DRIVER_CONNECTIONS', 16)
 );
@@ -102,14 +105,52 @@ function contextId(prefix, parts) {
 
 const appDatabaseUrl = process.env.DATABASE_URL || 'postgresql://platform:devpassword@platform-db:5432/agent_platform';
 const managedDatabaseUrl = process.env.MANAGED_DATABASE_URL || appDatabaseUrl;
-const appPool = new Pool({
+const catalogPoolOptions = {
   connectionString: appDatabaseUrl,
   ssl: sslConfigForUrl(appDatabaseUrl),
-  max: CATALOG_POOL_MAX,
   connectionTimeoutMillis: CATALOG_QUERY_TIMEOUT_MS,
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
   query_timeout: CATALOG_QUERY_TIMEOUT_MS,
-});
+};
+const ownerPool = new Pool({ ...catalogPoolOptions, max: 1 });
+let rolePool = null;
+let roleProbe = null;
+let nextRoleProbeAt = 0;
+
+// Cube deploys before the API applies migrations, so on the deploy that adds
+// the role it is missing for a few minutes. Until then, read as the owner, as
+// before; once the role exists every catalog read uses it, and a broken grant
+// fails closed rather than falling back.
+async function catalogPool() {
+  if (rolePool) {
+    return rolePool;
+  }
+  if (Date.now() >= nextRoleProbeAt) {
+    roleProbe ??= ownerPool
+      .query('SELECT to_regrole($1) IS NOT NULL AS present', [CATALOG_ROLE])
+      .then(({ rows }) => {
+        if (rows[0]?.present) {
+          rolePool ??= new Pool({
+            ...catalogPoolOptions,
+            max: CATALOG_POOL_MAX,
+            options: `-c role=${CATALOG_ROLE} -c default_transaction_read_only=on`,
+          });
+        } else {
+          nextRoleProbeAt = Date.now() + CATALOG_ROLE_PROBE_INTERVAL_MS;
+          console.warn(`Cube catalog role ${CATALOG_ROLE} does not exist yet; reading semantic_cubeschema as the DATABASE_URL owner`);
+        }
+      })
+      .finally(() => {
+        roleProbe = null;
+      });
+    await roleProbe;
+  }
+  return rolePool ?? ownerPool;
+}
+
+async function catalogQuery(text, values) {
+  return (await catalogPool()).query(text, values);
+}
 const managedConfig = connectionFromUrl(managedDatabaseUrl);
 
 module.exports = {
@@ -120,7 +161,7 @@ module.exports = {
     }
     // One authoritative lookup per request also supports JWTs from an older
     // API during Cube-first deployments. Never cache this across publications.
-    context[PUBLICATION_REVISION] ??= appPool.query(
+    context[PUBLICATION_REVISION] ??= catalogQuery(
       `
         SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS data_revision
         FROM semantic_cubeschema
@@ -195,7 +236,7 @@ module.exports = {
         return [];
       }
 
-      const { rows } = await appPool.query(
+      const { rows } = await catalogQuery(
         `
           SELECT filename, content
           FROM semantic_cubeschema
@@ -220,7 +261,7 @@ module.exports = {
       return 'healthcheck';
     }
 
-    const { rows } = await appPool.query(
+    const { rows } = await catalogQuery(
       `
         SELECT content_hash, updated_at
         FROM semantic_cubeschema

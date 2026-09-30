@@ -20,16 +20,24 @@ class FakePostgresDriver {
   }
 }
 
-function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = [], env = {}) {
+function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = [], env = {}, catalog = { roleExists: true, probes: 0, warnings: [] }) {
   const sandbox = {
     module: { exports: {} },
     process: { env },
     URL,
+    console: { warn: (message) => catalog.warnings.push(message) },
     require: (name) => {
       if (name === 'pg') {
         return { Pool: class {
-          constructor(options) { pools.push(options); }
-          query(...args) { return query(...args); }
+          constructor(options) { this.options = options; pools.push(options); }
+          query(text, values) {
+            if (text.includes('to_regrole')) {
+              catalog.probes += 1;
+              assert.deepEqual(Array.from(values), ['scout_cube_catalog']);
+              return Promise.resolve({ rows: [{ present: catalog.roleExists }] });
+            }
+            return query(text, values, this.options);
+          }
         } };
       }
       if (name === '@cubejs-backend/postgres-driver') return { PostgresDriver: FakePostgresDriver };
@@ -191,12 +199,54 @@ test('publication lookup preserves health checks and rejects partial tenant cont
   }
 });
 
-test('catalog connection acquisition and query execution have finite time budgets', () => {
+test('catalog connection acquisition and query execution have finite time budgets', async () => {
   const pools = [];
-  loadConfig(undefined, pools);
-  assert.equal(pools.length, 1);
-  for (const option of ['connectionTimeoutMillis', 'statement_timeout', 'query_timeout']) {
-    assert.equal(pools[0][option], 5000);
+  const config = loadConfig(async () => ({ rows: [{ data_revision: 'r' }] }), pools);
+  await config.queryRewrite({}, context());
+  assert.equal(pools.length, 2);
+  for (const pool of pools) {
+    for (const option of ['connectionTimeoutMillis', 'statement_timeout', 'query_timeout']) {
+      assert.equal(pool[option], 5000);
+    }
+  }
+});
+
+test('catalog reads run as the SELECT-only role once it exists, and never fall back', async () => {
+  const pools = [];
+  const seen = [];
+  const catalog = { roleExists: true, probes: 0, warnings: [] };
+  const config = loadConfig(async (text, values, options) => {
+    seen.push(options);
+    return { rows: [{ data_revision: 'r', filename: 'f', content: 'c', content_hash: 'h', updated_at: new Date(0) }] };
+  }, pools, {}, catalog);
+  await config.queryRewrite({}, context());
+  await config.repositoryFactory(context()).dataSchemaFiles();
+  catalog.roleExists = false;
+  await config.schemaVersion(context());
+  assert.equal(catalog.probes, 1);
+  assert.equal(seen.length, 3);
+  for (const options of seen) {
+    assert.equal(options.options, '-c role=scout_cube_catalog -c default_transaction_read_only=on');
+    assert.equal(options.max, 3);
+  }
+  assert.deepEqual(catalog.warnings, []);
+});
+
+test('before the migration creates the role, catalog reads use the owner and re-probe later', async () => {
+  const seen = [];
+  const catalog = { roleExists: false, probes: 0, warnings: [] };
+  const config = loadConfig(async (text, values, options) => {
+    seen.push(options);
+    return { rows: [{ data_revision: 'r' }] };
+  }, [], {}, catalog);
+  await config.queryRewrite({}, context());
+  await config.queryRewrite({}, context());
+  assert.equal(catalog.probes, 1, 'a missing role is not re-probed on every request');
+  assert.equal(catalog.warnings.length, 1);
+  assert.match(catalog.warnings[0], /scout_cube_catalog does not exist yet/);
+  for (const options of seen) {
+    assert.equal(options.options, undefined);
+    assert.equal(options.max, 1);
   }
 });
 
@@ -212,7 +262,7 @@ test('the readiness driver is time-bounded, read-only, and cannot resolve tenant
 test('every pool is capped and sheds idle connections', () => {
   const pools = [];
   const config = loadConfig(undefined, pools);
-  assert.equal(pools[0].max, 3);
+  assert.equal(pools[0].max, 1);
   for (const [ctx, max] of [[context(), 2], [{}, 1]]) {
     const driver = config.driverFactory(ctx);
     assert.equal(driver.config.maxPoolSize, max);

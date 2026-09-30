@@ -23,7 +23,8 @@ connections once, so every Cube pool is capped (#421):
 
 | Pool | Cap | Idle release |
 |---|---|---|
-| Catalog (`semantic_cubeschema` reads) | 3 | pg default, 10 s |
+| Catalog (`semantic_cubeschema` reads, as `scout_cube_catalog`) | 3 | pg default, 10 s |
+| Catalog owner (role probe; reads only until the role exists) | 1 | pg default, 10 s |
 | Readiness driver (`/readyz`) | 1 | 10 s |
 | Each tenant driver (one per workspace/schema/role orchestrator) | 2 | 10 s |
 | All tenant drivers together, including `testConnection()` probes | `SCOUT_CUBE_MAX_DRIVER_CONNECTIONS`, default 16 | |
@@ -44,7 +45,22 @@ and its driver released 60 seconds later, after any query it admitted has hit
 the 30-second statement timeout.
 
 Worst case per Cube process: 16 tenant + 1 readiness (+1 transient readiness
-probe) + 3 catalog = 21 connections. Production and staging together: 42.
+probe) + 3 catalog + 1 catalog owner = 22 connections. Production and staging
+together: 44.
+
+### Catalog role
+
+The catalog pool reads `semantic_cubeschema` as `scout_cube_catalog`, a `NOLOGIN`
+role with `SELECT` on that table only, by passing `-c role=` at connection
+startup, as tenant drivers do with their read-only roles. Semantic migration
+0005 creates the role, grants it to the migrating (`DATABASE_URL`) user, and
+grants the `SELECT`, so it needs no new credential or deploy setting.
+
+Cube deploys before the API runs migrations, so on the first deploy with this
+change the role is briefly missing. Until it exists, Cube reads the catalog as
+the owner, as before, re-checking every 60 seconds and logging a warning. Once
+the role exists, every catalog read uses it. A missing grant then fails closed
+instead of falling back.
 
 ## Bounded query-result retention without CubeStore
 
