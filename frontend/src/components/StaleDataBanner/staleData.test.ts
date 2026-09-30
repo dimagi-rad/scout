@@ -34,6 +34,7 @@ describe("staleData", () => {
       ageLabel: "3 days ago",
       oldestSourceName: null,
       reconnectProviders: [],
+      refreshable: true,
     })
   })
 
@@ -99,5 +100,23 @@ describe("staleData", () => {
       source("b", null, { reconnect: true, provider: "ocs", provider_label: "Open Chat Studio" }),
     ])
     expect(staleData(f, { now: NOW })?.reconnectProviders).toEqual([])
+  })
+
+  it("asks for a reconnect only for sources past the threshold", () => {
+    const f = freshness([source("a", 100), source("b", 2, { reconnect: true })])
+    expect(staleData(f, { now: NOW })).toMatchObject({
+      reconnectProviders: [],
+      refreshable: true,
+    })
+  })
+
+  it("is refreshable while any stale source is still connected", () => {
+    const f = freshness([source("a", 100), source("b", 72, { reconnect: true })])
+    expect(staleData(f, { now: NOW })).toMatchObject({
+      reconnectProviders: ["CommCare HQ"],
+      refreshable: true,
+    })
+    const g = freshness([source("a", 100, { reconnect: true })])
+    expect(staleData(g, { now: NOW })?.refreshable).toBe(false)
   })
 })

@@ -7,8 +7,10 @@ export interface StaleData {
   ageLabel: string
   /** Named only when several sources serve, so the age is not read as everyone's. */
   oldestSourceName: string | null
-  /** Providers of serving sources whose sign-in this viewer must renew before a refresh helps. */
+  /** Providers of stale sources whose sign-in this viewer must renew before a refresh helps. */
   reconnectProviders: string[]
+  /** At least one stale source can be fetched by a refresh as things stand. */
+  refreshable: boolean
 }
 
 /** "5 hours ago" under 48 hours, "3 days ago" after. */
@@ -32,25 +34,28 @@ export function staleData(
   if (!freshness || loading || freshness.in_progress) return null
   const serving = freshness.sources.filter((source) => source.serving && source.last_fetched_at)
   if (serving.length === 0) return null
-  const times = serving.map((source) => Date.parse(source.last_fetched_at as string))
-  const oldestTime = Math.min(...times)
-  const oldest = serving[times.indexOf(oldestTime)]
-  const ageMs = now - oldestTime
   const thresholdHours = freshness.stale_data_banner_hours ?? DEFAULT_STALE_HOURS
   // A non-positive threshold switches the banner off rather than showing it always.
   if (thresholdHours <= 0) return null
-  if (!(ageMs >= thresholdHours * HOUR_MS)) return null
+  const aged = serving.map((source) => ({
+    source,
+    ageMs: now - Date.parse(source.last_fetched_at as string),
+  }))
+  const stale = aged.filter(({ ageMs }) => ageMs >= thresholdHours * HOUR_MS)
+  if (stale.length === 0) return null
+  const oldest = stale.reduce((a, b) => (b.ageMs > a.ageMs ? b : a))
   const reconnectProviders = [
     ...new Set(
-      serving
-        .filter((source) => source.reconnect)
-        .map((source) => source.provider_label || source.provider),
+      stale
+        .filter(({ source }) => source.reconnect)
+        .map(({ source }) => source.provider_label || source.provider),
     ),
   ]
   return {
-    ageLabel: formatDataAge(ageMs),
-    oldestSourceName: serving.length > 1 ? oldest.name : null,
+    ageLabel: formatDataAge(oldest.ageMs),
+    oldestSourceName: serving.length > 1 ? oldest.source.name : null,
     reconnectProviders,
+    refreshable: stale.some(({ source }) => !source.reconnect),
   }
 }
 

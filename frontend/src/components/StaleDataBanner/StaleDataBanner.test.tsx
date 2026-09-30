@@ -156,6 +156,31 @@ describe("StaleDataBanner", () => {
     expect(screen.queryByTestId("stale-data-banner-refresh")).toBeNull()
   })
 
+  it("keeps Refresh beside the reconnect when another stale source can still sync", async () => {
+    mockDetail([
+      freshSource("Alpha", 100),
+      freshSource("Beta", 72, { reconnect: true }),
+    ])
+    renderBanner()
+
+    expect(await screen.findByTestId("stale-data-banner-reconnect")).toBeInTheDocument()
+    expect(screen.getByTestId("stale-data-banner-refresh")).toBeEnabled()
+    expect(screen.getByTestId("stale-data-banner-message")).toHaveTextContent(
+      "Alpha's data was last refreshed 4 days ago. Refresh it now? Your CommCare HQ sign-in expired",
+    )
+  })
+
+  it("tells a read-only member who can refresh rather than to reconnect", async () => {
+    asRole("read")
+    mockDetail([source(72, { reconnect: true })])
+    renderBanner()
+
+    expect(await screen.findByTestId("stale-data-banner-message")).toHaveTextContent(
+      READ_ONLY_REFRESH_NOTE,
+    )
+    expect(screen.queryByTestId("stale-data-banner-reconnect")).toBeNull()
+  })
+
   it("remembers a dismiss for the workspace this session", async () => {
     const spy = mockDetail([source(72)])
     const first = renderBanner()

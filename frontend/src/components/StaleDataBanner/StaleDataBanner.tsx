@@ -48,10 +48,15 @@ export function StaleDataBanner({ workspaceId, loading = false, onRefreshStarted
   }
 
   const subject = stale.oldestSourceName ? `${stale.oldestSourceName}'s data` : "This data"
-  const reconnect = stale.reconnectProviders
+  // Only a writer can act on a reconnect; a reader is told who can refresh instead.
+  const reconnect = canWrite ? stale.reconnectProviders : []
+  const showRefresh = canWrite && stale.refreshable
+  const expired = `Your ${reconnect.join(" and ")} sign-in expired`
   let callToAction = canWrite ? "Refresh it now?" : READ_ONLY_REFRESH_NOTE
   if (reconnect.length > 0) {
-    callToAction = `Your ${reconnect.join(" and ")} sign-in expired, so a refresh can't fetch it.`
+    callToAction = showRefresh
+      ? `Refresh it now? ${expired}, so some of it needs a reconnect first.`
+      : `${expired}, so a refresh can't fetch it.`
   }
 
   return (
@@ -75,32 +80,29 @@ export function StaleDataBanner({ workspaceId, loading = false, onRefreshStarted
           </p>
         )}
         <div className="ml-auto flex items-center gap-2">
-          {reconnect.length > 0 ? (
-            reconnect.map((provider) => (
-              <Link
-                key={provider}
-                to={CONNECTIONS_PATH}
-                className="rounded-md border border-amber-600/40 px-2.5 py-1 text-xs font-medium hover:bg-amber-500/10"
-                data-testid="stale-data-banner-reconnect"
-              >
-                Reconnect {provider}
-              </Link>
-            ))
-          ) : (
-            canWrite && (
-              <button
-                type="button"
-                onClick={handleRefresh}
-                disabled={refresh.blocked}
-                className="flex items-center gap-1 rounded-md border border-amber-600/40 px-2.5 py-1 text-xs font-medium hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-60"
-                data-testid="stale-data-banner-refresh"
-              >
-                <RotateCw
-                  className={`h-3 w-3 ${refresh.state === "pending" ? "animate-spin" : ""}`}
-                />
-                {refresh.state === "pending" ? "Starting…" : "Refresh"}
-              </button>
-            )
+          {reconnect.map((provider) => (
+            <Link
+              key={provider}
+              to={CONNECTIONS_PATH}
+              className="rounded-md border border-amber-600/40 px-2.5 py-1 text-xs font-medium hover:bg-amber-500/10"
+              data-testid="stale-data-banner-reconnect"
+            >
+              Reconnect {provider}
+            </Link>
+          ))}
+          {showRefresh && (
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refresh.blocked}
+              className="flex items-center gap-1 rounded-md border border-amber-600/40 px-2.5 py-1 text-xs font-medium hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+              data-testid="stale-data-banner-refresh"
+            >
+              <RotateCw
+                className={`h-3 w-3 ${refresh.state === "pending" ? "animate-spin" : ""}`}
+              />
+              {refresh.state === "pending" ? "Starting…" : "Refresh"}
+            </button>
           )}
           <button
             type="button"
