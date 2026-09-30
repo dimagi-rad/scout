@@ -3,6 +3,7 @@
  */
 
 import { BASE_PATH } from "@/config"
+import { BUSY_MESSAGE, fetchWithBusyRetry, isBusyBody } from "./busy"
 
 export function getCsrfToken(): string {
   const match = document.cookie.match(/(?:^|;\s*)csrftoken_scout=([^;]+)/)
@@ -28,11 +29,12 @@ async function request<T>(
   }
 
   const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
-  const res = await fetch(prefixedUrl, {
-    ...fetchOptions,
-    headers,
-    credentials: "include",
-  })
+  // A busy 503 can follow a write that already landed, so only reads repeat on
+  // their own.
+  const res = await fetchWithBusyRetry(
+    () => fetch(prefixedUrl, { ...fetchOptions, headers, credentials: "include" }),
+    { autoRetry: method === "GET" || method === "HEAD", signal: fetchOptions.signal },
+  )
 
   if (!res.ok) {
     throw await responseError(res)
@@ -71,7 +73,9 @@ function errorMessage(value: unknown): string | undefined {
 async function responseError(res: Response): Promise<ApiError> {
   const body: unknown = await res.json().catch(() => undefined)
   const record = asRecord(body)
-  const message = errorMessage(record?.detail)
+  // A busy body's `error` is the machine code "busy"; its prose is `message`.
+  const message = (isBusyBody(body) ? messageText(record?.message) ?? BUSY_MESSAGE : undefined)
+    ?? errorMessage(record?.detail)
     ?? errorMessage(record?.error)
     ?? errorMessage(body)
     ?? messageText(res.statusText)
@@ -92,7 +96,7 @@ export class ApiError extends Error {
 }
 
 export const api = {
-  get: <T>(url: string) => request<T>(url),
+  get: <T>(url: string, signal?: AbortSignal) => request<T>(url, { signal }),
   post: <T>(url: string, body?: unknown) =>
     request<T>(url, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   put: <T>(url: string, body?: unknown) =>
@@ -102,9 +106,12 @@ export const api = {
   delete: <T>(url: string) => request<T>(url, { method: "DELETE" }),
   upload: <T>(url: string, formData: FormData) =>
     request<T>(url, { method: "POST", body: formData, rawBody: true }),
-  getBlob: async (url: string): Promise<Blob> => {
+  getBlob: async (url: string, signal?: AbortSignal): Promise<Blob> => {
     const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
-    const res = await fetch(prefixedUrl, { credentials: "include" })
+    const res = await fetchWithBusyRetry(
+      () => fetch(prefixedUrl, { credentials: "include", signal }),
+      { autoRetry: true, signal },
+    )
     if (!res.ok) {
       throw await responseError(res)
     }
