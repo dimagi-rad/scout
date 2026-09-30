@@ -89,11 +89,12 @@ class DataNotLoaded(ExpectedStateError, ValueError):
     code = ErrorCode.DATA_NOT_LOADED
 
 
-def validation_error_code(exc: ValueError) -> ErrorCode:
-    """The code for a ValueError a request-scoped loader raised: its own if unloaded data.
+def validation_error_code(exc: Exception) -> ErrorCode:
+    """The code for a bad-request error a loader raised: its own if unloaded data.
 
-    Not a general accessor (that is ``code_of``): every other ValueError from these
-    loaders is a bad request, so the emitted codes stay a closed set.
+    For the MCP tools' ``except (ValueError, ValidationError)`` handlers and the query
+    path's context load. Not a general accessor (that is ``code_of``): anything else
+    those raise is a bad request, so the emitted codes stay a closed set.
     """
     return exc.code if isinstance(exc, DataNotLoaded) else ErrorCode.VALIDATION_ERROR
 
