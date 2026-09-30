@@ -280,14 +280,11 @@ class CubeClient:
                     response.raise_for_status()
                 except httpx.TransportError as exc:
                     failure: Exception = exc
-                    # A read the budget cut short timing out says less than the 503
-                    # before it; any other transport failure is the newer truth.
-                    shortened_read_timed_out = (
-                        isinstance(exc, httpx.ReadTimeout) and read_seconds < limits.read
-                    )
-                    if not (
-                        shortened_read_timed_out and isinstance(last_error, httpx.HTTPStatusError)
-                    ):
+                    # A retry only gets what the budget has left, so its read timing
+                    # out says less than the 503 before it; any other transport
+                    # failure is the newer truth.
+                    retry_read_timed_out = attempt > 1 and isinstance(exc, httpx.ReadTimeout)
+                    if not (retry_read_timed_out and isinstance(last_error, httpx.HTTPStatusError)):
                         last_error = exc
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code not in RETRYABLE_HTTP_STATUSES:

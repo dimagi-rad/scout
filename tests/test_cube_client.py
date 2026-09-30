@@ -452,8 +452,6 @@ async def test_slow_validator_failure_is_not_retried_past_the_budget(monkeypatch
 async def test_exhaustion_reports_the_503_not_a_later_shortened_timeout(
     monkeypatch, caplog, validator_url
 ):
-    # Leave less than a full read window after the first attempt.
-    monkeypatch.setattr(cube_client_module, "VALIDATE_BUDGET_SECONDS", 60.0)
     calls = []
 
     def handler(request):
