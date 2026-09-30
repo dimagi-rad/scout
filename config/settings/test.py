@@ -61,5 +61,6 @@ WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
 UPSTREAM_ACCESS_FRESHNESS_ENFORCED = True
 
 # DATABASES above ignores a .env DATABASE_URL, which the checkpointer still reads;
-# tests that need a real saver build it from the test database themselves.
+# tests that need a real saver build it from the test database themselves, so that
+# URL is unused here whether it matches (E001) or even parses (E002).
 SILENCED_SYSTEM_CHECKS = ["chat.E001", "chat.E002"]

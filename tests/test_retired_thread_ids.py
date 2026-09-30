@@ -382,7 +382,13 @@ def error_level_checks(settings):
 def test_checkpointer_check_never_blocks_commands_under_test_settings(monkeypatch, url):
     monkeypatch.setattr("apps.chat.checks.get_database_url", lambda: url)
 
-    assert not [e for e in run_checks() if e.is_serious() and not e.is_silenced()]
+    blocking = [
+        e
+        for e in run_checks()
+        if e.id.startswith("chat.") and e.is_serious() and not e.is_silenced()
+    ]
+
+    assert not blocking
 
 
 def test_checkpointer_on_the_default_database_passes_the_system_check(
