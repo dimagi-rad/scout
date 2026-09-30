@@ -18,7 +18,8 @@ export interface MissingTenant {
   remedy: string
 }
 
-export type SchemaStatus = "available" | "provisioning" | "unavailable" | "failed"
+// "unavailable" is only in payloads from servers older than "not_loaded" (#249).
+export type SchemaStatus = "available" | "provisioning" | "not_loaded" | "unavailable" | "failed"
 
 // Workspace list item — lighter shape returned by GET /api/workspaces/
 export interface WorkspaceListItem {
@@ -146,7 +147,13 @@ export interface WorkspaceTenant {
 }
 
 /** Recorded load/setup state, not a current query-readiness check. */
-export type WorkspaceLoadState = "loading" | "recorded" | "unavailable" | "failed" | "unknown"
+export type WorkspaceLoadState =
+  | "loading"
+  | "recorded"
+  | "not_loaded"
+  | "unavailable"
+  | "failed"
+  | "unknown"
 
 /**
  * Keep explicit setup problems/progress visible alongside load history.
@@ -161,6 +168,7 @@ export function workspaceLoadState(ws: {
   last_synced_at?: string | null
 }): WorkspaceLoadState {
   if (ws.in_progress || ws.schema_status === "provisioning") return "loading"
+  if (ws.schema_status === "not_loaded") return "not_loaded"
   if (ws.schema_status === "unavailable") return "unavailable"
   if (ws.schema_status === "failed") return "failed"
   return workspaceHasRecordedLoad(ws) ? "recorded" : "unknown"

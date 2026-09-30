@@ -106,6 +106,8 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "config.middleware.embed.EmbedFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    # Last, so its process_exception runs first.
+    "config.middleware.capacity.CapacityExhaustedMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

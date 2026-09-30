@@ -29,6 +29,7 @@ from apps.chat.helpers import (
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
+from apps.common.capacity import classify_capacity_error
 from apps.common.http import parse_json_object
 from apps.workspaces.access import access_denied_body, role_satisfies
 from apps.workspaces.models import WorkspaceRole
@@ -264,7 +265,12 @@ async def chat_view(request):
             mcp_tools=mcp_tools,
             conversation_id=str(thread_id),
         )
-    except Exception:
+    except Exception as first_error:
+        # A pool that is full stays full: a rebuild would only wait out another
+        # PoolTimeout. The capacity middleware answers with a retryable 503.
+        capacity = classify_capacity_error(first_error)
+        if capacity is not None:
+            raise capacity from first_error
         try:
             logger.info("Retrying agent build with fresh checkpointer")
             checkpointer = await ensure_checkpointer(force_new=True)
@@ -276,6 +282,9 @@ async def chat_view(request):
                 conversation_id=str(thread_id),
             )
         except Exception as e:
+            capacity = classify_capacity_error(e)
+            if capacity is not None:
+                raise capacity from e
             error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
             logger.exception("Failed to build agent [ref=%s]", error_ref)
             return JsonResponse(

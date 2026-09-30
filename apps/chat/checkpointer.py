@@ -7,7 +7,9 @@ import os
 from django.conf import settings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.conninfo import make_conninfo
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
+
+from apps.common.capacity import CapacityResource
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,26 @@ _checkpointer = None
 _pool = None
 # Serialize init so concurrent cold starts don't race the half-open pool (arch #255 08#1).
 _init_lock = asyncio.Lock()
+
+
+class CheckpointerPoolExhausted(PoolTimeout):
+    """Every checkpointer connection stayed checked out past the pool timeout."""
+
+    capacity_resource = CapacityResource.CHECKPOINTER_POOL
+
+
+class CheckpointerPool(AsyncConnectionPool):
+    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy".
+
+    Only a checkout timeout is tagged: ``open()`` also raises ``PoolTimeout`` when
+    the database is down or refusing auth, which retrying would not fix.
+    """
+
+    async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
+        try:
+            return await super().getconn(timeout)
+        except PoolTimeout as exc:
+            raise CheckpointerPoolExhausted(str(exc)) from exc
 
 
 def get_database_url() -> str:
@@ -87,13 +109,13 @@ async def ensure_checkpointer(*, force_new: bool = False):
             # force_new rebuilds only the stateless saver; it must NOT close a pool
             # other in-flight streams are still borrowing for writes (arch #255 08#1).
             if not _pool_is_usable(_pool):
-                _pool = AsyncConnectionPool(
+                _pool = CheckpointerPool(
                     conninfo=database_url,
                     min_size=min_size,
                     max_size=max_size,
                     open=False,
                     # Recycle a dead pooled connection on checkout, not mid-write (arch #255 08#1).
-                    check=AsyncConnectionPool.check_connection,
+                    check=CheckpointerPool.check_connection,
                     kwargs={
                         "autocommit": True,
                         "prepare_threshold": 0,

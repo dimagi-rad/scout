@@ -49,7 +49,7 @@ async def test_concurrent_cold_starts_build_a_single_pool():
     saver.setup = AsyncMock(return_value=None)
 
     with (
-        patch.object(ckpt, "AsyncConnectionPool", side_effect=_pool_factory) as pool_cls,
+        patch.object(ckpt, "CheckpointerPool", side_effect=_pool_factory) as pool_cls,
         patch.object(ckpt, "AsyncPostgresSaver", return_value=saver),
         patch.object(ckpt, "get_database_url", return_value="postgresql://x/y"),
     ):
@@ -75,7 +75,7 @@ async def test_force_new_reuses_open_pool_and_does_not_close_it():
     new_saver.setup = AsyncMock(return_value=None)
 
     with (
-        patch.object(ckpt, "AsyncConnectionPool") as pool_cls,
+        patch.object(ckpt, "CheckpointerPool") as pool_cls,
         patch.object(ckpt, "AsyncPostgresSaver", return_value=new_saver),
         patch.object(ckpt, "get_database_url", return_value="postgresql://x/y"),
     ):
@@ -96,7 +96,7 @@ async def test_pool_created_with_borrow_time_health_check():
     saver.setup = AsyncMock(return_value=None)
 
     with (
-        patch.object(ckpt, "AsyncConnectionPool", return_value=_make_pool()) as pool_cls,
+        patch.object(ckpt, "CheckpointerPool", return_value=_make_pool()) as pool_cls,
         patch.object(ckpt, "AsyncPostgresSaver", return_value=saver),
         patch.object(ckpt, "get_database_url", return_value="postgresql://x/y"),
     ):
@@ -121,7 +121,7 @@ async def test_closed_pool_is_rebuilt():
     saver.setup = AsyncMock(return_value=None)
 
     with (
-        patch.object(ckpt, "AsyncConnectionPool", return_value=fresh_pool) as pool_cls,
+        patch.object(ckpt, "CheckpointerPool", return_value=fresh_pool) as pool_cls,
         patch.object(ckpt, "AsyncPostgresSaver", return_value=saver),
         patch.object(ckpt, "get_database_url", return_value="postgresql://x/y"),
     ):
