@@ -9,6 +9,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
+from apps.semantic.services.catalog import SemanticCatalogUnavailable, load_physical_tables
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
@@ -144,3 +145,27 @@ async def test_mcp_reports_provisioning_while_a_first_load_runs():
 
     assert result["success"] is True
     assert result["data"]["state"] == "provisioning"
+
+
+def _catalog_status(workspace):
+    with pytest.raises(SemanticCatalogUnavailable) as caught:
+        load_physical_tables(workspace)
+    return caught.value.schema_status
+
+
+@pytest.mark.django_db
+def test_catalog_judges_a_multi_source_workspace_by_all_of_its_sources(
+    workspace, tenant, second_tenant
+):
+    """The first source alone used to decide; a load of any other source went unseen."""
+    assert _catalog_status(workspace) == "not_loaded"
+    _running_load(second_tenant)
+    assert _catalog_status(workspace) == "provisioning"
+
+
+@pytest.mark.django_db
+def test_catalog_ignores_a_stranded_provisioning_first_source(workspace, tenant, second_tenant):
+    TenantSchema.objects.create(
+        tenant=tenant, schema_name="stranded", state=SchemaState.PROVISIONING
+    )
+    assert _catalog_status(workspace) == "not_loaded"
