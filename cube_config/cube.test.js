@@ -288,9 +288,12 @@ test('tenant connections share one process-wide limit across workspaces', async 
   await waiting;
   assert.ok(third);
   let fourth = null;
-  a.createConnection().then((client) => { fourth = client; });
+  const pendingFourth = a.createConnection().then((client) => { fourth = client; });
   await new Promise(setImmediate);
   assert.equal(fourth, null, 'a repeated end must not free a second slot');
+  third.end();
+  await pendingFourth;
+  assert.ok(fourth);
 });
 
 test('a failed connect returns its slot', async () => {
@@ -306,6 +309,25 @@ test('readiness connections stay outside the tenant limit', async () => {
   const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
   await config.driverFactory(context()).createConnection();
   assert.ok(await config.driverFactory({}).createConnection());
+});
+
+test('a slot wait is bounded and a timed-out waiter leaves the queue', async () => {
+  const { createConnectionSlots } = require('./connection-slots');
+  const timers = [];
+  const slots = createConnectionSlots(1, 50, {
+    setTimeout: (callback) => { const timer = { callback }; timers.push(timer); return timer; },
+    clearTimeout: (timer) => { timer.cleared = true; },
+  });
+  const release = await slots.acquire();
+  const expired = slots.acquire();
+  const waiting = slots.acquire();
+  timers[0].callback();
+  await assert.rejects(expired, /No Cube database connection slot freed within 50ms \(limit 1\)/);
+  release();
+  const next = await waiting;
+  assert.equal(timers[1].cleared, true);
+  next();
+  assert.ok(await slots.acquire());
 });
 
 test('an invalid tenant connection limit fails startup', () => {

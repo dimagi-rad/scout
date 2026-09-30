@@ -13,7 +13,10 @@ function positiveIntegerFromEnv(env, key, fallback) {
 
 // A process-wide FIFO counting semaphore. Each tenant driver has its own pool,
 // so per-pool maxima alone would still multiply with the number of workspaces.
-function createConnectionSlots(limit) {
+function createConnectionSlots(limit, maxWaitMs, {
+  setTimeout: schedule = setTimeout,
+  clearTimeout: unschedule = clearTimeout,
+} = {}) {
   if (!Number.isSafeInteger(limit) || limit <= 0) {
     throw new Error('Connection slot limit must be a positive safe integer');
   }
@@ -31,7 +34,8 @@ function createConnectionSlots(limit) {
       inUse -= 1;
       const next = waiters.shift();
       if (next) {
-        next(grant());
+        unschedule(next.timer);
+        next.resolve(grant());
       }
     };
   }
@@ -41,10 +45,14 @@ function createConnectionSlots(limit) {
       if (inUse < limit) {
         return Promise.resolve(grant());
       }
-      return new Promise((resolve) => { waiters.push(resolve); });
-    },
-    stats() {
-      return { limit, inUse, waiting: waiters.length };
+      return new Promise((resolve, reject) => {
+        const waiter = { resolve };
+        waiter.timer = schedule(() => {
+          waiters.splice(waiters.indexOf(waiter), 1);
+          reject(new Error(`No Cube database connection slot freed within ${maxWaitMs}ms (limit ${limit})`));
+        }, maxWaitMs);
+        waiters.push(waiter);
+      });
     },
   };
 }

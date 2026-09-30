@@ -17,8 +17,12 @@ const CATALOG_POOL_MAX = 3;
 // Created, with SELECT on semantic_cubeschema only, by semantic migration 0005.
 const CATALOG_ROLE = 'scout_cube_catalog';
 const CATALOG_ROLE_PROBE_INTERVAL_MS = 60000;
+// Also the pool's acquireTimeoutMillis: generic-pool cannot time out a wait
+// inside its create factory, so the slot wait needs its own bound.
+const DRIVER_SLOT_WAIT_MS = 20000;
 const driverSlots = createConnectionSlots(
-  positiveIntegerFromEnv(process.env, 'SCOUT_CUBE_MAX_DRIVER_CONNECTIONS', 16)
+  positiveIntegerFromEnv(process.env, 'SCOUT_CUBE_MAX_DRIVER_CONNECTIONS', 16),
+  DRIVER_SLOT_WAIT_MS
 );
 
 // Counts every tenant connection, including the unpooled one Cube opens for
@@ -44,6 +48,7 @@ function boundedPoolConfig(maxPoolSize) {
     idleTimeoutMillis: DRIVER_IDLE_TIMEOUT_MS,
     softIdleTimeoutMillis: DRIVER_IDLE_TIMEOUT_MS,
     evictionRunIntervalMillis: DRIVER_EVICTION_INTERVAL_MS,
+    acquireTimeoutMillis: DRIVER_SLOT_WAIT_MS,
   };
 }
 
