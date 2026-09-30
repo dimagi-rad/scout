@@ -40,6 +40,8 @@ export function OnboardingWizard() {
   // An OCS-only user lands here too, e.g. once their team-less memberships are
   // archived (#379), so the wizard must offer OCS or they have no way forward.
   const [ocs, setOcs] = useState<OAuthProvider | null>(null)
+  // Listed only once its OAuth app is configured on this deployment (#719).
+  const [commcareEu, setCommcareEu] = useState<OAuthProvider | null>(null)
   const [providersState, setProvidersState] = useState<"loading" | "loaded" | "failed">(
     "loading",
   )
@@ -49,10 +51,12 @@ export function OnboardingWizard() {
     try {
       const data = await api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
       setOcs(data.providers.find((p) => p.id === "ocs") ?? null)
+      setCommcareEu(data.providers.find((p) => p.id === "commcare_eu") ?? null)
       setProvidersState("loaded")
     } catch (err) {
       console.error("Failed to load sign-in options", err)
       setOcs(null)
+      setCommcareEu(null)
       setProvidersState("failed")
     }
   }, [])
@@ -204,8 +208,20 @@ export function OnboardingWizard() {
             data-testid="onboarding-oauth"
             asChild
           >
-            <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>Connect with OAuth</a>
+            <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>
+              {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
+            </a>
           </Button>
+          {commcareEu && (
+            <Button
+              className="w-full"
+              variant="outline"
+              data-testid="onboarding-oauth-commcare-eu"
+              asChild
+            >
+              <a href={oauthConnectUrl(commcareEu, "/")}>Connect with {commcareEu.name}</a>
+            </Button>
+          )}
           <Button
             className="w-full"
             data-testid="onboarding-api-key-option"
