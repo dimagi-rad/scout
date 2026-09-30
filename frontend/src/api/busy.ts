@@ -67,9 +67,12 @@ type Listener = () => void
 export function createBusyTracker() {
   const retrying = new Set<symbol>()
   const listeners = new Set<Listener>()
-  // Holding off is the retry gate; the notice is only its visible half, so
-  // dismissing the notice must not re-arm retries against a full server.
-  let holdingOff = false
+  // The retry gate has two sources: reads mid-retry after seeing busy (released
+  // however their chain ends, abort or error included), and a read that gave up
+  // (latched with the notice until a read succeeds). Dismissing the notice hides
+  // it without re-arming retries against a full server.
+  const holders = new Set<symbol>()
+  let gaveUpLatched = false
   let noticeShown = false
   let dismissed = false
   let snapshot: BusySnapshot = { retrying: 0, stillBusy: false }
@@ -88,7 +91,7 @@ export function createBusyTracker() {
       }
     },
     getSnapshot: () => snapshot,
-    isHoldingOff: () => holdingOff,
+    isHoldingOff: () => gaveUpLatched || holders.size > 0,
     startRetry(token: symbol) {
       retrying.add(token)
       publish()
@@ -97,17 +100,20 @@ export function createBusyTracker() {
       retrying.delete(token)
       publish()
     },
-    /** Busy was seen: stop other reads from starting their own retry chains. */
-    holdOff() {
-      holdingOff = true
+    /** Busy was seen: other reads skip retrying while this chain backs off. */
+    holdOff(token: symbol) {
+      holders.add(token)
+    },
+    releaseHold(token: symbol) {
+      holders.delete(token)
     },
     gaveUp() {
-      holdingOff = true
+      gaveUpLatched = true
       if (!dismissed) noticeShown = true
       publish()
     },
     recovered() {
-      holdingOff = false
+      gaveUpLatched = false
       noticeShown = false
       dismissed = false
       publish()
@@ -158,8 +164,9 @@ export async function isBusyResponse(res: Response): Promise<boolean> {
  * the answer is "busy" (only when `autoRetry` is set). Returns the last response
  * either way, so the caller's normal error handling sees a busy failure.
  *
- * Once a read has given up, later reads fail at once until one succeeds:
- * overlapping polls must not multiply load on a server that is full.
+ * While another read is backing off from busy, or once a read has given up
+ * (until one succeeds), later reads fail at once: overlapping polls must not
+ * multiply load on a server that is full.
  */
 export async function fetchWithBusyRetry(
   send: () => Promise<Response>,
@@ -184,11 +191,12 @@ export async function fetchWithBusyRetry(
         if (autoRetry) tracker.gaveUp()
         return res
       }
-      tracker.holdOff()
+      tracker.holdOff(token)
       tracker.startRetry(token)
       await sleep(busyRetryDelayMs(res.headers.get("Retry-After"), retries + 1), signal)
     }
   } finally {
+    tracker.releaseHold(token)
     tracker.settle(token)
   }
 }

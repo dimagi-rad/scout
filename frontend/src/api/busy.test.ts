@@ -148,6 +148,30 @@ describe("fetchWithBusyRetry", () => {
     expect(tracker.getSnapshot().stillBusy).toBe(true)
   })
 
+  it.each([
+    ["an abort during the backoff", "abort"],
+    ["a non-busy failure on the retry", "error"],
+  ])("releases the hold when a chain ends by %s", async (_label, ending) => {
+    const tracker = createBusyTracker()
+    const controller = new AbortController()
+    const failed = new Response(JSON.stringify({ error: "Server error" }), { status: 500 })
+    const send = vi.fn()
+      .mockResolvedValueOnce(busyResponse("5"))
+      .mockResolvedValueOnce(failed)
+
+    const chain = fetchWithBusyRetry(send, { autoRetry: true, signal: controller.signal, tracker })
+      .catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(tracker.isHoldingOff()).toBe(true)
+
+    if (ending === "abort") controller.abort()
+    else await vi.advanceTimersByTimeAsync(10_000)
+    await chain
+
+    expect(tracker.isHoldingOff()).toBe(false)
+    expect(tracker.getSnapshot()).toEqual({ retrying: 0, stillBusy: false })
+  })
+
   it("holds other reads off as soon as one sees busy", async () => {
     const tracker = createBusyTracker()
     const first = fetchWithBusyRetry(vi.fn().mockResolvedValue(busyResponse("5")), {
