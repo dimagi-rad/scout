@@ -20,6 +20,7 @@ from django.db.models import Q
 
 from apps.semantic.canvas.diagnostics import saved_field_diagnostics
 from apps.semantic.canvas.objects import (
+    FIELD_CURATION_KEYS,
     field_sql_text,
     normalize_member_references,
     references_dataset,
@@ -347,10 +348,10 @@ def _restored_field_problems(entries: list[dict[str, Any]]) -> list[dict[str, An
     """
     restored: set[str] = set()
     for entry in entries:
-        before = entry.get("before")
+        before, after = entry.get("before"), entry.get("after")
         if before is None:
             continue
-        if entry["object_type"] == FIELD:
+        if entry["object_type"] == FIELD and (after is None or _changes_definition(before, after)):
             restored.add(entry["object_uuid"])
         elif entry["object_type"] == DATASET and entry.get("after") is None:
             restored.update(field["id"] for field in before.get("fields") or [])
@@ -371,6 +372,18 @@ def _restored_field_problems(entries: list[dict[str, Any]]) -> list[dict[str, An
             for diagnostic in saved_field_diagnostics(field)
         )
     return problems
+
+
+def _changes_definition(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Whether undoing this edit writes back more than curation (as canvas diagnostics judge it).
+
+    A curation-only undo leaves the SQL as it is, so it must not be refused
+    over SQL it does not touch.
+    """
+    curation = {*FIELD_CURATION_KEYS, "curated_fields"}
+    return any(
+        key.removeprefix("metadata.") not in curation for key in _changed_values(before, after)
+    )
 
 
 def _model_class(object_type: str):

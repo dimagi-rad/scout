@@ -473,6 +473,25 @@ def test_undo_refuses_to_restore_sql_that_fails_todays_field_rules(
     assert not SemanticModelRevision.objects.filter(reverts=edit).exists()
 
 
+def test_undo_of_a_curation_edit_ignores_sql_it_does_not_touch(
+    canvas, semantic_model, workspace, user
+):
+    _commit_paid_status(canvas, user)
+    _commit(
+        canvas,
+        user,
+        [{"op": "set", "target": "field/raw_visits.paid_status/label", "value": "Paid?"}],
+    )
+    label_edit = SemanticModelRevision.objects.order_by("-created_at").first()
+    field = semantic_model.datasets.get(name="raw_visits").fields.get(name="paid_status")
+    field.metadata = {**field.metadata, "cube_sql": '{CUBE}."no_such_column"'}
+    field.save(update_fields=["metadata"])
+
+    result = undo_revision(workspace, label_edit.id, user)
+
+    assert "refused" not in result, result
+
+
 def test_undo_of_a_dataset_create_refuses_while_it_is_named_bare(
     canvas, semantic_model, workspace, user, custom_sql
 ):
