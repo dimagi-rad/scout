@@ -45,7 +45,7 @@ jobs:
           docker run --detach --name scout-cube-cache-ci --network none \
             --entrypoint sleep scout-cube-cache-ci 600
           trap 'docker rm -f scout-cube-cache-ci' EXIT
-          uv run pytest tests/smoke/test_cube_publication_cache.py -m smoke
+          uv run pytest tests/smoke/test_cube_publication_cache.py tests/smoke/test_cube_driver_limits.py -m smoke
 
   lint-python:
     runs-on: ubuntu-latest
