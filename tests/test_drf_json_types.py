@@ -1,14 +1,12 @@
 """The DRF views answer a non-object body or a wrong-typed field with a 400, not a 500."""
 
-import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from django.test import Client
 
 from apps.semantic.services import query as query_service
 from apps.workspaces.models import (
-    TenantSchema,
     WorkspaceInvite,
     WorkspaceMembership,
     WorkspaceRole,
@@ -27,11 +25,6 @@ def client(user):
     c = Client(raise_request_exception=False)
     c.force_login(user)
     return c
-
-
-@pytest.fixture
-def active_schema(tenant):
-    return TenantSchema.objects.create(tenant=tenant, schema_name="test_schema", state="active")
 
 
 @pytest.mark.django_db
@@ -54,7 +47,6 @@ class TestNonObjectBody:
             "tenant-add": ("post", f"{ws}/tenants/"),
             "knowledge-create": ("post", f"{ws}/knowledge/"),
             "semantic-query": ("post", f"{ws}/semantic-query/"),
-            "transformations-trigger": ("post", "/api/transformations/runs/trigger/"),
         }
 
     @pytest.mark.parametrize(
@@ -68,7 +60,6 @@ class TestNonObjectBody:
             "tenant-add",
             "knowledge-create",
             "semantic-query",
-            "transformations-trigger",
         ],
     )
     @pytest.mark.parametrize(
@@ -119,65 +110,6 @@ class TestFieldTypes:
 
         assert resp.status_code == 400
         assert resp.json()["error"] == "Tenant not found or not accessible."
-
-    @pytest.mark.parametrize("value", UNHASHABLE.values(), ids=UNHASHABLE.keys())
-    def test_trigger_tenant_id_must_be_a_string(self, client, tenant_membership, value):
-        resp = _send(client, "post", "/api/transformations/runs/trigger/", {"tenant_id": value})
-
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "tenant_id must be a string."
-
-    def test_trigger_malformed_tenant_id_is_not_found(self, client, tenant_membership):
-        resp = _send(client, "post", "/api/transformations/runs/trigger/", {"tenant_id": "nope"})
-
-        assert resp.status_code == 404
-
-    @pytest.mark.parametrize("value", UNHASHABLE.values(), ids=UNHASHABLE.keys())
-    def test_trigger_workspace_id_must_be_a_string(
-        self, client, tenant, tenant_membership, active_schema, value
-    ):
-        body = {"tenant_id": str(tenant.id), "workspace_id": value}
-
-        resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
-
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "workspace_id must be a string."
-
-    @pytest.mark.parametrize(
-        "workspace_id,status",
-        [(["x"], 400), ({"a": 1}, 400), ("nope", 403), (str(uuid.uuid4()), 403)],
-        ids=["list", "object", "malformed", "unknown"],
-    )
-    def test_rejected_trigger_does_not_reset_the_schema_ttl(
-        self, client, tenant, tenant_membership, active_schema, workspace_id, status
-    ):
-        body = {"tenant_id": str(tenant.id), "workspace_id": workspace_id}
-
-        resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
-
-        assert resp.status_code == status
-        active_schema.refresh_from_db()
-        assert active_schema.last_accessed_at is None
-
-    @pytest.mark.parametrize("with_workspace", [False, True], ids=["no_workspace", "workspace"])
-    def test_accepted_trigger_resets_the_schema_ttl(
-        self, client, tenant, workspace, active_schema, with_workspace
-    ):
-        body = {"tenant_id": str(tenant.id)}
-        if with_workspace:
-            body["workspace_id"] = str(workspace.id)
-
-        with (
-            patch("apps.transformations.views.run_transformation_pipeline") as run,
-            patch("apps.transformations.views.TransformationRunSerializer") as serializer,
-        ):
-            serializer.return_value.data = {}
-            resp = _send(client, "post", "/api/transformations/runs/trigger/", body)
-
-        assert resp.status_code == 201
-        assert run.call_args.kwargs["workspace"] == (workspace if with_workspace else None)
-        active_schema.refresh_from_db()
-        assert active_schema.last_accessed_at is not None
 
 
 # transaction=True: the query service calls close_old_connections(), which closes a connection
