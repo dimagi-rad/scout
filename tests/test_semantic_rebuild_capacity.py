@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import psycopg
 import pytest
+from asgiref.sync import async_to_sync
 
 from apps.common.capacity import BUSY_MESSAGE, CapacityExhausted, CapacityResource
 from apps.semantic.models import CubeSchema, CustomDataset, SemanticDataset, SemanticModel
@@ -17,6 +18,7 @@ from apps.semantic.services.catalog import (
 )
 from apps.semantic.services.custom_datasets import CustomDatasetError, infer_custom_dataset_columns
 from apps.workspaces.models import SchemaState, WorkspaceViewSchema
+from apps.workspaces.services.query_state import semantic_layer_state
 from mcp_server.services import metadata
 from mcp_server.services.metadata import pipeline_table_primary_keys, workspace_table_identity
 
@@ -59,6 +61,7 @@ def test_a_refused_connection_while_reading_tables_is_not_a_refresh_prompt(works
         load_physical_tables(workspace)
 
     assert raised.value.resource == CapacityResource.DATABASE
+    assert raised.value.__cause__ is not raised.value
 
 
 @pytest.mark.django_db
@@ -144,6 +147,7 @@ def test_a_capacity_refusal_defers_the_rebuild_without_an_error_diagnostic(
     assert last_build["reason"] == BUSY_MESSAGE
     assert "error" not in last_build
     assert serving_model.diagnostics == []
+    assert async_to_sync(semantic_layer_state)(workspace)[0] == "stale"
     reported.assert_called_once()
 
 

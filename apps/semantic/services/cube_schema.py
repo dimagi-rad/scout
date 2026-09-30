@@ -185,7 +185,9 @@ def build_and_promote_cube_schema(
             raise
         report_capacity_exhausted(capacity.resource, str(exc), exc_info=exc)
         # Keeps the rebuild owed: a stale "ok" last_build would read as ready and
-        # the chat-time self-heal would never retry.
+        # the chat-time self-heal would never retry. The refused session is dropped
+        # first so the write reconnects instead of reusing it.
+        close_old_connections()
         record_cube_schema_build_deferred(workspace, BUSY_MESSAGE)
         raise CapacityExhausted(capacity.resource, BUSY_MESSAGE) from exc
     finally:
@@ -230,7 +232,13 @@ def record_cube_schema_build_deferred(workspace, reason: str) -> None:
             model.metadata["last_build"]["error"] = previous_error
         model.save(update_fields=["metadata", "updated_at"])
     except Exception:
-        logger.exception("Failed to record deferred Cube promotion for workspace %s", workspace.id)
+        # Warning, not exception: during a connection-limit incident this write is
+        # refused too, and an ungrouped ERROR would shadow the rate-limited alert.
+        logger.warning(
+            "Failed to record deferred Cube promotion for workspace %s",
+            workspace.id,
+            exc_info=True,
+        )
 
 
 def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> CubeSchema:

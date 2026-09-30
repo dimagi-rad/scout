@@ -15,7 +15,7 @@ from uuid import UUID
 from django.conf import settings
 from django.db import models
 
-from apps.common.capacity import classify_capacity_error
+from apps.common.capacity import reraise_if_capacity
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
 from apps.transformations.services.repeat_identity import (
@@ -184,9 +184,7 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
             ctx.max_query_timeout_seconds,
         )
     except Exception as exc:
-        capacity = classify_capacity_error(exc)
-        if capacity is not None:
-            raise capacity from exc
+        reraise_if_capacity(exc)
         logger.warning(
             "Could not enumerate live tables in schema %s; catalog will be empty",
             schema_name,
@@ -223,9 +221,7 @@ async def pipeline_table_primary_keys(ctx: QueryContext) -> dict[str, str]:
             ctx.max_query_timeout_seconds,
         )
     except Exception as exc:
-        capacity = classify_capacity_error(exc)
-        if capacity is not None:
-            raise capacity from exc
+        reraise_if_capacity(exc)
         logger.warning(
             "Could not read primary keys for schema %s; datasets will omit them",
             ctx.schema_name,
@@ -359,9 +355,7 @@ async def workspace_table_identity(
             published = await workspace_list_tables(ctx)
             validate_published_views(sources, {table["name"] for table in published})
     except Exception as exc:
-        capacity = classify_capacity_error(exc)
-        if capacity is not None:
-            raise capacity from exc
+        reraise_if_capacity(exc)
         logger.warning(
             "Could not verify source identity for workspace %s table %s",
             workspace_id,
