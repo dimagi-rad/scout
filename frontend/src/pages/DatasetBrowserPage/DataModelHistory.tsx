@@ -16,6 +16,10 @@ export interface DataModelRevision {
   undone: boolean
 }
 
+interface UndoResponse {
+  cube_schema?: { ok: boolean; error?: string }
+}
+
 interface RevisionListResponse {
   revisions: DataModelRevision[]
   can_undo: boolean
@@ -51,6 +55,7 @@ export function DataModelHistory({
   const [revisions, setRevisions] = useState<DataModelRevision[]>([])
   const [canUndo, setCanUndo] = useState(false)
   const [undoingId, setUndoingId] = useState<string | null>(null)
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [error, setError] = useState<{ message: string; details: string[] } | null>(null)
   const base = workspaceId ? `/api/workspaces/${workspaceId}/data-model/revisions/` : null
 
@@ -78,19 +83,28 @@ export function DataModelHistory({
 
   const undo = async (revision: DataModelRevision) => {
     if (!base) return
+    setConfirmingId(null)
     setUndoingId(revision.id)
     setError(null)
     try {
-      await api.post(`${base}${revision.id}/undo/`)
-      await Promise.all([load(), onChanged()])
+      const result = await api.post<UndoResponse>(`${base}${revision.id}/undo/`)
+      if (result?.cube_schema?.ok === false) {
+        setError({
+          message: "The change was undone, but queries still use the previous data model until it is rebuilt.",
+          details: result.cube_schema.error ? [result.cube_schema.error] : [],
+        })
+      }
     } catch (err) {
       setError({
         message: err instanceof Error ? err.message : "Could not undo this change.",
         details: conflictDetails(err),
       })
+      return
     } finally {
       setUndoingId(null)
     }
+    // A failed refresh must not read as a failed undo; the list reload reports its own error.
+    await Promise.allSettled([load(), onChanged()])
   }
 
   return (
@@ -158,12 +172,38 @@ export function DataModelHistory({
                     <Badge variant="outline" className="shrink-0">
                       Undone
                     </Badge>
+                  ) : canUndo && confirmingId === revision.id ? (
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <span className="text-xs text-muted-foreground">
+                        Restores what it replaced and removes what it added.
+                      </span>
+                      <div className="flex gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => setConfirmingId(null)}
+                          data-testid={`${testIdPrefix}-cancel-${revision.id}`}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => void undo(revision)}
+                          data-testid={`${testIdPrefix}-confirm-${revision.id}`}
+                        >
+                          Confirm undo
+                        </Button>
+                      </div>
+                    </div>
                   ) : canUndo ? (
                     <Button
                       variant="outline"
                       size="sm"
                       className="h-7 shrink-0 gap-1 px-2 text-xs"
-                      onClick={() => void undo(revision)}
+                      onClick={() => setConfirmingId(revision.id)}
                       disabled={undoingId !== null}
                       data-testid={`${testIdPrefix}-undo-${revision.id}`}
                     >

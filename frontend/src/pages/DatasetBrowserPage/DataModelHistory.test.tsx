@@ -45,6 +45,8 @@ describe("DataModelHistory", () => {
     expect(await screen.findByText("Created dataset visit_stats")).toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId("data-model-history-undo-rev-1"))
+    expect(postSpy).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByTestId("data-model-history-confirm-rev-1"))
 
     expect(postSpy).toHaveBeenCalledWith(`${BASE}rev-1/undo/`)
     expect(onChanged).toHaveBeenCalled()
@@ -78,10 +80,32 @@ describe("DataModelHistory", () => {
     render(<DataModelHistory workspaceId={WORKSPACE_ID} onChanged={vi.fn()} />)
     await userEvent.click(screen.getByTestId("data-model-history-btn"))
     await userEvent.click(await screen.findByTestId("data-model-history-undo-rev-1"))
+    await userEvent.click(screen.getByTestId("data-model-history-confirm-rev-1"))
 
     await waitFor(() => {
       expect(screen.getByTestId("data-model-history-error")).toHaveTextContent(
         "dataset/visit_stats: It was edited afterwards.",
+      )
+    })
+  })
+
+  it("warns when the undo saved but the query layer was not rebuilt", async () => {
+    vi.spyOn(api, "get").mockResolvedValue({
+      revisions: [revision({})],
+      can_undo: true,
+    } as never)
+    vi.spyOn(api, "post").mockResolvedValue({
+      cube_schema: { ok: false, error: "validator unavailable" },
+    } as never)
+
+    render(<DataModelHistory workspaceId={WORKSPACE_ID} onChanged={vi.fn()} />)
+    await userEvent.click(screen.getByTestId("data-model-history-btn"))
+    await userEvent.click(await screen.findByTestId("data-model-history-undo-rev-1"))
+    await userEvent.click(screen.getByTestId("data-model-history-confirm-rev-1"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("data-model-history-error")).toHaveTextContent(
+        "validator unavailable",
       )
     })
   })
