@@ -37,6 +37,11 @@ function ProviderBadge({ provider }: { provider: string }) {
 }
 
 function teamLabelFor(conn: ApiKeyConnection): string {
+  // A CommCare connection's scope is its HQ server, not a team; naming it keeps a
+  // www and an EU card (and their remove confirmations) apart.
+  if (conn.provider === "commcare" && conn.scope_key) {
+    return `CommCare HQ (${conn.scope_label || conn.scope_key})`
+  }
   // scope_label is the credential's own team; the chatbot fallback covers
   // connections created before the scope was recorded on the connection.
   if (conn.scope_label) return conn.scope_label

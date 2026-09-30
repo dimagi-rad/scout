@@ -24,7 +24,10 @@ export interface ApiKeyConnection {
   connection_id: string
   provider: string
   credential_type: string
-  /** The scope this credential authorises (an OCS team slug); "" when account-wide. */
+  /**
+   * The scope this credential authorises: an OCS team slug, or a CommCare HQ
+   * server ("" = www, "eu" = EU).
+   */
   scope_key: string
   scope_label: string
   /**
@@ -35,13 +38,23 @@ export interface ApiKeyConnection {
   chatbots: ConnectionChatbot[]
 }
 
+interface FieldOption {
+  value: string
+  label: string
+}
+
 interface ProviderField {
   key: string
   label: string
-  type: "text" | "password"
+  type: "text" | "password" | "select"
   required: boolean
   editable_on_rotate: boolean
+  /** For "select": the choices, the first being the default. */
+  options?: FieldOption[]
 }
+
+const SELECT_CLASSES =
+  "flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
 
 interface ProviderSchema {
   id: string
@@ -63,6 +76,16 @@ interface Props {
   onSaved: () => void | Promise<void>
 }
 
+/** A select's shown default is submitted too, so the payload matches what the user saw. */
+function initialValues(schema: ProviderSchema | undefined, mode: "add" | "edit") {
+  const values: Record<string, string> = {}
+  if (mode !== "add") return values
+  for (const f of schema?.fields ?? []) {
+    if (f.type === "select" && f.options?.length) values[f.key] = f.options[0].value
+  }
+  return values
+}
+
 export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: Props) {
   const [schemas, setSchemas] = useState<ProviderSchema[]>([])
   const [providerId, setProviderId] = useState<string>("")
@@ -79,7 +102,7 @@ export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: P
         const initial =
           mode === "edit" && editing ? editing.provider : (data[0]?.id ?? "")
         setProviderId(initial)
-        setValues({})
+        setValues(initialValues(data.find((s) => s.id === initial), mode))
         setError(null)
       })
       .catch(() => setError("Failed to load provider list."))
@@ -146,7 +169,11 @@ export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: P
                       name="api-connection-provider"
                       value={s.id}
                       checked={providerId === s.id}
-                      onChange={() => setProviderId(s.id)}
+                      onChange={() => {
+                        // A key typed for one provider must not be posted to another.
+                        setProviderId(s.id)
+                        setValues(initialValues(s, mode))
+                      }}
                       data-testid={`api-connection-provider-${s.id}`}
                     />
                     <span>{s.display_name}</span>
@@ -159,16 +186,34 @@ export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: P
           {visibleFields.map((f) => (
             <div key={f.key} className="space-y-2">
               <Label htmlFor={`field-${f.key}`}>{f.label}</Label>
-              <Input
-                id={`field-${f.key}`}
-                type={f.type}
-                required={f.required}
-                value={values[f.key] ?? ""}
-                onChange={(e) =>
-                  setValues((prev) => ({ ...prev, [f.key]: e.target.value }))
-                }
-                data-testid={`api-connection-field-${f.key}`}
-              />
+              {f.type === "select" ? (
+                <select
+                  id={`field-${f.key}`}
+                  className={SELECT_CLASSES}
+                  value={values[f.key] ?? ""}
+                  onChange={(e) =>
+                    setValues((prev) => ({ ...prev, [f.key]: e.target.value }))
+                  }
+                  data-testid={`api-connection-field-${f.key}`}
+                >
+                  {f.options?.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <Input
+                  id={`field-${f.key}`}
+                  type={f.type}
+                  required={f.required}
+                  value={values[f.key] ?? ""}
+                  onChange={(e) =>
+                    setValues((prev) => ({ ...prev, [f.key]: e.target.value }))
+                  }
+                  data-testid={`api-connection-field-${f.key}`}
+                />
+              )}
             </div>
           ))}
 

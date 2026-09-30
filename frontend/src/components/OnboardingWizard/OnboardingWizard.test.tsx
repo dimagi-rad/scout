@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
@@ -30,6 +30,95 @@ describe("OnboardingWizard", () => {
 
     expect(await screen.findByTestId("onboarding-ocs")).toBeTruthy()
     expect(screen.queryByTestId("onboarding-ocs-needs-team")).toBeNull()
+  })
+
+  it("sends an API key to the CommCare server the user picks", async () => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(
+        path === "/api/auth/api-key-providers/"
+          ? [
+              {
+                id: "commcare",
+                fields: [
+                  {
+                    key: "server",
+                    options: [
+                      { value: "", label: "Global (www.commcarehq.org)" },
+                      { value: "eu", label: "EU (eu.commcarehq.org)" },
+                    ],
+                  },
+                ],
+              },
+            ]
+          : providers(null),
+      ),
+    )
+    vi.mocked(api.post).mockResolvedValue({ memberships: [] })
+    render(<OnboardingWizard />)
+
+    fireEvent.click(await screen.findByTestId("onboarding-api-key-option"))
+    fireEvent.change(await screen.findByTestId("onboarding-server"), { target: { value: "eu" } })
+    fireEvent.change(screen.getByTestId("onboarding-domain"), { target: { value: "dom" } })
+    fireEvent.change(screen.getByTestId("onboarding-username"), {
+      target: { value: "u@example.com" },
+    })
+    fireEvent.change(screen.getByTestId("onboarding-api-key"), { target: { value: "k" } })
+    fireEvent.submit(screen.getByTestId("onboarding-domain").closest("form")!)
+
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith("/api/auth/connections/", {
+        provider: "commcare",
+        fields: { server: "eu", domain: "dom", username: "u@example.com", api_key: "k" },
+      }),
+    )
+  })
+
+  it("holds the API-key submit until the server list has loaded", async () => {
+    let resolveSchema!: (value: unknown) => void
+    vi.mocked(api.get).mockImplementation((path) =>
+      path === "/api/auth/api-key-providers/"
+        ? new Promise((resolve) => { resolveSchema = resolve })
+        : Promise.resolve(providers(null)),
+    )
+    render(<OnboardingWizard />)
+
+    fireEvent.click(await screen.findByTestId("onboarding-api-key-option"))
+    const submit = screen.getByRole("button", { name: "Connect" }) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+
+    resolveSchema([])
+    await waitFor(() => expect(submit.disabled).toBe(false))
+  })
+
+  it("says when the server list failed to load and retries", async () => {
+    let schemaCalls = 0
+    vi.mocked(api.get).mockImplementation((path) => {
+      if (path !== "/api/auth/api-key-providers/") return Promise.resolve(providers(null))
+      schemaCalls += 1
+      if (schemaCalls === 1) return Promise.reject(new Error("503"))
+      return Promise.resolve([
+        {
+          id: "commcare",
+          fields: [
+            {
+              key: "server",
+              options: [
+                { value: "", label: "Global (www.commcarehq.org)" },
+                { value: "eu", label: "EU (eu.commcarehq.org)" },
+              ],
+            },
+          ],
+        },
+      ])
+    })
+    render(<OnboardingWizard />)
+
+    fireEvent.click(await screen.findByTestId("onboarding-api-key-option"))
+    const failure = await screen.findByTestId("onboarding-server-error")
+    fireEvent.click(failure.querySelector("button")!)
+
+    expect(await screen.findByTestId("onboarding-server")).toBeTruthy()
+    expect(screen.queryByTestId("onboarding-server-error")).toBeNull()
   })
 
   it("says when sign-in options failed to load and retries", async () => {

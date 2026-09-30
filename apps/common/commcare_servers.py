@@ -9,6 +9,7 @@ original www server, so rows written before EU support keep their meaning unchan
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 DEFAULT_SERVER = ""
 
@@ -20,6 +21,10 @@ class CommCareServer:
     base_url: str
     # The allauth provider id whose sign-in lands on this server.
     provider_id: str
+
+    @property
+    def host(self) -> str:
+        return urlsplit(self.base_url).hostname or ""
 
     @property
     def token_url(self) -> str:
