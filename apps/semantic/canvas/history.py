@@ -293,8 +293,16 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
         revision = (
             requested
             if head_id == requested.id
-            else SemanticModelRevision.objects.select_for_update().get(id=head_id)
+            else SemanticModelRevision.objects.select_for_update().get(
+                id=head_id, workspace=workspace
+            )
         )
+        # Another revision in the chain may have reversed the head while we waited for its lock.
+        if (
+            revision is not requested
+            and SemanticModelRevision.objects.filter(reverts=revision).exists()
+        ):
+            return refused("ALREADY_UNDONE", "This revision has already been undone.")
         model = _lock_model(workspace)
         if model is None:
             return refused(
