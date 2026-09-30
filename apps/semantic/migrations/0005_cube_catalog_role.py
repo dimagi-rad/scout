@@ -15,7 +15,16 @@ EXCEPTION WHEN duplicate_object THEN
     NULL;
 END
 $$;
-GRANT {role} TO CURRENT_USER;
+DO $$
+BEGIN
+    GRANT {role} TO CURRENT_USER;
+EXCEPTION WHEN insufficient_privilege THEN
+    -- Another database's user created the role and we lack ADMIN OPTION on it.
+    -- Cube checks membership and keeps reading as the owner, so don't fail the deploy.
+    RAISE WARNING 'Cannot grant {role} to %; Cube will keep reading its catalog as the owner',
+        current_user;
+END
+$$;
 GRANT SELECT ON semantic_cubeschema TO {role};
 """.replace("{role}", CATALOG_ROLE)
 
