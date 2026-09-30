@@ -116,6 +116,45 @@ test('trusted prior checkpoint selects and verifies the exact incremental range'
     && JSON.stringify(args) === JSON.stringify(['merge-base', '--is-ancestor', PRIOR, HEAD])));
 });
 
+test('a moved base tip keeps the checkpoint only when the merge-base is unchanged', async () => {
+  const NEW_BASE = 'f'.repeat(40);
+  const cases = [
+    [{ [`${BASE}...${PRIOR}`]: MERGE, [`${NEW_BASE}...${HEAD}`]: MERGE }, 'false', 'accepted checkpoint'],
+    [{ [`${BASE}...${PRIOR}`]: MERGE, [`${NEW_BASE}...${HEAD}`]: '1'.repeat(40) }, 'true', 'base changed'],
+    [{ [`${BASE}...${PRIOR}`]: MERGE }, 'true', 'base changed'],
+    [{ [`${BASE}...${PRIOR}`]: MERGE, [`${NEW_BASE}...${HEAD}`]: 'not-a-sha' }, 'true', 'base changed'],
+  ];
+  for (const [mergeBases, full, reason] of cases) {
+    const h = harness({ REVIEW_BASE: NEW_BASE });
+    h.pr.base.sha = NEW_BASE;
+    const compared = [];
+    h.github.rest.repos = { compareCommitsWithBasehead: async ({ basehead }) => {
+      compared.push(basehead);
+      if (!Object.hasOwn(mergeBases, basehead)) throw Object.assign(new Error('Not Found'), { status: 404 });
+      return { data: { merge_base_commit: { sha: mergeBases[basehead] } } };
+    } };
+    await prepareReview(h);
+    h.comments = [comment(state({ policy: h.outputs.policy })), nativeComment()];
+    await prepareReview(h);
+    assert.equal(h.outputs.full_review, full);
+    assert.equal(h.outputs.reason, reason);
+    assert.equal(h.outputs.checkpoint, full === 'false' ? PRIOR : '');
+    assert.deepEqual(compared.sort(), [`${BASE}...${PRIOR}`, `${NEW_BASE}...${HEAD}`]);
+  }
+});
+
+test('an unchanged base tip or a blocked prior review never compares merge bases', async () => {
+  for (const [base, passed] of [[BASE, true], ['f'.repeat(40), false]]) {
+    const h = harness({ REVIEW_BASE: base });
+    h.pr.base.sha = base;
+    h.github.rest.repos = { compareCommitsWithBasehead: async () => assert.fail('unexpected compare') };
+    await prepareReview(h);
+    h.comments = [comment(state({ policy: h.outputs.policy, passed })), nativeComment()];
+    await prepareReview(h);
+    assert.equal(h.outputs.full_review, passed ? 'false' : 'true');
+  }
+});
+
 test('blocked or partial reviews overwrite eligibility and force the next run to be full', async () => {
   for (const mutate of [h => { h.result.comments = [{ severity: 'high', content: 'Blocking finding' }]; },
     h => { h.result.status = 'partial'; }, h => { h.env.POSTING_FAILED = '1'; },
