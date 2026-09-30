@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from asgiref.sync import sync_to_async
+from django.core.exceptions import ValidationError
 from django.db import close_old_connections
 from langchain_core.tools import tool
 
@@ -54,11 +55,16 @@ def _resolve_canvas_sync(workspace, user, conversation_id: str):
     close_old_connections()
     # Never create the row here: chat_view creates it before the turn starts, and a
     # missing row means the thread was deleted, whose checkpoints must not be adopted.
-    thread = Thread.objects.filter(id=conversation_id).first()
+    try:
+        thread = Thread.objects.filter(id=conversation_id).first()
+    except ValidationError:
+        thread = None
     if thread is None:
         raise SemanticCatalogUnavailable("This conversation no longer exists.")
     if thread.workspace_id != workspace.id:
         raise SemanticCatalogUnavailable("This conversation belongs to another workspace.")
+    if thread.user_id != getattr(user, "pk", None):
+        raise SemanticCatalogUnavailable("This conversation belongs to another user.")
     return resolve_thread_canvas(workspace, thread, user)
 
 

@@ -28,6 +28,7 @@ from apps.agents.tools.canvas_tool import create_canvas_read_tool
 from apps.chat.checkpointer import thread_has_checkpoint
 from apps.chat.checks import same_database
 from apps.chat.models import Thread
+from apps.common.db_urls import build_pg_url
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from tests.tenant_access import ausable_connection
@@ -316,6 +317,27 @@ async def test_canvas_tool_does_not_recreate_a_deleted_thread(workspace, user):
     assert not await Thread.objects.filter(id=conversation_id).aexists()
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_canvas_tool_rejects_another_users_thread(workspace, user, read_user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=read_user)
+    tool = create_canvas_read_tool(workspace, user, str(thread.id))
+
+    result = await tool.ainvoke({"selector": "graph"})
+
+    assert "another user" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_canvas_tool_treats_a_non_uuid_conversation_as_gone(workspace, user):
+    tool = create_canvas_read_tool(workspace, user, "")
+
+    result = await tool.ainvoke({"selector": "graph"})
+
+    assert "no longer exists" in result
+
+
 @pytest.mark.parametrize(
     ("django_db", "conninfo", "expected"),
     [
@@ -335,10 +357,40 @@ async def test_canvas_tool_does_not_recreate_a_deleted_thread(workspace, user):
             "postgresql://scout:x@replica.internal:5432/scout",
             False,
         ),
+        (
+            {"NAME": "scout", "HOST": "", "PORT": ""},
+            "postgresql:///scout?host=/var/run/postgresql",
+            True,
+        ),
     ],
 )
 def test_same_database(django_db, conninfo, expected):
     assert same_database(django_db, conninfo) is expected
+
+
+def test_checkpointer_on_the_default_database_passes_the_system_check(settings, monkeypatch):
+    default = settings.DATABASES["default"]
+    url = build_pg_url(
+        host=str(default.get("HOST") or ""),
+        port=default.get("PORT") or 5432,
+        dbname=default["NAME"],
+        user=str(default.get("USER") or ""),
+        password=str(default.get("PASSWORD") or ""),
+    )
+    monkeypatch.setattr("apps.chat.checks.get_database_url", lambda: url)
+
+    assert "chat.E001" not in {e.id for e in run_checks()}
+
+
+def test_unparseable_checkpointer_url_is_a_check_error_without_the_password(monkeypatch):
+    monkeypatch.setattr(
+        "apps.chat.checks.get_database_url", lambda: "pgsql://scout:hunter2@db.internal/scout"
+    )
+
+    errors = [e for e in run_checks() if e.id == "chat.E001"]
+
+    assert len(errors) == 1
+    assert "hunter2" not in str(errors[0])
 
 
 def test_checkpointer_on_another_database_fails_the_system_check(monkeypatch):
