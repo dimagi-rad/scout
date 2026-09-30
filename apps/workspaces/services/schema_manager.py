@@ -139,7 +139,7 @@ async def aview_schema_buildable(workspace_id) -> bool:
     return len(tenant_ids) > 1 and await _served_sources(tenant_ids).aexists()
 
 
-def fail_view_schema_if_unbuildable(workspace) -> bool:
+def fail_view_schema_if_unbuildable(workspace, *, removing: bool = False) -> bool:
     """True when no view rebuild should be queued, having recorded why.
 
     For callers deciding whether to queue a rebuild, inside their transaction. A
@@ -147,11 +147,12 @@ def fail_view_schema_if_unbuildable(workspace) -> bool:
     written. With no served source this writes the build's own FAILED state,
     ``last_error`` and coverage, creating the row as the build would: the
     dependent-rebuild fan-out only reaches workspaces with a row, and it is what
-    rebuilds these views once any source loads. The row is locked before the
-    check, as a build publishing ACTIVE holds that lock, so a build that just
-    succeeded is never overwritten with FAILED. A PROVISIONING row asks for a
-    rebuild, and a retired row keeps its lifecycle state (see
-    SchemaManager._save_build_failure).
+    rebuilds these views once any source loads. The row lock only orders this
+    against a build's entry and publish, not its DDL, so a row a build may be
+    running over is left to a rebuild queued behind it: PROVISIONING, and when
+    ``removing`` also ACTIVE, which a build keeps while it runs and would
+    republish over the removed source. A retired row keeps its lifecycle state
+    (see SchemaManager._save_build_failure).
     """
     # iterator() bypasses a prefetch cache, which would still hold a source the
     # caller just removed in this transaction.
@@ -162,10 +163,12 @@ def fail_view_schema_if_unbuildable(workspace) -> bool:
     if len(tenants) < 2:
         return True
     existing = WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace).first()
-    if existing is not None and existing.state == SchemaState.PROVISIONING:
-        # A build may be mid-flight over sources read before this change; it only
-        # holds the row lock to publish, so only a rebuild queued behind it
-        # corrects what it publishes.
+    # An add is safe over an ACTIVE row: a build in flight publishes the sources
+    # it planned, all still linked, and names the new one missing.
+    in_flight = (
+        (SchemaState.PROVISIONING, SchemaState.ACTIVE) if removing else (SchemaState.PROVISIONING,)
+    )
+    if existing is not None and existing.state in in_flight:
         return False
     if _served_sources([t.id for t in tenants]).exists():
         return False
@@ -180,7 +183,7 @@ def fail_view_schema_if_unbuildable(workspace) -> bool:
     if existing is None:
         WorkspaceViewSchema.objects.get_or_create(
             workspace=workspace,
-            defaults={"schema_name": SchemaManager()._view_schema_name(workspace.id), **failure},
+            defaults={"schema_name": SchemaManager._view_schema_name(workspace.id), **failure},
         )
     elif existing.state not in RETIRED_VIEW_STATES:
         WorkspaceViewSchema.objects.filter(pk=existing.pk).update(**failure)
@@ -664,7 +667,8 @@ class SchemaManager:
             )
         )
 
-    def _view_schema_name(self, workspace_id) -> str:
+    @staticmethod
+    def _view_schema_name(workspace_id) -> str:
         """Generate a PostgreSQL schema name for a workspace's view schema."""
         hex_id = str(workspace_id).replace("-", "")[:16]
         return f"ws_{hex_id}"

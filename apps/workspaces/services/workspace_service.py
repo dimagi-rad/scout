@@ -232,7 +232,7 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         # When nothing is served, views over the removed source stay physically
         # until a load rebuilds them or that source's retirement retry drops them;
         # a FAILED row is never served, so they are unreadable meanwhile.
-        elif not fail_view_schema_if_unbuildable(workspace):
+        elif not fail_view_schema_if_unbuildable(workspace, removing=True):
             WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                 state=SchemaState.PROVISIONING
             )

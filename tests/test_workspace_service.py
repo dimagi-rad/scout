@@ -410,17 +410,17 @@ def test_removing_a_source_when_nothing_is_served_creates_the_failed_row(
 
 
 @pytest.mark.django_db
-def test_removing_a_source_behind_a_provisioning_build_still_rebuilds(
-    workspace, tenant, tenant2, tenant_membership2, tenant3, tenant_membership3
+@pytest.mark.parametrize("state", [SchemaState.PROVISIONING, SchemaState.ACTIVE])
+def test_removing_a_source_behind_a_possible_build_still_rebuilds(
+    workspace, tenant2, tenant_membership2, tenant3, tenant_membership3, state
 ):
     """A build in flight planned over the removed source and would publish it; only
-    a rebuild queued behind it corrects that, even though nothing is served now."""
+    a rebuild queued behind it corrects that, even though nothing is served now. A
+    build over serving views leaves the row ACTIVE while it runs."""
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
     wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
     TenantSchema.objects.create(tenant=tenant3, schema_name="live_three", state=SchemaState.ACTIVE)
-    vs = WorkspaceViewSchema.objects.create(
-        workspace=workspace, schema_name="ws_test", state=SchemaState.PROVISIONING
-    )
+    vs = WorkspaceViewSchema.objects.create(workspace=workspace, schema_name="ws_test", state=state)
 
     with patch(
         "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
@@ -497,7 +497,7 @@ def test_removing_a_source_when_nothing_is_served_queues_no_rebuild(
     wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
     TenantSchema.objects.create(tenant=tenant3, schema_name="live_three", state=SchemaState.ACTIVE)
     vs = WorkspaceViewSchema.objects.create(
-        workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
+        workspace=workspace, schema_name="ws_test", state=SchemaState.FAILED
     )
 
     with patch(
