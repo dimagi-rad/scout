@@ -5,7 +5,7 @@
 // This only alerts. It never dispatches a deploy: a run is usually cancelled on
 // purpose (host trouble, a held migration), and an unattended redeploy drains
 // workers on a host shared with staging.
-const { WAITING, findLiveRun } = require('./deploy-supersede.cjs');
+const { WAITING, findLiveRun, listMainRuns } = require('./deploy-supersede.cjs');
 const { findOpenIssue, fileOrComment } = require('./deploy-failure-issue.cjs');
 
 const THRESHOLD_MINUTES = 45;
@@ -21,11 +21,9 @@ function behindSince({ headRuns, commitDate }) {
 
 async function assessDeployLag({ github, context, core, workflowId, jobName, now, thresholdMinutes }) {
   const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: 'main' });
-  const head = branch.commit.sha;
-  const { data } = await github.rest.actions.listWorkflowRuns({
-    ...context.repo, workflow_id: workflowId, branch: 'main', per_page: 100,
+  const { head, headRuns: unsorted, reliable, runs } = await listMainRuns({
+    github, context, core, workflowId, branch,
   });
-  const runs = data.workflow_runs;
 
   // Explicit states, as in deploy-supersede.cjs: a run parked in e.g.
   // `action_required` never deploys and must not silence the alert.
@@ -36,10 +34,12 @@ async function assessDeployLag({ github, context, core, workflowId, jobName, now
     github, context, core, runs, jobName, consequence: 'the commit production runs is unknown',
   });
   if (live && live.head_sha === head) return { state: 'current', head, live };
+  // Without a trustworthy run list a dispatched deploy of an older commit, or the
+  // live run, may be invisible. Stay silent (with a warning) rather than cry wolf;
+  // the next tick re-reads the list.
+  if (!reliable) return { state: 'unknown', head };
 
-  const headRuns = runs
-    .filter((run) => run.head_sha === head)
-    .sort((a, b) => b.run_number - a.run_number);
+  const headRuns = [...unsorted].sort((a, b) => b.run_number - a.run_number);
   const latest = headRuns[0] || null;
   const since = behindSince({ headRuns, commitDate: branch.commit.commit.committer.date });
   const minutes = Math.floor((now - since) / 60000);
@@ -88,6 +88,10 @@ async function checkDeployLag({
   now = Date.now(), thresholdMinutes = THRESHOLD_MINUTES,
 }) {
   const lag = await assessDeployLag({ github, context, core, workflowId, jobName, now, thresholdMinutes });
+  if (lag.state === 'unknown') {
+    core.warning(`Could not tell whether production is behind main ${lag.head.slice(0, 12)}; not filing an issue.`);
+    return lag;
+  }
   const quiet = () => {
     core.info(`Production deploy state: ${lag.state} (main at ${lag.head.slice(0, 12)}).`);
     return lag;
