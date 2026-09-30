@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import httpx
 
 from apps.common.commcare_servers import (
@@ -22,8 +25,22 @@ def _auth_header(username: str, api_key: str) -> dict[str, str]:
     return {"Authorization": f"ApiKey {username}:{api_key}"}
 
 
-# A user's domain list is small; the bound only stops a looping ``next`` link.
+# A user's domain list is small; the bounds stop a looping or trickling upstream
+# from holding a credential add open.
 _MAX_DOMAIN_PAGES = 50
+_LISTING_BUDGET_SECONDS = 30.0
+_REQUEST_TIMEOUT_SECONDS = 15.0
+_UNEXPECTED = "CommCare returned an unexpected domain list"
+
+
+def _page(payload) -> tuple[list, str | None]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("objects"), list):
+        raise CredentialVerificationError(_UNEXPECTED)
+    meta = payload.get("meta") or {}
+    next_url = meta.get("next") if isinstance(meta, dict) else None
+    if next_url is not None and not isinstance(next_url, str):
+        raise CredentialVerificationError(_UNEXPECTED)
+    return payload["objects"], next_url
 
 
 async def _list_domains(domains_url: str, fields: dict[str, str]) -> list[dict]:
@@ -34,11 +51,29 @@ async def _list_domains(domains_url: str, fields: dict[str, str]) -> list[dict]:
     """
     headers = _auth_header(fields["username"], fields["api_key"])
     policy = ProviderURLPolicy(domains_url)
-    url: str | None = domains_url
+    deadline = time.monotonic() + _LISTING_BUDGET_SECONDS
+    url = domains_url
+    seen: set[str] = set()
     domains: list[dict] = []
-    async with httpx.AsyncClient(timeout=15) as client:
-        for _page in range(_MAX_DOMAIN_PAGES):
-            resp = await client.get(url, headers=headers)
+    async with httpx.AsyncClient() as client:
+        for _page_number in range(_MAX_DOMAIN_PAGES):
+            remaining = deadline - time.monotonic()
+            if url in seen or remaining <= 0:
+                break
+            seen.add(url)
+            try:
+                # The key must never follow a redirect past the origin policy.
+                resp = await asyncio.wait_for(
+                    client.get(
+                        url,
+                        headers=headers,
+                        follow_redirects=False,
+                        timeout=min(_REQUEST_TIMEOUT_SECONDS, remaining),
+                    ),
+                    timeout=remaining,
+                )
+            except (httpx.RequestError, TimeoutError):
+                raise CredentialVerificationError("CommCare could not be reached") from None
             if resp.status_code in (401, 403):
                 raise CredentialVerificationError(
                     f"CommCare rejected the API key (HTTP {resp.status_code})"
@@ -49,16 +84,17 @@ async def _list_domains(domains_url: str, fields: dict[str, str]) -> list[dict]:
                 )
             try:
                 payload = resp.json()
-                domains.extend(payload["objects"])
-                next_url = (payload.get("meta") or {}).get("next")
-                url = policy.resolve(next_url, relative_to=url) if next_url else None
-            except (ValueError, KeyError, TypeError, AttributeError, UnsafeProviderURL):
-                raise CredentialVerificationError(
-                    "CommCare returned an unexpected domain list"
-                ) from None
-            if url is None:
+            except ValueError:
+                raise CredentialVerificationError(_UNEXPECTED) from None
+            objects, next_url = _page(payload)
+            domains.extend(objects)
+            if not next_url:
                 return domains
-    raise CredentialVerificationError("CommCare returned too many pages of domains")
+            try:
+                url = policy.resolve(next_url, relative_to=url)
+            except UnsafeProviderURL:
+                raise CredentialVerificationError(_UNEXPECTED) from None
+    raise CredentialVerificationError("CommCare's domain list did not finish")
 
 
 class CommCareStrategy(CredentialProviderStrategy):

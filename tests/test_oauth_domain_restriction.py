@@ -1,5 +1,7 @@
 """Tests for OAuth email-domain restriction enforcement and configuration."""
 
+from types import SimpleNamespace
+
 import pytest
 from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.models import SocialAccount, SocialLogin
@@ -33,12 +35,16 @@ def _make_request():
     return request
 
 
-def _make_sociallogin(provider: str, email: str) -> SocialLogin:
-    """Build an in-memory SocialLogin for adapter testing (no DB writes)."""
+def _make_sociallogin(provider: str, email: str, *, adapter_id: str | None = None) -> SocialLogin:
+    """Build an in-memory SocialLogin for adapter testing (no DB writes).
+
+    ``adapter_id`` is the provider that signed in, which allauth sets on the login;
+    it defaults to ``provider``, an unaliased sign-in.
+    """
     user = User(email=email)
     account = SocialAccount(provider=provider, uid="test-uid")
-    sociallogin = SocialLogin(user=user, account=account)
-    return sociallogin
+    signed_in_with = SimpleNamespace(id=adapter_id or provider)
+    return SocialLogin(user=user, account=account, provider=signed_in_with)
 
 
 class TestPreSocialLoginEnforcement:

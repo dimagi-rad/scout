@@ -76,6 +76,8 @@ def server_for_provider(provider_id: str) -> str:
     CommCare id, including www aliases such as ``commcare_prod``, is www.
     """
     for server in COMMCARE_SERVERS.values():
-        if server.key and provider_id.startswith(server.provider_id):
+        if server.key and (
+            provider_id == server.provider_id or provider_id.startswith(f"{server.provider_id}_")
+        ):
             return server.key
     return DEFAULT_SERVER

@@ -131,3 +131,27 @@ async def test_an_unexpected_domain_list_is_a_rejection(httpx_mock, response):
 
     with pytest.raises(CredentialVerificationError, match="unexpected domain list"):
         await CommCareStrategy.verify_and_discover({**FIELDS, "server": "eu"})
+
+
+@pytest.mark.asyncio
+async def test_a_next_link_back_to_the_same_page_stops_at_once(httpx_mock):
+    httpx_mock.add_response(
+        url=EU_DOMAINS, json={"objects": [], "meta": {"next": "/api/user_domains/v1/"}}
+    )
+
+    with pytest.raises(CredentialVerificationError, match="did not finish"):
+        await CommCareStrategy.verify_and_discover({**FIELDS, "server": "eu"})
+
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_is_not_followed_with_the_key(httpx_mock):
+    httpx_mock.add_response(
+        url=EU_DOMAINS, status_code=302, headers={"Location": "https://evil.example/"}
+    )
+
+    with pytest.raises(CredentialVerificationError, match="unexpected status 302"):
+        await CommCareStrategy.verify_and_discover({**FIELDS, "server": "eu"})
+
+    assert len(httpx_mock.get_requests()) == 1

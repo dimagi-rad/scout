@@ -120,11 +120,13 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         that maps elsewhere (a ``commcare_eu*`` id on the www provider) would send
         that token to the wrong HQ, so it fails here instead of at first use.
         """
-        adapter_id = getattr(getattr(sociallogin, "provider", None), "id", "") or ""
         stored_id = sociallogin.account.provider
-        if canonical_provider(adapter_id) != "commcare":
+        if canonical_provider(stored_id) != "commcare":
             return
-        if server_for_provider(adapter_id) == server_for_provider(stored_id):
+        # allauth's sociallogin_from_response sets the provider that signed in; a
+        # CommCare login without one cannot be placed on a server, so it fails closed.
+        adapter_id = getattr(getattr(sociallogin, "provider", None), "id", None)
+        if adapter_id and server_for_provider(adapter_id) == server_for_provider(stored_id):
             return
         logger.error(
             "CommCare sign-in refused: provider id %s maps to a different HQ server than %s",
