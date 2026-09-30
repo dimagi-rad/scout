@@ -40,6 +40,7 @@ from apps.users.services.tenant_resolution import (
 from apps.users.services.token_refresh import (
     INTERACTIVE_DB_DEADLINE,
     TokenRefreshError,
+    TokenRefreshUnavailable,
     credential_fingerprint,
     get_token_url,
     refresh_oauth_token,
@@ -288,7 +289,7 @@ def providers_view(request):
     apps = SocialApp.objects.filter(sites=current_site).order_by("provider")
 
     connected_providers = set()
-    token_status = {}  # provider -> "connected" | "expired" | "needs_team"
+    token_status = {}  # provider -> "connected" | "unavailable" | "expired" | "needs_team"
     if request.user.is_authenticated:
         connected_providers = set(
             SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
@@ -299,7 +300,8 @@ def providers_view(request):
         # provider -> every one of its identities' statuses. A scoped provider now
         # has one token per team (#156), and the old per-provider assignment was
         # last-row-wins, so a healthy team could be reported as expired purely on
-        # queryset order. Reduced below to "connected while at least one works";
+        # queryset order. Reduced below to "connected while at least one works",
+        # then "unavailable" (unknown, not dead) ahead of "expired";
         # the per-team detail lives on /api/auth/connections/.
         bindings = {
             (conn.provider, conn.scope_key): conn.social_account_id
@@ -320,11 +322,16 @@ def providers_view(request):
             token_url = get_token_url(provider, scope_key)
             can_refresh = bool(token_url and social_token.token_secret and social_token.app)
             refresh_failed = False
+            refresh_unavailable = False
             if can_refresh and token_needs_refresh(social_token.expires_at):
                 try:
                     async_to_sync(refresh_oauth_token)(
                         social_token, token_url, db_timeout=INTERACTIVE_DB_DEADLINE
                     )
+                except TokenRefreshUnavailable:
+                    # The stored credential isn't known to be dead (provider blip, Scout's
+                    # own invalid_client, contended DB), so reconnecting can't help (#779).
+                    refresh_unavailable = True
                 except TokenRefreshError:
                     refresh_failed = True
             refresh_failed = (
@@ -334,16 +341,18 @@ def providers_view(request):
                     oauth_refresh_failure_fingerprint=credential_fingerprint(social_token),
                 ).exists()
             )
+            status = token_health(
+                social_token, provider, scope_key=scope_key, refresh_failed=refresh_failed
+            )
             _record_status(
                 seen_statuses,
                 provider,
-                token_health(
-                    social_token, provider, scope_key=scope_key, refresh_failed=refresh_failed
-                ),
+                "unavailable" if refresh_unavailable and status == "connected" else status,
             )
         token_status = {
             provider: next(
-                (s for s in ("connected", "expired", "needs_team") if s in statuses), "expired"
+                (s for s in ("connected", "unavailable", "expired", "needs_team") if s in statuses),
+                "expired",
             )
             for provider, statuses in seen_statuses.items()
         }
