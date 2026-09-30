@@ -4,6 +4,7 @@
     "**/test_*.py",
     "**/conftest.py",
     "**/*.test.cjs",
+    "frontend/src/test/**",
     "**/package-lock.json"
   ]
 }
