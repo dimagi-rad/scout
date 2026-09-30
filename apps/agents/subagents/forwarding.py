@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 from apps.agents.subagents.events import emit_subagent_event
+from apps.chat.stream import _redact_tool_input, _tool_content_to_str, _truncate_tool_output
 
 TRACE_MAX_EVENTS = 200
 MESSAGE_MAX_CHARS = 40_000
@@ -75,7 +76,6 @@ class NestedEventForwarder:
     # -- event handlers -----------------------------------------------------
 
     async def _tool_start(self, event: dict[str, Any]) -> None:
-        from apps.chat.stream import _redact_tool_input
 
         raw_input = event.get("data", {}).get("input")
         run_id = str(event.get("run_id") or "")
@@ -99,7 +99,6 @@ class NestedEventForwarder:
         )
 
     async def _tool_end(self, event: dict[str, Any]) -> None:
-        from apps.chat.stream import _tool_content_to_str, _truncate_tool_output
 
         tool_output = event.get("data", {}).get("output")
         if not tool_output:

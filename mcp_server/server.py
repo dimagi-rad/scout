@@ -23,10 +23,12 @@ import argparse
 import contextlib
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime
 
+import django
 import uvicorn
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -34,6 +36,7 @@ from django.core.exceptions import ValidationError as _ValidationError
 from django.db.models import Q, aprefetch_related_objects
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from watchfiles import watch
 
 from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import SemanticDataset
@@ -2067,7 +2070,6 @@ def _setup_django() -> None:
             "DJANGO_SETTINGS_MODULE environment variable is required. "
             "Set it to 'config.settings.development' or 'config.settings.production'."
         )
-    import django
 
     django.setup()
 
@@ -2129,9 +2131,6 @@ def _run_streamable_http(args: argparse.Namespace) -> None:
 
 def _run_with_reload(args: argparse.Namespace) -> None:
     """Run the server in a subprocess and restart it when files change."""
-    import subprocess
-
-    from watchfiles import watch
 
     watch_dirs = ["mcp_server", "apps"]
     cmd = [

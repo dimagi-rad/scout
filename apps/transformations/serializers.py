@@ -1,3 +1,4 @@
+from django.db import models
 from rest_framework import serializers
 
 from .models import TransformationAsset, TransformationAssetRun, TransformationRun
@@ -29,7 +30,6 @@ class TransformationAssetSerializer(serializers.ModelSerializer):
             user = self.context["request"].user
             tenant_ids = user.tenant_memberships.values_list("tenant_id", flat=True)
             workspace_ids = user.workspace_memberships.values_list("workspace_id", flat=True)
-            from django.db import models
 
             self.fields["replaces"].queryset = TransformationAsset.objects.filter(
                 models.Q(tenant_id__in=tenant_ids) | models.Q(workspace_id__in=workspace_ids)

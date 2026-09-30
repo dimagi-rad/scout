@@ -4,6 +4,7 @@ Serializers for recipes API.
 
 from rest_framework import serializers
 
+from apps.common.utils import creator_display_name
 from apps.recipes.models import Recipe, RecipeRun
 
 
@@ -36,7 +37,6 @@ class RecipeListSerializer(serializers.ModelSerializer):
         return last_run.created_at if last_run else None
 
     def get_created_by_name(self, obj):
-        from apps.common.utils import creator_display_name
 
         return creator_display_name(obj.created_by)
 
@@ -61,7 +61,6 @@ class RecipeDetailSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_by_name", "created_at", "updated_at"]
 
     def get_created_by_name(self, obj):
-        from apps.common.utils import creator_display_name
 
         return creator_display_name(obj.created_by)
 

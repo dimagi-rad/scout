@@ -8,6 +8,7 @@ exposed as a decorator.
 import functools
 import time
 
+from django.conf import settings
 from django.core.cache import cache
 from django.http import JsonResponse
 
@@ -18,7 +19,6 @@ CHAT_RATE_WINDOW = 60  # seconds
 
 def _get_settings():
     """Read overrides from Django settings, falling back to module defaults."""
-    from django.conf import settings
 
     limit = getattr(settings, "CHAT_RATE_LIMIT", CHAT_RATE_LIMIT)
     window = getattr(settings, "CHAT_RATE_WINDOW", CHAT_RATE_WINDOW)

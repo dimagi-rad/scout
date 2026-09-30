@@ -15,9 +15,11 @@ import uuid
 from django.http import JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_protect
+from langchain_core.messages import HumanMessage
 
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
+from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.helpers import (
     _resolve_chat_access,
@@ -292,16 +294,12 @@ async def chat_view(request):
     # inject synthetic ToolMessages before appending the new HumanMessage.
     dangling_tool_results = await repair_dangling_tool_calls(agent, config)
 
-    from langchain_core.messages import HumanMessage
-
     input_state = {
         "messages": [*dangling_tool_results, HumanMessage(content=user_content)],
         "workspace_id": str(workspace.id),
         "user_id": str(user.id),
         "thread_id": str(thread_id),
     }
-
-    from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 
     trace_metadata = {
         "workspace_id": str(workspace.id),

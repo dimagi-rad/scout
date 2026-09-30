@@ -1,9 +1,11 @@
 """Recipe and RecipeRun models for reusable conversation workflows."""
 
 import uuid
+from datetime import datetime
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class RecipeSoftDeleteManager(models.Manager):
@@ -82,7 +84,6 @@ class Recipe(models.Model):
         return f"{self.name} ({self.workspace})"
 
     def soft_delete(self, deleted_by) -> None:
-        from django.utils import timezone
 
         self.is_deleted = True
         self.deleted_at = timezone.now()
@@ -109,7 +110,6 @@ class Recipe(models.Model):
 
     def validate_variable_values(self, values: dict) -> list[str]:
         """Validate ``values`` against variable definitions; return error messages (empty if valid)."""
-        from datetime import datetime
 
         errors = []
         required_vars = set(self.get_variable_names())
