@@ -205,3 +205,26 @@ describe("a turn that hits an overload and then fails hard", () => {
     consoleError.mockRestore()
   })
 })
+
+describe("a busy turn whose retry then fails hard", () => {
+  it("drops the retrying notice and shows the error", async () => {
+    let posts = 0
+    const api = mockChat(() => {
+      posts += 1
+      return posts === 1
+        ? Response.json(BUSY_BODY, { status: 503 })
+        : Response.json({ error: "Agent initialization failed" }, { status: 500 })
+    })
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await waitFor(() => expect(api.messageLoads).toHaveLength(1))
+    await act(async () => {})
+
+    await send("How many visits last week?")
+
+    await screen.findByTestId("chat-error")
+    expect(api.chatPosts).toHaveLength(2)
+    expect(busyTracker.getSnapshot().retrying).toBe(0)
+    consoleError.mockRestore()
+  })
+})

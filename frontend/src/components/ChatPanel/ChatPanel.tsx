@@ -294,8 +294,13 @@ export function ChatPanel() {
     const wasRunning = prev === "streaming" || prev === "submitted"
     // "error" counts only for a busy 503; a hard failure after an overload part must
     // keep its error notice, not be silently re-posted.
-    if (!wasRunning || (status !== "ready" && !(status === "error" && busyError))) return
+    if (!wasRunning) return
+    // Any finished run releases this thread's "retrying" slot, hard errors included.
     busyTracker.settle(busyToken)
+    if (status !== "ready" && !(status === "error" && busyError)) {
+      busyHitRef.current = null
+      return
+    }
 
     // A busy 503 is raised before the agent runs or writes a checkpoint, so resending
     // is safe and gets the full budget. A busy stream part comes after the turn was
