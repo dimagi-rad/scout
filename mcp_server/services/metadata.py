@@ -15,6 +15,7 @@ from uuid import UUID
 from django.conf import settings
 from django.db import models
 
+from apps.common.capacity import classify_capacity_error
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
 from apps.transformations.services.repeat_identity import (
@@ -148,8 +149,10 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
     """Return the set of table names that actually exist in ``schema_name``.
 
     Used by ``pipeline_list_tables`` to reconcile the catalog with reality.
-    Returns an empty set on query failure (treated as "nothing live"), so a
-    transient DB error surfaces as an empty list rather than phantom rows.
+    Returns an empty set on other query failures (treated as "nothing live"), so a
+    transient DB error surfaces as an empty list rather than phantom rows. A full
+    connection limit is raised as ``CapacityExhausted`` instead: an empty set would
+    tell the agent the tables are gone when the database merely refused us.
 
     Builds ``connection_params`` from ``MANAGED_DATABASE_URL`` the same way
     ``load_tenant_context``/``load_workspace_context`` do. Constructing the
@@ -180,7 +183,10 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
             (schema_name,),
             ctx.max_query_timeout_seconds,
         )
-    except Exception:
+    except Exception as exc:
+        capacity = classify_capacity_error(exc)
+        if capacity is not None:
+            raise capacity from exc
         logger.warning(
             "Could not enumerate live tables in schema %s; catalog will be empty",
             schema_name,

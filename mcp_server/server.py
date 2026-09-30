@@ -38,6 +38,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.capacity import BUSY_MESSAGE, classify_capacity_error, report_capacity_exhausted
 from apps.common.errors import validation_error_code
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
@@ -104,6 +105,7 @@ from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     AUTH_ACCESS_DENIED,
+    CAPACITY_EXHAUSTED,
     INTERNAL_ERROR,
     NOT_FOUND,
     PIPELINE_UNRESOLVED,
@@ -130,6 +132,15 @@ mcp = FastMCP("scout")
 
 MAX_WORKSPACE_DISCOVERY_LIMIT = 100
 MAX_DATASET_DISCOVERY_LIMIT = 100
+
+
+async def _busy_result(exc: Exception) -> dict | None:
+    """The retryable busy result if ``exc`` is connection-limit exhaustion, else ``None``."""
+    capacity = classify_capacity_error(exc)
+    if capacity is None:
+        return None
+    await sync_to_async(report_capacity_exhausted)(capacity.resource, str(exc), exc_info=exc)
+    return error_response(CAPACITY_EXHAUSTED, BUSY_MESSAGE)
 
 
 class _WorkspaceAccessDenied(Exception):
@@ -225,7 +236,14 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
                 schema_name=ctx.schema_name, state=SchemaState.ACTIVE
             ).aexists()
             if is_view_schema:
-                tables = await workspace_list_tables(ctx)
+                try:
+                    tables = await workspace_list_tables(ctx)
+                except Exception as exc:
+                    busy = await _busy_result(exc)
+                    if busy is None:
+                        raise
+                    tc["result"] = busy
+                    return busy
                 tc["result"] = success_response(
                     {"tables": tables, "note": None},
                     schema=ctx.schema_name,
@@ -249,7 +267,14 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             tc["result"] = _pipeline_unresolved_response(exc)
             return tc["result"]
 
-        tables = await pipeline_list_tables(ts, pipeline_config)
+        try:
+            tables = await pipeline_list_tables(ts, pipeline_config)
+        except Exception as exc:
+            busy = await _busy_result(exc)
+            if busy is None:
+                raise
+            tc["result"] = busy
+            return busy
 
         note = (
             "No completed materialization run found. Run run_materialization to load data."
@@ -1914,7 +1939,14 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 # the same call the multi-tenant branch below makes, so both
                 # branches now return identically-shaped entries.
                 pipeline_config = await _resolve_pipeline_config(ts, last_run)
-                tables = await pipeline_list_tables(ts, pipeline_config)
+                try:
+                    tables = await pipeline_list_tables(ts, pipeline_config)
+                except Exception as exc:
+                    busy = await _busy_result(exc)
+                    if busy is None:
+                        raise
+                    tc["result"] = busy
+                    return busy
 
             tc["result"] = success_response(
                 {
