@@ -218,10 +218,27 @@ def cube_member_references(references: set[str], dataset) -> set[str]:
 def cube_schema_yaml(schema: dict[str, Any]) -> str:
     """Serialize a generated schema's cubes; model info and diagnostics stay out of Cube."""
     return yaml.safe_dump(
-        {"cubes": schema["cubes"]},
+        {"cubes": _literal_text_properties(schema["cubes"])},
         sort_keys=False,
         allow_unicode=False,
     )
+
+
+def _literal_text_properties(value: Any, key: str = "") -> Any:
+    """Escape every non-SQL string so Cube reads it as literal text.
+
+    Cube renders a YAML model file as a Jinja template when it contains template
+    delimiters, then compiles each string property as a Python f-string. Free text
+    such as descriptions and formats must survive both passes unchanged; ``sql``
+    values were already escaped with their trusted references by the generator.
+    """
+    if isinstance(value, dict):
+        return {k: _literal_text_properties(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_literal_text_properties(item, key) for item in value]
+    if isinstance(value, str) and key != "sql":
+        return embed_cube_sql(value)
+    return value
 
 
 def _publication_scoped_sql(source_sql: str) -> str:
