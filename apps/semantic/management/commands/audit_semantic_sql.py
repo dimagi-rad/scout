@@ -179,15 +179,27 @@ def _audit_model(model: SemanticModel) -> list[dict]:
                         ),
                     )
 
+    datasets_by_id = {dataset.id: dataset for dataset in datasets}
     relationships = SemanticRelationship.objects.filter(workspace_id=model.workspace_id)
     for relationship in relationships.order_by("name"):
-        visible = {relationship.from_dataset_id, relationship.to_dataset_id} <= published
+        from_dataset = datasets_by_id.get(relationship.from_dataset_id)
+        # Generation drops a join without a primary key before reading its SQL.
+        visible = (
+            {relationship.from_dataset_id, relationship.to_dataset_id} <= published
+            and from_dataset is not None
+            and bool(from_dataset.primary_key)
+        )
+        columns = dataset_column_names(from_dataset) if from_dataset is not None else set()
         check(
             "relationship",
             relationship.id,
             relationship.name,
             "join_expression",
             visible,
-            partial(compile_join_sql, relationship.join_expression),
+            published_sql(
+                partial(compile_join_sql, relationship.join_expression, columns=columns),
+                references | {"CUBE"},
+                visible=visible,
+            ),
         )
     return findings
