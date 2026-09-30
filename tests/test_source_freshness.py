@@ -133,7 +133,7 @@ async def test_schema_status_names_the_stale_source_and_its_fix(workspace, tenan
     _result, connect = await _expired_hq_load(workspace, tenant, user, month_ago)
 
     with patch("mcp_server.server.workspace_list_tables", AsyncMock(return_value=[])):
-        response = await get_schema_status(workspace_id=str(workspace.id))
+        response = await get_schema_status(workspace_id=str(workspace.id), user_id=str(user.id))
 
     assert response["success"] is True
     by_tenant = {s["tenant_id"]: s for s in response["data"]["sources"]}

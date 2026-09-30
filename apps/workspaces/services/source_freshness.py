@@ -161,15 +161,16 @@ async def arecord_load_outcomes(
         return []
 
 
-async def _excluded_from_view(workspace_id, tenant_count: int) -> set[str]:
-    if tenant_count < 2:
+async def _excluded_from_view(workspace_id, tenant_ids: list) -> set[str]:
+    """Sources a multi-source workspace does not query: all of them with no live view."""
+    if len(tenant_ids) < 2:
         return set()
-    coverage = await (
-        WorkspaceViewSchema.objects.filter(workspace_id=workspace_id, state=SchemaState.ACTIVE)
-        .values_list("tenant_coverage", flat=True)
-        .afirst()
-    )
-    return serving_excluded_tenant_ids(parse_coverage(coverage))
+    view = await WorkspaceViewSchema.objects.filter(
+        workspace_id=workspace_id, state=SchemaState.ACTIVE
+    ).afirst()
+    if view is None:
+        return {str(tenant_id) for tenant_id in tenant_ids}
+    return serving_excluded_tenant_ids(parse_coverage(view.tenant_coverage))
 
 
 async def aworkspace_source_freshness(workspace_id, viewer_id="") -> list[dict]:
@@ -203,7 +204,7 @@ async def _source_freshness(workspace_id, viewer_id: str) -> list[dict]:
             tenant_id__in=tenant_ids, state=SchemaState.ACTIVE
         ).values_list("tenant_id", flat=True)
     }
-    excluded = await _excluded_from_view(workspace_id, len(rows))
+    excluded = await _excluded_from_view(workspace_id, tenant_ids)
     sources = []
     for wt in rows:
         tenant = wt.tenant
