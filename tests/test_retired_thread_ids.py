@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.checks import run_checks
 from django.db import connection
 from django.test import AsyncClient
 from langchain_core.messages import AIMessage, HumanMessage
@@ -25,6 +26,7 @@ from psycopg.conninfo import make_conninfo
 
 from apps.agents.tools.canvas_tool import create_canvas_read_tool
 from apps.chat.checkpointer import thread_has_checkpoint
+from apps.chat.checks import same_database
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
@@ -312,3 +314,36 @@ async def test_canvas_tool_does_not_recreate_a_deleted_thread(workspace, user):
 
     assert "no longer exists" in result
     assert not await Thread.objects.filter(id=conversation_id).aexists()
+
+
+@pytest.mark.parametrize(
+    ("django_db", "conninfo", "expected"),
+    [
+        (
+            {"NAME": "scout", "HOST": "db.internal", "PORT": 5432},
+            "postgresql://scout:x@db.internal:5432/scout?sslmode=require",
+            True,
+        ),
+        ({"NAME": "scout", "HOST": "localhost", "PORT": ""}, "postgresql://localhost/scout", True),
+        (
+            {"NAME": "other", "HOST": "db.internal", "PORT": 5432},
+            "postgresql://scout:x@db.internal:5432/scout",
+            False,
+        ),
+        (
+            {"NAME": "scout", "HOST": "db.internal", "PORT": 5432},
+            "postgresql://scout:x@replica.internal:5432/scout",
+            False,
+        ),
+    ],
+)
+def test_same_database(django_db, conninfo, expected):
+    assert same_database(django_db, conninfo) is expected
+
+
+def test_checkpointer_on_another_database_fails_the_system_check(monkeypatch):
+    monkeypatch.setattr(
+        "apps.chat.checks.get_database_url", lambda: "postgresql://x@elsewhere:5432/not_scout"
+    )
+
+    assert "chat.E001" in {e.id for e in run_checks()}
