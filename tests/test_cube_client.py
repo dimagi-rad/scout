@@ -487,3 +487,58 @@ async def test_exhaustion_reports_a_later_connect_failure_over_an_earlier_503(
     with pytest.raises(cube_client_module.CubeServiceUnavailable, match="ConnectTimeout"):
         await _schema_operation("validate")
     assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 400, 500])
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Error: sorry, too many clients already",
+        "Error: No Cube database connection slot freed within 10000ms (limit 8)",
+    ],
+)
+async def test_a_full_connection_pool_is_retried_then_reported_as_capacity(
+    monkeypatch, status, error
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": error})
+
+    _patched_async_client(monkeypatch, handler)
+    monkeypatch.setattr(cube_client_module, "RETRY_BASE_DELAY_SECONDS", 0)
+    with pytest.raises(CubeConnectionError) as raised:
+        await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
+            {}, security_context={"workspaceId": "w1"}
+        )
+    assert raised.value.capacity_resource == "cube"
+    assert len(calls) == cube_client_module.MAX_TRANSIENT_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_outage_is_not_reported_as_capacity(monkeypatch):
+    def handler(request):
+        return httpx.Response(500, json={"error": "connection terminated unexpectedly"})
+
+    _patched_async_client(monkeypatch, handler)
+    monkeypatch.setattr(cube_client_module, "RETRY_BASE_DELAY_SECONDS", 0)
+    with pytest.raises(CubeConnectionError) as raised:
+        await CubeClient(base_url="http://cube.test", api_secret="secret").execute_query(
+            {}, security_context={"workspaceId": "w1"}
+        )
+    assert raised.value.capacity_resource is None
+
+
+@pytest.mark.asyncio
+async def test_schema_operation_unavailable_from_a_full_pool_is_capacity(
+    monkeypatch, validator_url
+):
+    def handler(request):
+        return httpx.Response(503, json={"error": "sorry, too many clients already"})
+
+    _patched_async_client(monkeypatch, handler)
+    with pytest.raises(cube_client_module.CubeServiceUnavailable) as raised:
+        await _schema_operation("validate")
+    assert raised.value.capacity_resource == "cube"

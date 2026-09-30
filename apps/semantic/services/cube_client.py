@@ -13,6 +13,7 @@ import httpx
 import jwt
 from django.conf import settings
 
+from apps.common.capacity import CapacityResource, is_capacity_message
 from apps.common.errors import ExpectedStateError
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ TRANSIENT_ERROR_MARKERS = (
     "the database system is starting up",
     "the database system is shutting down",
 )
+# connection-slots.js (#735) rejects a query whose wait for a pool slot ran out.
+CUBE_SLOT_WAIT_MARKER = "no cube database connection slot freed"
 
 SCHEMA_REQUEST_ATTEMPTS = 3
 # Long enough for a restarted validator or a busy Cube to come back.
@@ -73,7 +76,15 @@ class CubeAuthenticationError(CubeQueryError):
 
 
 class CubeConnectionError(RuntimeError):
-    """A transient Cube failure, distinct from an invalid semantic query."""
+    """A transient Cube failure, distinct from an invalid semantic query.
+
+    ``capacity_resource`` is set when the failure was a full connection limit, so
+    ``apps.common.capacity`` can answer "busy" instead of "failed".
+    """
+
+    def __init__(self, *args: object, capacity_exhausted: bool = False) -> None:
+        super().__init__(*args)
+        self.capacity_resource = CapacityResource.CUBE if capacity_exhausted else None
 
 
 class CubeServiceUnavailable(CubeConnectionError, ExpectedStateError):
@@ -174,14 +185,19 @@ class CubeClient:
                         raise CubeAuthenticationError(
                             str(error) if error else "Cube rejected Scout's service credentials."
                         )
-                    if response.status_code in {400, 404, 422}:
+                    if response.status_code in RETRYABLE_HTTP_STATUSES:
+                        with suppress(ValueError):
+                            retry_after = max(0.0, float(response.headers.get("Retry-After", "")))
+                    # Cube can return a driver error with a 400, so a full pool is
+                    # recognised before the malformed-request fast path.
+                    if error and _is_cube_capacity_error(str(error)):
+                        retry_reason = "capacity"
+                    elif response.status_code in {400, 404, 422}:
                         if error:
                             raise CubeQueryError(str(error))
                         response.raise_for_status()
-                    if response.status_code in RETRYABLE_HTTP_STATUSES:
+                    elif response.status_code in RETRYABLE_HTTP_STATUSES:
                         retry_reason = f"http_{response.status_code}"
-                        with suppress(ValueError):
-                            retry_after = max(0.0, float(response.headers.get("Retry-After", "")))
                     elif error and any(
                         marker in str(error).lower() for marker in TRANSIENT_ERROR_MARKERS
                     ):
@@ -213,7 +229,8 @@ class CubeClient:
                 if transient_failures >= MAX_TRANSIENT_ATTEMPTS:
                     logger.warning("Cube query exhausted transient retries (%s)", retry_reason)
                     raise CubeConnectionError(
-                        "Cube is temporarily unavailable. Please retry the query."
+                        "Cube is temporarily unavailable. Please retry the query.",
+                        capacity_exhausted=retry_reason == "capacity",
                     ) from last_error
                 # This is a read-only /load operation despite using POST. Keep
                 # the identical query and authorization context across retries.
@@ -229,7 +246,8 @@ class CubeClient:
                 )
                 if delay >= deadline - time.monotonic():
                     raise CubeConnectionError(
-                        "Cube retry delay exceeds the remaining query timeout budget. Please retry later."
+                        "Cube retry delay exceeds the remaining query timeout budget. Please retry later.",
+                        capacity_exhausted=retry_reason == "capacity",
                     ) from last_error
                 await asyncio.sleep(delay)
 
@@ -312,7 +330,9 @@ class CubeClient:
                 )
                 await asyncio.sleep(delay)
         raise CubeServiceUnavailable(
-            f"Cube {operation} failed after {attempt} attempt(s): {_describe_transient(last_error)}"
+            f"Cube {operation} failed after {attempt} attempt(s): {_describe_transient(last_error)}",
+            capacity_exhausted=isinstance(last_error, httpx.HTTPStatusError)
+            and _is_cube_capacity_error(last_error.response.text),
         ) from last_error
 
     async def validate_schema(self, content: str) -> dict[str, Any]:
@@ -337,6 +357,10 @@ class CubeClient:
             headers={"Authorization": f"Bearer {self.api_secret}"},
         )
         return response.json()
+
+
+def _is_cube_capacity_error(text: str) -> bool:
+    return is_capacity_message(text) or CUBE_SLOT_WAIT_MARKER in text.lower()
 
 
 def _describe_transient(error: Exception | None) -> str:

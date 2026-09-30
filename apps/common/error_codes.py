@@ -31,6 +31,9 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "NOT_FOUND"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     SCHEMA_BUILD_FAILED = "SCHEMA_BUILD_FAILED"
+    # A shared connection limit (Postgres, the checkpointer pool, Cube) is full.
+    # Scout is healthy, just busy: the request is safe to retry shortly.
+    CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
 
     # No materialization pipeline could be resolved for a tenant's provider.
     # Distinct from SCHEMA_BUILD_FAILED: the schema may be perfectly healthy —
