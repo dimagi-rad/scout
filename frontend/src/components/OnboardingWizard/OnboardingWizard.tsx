@@ -73,7 +73,10 @@ export function OnboardingWizard() {
       const schemas = await api.get<ApiKeyProviderSchema[]>("/api/auth/api-key-providers/")
       if (!isCurrent()) return
       const commcare = schemas.find((s) => s.id === "commcare")
-      setServerOptions(commcare?.fields.find((f) => f.key === "server")?.options ?? [])
+      const options = commcare?.fields.find((f) => f.key === "server")?.options ?? []
+      setServerOptions(options)
+      // Submit what the user sees: the shown default is the first option.
+      if (options.length) setServer(options[0].value)
       setServerOptionsState("loaded")
       serverOptionsLoaded.current = true
     } catch (err) {
@@ -208,7 +211,12 @@ export function OnboardingWizard() {
                 >
                   Back
                 </Button>
-                <Button type="submit" className="flex-1" disabled={loading}>
+                <Button
+                  type="submit"
+                  className="flex-1"
+                  // Submitting before the server list arrives would check the key on www.
+                  disabled={loading || serverOptionsState === "loading"}
+                >
                   {loading ? "Connecting..." : "Connect"}
                 </Button>
               </div>

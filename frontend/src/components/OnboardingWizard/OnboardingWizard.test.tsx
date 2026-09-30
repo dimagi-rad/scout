@@ -73,6 +73,23 @@ describe("OnboardingWizard", () => {
     )
   })
 
+  it("holds the API-key submit until the server list has loaded", async () => {
+    let resolveSchema!: (value: unknown) => void
+    vi.mocked(api.get).mockImplementation((path) =>
+      path === "/api/auth/api-key-providers/"
+        ? new Promise((resolve) => { resolveSchema = resolve })
+        : Promise.resolve(providers(null)),
+    )
+    render(<OnboardingWizard />)
+
+    fireEvent.click(await screen.findByTestId("onboarding-api-key-option"))
+    const submit = screen.getByRole("button", { name: "Connect" }) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+
+    resolveSchema([])
+    await waitFor(() => expect(submit.disabled).toBe(false))
+  })
+
   it("says when the server list failed to load and retries", async () => {
     let schemaCalls = 0
     vi.mocked(api.get).mockImplementation((path) => {
