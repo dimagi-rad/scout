@@ -16,6 +16,14 @@ describe("SourceFreshness", () => {
     expect(screen.getByTestId("source-freshness-Beta")).toHaveTextContent("Beta: not loaded yet")
   })
 
+  it("gives no age for data the workspace does not query", () => {
+    render(<SourceFreshness freshness={freshness([freshSource("Alpha", 1, { serving: false })])} />)
+
+    expect(screen.getByTestId("source-freshness-Alpha")).toHaveTextContent(
+      "Alpha: loaded but not in use",
+    )
+  })
+
   it("renders nothing until freshness arrives", () => {
     render(<SourceFreshness freshness={null} />)
 

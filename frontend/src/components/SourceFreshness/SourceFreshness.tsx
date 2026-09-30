@@ -1,13 +1,20 @@
-import type { WorkspaceFreshness } from "@/api/workspaces"
+import type { SourceFreshnessDetail, WorkspaceFreshness } from "@/api/workspaces"
 import { formatRelativeTime } from "@/lib/relativeTime"
 
 interface Props {
   freshness: WorkspaceFreshness | null
 }
 
+function freshnessLabel(source: SourceFreshnessDetail): string {
+  if (!source.last_fetched_at) return "not loaded yet"
+  // Loaded, but outside what the workspace queries (e.g. no live multi-source view).
+  if (!source.serving) return "loaded but not in use"
+  return `data as of ${formatRelativeTime(source.last_fetched_at)}`
+}
+
 /**
  * One "Data as of" line per source, so a stale source is not hidden by a fresh one.
- * Reads the serving snapshot's age, the same figure the stale-data banner judges by.
+ * Ages only the sources the workspace queries, as the stale-data banner does.
  */
 export function SourceFreshness({ freshness }: Props) {
   const sources = freshness?.sources ?? []
@@ -21,10 +28,7 @@ export function SourceFreshness({ freshness }: Props) {
     >
       {sources.map((source) => (
         <li key={source.tenant_id} data-testid={`source-freshness-${source.tenant_id}`}>
-          {source.name}:{" "}
-          {source.last_fetched_at
-            ? `data as of ${formatRelativeTime(source.last_fetched_at)}`
-            : "not loaded yet"}
+          {source.name}: {freshnessLabel(source)}
         </li>
       ))}
     </ul>
