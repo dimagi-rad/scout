@@ -107,6 +107,17 @@ class TestLease:
 
         assert (await _lease_row(thread.id))["turn_lease_token"] is None
 
+    async def test_a_run_past_its_max_lifetime_stops_renewing_the_lease(self):
+        thread = await _thread("lease-max-lifetime")
+        lease = await atry_acquire_turn_lease(thread.id)
+        soon = timezone.now() + timedelta(seconds=1)
+        await Thread.objects.filter(id=thread.id).aupdate(turn_lease_expires_at=soon)
+
+        with patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05):
+            async with lease.held(max_lifetime=timedelta(seconds=0.01)):
+                await asyncio.sleep(0.2)
+                assert (await _lease_row(thread.id))["turn_lease_expires_at"] == soon
+
     async def test_acquire_waits_for_a_release(self):
         thread = await _thread("lease-wait")
         holder = await atry_acquire_turn_lease(thread.id)

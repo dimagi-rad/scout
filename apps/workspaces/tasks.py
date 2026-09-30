@@ -3476,36 +3476,36 @@ async def _persist_synthetic_failure_message(
     waited for, while another run holds the thread's turn lease: the ThreadJob's
     error card still reports the failure.
     """
-    lease = None
     try:
-        if not holds_turn_lease:
-            lease = await atry_acquire_turn_lease(thread_job.thread_id)
-            if lease is None:
-                logger.info(
-                    "resume: thread %s busy; skipped synthetic failure message for tj=%s",
-                    thread_job.thread_id,
-                    thread_job.id,
-                )
-                return
-        agent = await _build_agent_for_resume(
-            thread_job.thread.workspace,
-            thread_job.thread.user,
-            conversation_id=str(thread_job.thread.id),
-        )
-        config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
-        await agent.aupdate_state(
-            config,
-            {"messages": [AIMessage(content=text)]},
-        )
+        if holds_turn_lease:
+            await _append_synthetic_message(thread_job, text)
+            return
+        lease = await atry_acquire_turn_lease(thread_job.thread_id)
+        if lease is None:
+            logger.info(
+                "resume: thread %s busy; skipped synthetic failure message for tj=%s",
+                thread_job.thread_id,
+                thread_job.id,
+            )
+            return
+        async with lease.held(max_lifetime=STALE_JOB_THRESHOLD):
+            await _append_synthetic_message(thread_job, text)
     except Exception:
         logger.warning(
             "resume: failed to persist synthetic failure message for tj=%s",
             thread_job.id,
             exc_info=True,
         )
-    finally:
-        if lease is not None:
-            await lease.release()
+
+
+async def _append_synthetic_message(thread_job, text: str) -> None:
+    agent = await _build_agent_for_resume(
+        thread_job.thread.workspace,
+        thread_job.thread.user,
+        conversation_id=str(thread_job.thread.id),
+    )
+    config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
+    await agent.aupdate_state(config, {"messages": [AIMessage(content=text)]})
 
 
 TENANT_NOT_RUN = "not_run"
@@ -3804,7 +3804,9 @@ async def resume_thread_after_materialization(
     lease = await atry_acquire_turn_lease(tj.thread_id)
     if lease is None:
         return await _defer_resume_while_thread_busy(tj, busy_attempt)
-    async with lease.held():
+    # By STALE_JOB_THRESHOLD the reconciler has failed the job, so a resume hung
+    # outside the ainvoke timeout (agent build, MCP) must stop blocking chat.
+    async with lease.held(max_lifetime=STALE_JOB_THRESHOLD):
         return await _resume_with_turn_lease(tj, thread_job_id)
 
 

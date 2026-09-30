@@ -63,9 +63,14 @@ class TurnLease:
         )
 
     @contextlib.asynccontextmanager
-    async def held(self) -> AsyncIterator[TurnLease]:
-        """Heartbeat the lease for the body's duration, then release it."""
-        heartbeat = asyncio.create_task(self._heartbeat())
+    async def held(self, *, max_lifetime: timedelta | None = None) -> AsyncIterator[TurnLease]:
+        """Heartbeat the lease for the body's duration, then release it.
+
+        ``max_lifetime`` stops the heartbeat after that long, so a body hung on
+        something no timeout covers frees the thread one TTL later instead of
+        holding it until the process dies.
+        """
+        heartbeat = asyncio.create_task(self._heartbeat(max_lifetime))
         try:
             yield self
         finally:
@@ -74,9 +79,18 @@ class TurnLease:
                 await heartbeat
             await self.release()
 
-    async def _heartbeat(self) -> None:
+    async def _heartbeat(self, max_lifetime: timedelta | None) -> None:
+        loop = asyncio.get_running_loop()
+        stop_at = loop.time() + max_lifetime.total_seconds() if max_lifetime else None
         while True:
             await asyncio.sleep(TURN_LEASE_HEARTBEAT_SECONDS)
+            if stop_at is not None and loop.time() >= stop_at:
+                logger.warning(
+                    "turn lease: run on thread %s outlived %s; letting the lease lapse",
+                    self.thread_id,
+                    max_lifetime,
+                )
+                return
             try:
                 renewed = await self.renew()
             except Exception:
