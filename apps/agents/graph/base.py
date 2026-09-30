@@ -170,8 +170,12 @@ ESCALATION_ERROR_CODES = frozenset(
     {
         ErrorCode.NOT_FOUND,
         ErrorCode.VALIDATION_ERROR,
+        # semantic_query reported these as VALIDATION_ERROR until #251, so they
+        # keep escalating as they did.
         ErrorCode.DATA_NOT_LOADED,
         ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
+        ErrorCode.SCHEMA_BUILD_FAILED,
+        ErrorCode.PIPELINE_UNRESOLVED,
     }
 )
 ESCALATION_TRIGGER_COUNT = 3
@@ -211,6 +215,24 @@ def _tool_message_error(content: Any) -> dict | None:
         return None
     error = envelope.get("error")
     return error if isinstance(error, dict) else None
+
+
+def _schema_escalation_message(messages: list, *, write_capable: bool, interactive: bool) -> str:
+    latest_code = next(
+        (
+            _tool_message_error_code(m.content)
+            for m in reversed(messages)
+            if isinstance(m, ToolMessage)
+        ),
+        None,
+    )
+    if latest_code == ErrorCode.SEMANTIC_MODEL_UNAVAILABLE:
+        return SEMANTIC_ESCALATION_MESSAGE
+    if not write_capable:
+        return READ_ONLY_ESCALATION_MESSAGE
+    if not interactive:
+        return HEADLESS_ESCALATION_MESSAGE
+    return ESCALATION_MESSAGE
 
 
 def _tool_message_error_code(content: Any) -> str | None:
@@ -265,6 +287,13 @@ READ_ONLY_ESCALATION_MESSAGE = (
     "I've encountered repeated schema errors — the tables I expected to "
     "find aren't queryable. The data may need to be refreshed, which a "
     "workspace member with write access can do."
+)
+
+# A missing data model is fixed by rebuilding it, not by reloading the data.
+SEMANTIC_ESCALATION_MESSAGE = (
+    "I've encountered repeated errors — this workspace's data model (its semantic "
+    "datasets) isn't available, so its data can't be queried yet. The data model "
+    "needs to be rebuilt; that does not reload any data."
 )
 
 # Marks the escalation node's message so headless callers (recipe runs) can tell
@@ -1066,12 +1095,10 @@ async def build_agent_graph(
         denial = _workspace_access_denial(state.get("messages", []))
         if denial is not None:
             message = denial
-        elif not write_capable:
-            message = READ_ONLY_ESCALATION_MESSAGE
-        elif not interactive:
-            message = HEADLESS_ESCALATION_MESSAGE
         else:
-            message = ESCALATION_MESSAGE
+            message = _schema_escalation_message(
+                state.get("messages", []), write_capable=write_capable, interactive=interactive
+            )
         reason = "workspace_access_denied" if denial is not None else "schema_errors"
         return {
             "messages": [
@@ -1443,6 +1470,7 @@ __all__ = [
     "FIXED_MESSAGE_NODES",
     "HEADLESS_ESCALATION_MESSAGE",
     "READ_ONLY_ESCALATION_MESSAGE",
+    "SEMANTIC_ESCALATION_MESSAGE",
     "_should_escalate",
     "build_agent_graph",
 ]

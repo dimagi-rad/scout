@@ -8,14 +8,26 @@ so nothing downstream could tell "load the data" from "fix the query".
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from apps.agents.graph.base import _should_escalate
+from apps.agents.graph.base import (
+    ESCALATION_MESSAGE,
+    READ_ONLY_ESCALATION_MESSAGE,
+    SEMANTIC_ESCALATION_MESSAGE,
+    _schema_escalation_message,
+    _should_escalate,
+)
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import DataNotLoaded, ExpectedStateError
+from apps.semantic.models import SemanticDataset, SemanticModel
+from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services import query as query_service
-from apps.semantic.services.catalog import no_active_semantic_model
-from apps.semantic.services.cube_schema import get_active_cube_schema
+from apps.semantic.services.catalog import (
+    SemanticCatalogUnavailable,
+    no_active_semantic_model,
+    serialize_dataset,
+)
+from apps.semantic.services.cube_schema import NoActiveCubeSchema, get_active_cube_schema
 from apps.users.models import Tenant
-from apps.workspaces.models import WorkspaceTenant
+from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant
 from apps.workspaces.services.schema_manager import NoActiveTenantSchema
 from mcp_server import server
 from mcp_server.context import load_workspace_context
@@ -51,9 +63,11 @@ def test_missing_semantic_layer_shares_one_code():
 
 @pytest.mark.django_db
 def test_a_missing_cube_schema_is_semantic_model_unavailable(workspace):
-    with pytest.raises(Exception) as caught:
-        get_active_cube_schema(workspace, model=None)
+    model = SemanticModel.objects.create(workspace=workspace, name="No cube")
+    with pytest.raises(NoActiveCubeSchema) as caught:
+        get_active_cube_schema(workspace, model=model)
     assert caught.value.code == SEMANTIC_MODEL_UNAVAILABLE
+    assert isinstance(caught.value, ExpectedStateError)
 
 
 async def _query_error(monkeypatch, workspace, **patches):
@@ -103,9 +117,7 @@ async def test_describe_dataset_reports_a_missing_model_by_its_own_code(workspac
     assert result["error"]["code"] == SEMANTIC_MODEL_UNAVAILABLE
 
 
-@pytest.mark.parametrize("code", [DATA_NOT_LOADED, SEMANTIC_MODEL_UNAVAILABLE])
-def test_repeated_not_loaded_errors_still_escalate(code):
-    """They were VALIDATION_ERROR, which escalates; the new codes must too."""
+def _repeated(code):
     error = f'{{"success": false, "error": {{"code": "{code}", "message": "m"}}}}'
     messages = [HumanMessage(content="q")]
     for i in range(3):
@@ -113,4 +125,88 @@ def test_repeated_not_loaded_errors_still_escalate(code):
             AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": f"c{i}"}])
         )
         messages.append(ToolMessage(content=error, tool_call_id=f"c{i}"))
-    assert _should_escalate(messages)
+    return messages
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        DATA_NOT_LOADED,
+        SEMANTIC_MODEL_UNAVAILABLE,
+        ErrorCode.SCHEMA_BUILD_FAILED,
+        ErrorCode.PIPELINE_UNRESOLVED,
+    ],
+)
+def test_codes_semantic_query_used_to_flatten_still_escalate(code):
+    """semantic_query reported these as VALIDATION_ERROR, which escalates."""
+    assert _should_escalate(_repeated(code))
+
+
+@pytest.mark.parametrize(
+    ("code", "write_capable", "expected"),
+    [
+        (SEMANTIC_MODEL_UNAVAILABLE, True, SEMANTIC_ESCALATION_MESSAGE),
+        (SEMANTIC_MODEL_UNAVAILABLE, False, SEMANTIC_ESCALATION_MESSAGE),
+        (DATA_NOT_LOADED, True, ESCALATION_MESSAGE),
+        (DATA_NOT_LOADED, False, READ_ONLY_ESCALATION_MESSAGE),
+    ],
+)
+def test_a_missing_data_model_escalates_to_a_rebuild_not_a_reload(code, write_capable, expected):
+    message = _schema_escalation_message(
+        _repeated(code), write_capable=write_capable, interactive=True
+    )
+    assert message == expected
+
+
+@pytest.mark.django_db
+def test_a_hidden_dataset_is_not_reported_as_a_missing_model(workspace):
+    model = SemanticModel.objects.create(workspace=workspace, name="Model")
+    hidden = SemanticDataset.objects.create(
+        semantic_model=model,
+        workspace=workspace,
+        name="hidden",
+        label="Hidden",
+        table_name="raw_hidden",
+        schema_name="s",
+        is_visible=False,
+    )
+    with pytest.raises(SemanticCatalogUnavailable) as caught:
+        serialize_dataset(hidden)
+    assert caught.value.code == ErrorCode.VALIDATION_ERROR
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("serving", "code"),
+    [(False, DATA_NOT_LOADED), (True, ErrorCode.INTERNAL_ERROR)],
+    ids=["not-loaded", "serving-but-unreadable"],
+)
+def test_an_unreadable_catalog_claims_not_loaded_only_when_nothing_serves(
+    monkeypatch, workspace, tenant, serving, code
+):
+    if serving:
+        TenantSchema.objects.create(tenant=tenant, schema_name="s", state=SchemaState.ACTIVE)
+
+    async def broken(_workspace):
+        raise RuntimeError("transient read failure")
+
+    monkeypatch.setattr(catalog_service, "_load_physical_tables_async", broken)
+    with pytest.raises(SemanticCatalogUnavailable) as caught:
+        catalog_service.load_physical_tables(workspace)
+    assert caught.value.code == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_sql_tools_report_unloaded_data_by_its_own_code(workspace, user):
+    result = await server.list_tables(workspace_id=str(workspace.id), user_id=str(user.id))
+    assert result["success"] is False
+    assert result["error"]["code"] == DATA_NOT_LOADED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_list_datasets_names_the_code_of_a_workspace_without_a_model(workspace, user):
+    result = await server.list_datasets(user_id=str(user.id))
+    errors = result["data"]["workspace_errors"]
+    assert [e["code"] for e in errors] == [SEMANTIC_MODEL_UNAVAILABLE]

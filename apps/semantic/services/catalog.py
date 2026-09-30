@@ -67,7 +67,7 @@ class SemanticCatalogUnavailable(Exception):
         self,
         message: str,
         schema_status: str = "unavailable",
-        code: ErrorCode = ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
+        code: ErrorCode = ErrorCode.VALIDATION_ERROR,
     ) -> None:
         super().__init__(message)
         self.schema_status = schema_status
@@ -347,6 +347,16 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
     return schema_name, physical_tables
 
 
+# Why a workspace's tables could not be read, by its status. One that serves
+# ("unavailable" here) failed for some other reason, so no diagnosis is claimed.
+_UNREADABLE_CATALOG_CODES = {
+    "not_loaded": ErrorCode.DATA_NOT_LOADED,
+    "provisioning": ErrorCode.DATA_NOT_LOADED,
+    "failed": ErrorCode.SCHEMA_BUILD_FAILED,
+    "unavailable": ErrorCode.INTERNAL_ERROR,
+}
+
+
 def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
     try:
         return async_to_sync(_load_physical_tables_async)(workspace)
@@ -372,7 +382,7 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
         raise SemanticCatalogUnavailable(
             "Data unavailable. Please refresh workspace data.",
             schema_status=schema_status,
-            code=ErrorCode.DATA_NOT_LOADED,
+            code=_UNREADABLE_CATALOG_CODES[schema_status],
         ) from exc
 
 
@@ -411,7 +421,9 @@ def ensure_semantic_model(workspace) -> SemanticModel:
     """Create or refresh the default semantic catalog from active physical tables."""
     schema_name, tables = load_physical_tables(workspace)
     if not tables:
-        raise SemanticCatalogUnavailable("No queryable datasets are available.")
+        raise SemanticCatalogUnavailable(
+            "No queryable datasets are available.", code=ErrorCode.DATA_NOT_LOADED
+        )
 
     with transaction.atomic():
         model, created = SemanticModel.objects.select_for_update().get_or_create(
@@ -495,6 +507,7 @@ def no_active_semantic_model() -> SemanticCatalogUnavailable:
     return SemanticCatalogUnavailable(
         "No active semantic model is available.",
         schema_status="unavailable",
+        code=ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
     )
 
 

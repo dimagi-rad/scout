@@ -52,7 +52,7 @@ class CubeSchemaBuildError(RuntimeError):
     code = ErrorCode.SCHEMA_BUILD_FAILED
 
 
-class NoActiveCubeSchema(CubeSchemaBuildError):
+class NoActiveCubeSchema(ExpectedStateError, CubeSchemaBuildError):
     code = ErrorCode.SEMANTIC_MODEL_UNAVAILABLE
 
 
