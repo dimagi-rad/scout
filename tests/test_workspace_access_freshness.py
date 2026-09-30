@@ -174,7 +174,7 @@ def test_outage_response_body_is_structured_and_retryable(
     client = Client()
     client.force_login(user)
 
-    response = client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
+    response = client.get(f"/api/workspaces/{workspace.id}/artifacts/")
 
     assert response.status_code == 403
     body = response.json()

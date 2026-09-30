@@ -940,6 +940,7 @@ class WorkspaceMemberListView(APIView):
             # after their last Scout login. Refresh their memberships server-side
             # using their own token, renewed if it has expired, then re-check.
             providers = sorted({t.provider for t in gaps})
+            # DRF APIView is sync; the refresh is async provider I/O.
             rediscovery = async_to_sync(_arefresh_target_for_workspace)(
                 target, providers, renew=True
             )
@@ -1300,6 +1301,7 @@ class WorkspaceTenantView(APIView):
         lacking = [] if already_added else members_lacking_tenant(workspace, tenant)
         recheck = MemberRecheck()
         if lacking:
+            # DRF APIView is sync; the refresh is async provider I/O.
             recheck = async_to_sync(_arefresh_members_for_provider)(
                 [user for user, _missing in lacking], tenant.provider
             )

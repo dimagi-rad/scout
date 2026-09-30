@@ -1229,7 +1229,7 @@ class ArtifactUndeleteView(LoginRequiredJsonMixin, View):
 
 class ArtifactExportView(LoginRequiredJsonMixin, View):
     """
-    Export artifacts to various formats (HTML, PNG, PDF).
+    Export artifacts as standalone HTML.
 
     Requires project membership for access.
     """
@@ -1237,37 +1237,25 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
     def get(
         self, request: HttpRequest, workspace_id, artifact_id: str, format: str
     ) -> HttpResponse:
-        """Export artifact to the given format (html, png, pdf)."""
+        """Export artifact to the given format (html)."""
         workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
-        if format not in ("html", "png", "pdf"):
+        if format != "html":
             return JsonResponse(
-                {"error": f"Invalid format: {format}. Supported formats: html, png, pdf"},
+                {"error": f"Invalid format: {format}. Supported formats: html"},
                 status=400,
             )
 
         exporter = ArtifactExporter(artifact)
         filename = exporter.get_download_filename(format)
 
-        if format == "html":
-            try:
-                content = exporter.export_html()
-            except ValueError as error:
-                return JsonResponse({"error": str(error)}, status=400)
-            response = HttpResponse(content, content_type="text/html")
-            response["Content-Disposition"] = f'attachment; filename="{filename}"'
-            return response
-
-        # PNG/PDF need an async endpoint or background task; not served here.
-        if format in ("png", "pdf"):
-            return JsonResponse(
-                {
-                    "error": f"{format.upper()} export requires an async endpoint. Use /api/artifacts/{artifact_id}/export/{format}/ with async support."
-                },
-                status=501,
-            )
-
-        return JsonResponse({"error": "Export failed"}, status=500)
+        try:
+            content = exporter.export_html()
+        except ValueError as error:
+            return JsonResponse({"error": str(error)}, status=400)
+        response = HttpResponse(content, content_type="text/html")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response

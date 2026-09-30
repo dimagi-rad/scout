@@ -139,7 +139,7 @@ Errors:
 | GET | `…/artifacts/<artifact_id>/semantic-queries/` | read | The artifact's semantic queries, paginated with `limit` (default 25, max 100) and `offset`. |
 | GET, POST | `…/artifacts/<artifact_id>/recovery/` | read / read_write | Inspect the data behind an artifact, or start repairing it. |
 | GET | `…/artifacts/<artifact_id>/sandbox/` | read | HTML page that renders a non-story artifact in a sandboxed iframe. |
-| GET | `…/artifacts/<artifact_id>/export/<format>/` | read | Download as `html`. `png` and `pdf` return 501. |
+| GET | `…/artifacts/<artifact_id>/export/<format>/` | read | Download as `html`. Other formats return 400. |
 
 Artifacts have no public share links.
 
@@ -200,13 +200,10 @@ existing entry updates it in place. The response counts `created`, `updated`
 and `skipped` entries and lists per-file `errors`. It is 207 when any file
 failed, and the whole import rolls back on a database error.
 
-## Data dictionary and semantic model
+## Semantic model
 
 | Method | Path | Role | Description |
 |--------|------|------|-------------|
-| GET | `…/data-dictionary/` | read | Tables and columns in the workspace's data. |
-| GET | `…/data-dictionary/tables/<qualified_name>/` | read | One table, with its annotations. |
-| PUT | `…/data-dictionary/tables/<qualified_name>/` | read_write | Save table annotations (TableKnowledge). |
 | GET | `…/datasets/` | read | Semantic datasets. |
 | GET | `…/datasets/<dataset_name>/` | read | One dataset's members. |
 | POST | `…/semantic-query/` | read | Run a structured semantic query. |
@@ -219,7 +216,6 @@ failed, and the whole import rolls back on a database error.
 | Method | Path | Role | Description |
 |--------|------|------|-------------|
 | POST | `…/refresh/` | read_write | Start a data refresh. |
-| GET | `…/refresh/status/` | read | Refresh progress. |
 | POST | `…/materialization/cancel/` | read_write | Cancel a running materialization. |
 | POST | `…/materialize/retry/` | read_write | Retry a failed materialization. |
 | GET | `…/jobs/active/` | read | The workspace's active background jobs. |

@@ -427,3 +427,77 @@ def test_no_sync_to_async_orm_in_repo():
         "transactional writes in `with transaction.atomic():`.\n"
         "Offenders:\n  " + "\n  ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# async_to_sync bridges: existing sync->async seams are baselined; a new one
+# must be a deliberate decision, so it fails until the baseline is bumped.
+# ---------------------------------------------------------------------------
+
+_ASYNC_TO_SYNC_ROOTS = ("apps", "mcp_server", "config")
+
+_ASYNC_TO_SYNC_BASELINE = {
+    "apps/semantic/services/catalog.py": 1,
+    "apps/semantic/services/custom_datasets.py": 1,
+    "apps/semantic/services/cube_schema.py": 3,
+    "apps/semantic/services/query.py": 1,
+    "apps/users/auth_views.py": 1,
+    "apps/users/signals.py": 3,
+    "apps/workspaces/api/workspace_views.py": 2,
+    "apps/workspaces/services/access_freshness.py": 1,
+    "mcp_server/services/materializer.py": 1,
+}
+
+
+def _count_async_to_sync_uses(source: str) -> int:
+    """Count references to ``async_to_sync``: calls, decorators and aliased imports."""
+    tree = ast.parse(source)
+    names = {"async_to_sync"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "asgiref.sync":
+            names |= {a.asname for a in node.names if a.name == "async_to_sync" and a.asname}
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Name) and node.id in names)
+        or (isinstance(node, ast.Attribute) and node.attr == "async_to_sync")
+    )
+
+
+def test_no_new_async_to_sync_bridges():
+    """Each ``async_to_sync`` is a sync/async seam that blocks a thread on a loop.
+
+    Prefer an async caller. If a new bridge is unavoidable, say why in a one-line
+    comment at the call and update the baseline above; equality keeps the baseline
+    from allowing a removed bridge to return.
+    """
+    root = _repo_root()
+    found: dict[str, int] = {}
+    for path in _iter_python_files():
+        rel = path.relative_to(root).as_posix()
+        if not rel.startswith(tuple(f"{r}/" for r in _ASYNC_TO_SYNC_ROOTS)):
+            continue
+        if "/tests/" in rel or path.name.startswith("test_") or path.name == "conftest.py":
+            continue
+        count = _count_async_to_sync_uses(path.read_text(encoding="utf-8"))
+        if count:
+            found[rel] = count
+
+    assert found == _ASYNC_TO_SYNC_BASELINE, (
+        "async_to_sync call sites changed (file: count). Update the baseline if the "
+        f"change is intended: {found}"
+    )
+
+
+def test_async_to_sync_counter_detects_calls_decorators_and_aliases():
+    source = (
+        "from asgiref.sync import async_to_sync, async_to_sync as a2s\n"
+        "import asgiref.sync\n"
+        "async_to_sync(f)(1)\n"
+        "asgiref.sync.async_to_sync(g)(2)\n"
+        "a2s(h)(3)\n"
+        "@async_to_sync\n"
+        "def wrapped():\n"
+        "    pass\n"
+    )
+    assert _count_async_to_sync_uses(source) == 4

@@ -57,10 +57,7 @@ def tenant_metadata(membership):
 
 @pytest.fixture
 def workspace(membership):
-    return Workspace.objects.create(
-        name="Test Workspace",
-        data_dictionary={"tables": []},
-    )
+    return Workspace.objects.create(name="Test Workspace")
 
 
 @pytest.mark.django_db
@@ -72,15 +69,13 @@ def test_purge_requires_confirm_flag():
 
 
 @pytest.mark.django_db
-def test_purge_dry_run_preserves_data(tenant_schema, tenant_metadata, workspace):
+def test_purge_dry_run_preserves_data(tenant_schema, tenant_metadata):
     """Dry run does not delete any records."""
     with pytest.raises(SystemExit):
         call_command("purge_synced_data")
 
     assert TenantSchema.objects.count() == 1
     assert TenantMetadata.objects.count() == 1
-    workspace.refresh_from_db()
-    assert workspace.data_dictionary is not None
 
 
 @pytest.mark.django_db
@@ -103,18 +98,6 @@ def test_purge_deletes_tenant_metadata(tenant_metadata):
         call_command("purge_synced_data", confirm=True)
 
     assert TenantMetadata.objects.count() == 0
-
-
-@pytest.mark.django_db
-def test_purge_clears_data_dictionary(workspace):
-    """--confirm clears data_dictionary on Workspace without deleting the workspace."""
-    with patch("apps.workspaces.management.commands.purge_synced_data.SchemaManager.teardown"):
-        call_command("purge_synced_data", confirm=True)
-
-    workspace.refresh_from_db()
-    assert workspace.data_dictionary is None
-    assert workspace.data_dictionary_generated_at is None
-    assert Workspace.objects.filter(id=workspace.id).exists()  # workspace preserved
 
 
 @pytest.fixture
