@@ -323,6 +323,21 @@ class TestResume:
         assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
         assert tj.error_summary == RESUME_THREAD_BUSY_SUMMARY
 
+    async def test_giving_up_keeps_a_users_cancel(self):
+        tj = await _resumable_job("resume-giveup-cancel", 880009)
+        await ThreadJob.objects.filter(id=tj.id).aupdate(state=ThreadJob.State.CANCELLED)
+        await atry_acquire_turn_lease(tj.thread_id)
+        requeue, _ = _requeue_capture()
+
+        with requeue:
+            await resume_thread_after_materialization(
+                None, thread_job_id=str(tj.id), busy_attempt=RESUME_BUSY_MAX_ATTEMPTS
+            )
+
+        await tj.arefresh_from_db()
+        assert tj.state == ThreadJob.State.CANCELLED
+        assert tj.error_summary == ""
+
     async def test_an_idle_thread_resumes_under_the_lease_and_frees_it(self):
         tj = await _resumable_job("resume-idle", 880004)
         seen_during_invoke = []

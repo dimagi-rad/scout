@@ -3813,9 +3813,8 @@ async def resume_thread_after_materialization(
 async def _defer_resume_while_thread_busy(tj: ThreadJob, busy_attempt: int) -> dict:
     if busy_attempt >= RESUME_BUSY_MAX_ATTEMPTS:
         # No synthetic chat message: writing one now would race the live turn too.
-        gave_up = await ThreadJob.objects.filter(
-            id=tj.id, state__in=[ThreadJob.State.PENDING, ThreadJob.State.CANCELLED]
-        ).aupdate(
+        # A CANCELLED job keeps its state, so the user still sees their Stop.
+        gave_up = await ThreadJob.objects.filter(id=tj.id, state=ThreadJob.State.PENDING).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
             failure_phase=ThreadJob.FailurePhase.RESUME,
