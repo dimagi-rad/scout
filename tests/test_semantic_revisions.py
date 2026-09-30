@@ -1028,3 +1028,35 @@ def test_undo_clears_canvas_rows_of_members_removed_with_their_dataset(
 
     assert not SemanticCanvasChange.objects.filter(object_uuid__in=field_ids).exists()
     _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "V"}])
+
+
+def test_undo_refuses_to_restore_a_join_on_a_member_removed_since(
+    canvas, semantic_model, workspace, user, custom_sql
+):
+    _create_visit_stats(canvas, user)
+    _commit(
+        canvas,
+        user,
+        [
+            {
+                "op": "create",
+                "object_type": "relationship",
+                "value": {
+                    "from_dataset": "visit_stats",
+                    "from_field": "username",
+                    "to_dataset": "raw_users",
+                    "to_field": "username",
+                    "relationship_type": "many_to_one",
+                },
+            }
+        ],
+    )
+    _commit(canvas, user, [{"op": "delete_object", "object": "dataset/visit_stats"}])
+    deleted = SemanticModelRevision.objects.order_by("-created_at").first()
+    SemanticField.objects.filter(dataset__name="raw_users", name="username").delete()
+
+    refusal = undo_revision(workspace, deleted.id, user)["refused"]
+
+    assert refusal["code"] == "INVALID"
+    assert refusal["conflicts"][0]["object"].startswith("relationship/")
+    assert not SemanticDataset.objects.filter(name="visit_stats").exists()
