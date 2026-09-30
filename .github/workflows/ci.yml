@@ -62,6 +62,27 @@ jobs:
       - name: Check Python formatting
         run: uv run --extra dev ruff format --check .
 
+  # Non-blocking: reports the error count without gating merges (#160).
+  typecheck-python:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Type-check Python (pyright, basic mode)
+        run: |
+          set +e
+          uv run pyright | tee pyright.log
+          status=${PIPESTATUS[0]}
+          {
+            echo "### Pyright"
+            echo
+            tail -n 1 pyright.log
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
   lint-frontend:
     runs-on: ubuntu-latest
     steps:

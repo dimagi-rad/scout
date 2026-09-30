@@ -101,6 +101,13 @@ ignore = [
 "tests/**/*.py" = ["S101", "S105", "S106", "S107", "S110", "S608", "SIM105", "SIM117", "RUF043"]
 "apps/**/tests/**/*.py" = ["S101", "S105", "S106", "S107", "S110", "S608", "SIM105", "SIM117", "RUF043"]
 
+[tool.pyright]
+include = ["apps", "config", "mcp_server"]
+exclude = ["**/migrations", "**/tests", "**/__pycache__", "frontend"]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
@@ -133,4 +140,7 @@ dev = [
     "invoke>=2.2",
     "freezegun>=1.5.5",
     "pytest-timeout>=2.4.0",
+    "pyright>=1.1.414",
+    "django-stubs>=6.1.1",
+    "djangorestframework-stubs>=3.18.1",
 ]
