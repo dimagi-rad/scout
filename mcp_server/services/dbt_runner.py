@@ -80,6 +80,8 @@ def generate_profiles_yml(
         "search_path": schema_name,
         "threads": threads,
     }
+    if "sslmode" in identity:
+        output["sslmode"] = identity["sslmode"]
     if confinement_role:
         output["role"] = confinement_role
     profile = {

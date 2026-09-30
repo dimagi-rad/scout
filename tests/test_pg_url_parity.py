@@ -56,6 +56,7 @@ def _django(url, tmp_path):
 
 BUILDERS = {"mcp": _mcp, "dbt": _dbt, "libpq": _libpq, "django": _django}
 
+# The deploy URL shape (scripts/resolve-database-url.sh): encoded password, no sslmode.
 ENCODED = "postgresql://plat%40form:p%40ss%2Fw%3Ard%25x%2B@db.example:6543/scout"
 SSLMODE_NO_PORT = "postgresql://u:p@db.example/scout?sslmode=require"
 QUERY_OPTIONS = (
@@ -90,15 +91,14 @@ EXPECTED = {
     },
     SSLMODE_NO_PORT: {
         "mcp": {**_UP, "port": "5432", "sslmode": "require"},
-        # Divergence: dbt drops the URL's sslmode and falls back to libpq's default.
-        "dbt": {**_UP, "port": "5432"},
+        "dbt": {**_UP, "port": "5432", "sslmode": "require"},
         "libpq": {**_UP, "sslmode": "require"},
         "django": {**_UP, "sslmode": "require"},
     },
     QUERY_OPTIONS: {
         # The MCP and dbt builders keep only the connection identity and sslmode.
         "mcp": {**_UP, "port": "5432", "sslmode": "verify-full"},
-        "dbt": {**_UP, "port": "5432"},
+        "dbt": {**_UP, "port": "5432", "sslmode": "verify-full"},
         "libpq": _QUERY_OPTIONS_ALL,
         "django": _QUERY_OPTIONS_ALL,
     },
