@@ -36,7 +36,7 @@ function loadConfig(query = () => { throw new Error('Unexpected database access'
               catalog.probes += 1;
               assert.deepEqual(Array.from(values), ['scout_cube_catalog']);
               if (catalog.probeError) return Promise.reject(new Error('synthetic probe failure'));
-              assert.match(text, /has_table_privilege\(to_regrole\(\$1\)::oid, 'semantic_cubeschema', 'SELECT'\)/);
+              assert.match(text, /has_table_privilege\(to_regrole\(\$1\)::oid, 'public\.semantic_cubeschema', 'SELECT'\)/);
               return Promise.resolve({ rows: [{ ready: catalog.roleExists }] });
             }
             return query(text, values, this.options);
@@ -250,7 +250,7 @@ test('catalog reads run as the SELECT-only role once it exists, and never fall b
   assert.equal(catalog.probes, 1);
   assert.equal(seen.length, 3);
   for (const options of seen) {
-    assert.equal(options.options, '-c role=scout_cube_catalog -c default_transaction_read_only=on');
+    assert.equal(options.options, '-c role=scout_cube_catalog -c search_path=public -c default_transaction_read_only=on');
     assert.equal(options.max, 3);
   }
   assert.deepEqual(catalog.warnings, []);
@@ -269,7 +269,7 @@ test('before the migration creates the role, catalog reads use the owner and re-
   assert.equal(catalog.warnings.length, 1);
   assert.match(catalog.warnings[0], /scout_cube_catalog cannot read semantic_cubeschema yet/);
   for (const options of seen) {
-    assert.equal(options.options, undefined);
+    assert.equal(options.options, '-c search_path=public');
     assert.equal(options.max, 3);
   }
 });
@@ -375,7 +375,7 @@ test('a failed role check falls back to the owner instead of failing the read', 
   await config.queryRewrite({}, context());
   await config.queryRewrite({}, context());
   assert.equal(seen.length, 2);
-  assert.equal(seen[0].options, undefined);
+  assert.equal(seen[0].options, '-c search_path=public');
   assert.equal(catalog.warnings.length, 1, 'a failed check backs off instead of re-probing every request');
   assert.match(catalog.warnings[0], /synthetic probe failure/);
 });

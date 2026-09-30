@@ -119,8 +119,12 @@ function contextId(prefix, parts) {
 
 const appDatabaseUrl = process.env.DATABASE_URL || 'postgresql://platform:devpassword@platform-db:5432/agent_platform';
 const managedDatabaseUrl = process.env.MANAGED_DATABASE_URL || appDatabaseUrl;
+// Pin search_path: the default "$user", public resolves differently for the
+// owner and for the role, so the grant check and the reads could otherwise
+// see different semantic_cubeschema tables.
 const catalogPoolOptions = {
   connectionString: appDatabaseUrl,
+  options: '-c search_path=public',
   ssl: sslConfigForUrl(appDatabaseUrl),
   connectionTimeoutMillis: CATALOG_QUERY_TIMEOUT_MS,
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
@@ -146,7 +150,7 @@ let nextRoleProbeAt = 0;
 const ROLE_READY_SQL = `
   SELECT coalesce(
     pg_has_role(current_user, to_regrole($1)::oid, 'MEMBER')
-      AND has_table_privilege(to_regrole($1)::oid, 'semantic_cubeschema', 'SELECT'),
+      AND has_table_privilege(to_regrole($1)::oid, 'public.semantic_cubeschema', 'SELECT'),
     false
   ) AS ready
 `;
@@ -167,7 +171,7 @@ async function catalogPool() {
           rolePool ??= catalogPoolWithErrorHandler({
             ...catalogPoolOptions,
             max: CATALOG_POOL_MAX,
-            options: `-c role=${CATALOG_ROLE} -c default_transaction_read_only=on`,
+            options: `-c role=${CATALOG_ROLE} -c search_path=public -c default_transaction_read_only=on`,
           });
           return;
         }
