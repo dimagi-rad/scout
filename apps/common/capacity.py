@@ -116,7 +116,7 @@ def classify_capacity_error(exc: BaseException) -> CapacityExhausted | None:
 
 
 def busy_payload() -> dict:
-    return {"error": BUSY_ERROR, "message": BUSY_MESSAGE}
+    return {"error": BUSY_ERROR, "code": ErrorCode.CAPACITY_EXHAUSTED, "message": BUSY_MESSAGE}
 
 
 def busy_response() -> JsonResponse:
@@ -134,6 +134,9 @@ def _claim_alert_window(resource: str) -> bool:
     try:
         return bool(cache.add(f"capacity-exhausted-alert:{resource}", 1, ALERT_WINDOW_SECONDS))
     except Exception:
+        logger.warning(
+            "Capacity alert cache unavailable; using a per-process window", exc_info=True
+        )
         now = time.monotonic()
         if _local_alert_deadlines.get(resource, 0.0) > now:
             return False
@@ -142,7 +145,13 @@ def _claim_alert_window(resource: str) -> bool:
 
 
 def _connection_usage() -> dict | None:
-    """Current platform-DB connection count vs ``max_connections``, or ``None``."""
+    """Current platform-DB connection count vs ``max_connections``, or ``None``.
+
+    Only on a connection this thread already holds: opening one now would take a
+    scarce slot, or block the thread on a refused connect, at the worst moment.
+    """
+    if connection.connection is None:
+        return None
     try:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -155,21 +164,19 @@ def _connection_usage() -> dict | None:
     return {"pg_stat_activity_count": active, "max_connections": maximum}
 
 
-def report_capacity_exhausted(resource: CapacityResource | str) -> None:
+def report_capacity_exhausted(resource: CapacityResource | str, detail: str = "") -> None:
     """Log every occurrence; escalate to Sentry at most once per window per resource.
 
     Sync: it reads the cache and, when the database still answers, one row of
     connection stats. Async callers bridge it with ``sync_to_async``.
     """
     resource = CapacityResource(resource)
-    logger.warning("Connection capacity exhausted: %s", resource)
+    logger.warning("Connection capacity exhausted: %s: %s", resource, detail)
     if not _claim_alert_window(resource):
         return
 
-    # Opening another connection to read stats would be refused too when the
-    # database itself is the resource that is full.
-    usage = None if resource == CapacityResource.DATABASE else _connection_usage()
-    details = {"resource": str(resource), **(usage or {"usage": "unavailable"})}
+    usage = _connection_usage()
+    details = {"resource": str(resource), "detail": detail, **(usage or {"usage": "unavailable"})}
     with sentry_sdk.new_scope() as scope:
         scope.fingerprint = ["capacity-exhausted", str(resource)]
         scope.set_tag("capacity_resource", str(resource))

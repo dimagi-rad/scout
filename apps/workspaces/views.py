@@ -49,11 +49,11 @@ async def health_check(request):
     unreachable queue report healthy — the blind spot in arch #257, finding 08#7.
 
     A probe refused only for lack of connections reports ``busy`` rather than
-    ``unhealthy``: still a 503 for readiness, but the SPA shows a calm "busy"
-    notice instead of its "server unreachable" bar.
+    ``unhealthy``: still a 503 for readiness, but it lets the SPA tell a full
+    server from an unreachable one and skip its "server unreachable" bar.
     """
     checks: dict[str, str] = {}
-    capacity_resources = set()
+    capacity_failures = {}
 
     for name, probe in (("database", _check_database), ("queue", _check_queue)):
         try:
@@ -63,13 +63,13 @@ async def health_check(request):
             capacity = classify_capacity_error(exc)
             if capacity is not None:
                 checks[name] = "busy"
-                capacity_resources.add(capacity.resource)
+                capacity_failures[capacity.resource] = str(capacity)
             else:
                 checks[name] = "error"
             logger.warning("health_check: %s probe failed: %s", name, exc)
 
-    for resource in capacity_resources:
-        await sync_to_async(report_capacity_exhausted)(resource)
+    for resource, detail in capacity_failures.items():
+        await sync_to_async(report_capacity_exhausted)(resource, detail)
 
     if all(value == "ok" for value in checks.values()):
         return JsonResponse({"status": "ok", "checks": checks})

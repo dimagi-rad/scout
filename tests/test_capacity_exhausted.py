@@ -38,7 +38,7 @@ from tests.tenant_access import ausable_connection
 
 User = get_user_model()
 
-BUSY_BODY = {"error": "busy", "message": BUSY_MESSAGE}
+BUSY_BODY = {"error": "busy", "code": "CAPACITY_EXHAUSTED", "message": BUSY_MESSAGE}
 
 
 def _django_wrapped(message: str) -> OperationalError:
@@ -194,12 +194,24 @@ def test_alert_includes_connection_usage_when_the_database_answers(sentry):
     assert details["max_connections"] > 0
 
 
-def test_alert_skips_usage_when_the_database_is_the_full_resource(sentry):
-    with patch("apps.common.capacity._connection_usage") as usage:
-        report_capacity_exhausted(CapacityResource.DATABASE)
-    usage.assert_not_called()
+def test_alert_never_opens_a_connection_to_read_usage(sentry):
+    with patch("apps.common.capacity.connection") as conn:
+        conn.connection = None
+        report_capacity_exhausted(CapacityResource.DATABASE, "FATAL: too many clients already")
+    conn.cursor.assert_not_called()
     details = sentry.new_scope.return_value.__enter__.return_value.set_context.call_args.args[1]
-    assert details == {"resource": "db", "usage": "unavailable"}
+    assert details == {
+        "resource": "db",
+        "detail": "FATAL: too many clients already",
+        "usage": "unavailable",
+    }
+
+
+def test_an_unreachable_cache_is_logged(sentry, caplog):
+    with patch("apps.common.capacity.cache") as mock_cache:
+        mock_cache.add.side_effect = ConnectionError("redis down")
+        report_capacity_exhausted(CapacityResource.CUBE)
+    assert "per-process window" in caplog.text
 
 
 class _RaisingAgent:

@@ -142,7 +142,7 @@ async def run_semantic_query(
         return query_error(VALIDATION_ERROR, str(exc), category="configuration_required")
     except CubeConnectionError as exc:
         if exc.capacity_resource is not None:
-            await sync_to_async(report_capacity_exhausted)(exc.capacity_resource)
+            await sync_to_async(report_capacity_exhausted)(exc.capacity_resource, str(exc))
             return query_error(
                 CONNECTION_ERROR,
                 "Cube is at its database connection limit. Retry the query in a few seconds.",

@@ -552,7 +552,7 @@ async def langgraph_to_ui_stream(
     except Exception as exc:
         capacity = classify_capacity_error(exc)
         if capacity is not None:
-            await sync_to_async(report_capacity_exhausted)(capacity.resource)
+            await sync_to_async(report_capacity_exhausted)(capacity.resource, str(capacity))
             yield _sse(
                 {
                     "type": "data-chat-status",
