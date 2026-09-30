@@ -67,7 +67,7 @@ describe("DataModelHistory", () => {
   })
 
   it("explains a conflicting undo", async () => {
-    vi.spyOn(api, "get").mockResolvedValue({
+    const getSpy = vi.spyOn(api, "get").mockResolvedValue({
       revisions: [revision({})],
       can_undo: true,
     } as never)
@@ -87,6 +87,7 @@ describe("DataModelHistory", () => {
         "dataset/visit_stats: It was edited afterwards.",
       )
     })
+    expect(getSpy).toHaveBeenCalledTimes(2)
   })
 
   it("drops the previous workspace's revisions when the workspace changes", async () => {

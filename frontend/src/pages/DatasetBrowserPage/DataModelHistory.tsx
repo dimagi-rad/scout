@@ -101,6 +101,8 @@ export function DataModelHistory({
         message: err instanceof Error ? err.message : "Could not undo this change.",
         details: conflictDetails(err),
       })
+      // Someone else may have undone it already; refresh so its button reflects that.
+      void load()
       return
     } finally {
       setUndoingId(null)
@@ -141,8 +143,8 @@ export function DataModelHistory({
             <p>{error.message}</p>
             {error.details.length > 0 && (
               <ul className="mt-1 list-disc pl-4">
-                {error.details.map((detail) => (
-                  <li key={detail}>{detail}</li>
+                {error.details.map((detail, index) => (
+                  <li key={`${index}-${detail}`}>{detail}</li>
                 ))}
               </ul>
             )}
