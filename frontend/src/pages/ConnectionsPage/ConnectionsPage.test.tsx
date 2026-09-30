@@ -113,9 +113,8 @@ describe("ConnectionsPage", () => {
     )
     render(<ConnectionsPage />)
 
-    expect((await screen.findByTestId("connection-server-eu1")).textContent).toBe("EU")
-    expect(screen.getByTestId("connection-team-eu1").textContent).toBe("commcare (EU)")
-    expect(screen.queryByTestId("connection-server-www1")).toBeNull()
+    expect((await screen.findByTestId("connection-team-eu1")).textContent).toBe("CommCare HQ (EU)")
+    expect(screen.getByTestId("connection-team-www1").textContent).toBe("commcare")
   })
 
   describe("filtering", () => {

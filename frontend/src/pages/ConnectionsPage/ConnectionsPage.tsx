@@ -36,15 +36,12 @@ function ProviderBadge({ provider }: { provider: string }) {
   )
 }
 
-/** A CommCare connection's scope is its HQ server, shown as a badge, not a team. */
-function commcareServerLabel(conn: ApiKeyConnection): string | null {
-  if (conn.provider !== "commcare" || !conn.scope_key) return null
-  return conn.scope_label || conn.scope_key
-}
-
 function teamLabelFor(conn: ApiKeyConnection): string {
-  const server = commcareServerLabel(conn)
-  if (server) return `${conn.provider} (${server})`
+  // A CommCare connection's scope is its HQ server, not a team; naming it keeps a
+  // www and an EU card (and their remove confirmations) apart.
+  if (conn.provider === "commcare" && conn.scope_key) {
+    return `CommCare HQ (${conn.scope_label || conn.scope_key})`
+  }
   // scope_label is the credential's own team; the chatbot fallback covers
   // connections created before the scope was recorded on the connection.
   if (conn.scope_label) return conn.scope_label
@@ -358,7 +355,6 @@ export function ConnectionsPage() {
                   const isApiKey = conn.credential_type === "api_key"
                   const isConfirming = confirmRemoveId === conn.connection_id
                   const teamLabel = teamLabelFor(conn)
-                  const serverLabel = commcareServerLabel(conn)
                   const statusBadge = conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined
 
                   return (
@@ -379,14 +375,6 @@ export function ConnectionsPage() {
                             </div>
                             <div className="flex items-center gap-2">
                               <ProviderBadge provider={conn.provider} />
-                              {serverLabel && (
-                                <Badge
-                                  variant="secondary"
-                                  data-testid={`connection-server-${conn.connection_id}`}
-                                >
-                                  {serverLabel}
-                                </Badge>
-                              )}
                               <Badge variant="secondary">
                                 {isApiKey ? "API Key" : "OAuth"}
                               </Badge>
