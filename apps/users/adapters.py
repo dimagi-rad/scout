@@ -20,6 +20,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.shortcuts import redirect
 
+from apps.common.commcare_servers import server_for_provider
 from apps.users.services.oauth_scope import canonical_provider
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         leaves open (Connect, OCS) carry no allow-list, so their no-email logins
         are unaffected by this gate.
         """
+        self._reject_cross_server_commcare_login(request, sociallogin)
         provider = sociallogin.account.provider
         restrictions = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS
         allowed = restrictions.get(provider, restrictions.get(canonical_provider(provider))) or []
@@ -108,6 +110,28 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             "Sign-in with this account is not permitted. "
             f"Login using '{provider_name}' is restricted to {', '.join('@' + d for d in allowed_lower)} addresses.",
         )
+        raise ImmediateHttpResponse(redirect("account_login"))
+
+    def _reject_cross_server_commcare_login(self, request, sociallogin):
+        """Refuse a CommCare sign-in whose stored id names another HQ server (#719).
+
+        Scout reads a CommCare identity's server from its allauth provider id, but
+        the token came from the adapter's server. An app configured under an alias
+        that maps elsewhere (a ``commcare_eu*`` id on the www provider) would send
+        that token to the wrong HQ, so it fails here instead of at first use.
+        """
+        adapter_id = getattr(getattr(sociallogin, "provider", None), "id", "") or ""
+        stored_id = sociallogin.account.provider
+        if canonical_provider(adapter_id) != "commcare":
+            return
+        if server_for_provider(adapter_id) == server_for_provider(stored_id):
+            return
+        logger.error(
+            "CommCare sign-in refused: provider id %s maps to a different HQ server than %s",
+            stored_id,
+            adapter_id,
+        )
+        messages.error(request, "This CommCare HQ sign-in is misconfigured. Contact support.")
         raise ImmediateHttpResponse(redirect("account_login"))
 
     def get_connect_redirect_url(self, request, socialaccount):

@@ -114,7 +114,7 @@ describe("ConnectionsPage", () => {
     render(<ConnectionsPage />)
 
     expect((await screen.findByTestId("connection-server-eu1")).textContent).toBe("EU")
-    expect(screen.getByTestId("connection-team-eu1").textContent).toBe("commcare")
+    expect(screen.getByTestId("connection-team-eu1").textContent).toBe("commcare (EU)")
     expect(screen.queryByTestId("connection-server-www1")).toBeNull()
   })
 

@@ -14,7 +14,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from apps.common.commcare_servers import DEFAULT_SERVER, get_commcare_server
+from apps.common.commcare_servers import DEFAULT_SERVER
 from apps.common.http import parse_json_object, string_field
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
@@ -101,7 +101,7 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
 # sanctioned bridge for transactional ORM writes from async views.
 @sync_to_async
 def _persist_api_key_connection(
-    user, provider, descriptors, encrypted, team_slug, team_name, server=DEFAULT_SERVER
+    user, provider, descriptors, encrypted, team_slug, team_name, server="", server_label=""
 ):
     """Create one API-key connection and link every chatbot it discovered to it.
 
@@ -116,7 +116,7 @@ def _persist_api_key_connection(
             credential_type=TenantConnection.API_KEY,
             encrypted_credential=encrypted,
             scope_key=server,
-            scope_label=get_commcare_server(server).label if server else "",
+            scope_label=server_label,
         )
         for desc in descriptors:
             tenant, _ = Tenant.objects.get_or_create(
@@ -353,7 +353,14 @@ async def tenant_credential_list_view(request):
 
     try:
         memberships_payload = await _persist_api_key_connection(
-            user, provider, descriptors, encrypted, team_slug, team_name, server
+            user,
+            provider,
+            descriptors,
+            encrypted,
+            team_slug,
+            team_name,
+            server,
+            strategy.server_label(server),
         )
     except Exception as e:
         logger.exception("Failed to persist connection for provider %s", provider)
@@ -529,6 +536,7 @@ async def tenant_ensure_view(request):
         {
             "id": str(tm.id),
             "provider": tm.tenant.provider,
+            "server": tm.tenant.server,
             "tenant_id": tm.tenant.external_id,
             "tenant_name": tm.tenant.canonical_name,
             "workspace_id": str(workspace.id) if workspace else None,

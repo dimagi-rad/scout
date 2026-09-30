@@ -186,9 +186,9 @@ class TenantConnection(models.Model):
     A connection is a credential plus the *scope* that credential authorises.
     ``scope_key`` is the provider-native scope identifier — the OCS team slug, or
     the CommCare HQ server key (``""`` for www, ``"eu"`` for EU, #719) — and is
-    ``""`` for CommCare Connect, whose tokens are account-wide on one server. It exists because an OCS token can only ever read one
-    team, so covering N teams needs N credentials, and the row has to say which
-    one it speaks for (#156). It also replaces the old
+    ``""`` for CommCare Connect, whose tokens are account-wide on one server. It
+    exists because an OCS token can only ever read one team, so covering N teams
+    needs N credentials, and the row has to say which one it speaks for (#156). It also replaces the old
     ``unique(user, provider)`` OAuth guarantee with the narrower
     ``unique(user, provider, scope_key)``: re-authorising a team you already
     hold updates that team's connection instead of creating a second one.

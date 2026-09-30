@@ -8,13 +8,16 @@ from uuid import uuid4
 
 import pytest
 import requests_mock
+from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
 from django.db import IntegrityError
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.common.commcare_servers import UnknownCommCareServer, server_for_provider
 from apps.common.identifiers import refresh_schema_name, tenant_schema_name
+from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 from apps.users.services.access_verification_providers import verify_provider
@@ -26,11 +29,12 @@ from apps.users.services.access_verification_types import (
 from apps.users.services.credential_resolver import aresolve_credential
 from apps.users.services.oauth_scope import account_scope
 from apps.users.services.tenant_resolution import resolve_commcare_domains
-from apps.users.services.token_refresh import get_token_url
+from apps.users.services.token_refresh import get_token_url, token_health
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 from mcp_server.services.materializer import _run_discover_phase
+from tests.test_oauth_domain_restriction import _make_request, _make_sociallogin
 
 EU = "https://eu.commcarehq.org"
 WWW = "https://www.commcarehq.org"
@@ -279,3 +283,45 @@ def test_www_sign_in_endpoints_are_unchanged():
     assert CommCareOAuth2Adapter.access_token_url == f"{WWW}/oauth/token/"
     assert CommCareOAuth2Adapter.authorize_url == f"{WWW}/oauth/authorize/"
     assert CommCareOAuth2Adapter.profile_url == f"{WWW}/api/v0.5/identity/"
+
+
+class TestCrossServerSignInGuard:
+    @staticmethod
+    def _login(adapter_id, stored_id):
+        login = _make_sociallogin(stored_id, "a@dimagi.com")
+        login.provider = SimpleNamespace(id=adapter_id)
+        return login
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    def test_an_eu_id_on_the_www_provider_is_refused(self):
+        with pytest.raises(ImmediateHttpResponse):
+            EncryptingSocialAccountAdapter().pre_social_login(
+                _make_request(), self._login("commcare", "commcare_eu_prod")
+            )
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    @pytest.mark.parametrize("stored_id", ["commcare", "commcare_prod", "hq_production"])
+    def test_www_ids_on_the_www_provider_pass(self, stored_id):
+        login = self._login("commcare", stored_id)
+        assert EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login) is None
+
+
+def test_token_health_reads_the_credential_server():
+    token = SimpleNamespace(token_secret="refresh", app=object(), expires_at=None)
+    assert token_health(token, "commcare", scope_key="eu") == "connected"
+    assert token_health(token, "commcare", scope_key="mars") == "connected"
+    token.expires_at = timezone.now() - timedelta(minutes=1)
+    assert token_health(token, "commcare", scope_key="mars") == "expired"
+    assert token_health(token, "commcare", scope_key="eu") == "connected"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_discovery_without_a_named_identity_binds_the_eu_one(user, httpx_mock):
+    account = await _aeu_identity(user)
+    httpx_mock.add_response(url=f"{EU}/api/user_domains/v1/", json=_domains("dom"))
+
+    await resolve_commcare_domains(user, "eu-access")
+
+    conn = await TenantConnection.objects.aget(user=user, provider="commcare")
+    assert (conn.scope_key, conn.social_account_id) == ("eu", account.pk)

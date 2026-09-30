@@ -274,25 +274,24 @@ async def resolve_commcare_domains(
     one connection per user per server (``scope_key`` is the server key, ``""`` for
     www); ``social_account`` pins which identity holds it and so which server to ask.
     """
-    # Callers without an identity keep their old binding semantics; the lookup only
-    # decides which server the token belongs to.
+    # The identity decides the server, so a caller that did not name it gets the one
+    # holding this token, bound as if named: an unbound EU connection could otherwise
+    # fall back to a www token.
     account = social_account or await _aaccount_holding(user, "commcare", access_token)
     server = get_commcare_server(account_scope(account))
-    observed = await adiscovery_connection(user, "commcare", access_token, social_account)
+    observed = await adiscovery_connection(user, "commcare", access_token, account)
     try:
         domains = await _fetch_all_domains(access_token, server.user_domains_url)
     except CommCareAuthError as error:
         if may_revoke:
-            await _record_discovery_denial(
-                observed, access_token, error.status_code, social_account
-            )
+            await _record_discovery_denial(observed, access_token, error.status_code, account)
         raise
     conn = await _aoauth_connection(
         user,
         "commcare",
         scope_key=server.key,
         scope_label=server.label if server.key else "",
-        account=social_account,
+        account=account,
         allow_replace=allow_replace,
         observed_connection=observed,
         access_token=access_token,

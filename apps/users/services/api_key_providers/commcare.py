@@ -15,29 +15,50 @@ from apps.users.services.api_key_providers.base import (
     FormField,
     TenantDescriptor,
 )
+from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 
 def _auth_header(username: str, api_key: str) -> dict[str, str]:
     return {"Authorization": f"ApiKey {username}:{api_key}"}
 
 
-def _domains_url(fields: dict[str, str]) -> str:
-    return get_commcare_server(CommCareStrategy.server_for(fields)).user_domains_url
+# A user's domain list is small; the bound only stops a looping ``next`` link.
+_MAX_DOMAIN_PAGES = 50
 
 
-async def _list_domains(fields: dict[str, str]) -> list[dict]:
+async def _list_domains(domains_url: str, fields: dict[str, str]) -> list[dict]:
+    """Every domain the key can see, following Tastypie's relative ``meta.next``.
+
+    A domain past page 1 is a real membership, so stopping early would reject a
+    valid key; shape drift and non-JSON bodies are rejections, never "no domains".
+    """
     headers = _auth_header(fields["username"], fields["api_key"])
+    policy = ProviderURLPolicy(domains_url)
+    url: str | None = domains_url
+    domains: list[dict] = []
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(_domains_url(fields), headers=headers)
-    if resp.status_code in (401, 403):
-        raise CredentialVerificationError(
-            f"CommCare rejected the API key (HTTP {resp.status_code})"
-        )
-    if not resp.is_success:
-        raise CredentialVerificationError(
-            f"CommCare API returned unexpected status {resp.status_code}"
-        )
-    return resp.json().get("objects", [])
+        for _page in range(_MAX_DOMAIN_PAGES):
+            resp = await client.get(url, headers=headers)
+            if resp.status_code in (401, 403):
+                raise CredentialVerificationError(
+                    f"CommCare rejected the API key (HTTP {resp.status_code})"
+                )
+            if not resp.is_success:
+                raise CredentialVerificationError(
+                    f"CommCare API returned unexpected status {resp.status_code}"
+                )
+            try:
+                payload = resp.json()
+                domains.extend(payload["objects"])
+                next_url = (payload.get("meta") or {}).get("next")
+                url = policy.resolve(next_url, relative_to=url) if next_url else None
+            except (ValueError, KeyError, TypeError, AttributeError, UnsafeProviderURL):
+                raise CredentialVerificationError(
+                    "CommCare returned an unexpected domain list"
+                ) from None
+            if url is None:
+                return domains
+    raise CredentialVerificationError("CommCare returned too many pages of domains")
 
 
 class CommCareStrategy(CredentialProviderStrategy):
@@ -87,13 +108,22 @@ class CommCareStrategy(CredentialProviderStrategy):
             raise CredentialVerificationError(f"Unknown CommCare HQ server '{server}'") from None
 
     @classmethod
+    def server_label(cls, server: str) -> str:
+        return get_commcare_server(server).label if server else ""
+
+    @classmethod
+    async def _domains(cls, fields: dict[str, str]) -> list[dict]:
+        server = get_commcare_server(cls.server_for(fields))
+        return await _list_domains(server.user_domains_url, fields)
+
+    @classmethod
     def pack_credential(cls, fields: dict[str, str]) -> str:
         return f"{fields['username']}:{fields['api_key']}"
 
     @classmethod
     async def verify_and_discover(cls, fields: dict[str, str]) -> list[TenantDescriptor]:
         domain = fields["domain"]
-        domains = await _list_domains(fields)
+        domains = await cls._domains(fields)
         for entry in domains:
             if entry.get("domain_name") == domain:
                 return [TenantDescriptor(domain, domain)]
@@ -103,7 +133,7 @@ class CommCareStrategy(CredentialProviderStrategy):
 
     @classmethod
     async def verify_for_tenant(cls, fields: dict[str, str], external_id: str) -> None:
-        domains = await _list_domains(fields)
+        domains = await cls._domains(fields)
         for entry in domains:
             if entry.get("domain_name") == external_id:
                 return
