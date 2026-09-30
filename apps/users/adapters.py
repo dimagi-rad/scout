@@ -13,7 +13,7 @@ import logging
 
 from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
-from allauth.socialaccount.models import SocialToken
+from allauth.socialaccount.models import SocialApp, SocialToken
 from allauth.socialaccount.providers import registry as providers_registry
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
@@ -24,6 +24,17 @@ from apps.common.commcare_servers import server_for_provider
 from apps.users.services.oauth_scope import canonical_provider
 
 logger = logging.getLogger(__name__)
+
+
+def _signed_in_provider_id(request, sociallogin) -> str | None:
+    """The allauth provider class id that performed this sign-in, if knowable."""
+    provider = getattr(sociallogin, "provider", None)
+    if provider is None:
+        try:
+            provider = sociallogin.account.get_provider(request)
+        except (SocialApp.DoesNotExist, SocialApp.MultipleObjectsReturned):
+            return None
+    return getattr(provider, "id", None)
 
 
 class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
@@ -120,9 +131,10 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         stored_id = sociallogin.account.provider
         if canonical_provider(stored_id) != "commcare":
             return
-        # allauth's sociallogin_from_response sets the provider that signed in; a
-        # CommCare login without one cannot be placed on a server, so it fails closed.
-        adapter_id = getattr(getattr(sociallogin, "provider", None), "id", None)
+        # allauth sets (and session-round-trips) the provider that signed in; a
+        # CommCare login whose provider can't be found cannot be placed on a server,
+        # so it fails closed.
+        adapter_id = _signed_in_provider_id(request, sociallogin)
         if adapter_id and server_for_provider(adapter_id) == server_for_provider(stored_id):
             return
         logger.error(
