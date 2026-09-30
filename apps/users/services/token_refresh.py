@@ -25,6 +25,7 @@ from typing import NamedTuple
 
 import httpx
 import requests
+import sentry_sdk
 from allauth.socialaccount.models import SocialAccount, SocialToken
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -370,15 +371,42 @@ def classify_http_failure(
         error: TokenRefreshError = TokenRefreshRejected(
             "OAuth refresh grant was rejected as invalid."
         )
+    elif misconfigured:
+        # Scout's own client id/secret was refused; the user's credential is untouched, so
+        # "reconnect" cannot help (#759). Retryable once ops fixes the deployment.
+        error = TokenRefreshUnavailable("OAuth client credentials were rejected by the provider.")
     elif transient:
         error = TokenRefreshUnavailable(f"Failed to refresh OAuth token: {cause}")
     else:
         error = TokenRefreshError(f"Failed to refresh OAuth token: {cause}")
     # A 4xx is an expected outcome (typically 400 invalid_grant on a dead refresh
     # token), not a bug worth a Sentry event.
-    log_level = logging.WARNING if status is not None and 400 <= status < 500 else logging.ERROR
+    log_level = (
+        logging.WARNING
+        if status is not None and 400 <= status < 500 and not misconfigured
+        else logging.ERROR
+    )
     reason = "invalid_grant" if rejected else "invalid_client" if misconfigured else "other"
-    return HttpFailureVerdict(error, not transient, log_level, reason)
+    return HttpFailureVerdict(error, not (transient or misconfigured), log_level, reason)
+
+
+def _log_invalid_client(provider: str, client_id: str, status: int | None) -> None:
+    """Alert ops that Scout's OAuth client credentials are refused.
+
+    The fixed fingerprint groups every affected user into one Sentry issue per app; each
+    attempt still logs one event. ``provider`` is canonical (www and EU CommCare share
+    it), so the client id -- public, unlike the secret -- tells ops which SocialApp to
+    fix. The secret and the response body are never logged.
+    """
+    with sentry_sdk.new_scope() as scope:
+        scope.fingerprint = ["oauth-invalid-client", provider, client_id]
+        logger.error(
+            "OAuth provider %s rejected Scout's client credentials for app %s (HTTP %s); "
+            "check that SocialApp's client id/secret",
+            provider,
+            client_id,
+            status,
+        )
 
 
 def classify_persist_failure(
@@ -812,7 +840,9 @@ async def refresh_oauth_token_result(
             misconfigured=_is_invalid_client(e.response),
             cause=e,
         )
-        if verdict.log_level >= logging.ERROR:
+        if verdict.reason == "invalid_client":
+            _log_invalid_client(preflight.account_provider, social_token.app.client_id, status)
+        elif verdict.log_level >= logging.ERROR:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         else:
             logger.log(
@@ -980,7 +1010,9 @@ def refresh_oauth_token_result_sync(
             misconfigured=_is_invalid_client(e.response),
             cause=e,
         )
-        if verdict.log_level >= logging.ERROR:
+        if verdict.reason == "invalid_client":
+            _log_invalid_client(preflight.account_provider, social_token.app.client_id, status)
+        elif verdict.log_level >= logging.ERROR:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         else:
             logger.log(
