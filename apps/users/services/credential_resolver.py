@@ -102,7 +102,8 @@ async def aget_connection_token(conn) -> SocialToken | None:
     safe: the connection names the identity whose token it is, so no ordering
     heuristic decides which team Scout authenticates as. Connections written
     before the scope backfill have no linked account and fall back to the
-    provider-wide (now ordered) read.
+    provider-wide (now ordered) read, limited to identities in the connection's
+    scope so a legacy www connection never picks up a newer EU token.
     """
     if conn.social_account_id:
         return (
@@ -112,11 +113,12 @@ async def aget_connection_token(conn) -> SocialToken | None:
         )
     # user_id, not user: callers select_related("connection") but not its user, so
     # touching conn.user here would be a sync FK fetch inside an async view.
-    return (
-        await _social_token_qs(conn.user_id, conn.provider)
-        .select_related("account", "app")
-        .afirst()
-    )
+    async for token in _social_token_qs(conn.user_id, conn.provider).select_related(
+        "account", "app"
+    ):
+        if account_scope(token.account) == conn.scope_key:
+            return token
+    return None
 
 
 async def aiter_fresh_access_tokens(user, provider: str) -> list[tuple]:
