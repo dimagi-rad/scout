@@ -320,6 +320,23 @@ test('tenant connections share one process-wide limit across workspaces', async 
   assert.ok(fourth);
 });
 
+test('a connection that errors returns its slot even without an end event', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
+  const driver = config.driverFactory(context());
+  const client = await driver.createConnection();
+  client.on('error', () => {});
+  client.emit('error', new Error('Connection terminated unexpectedly'));
+  client.end();
+  const second = await driver.createConnection();
+  let extra = null;
+  const pending = driver.createConnection().then((c) => { extra = c; });
+  await new Promise(setImmediate);
+  assert.equal(extra, null, 'error followed by end must free only one slot');
+  second.end();
+  await pending;
+  assert.ok(extra);
+});
+
 test('a failed connect returns its slot', async () => {
   const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
   const failing = config.driverFactory(context());

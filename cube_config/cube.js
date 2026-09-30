@@ -44,7 +44,9 @@ class SlottedPostgresDriver extends PostgresDriver {
       release();
       throw error;
     }
+    // release() is idempotent; a fatal socket error need not surface as 'end'.
     client.once('end', release);
+    client.once('error', release);
     return client;
   }
 }
