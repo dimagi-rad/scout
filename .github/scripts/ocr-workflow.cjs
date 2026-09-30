@@ -128,8 +128,26 @@ async function recordReviewCheck({ github, context, core, env, delay }) {
   core.info(`PR review check recorded as ${conclusion}.`);
 }
 
+// Flat 500K ran out on most medium and large PRs (~260 runs: median 306K, mean 644K,
+// max 6.34M tokens). OCR's own estimate is only printed after dispatch, so size the
+// ceiling from the PR's file and line counts. It gates group starts, not spend.
+const BUDGET_TIERS = [
+  { files: 10, lines: 500, budget: 500000 },
+  { files: 25, lines: 2000, budget: 2000000 },
+  { files: Infinity, lines: Infinity, budget: 4000000 },
+];
+const FULL_RERUN_FLOOR = 2000000;
+
+function scaledBudget({ files, lines, full, firstReview }) {
+  const count = Number.isFinite(files) && files > 0 ? files : 0;
+  const changed = Number.isFinite(lines) && lines > 0 ? lines : 0;
+  const tier = BUDGET_TIERS.find(t => count < t.files && changed < t.lines);
+  // A repeat full review (policy change, blocked prior run) re-reads the whole PR.
+  return full && !firstReview ? Math.max(tier.budget, FULL_RERUN_FLOOR) : tier.budget;
+}
+
 async function prepareReview({ github, context, core, fs, env }) {
-  await currentPR(github, context, env);
+  const pr = await currentPR(github, context, env);
   const hash = crypto.createHash('sha256');
   for (const file of policyFiles) hash.update(file).update('\0').update(fs.readFileSync(path.join(env.GITHUB_WORKSPACE, file)));
   const policy = hash.digest('hex');
@@ -156,12 +174,18 @@ async function prepareReview({ github, context, core, fs, env }) {
   for (const file of policyFiles.filter((file) => file.endsWith('.cjs'))) {
     fs.copyFileSync(path.join(env.GITHUB_WORKSPACE, file), path.join(snapshot, path.basename(file)));
   }
+  const manualBudget = Number(env.MANUAL_BUDGET);
+  const manual = Number.isSafeInteger(manualBudget) && manualBudget > 0;
+  const budget = manual ? manualBudget : scaledBudget({
+    files: pr.changed_files, lines: (pr.additions || 0) + (pr.deletions || 0),
+    full: selection.full, firstReview: previous === null,
+  });
   for (const [key, value] of Object.entries({
-    full_review: String(selection.full), checkpoint: selection.checkpoint || '',
+    token_budget: String(budget), full_review: String(selection.full), checkpoint: selection.checkpoint || '',
     source_run: selection.sourceRun || '', claude_head: selection.claudeHead || '',
     policy, reason: selection.reason,
   })) core.setOutput(key, value);
-  core.info(`Review baseline: ${selection.reason}`);
+  core.info(`Review baseline: ${selection.reason}; token budget ${budget}${manual ? ' (manual)' : ''}`);
 }
 
 async function finishReview({ github, context, core, fs, execFileSync, env }) {
@@ -454,4 +478,4 @@ async function finishClaude({ github, context, core, fs, env, delay }) {
   }
 }
 
-module.exports = { prepareReview, finishReview, prepareClaude, finishClaude, recordReviewCheck };
+module.exports = { scaledBudget, prepareReview, finishReview, prepareClaude, finishClaude, recordReviewCheck };

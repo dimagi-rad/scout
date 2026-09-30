@@ -24,7 +24,7 @@ jobs:
       base: ${{ steps.pr.outputs.base }}
       base_ref: ${{ steps.pr.outputs.base_ref }}
       same_repo: ${{ steps.pr.outputs.same_repo }}
-      token_budget: ${{ steps.pr.outputs.token_budget }}
+      manual_budget: ${{ steps.pr.outputs.manual_budget }}
       full_review: ${{ steps.pr.outputs.full_review }}
     steps:
       - name: Checkout trusted workflow policy
@@ -66,12 +66,12 @@ jobs:
             const { parseCommand } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-state.cjs`);
             let request;
             try {
-              request = manual ? parseCommand(context.payload.comment.body) : { full: false, budget: 500000 };
+              request = manual ? parseCommand(context.payload.comment.body) : { full: false, budget: null };
             } catch (error) {
               core.notice(error.message);
               return;
             }
-            core.setOutput('token_budget', String(request.budget));
+            core.setOutput('manual_budget', request.budget === null ? '' : String(request.budget));
             core.setOutput('full_review', String(request.full));
             core.setOutput('number', String(pr.number));
             core.setOutput('head', pr.head.sha);
@@ -84,7 +84,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.authorized == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       # The npm launcher otherwise replaces its pinned install in the background.
       OCR_NO_UPDATE: "1"
@@ -114,6 +114,7 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           FORCE_FULL: ${{ needs.prepare.outputs.full_review }}
+          MANUAL_BUDGET: ${{ needs.prepare.outputs.manual_budget }}
         with:
           script: |
             const { prepareReview } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-workflow.cjs`);
@@ -137,7 +138,7 @@ jobs:
           # docs/development/automated-code-review.md ("How the token budget works").
           review_concurrency: '2'
           review_task_timeout: '15'
-          max_tokens_budget: ${{ needs.prepare.outputs.token_budget }}
+          max_tokens_budget: ${{ steps.baseline.outputs.token_budget }}
           effort: medium
           stream_progress: 'true'
           sticky_summary: 'true'

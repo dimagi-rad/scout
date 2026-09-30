@@ -87,6 +87,7 @@ from apps.workspaces.services.pipeline_resolver import (
 )
 from apps.workspaces.services.query_state import synced_runs, workspace_query_surface
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.source_freshness import aworkspace_source_freshness
 from apps.workspaces.services.tenant_coverage import coverage_complete
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
 from apps.workspaces.services.thread_job_dispatch import adispatch_thread_materialization
@@ -1819,6 +1820,14 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
     workspace's load waits on it. Fails with WORKSPACE_ACCESS_DENIED when the
     acting user can no longer read the workspace.
 
+    ``sources`` lists each data source with ``last_fetched_at`` (when its serving
+    data was fetched) and ``last_load`` (``refreshed``, ``reused`` or ``skipped``
+    by this workspace's latest load, or null before this workspace has loaded it).
+    ``last_materialized_at`` is only the newest of those times, so read ``sources``
+    for any one source's age. A source with
+    ``not_refreshed: true`` was not fetched by the latest load; ``serving`` says
+    whether its older data is still queryable and ``remedy`` what gets it fetched.
+
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
         user_id: Acting user UUID (injected server-side; recorded in the audit trail).
@@ -1844,6 +1853,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 "exists": False,
                 "state": "not_provisioned",
                 "last_materialized_at": None,
+                "sources": [],
                 "tables": [],
             },
             schema="",
@@ -1868,6 +1878,8 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         if tenant_count == 0:
             tc["result"] = not_provisioned
             return tc["result"]
+        sources = await aworkspace_source_freshness(workspace.id, user_id)
+        not_provisioned["data"]["sources"] = sources
 
         synced_at = (
             await synced_runs()
@@ -1910,6 +1922,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                     "state": ts.state,
                     "query_surface": query_surface,
                     "last_materialized_at": last_materialized_at,
+                    "sources": sources,
                     "tables": tables,
                     "load_in_progress": load_in_progress,
                 },
@@ -1961,6 +1974,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 "state": vs.state,
                 "query_surface": query_surface,
                 "last_materialized_at": last_materialized_at,
+                "sources": sources,
                 "tables": tables,
                 "tenant_coverage": coverage,
                 "load_in_progress": load_in_progress,

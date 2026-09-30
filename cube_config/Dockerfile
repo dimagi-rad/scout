@@ -4,6 +4,7 @@ COPY package.json /cube/conf/package.json
 COPY cube.js /cube/conf/cube.js
 COPY validator-core.js /cube/conf/validator-core.js
 COPY validator-server.js /cube/conf/validator-server.js
+COPY validator-compiler.js /cube/conf/validator-compiler.js
 COPY validator-worker.js /cube/conf/validator-worker.js
 COPY bounded-local-cache.js /cube/conf/bounded-local-cache.js
 COPY patch-local-cache.js /cube/conf/patch-local-cache.js

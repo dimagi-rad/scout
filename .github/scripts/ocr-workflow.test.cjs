@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { prepareReview, finishReview, prepareClaude, finishClaude, recordReviewCheck } = require('./ocr-workflow.cjs');
+const { scaledBudget, prepareReview, finishReview, prepareClaude, finishClaude, recordReviewCheck } = require('./ocr-workflow.cjs');
 const { MARKER, encodeState, readState } = require('./ocr-state.cjs');
 
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40), PRIOR = 'c'.repeat(40), MERGE = 'd'.repeat(40);
@@ -398,4 +398,43 @@ test('only the separate issue_comment job can write checks', () => {
   assert.match(job, /REVIEW_HEAD: \$\{\{ needs\.prepare\.outputs\.head \}\}/);
   assert.match(job, /REVIEW_RESULT: \$\{\{ needs\.review\.result \}\}/);
   assert.equal((workflow.match(/checks: write/g) || []).length, 1);
+});
+
+test('push budget scales with PR size and a repeat full review gets the medium floor', () => {
+  const small = { files: 3, lines: 120 };
+  assert.equal(scaledBudget(small), 500000);
+  assert.equal(scaledBudget({ files: 9, lines: 499 }), 500000);
+  assert.equal(scaledBudget({ files: 10, lines: 100 }), 2000000);
+  assert.equal(scaledBudget({ files: 4, lines: 500 }), 2000000);
+  assert.equal(scaledBudget({ files: 25, lines: 100 }), 4000000);
+  assert.equal(scaledBudget({ files: 4, lines: 2000 }), 4000000);
+  assert.equal(scaledBudget({}), 500000);
+  assert.equal(scaledBudget({ ...small, full: true, firstReview: true }), 500000);
+  assert.equal(scaledBudget({ ...small, full: true, firstReview: false }), 2000000);
+  assert.equal(scaledBudget({ files: 40, lines: 9000, full: true }), 4000000);
+});
+
+test('prepareReview outputs a scaled budget unless a manual budget overrides it', async () => {
+  const h = harness();
+  Object.assign(h.pr, { changed_files: 12, additions: 300, deletions: 50 });
+  await prepareReview(h);
+  assert.equal(h.outputs.token_budget, '2000000');
+  const manual = harness({ MANUAL_BUDGET: '750000' });
+  Object.assign(manual.pr, { changed_files: 40, additions: 9000, deletions: 0 });
+  await prepareReview(manual);
+  assert.equal(manual.outputs.token_budget, '750000');
+  const empty = harness({ MANUAL_BUDGET: '' });
+  await prepareReview(empty);
+  assert.equal(empty.outputs.token_budget, '500000');
+});
+
+test('a repeat full review floors the budget, including a forced first review with no state', async () => {
+  const repeat = incremental(harness());
+  repeat.comments = [comment(state({ passed: false }))];
+  await prepareReview(repeat);
+  assert.equal(repeat.outputs.full_review, 'true');
+  assert.equal(repeat.outputs.token_budget, '2000000');
+  const forced = harness({ FORCE_FULL: 'true' });
+  await prepareReview(forced);
+  assert.equal(forced.outputs.token_budget, '500000');
 });

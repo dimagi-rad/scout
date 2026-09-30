@@ -89,7 +89,9 @@ class CubeSchemaAdmin(admin.ModelAdmin):
     list_filter = ("status", "workspace")
     search_fields = ("filename", "content_hash", "content")
     raw_id_fields = ("workspace", "semantic_model")
-    readonly_fields = ("content_hash", "diagnostics", "created_at", "updated_at")
+    # Cube recompiles only when content_hash changes, so hand-edited content would
+    # never be served; it would also skip validation.
+    readonly_fields = ("content", "content_hash", "diagnostics", "created_at", "updated_at")
 
 
 @admin.register(SemanticCanvas)

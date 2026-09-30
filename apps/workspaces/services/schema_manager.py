@@ -20,6 +20,7 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
 
+from apps.common.errors import ExpectedStateError
 from apps.common.identifiers import (
     dbt_role_name,
     readonly_role_name,
@@ -29,7 +30,12 @@ from apps.common.identifiers import (
     view_name,
 )
 from apps.users.models import Tenant
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     sync_tenant_data_lock,
@@ -96,6 +102,92 @@ class ViewSchemaRetired(Exception):
 
 
 RETIRED_VIEW_STATES = (SchemaState.TEARDOWN, SchemaState.EXPIRED)
+
+
+class NoActiveTenantSchema(ExpectedStateError, ValueError):
+    """No source of the workspace has an ACTIVE schema, so there is nothing to view.
+
+    Expected (apps.common.errors): a source added before its first load, or whose
+    load failed, is routine. It is surfaced as the view row's ``last_error`` and
+    coverage, and resolved by the next load, which rebuilds the views (#361).
+    A ValueError so it takes the build's existing validation-failure path.
+    """
+
+    def __init__(self, workspace_id):
+        super().__init__(
+            f"Workspace {workspace_id} has no active schema for any tenant. "
+            "Run a data refresh before building the view schema."
+        )
+
+
+def _served_sources(tenant_ids):
+    return TenantSchema.objects.filter(tenant_id__in=tenant_ids, state=SchemaState.ACTIVE)
+
+
+async def aview_schema_buildable(workspace_id) -> bool:
+    """Whether a view rebuild for this workspace can publish anything.
+
+    A single source is served from its own schema, and with no source served at
+    all the build can only fail with NoActiveTenantSchema, so queueing it is noise.
+    """
+    tenant_ids = [
+        tenant_id
+        async for tenant_id in WorkspaceTenant.objects.filter(
+            workspace_id=workspace_id
+        ).values_list("tenant_id", flat=True)
+    ]
+    return len(tenant_ids) > 1 and await _served_sources(tenant_ids).aexists()
+
+
+def fail_view_schema_if_unbuildable(workspace, *, removing: bool = False) -> bool:
+    """True when no view rebuild should be queued, having recorded why.
+
+    For callers deciding whether to queue a rebuild, inside their transaction. A
+    workspace with fewer than two sources has no views to build and nothing is
+    written. With no served source this writes the build's own FAILED state,
+    ``last_error`` and coverage, creating the row as the build would: the
+    dependent-rebuild fan-out only reaches workspaces with a row, and it is what
+    rebuilds these views once any source loads. The row lock only orders this
+    against a build's entry and publish, not its DDL, so a row a build may be
+    running over is left to a rebuild queued behind it: PROVISIONING, and when
+    ``removing`` also ACTIVE, which a build keeps while it runs and would
+    republish over the removed source. A retired row keeps its lifecycle state
+    (see SchemaManager._save_build_failure).
+    """
+    # iterator() bypasses a prefetch cache, which would still hold a source the
+    # caller just removed in this transaction.
+    tenants = sorted(
+        workspace.tenants.all().iterator(),
+        key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
+    )
+    if len(tenants) < 2:
+        return True
+    existing = WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace).first()
+    # An add is safe over an ACTIVE row: a build in flight publishes the sources
+    # it planned, all still linked, and names the new one missing.
+    in_flight = (
+        (SchemaState.PROVISIONING, SchemaState.ACTIVE) if removing else (SchemaState.PROVISIONING,)
+    )
+    if existing is not None and existing.state in in_flight:
+        return False
+    if _served_sources([t.id for t in tenants]).exists():
+        return False
+    failure = {
+        "state": SchemaState.FAILED,
+        "last_error": str(NoActiveTenantSchema(workspace.id))[:500],
+        "tenant_coverage": {
+            "included_tenants": [],
+            "excluded_tenants": [coverage_entry(t) for t in tenants],
+        },
+    }
+    if existing is None:
+        WorkspaceViewSchema.objects.get_or_create(
+            workspace=workspace,
+            defaults={"schema_name": SchemaManager._view_schema_name(workspace.id), **failure},
+        )
+    elif existing.state not in RETIRED_VIEW_STATES:
+        WorkspaceViewSchema.objects.filter(pk=existing.pk).update(**failure)
+    return True
 
 
 class SchemaStillReferenced(Exception):
@@ -575,7 +667,8 @@ class SchemaManager:
             )
         )
 
-    def _view_schema_name(self, workspace_id) -> str:
+    @staticmethod
+    def _view_schema_name(workspace_id) -> str:
         """Generate a PostgreSQL schema name for a workspace's view schema."""
         hex_id = str(workspace_id).replace("-", "")[:16]
         return f"ws_{hex_id}"
@@ -698,10 +791,7 @@ class SchemaManager:
             }
 
             if not tenant_schemas:
-                raise ValueError(
-                    f"Workspace {workspace.id} has no active schema for any tenant. "
-                    "Run a data refresh before building the view schema."
-                )
+                raise NoActiveTenantSchema(workspace.id)
         except ValueError as exc:
             fields = ["state", "last_error", "tenant_coverage"]
             # When the sources are retiring these views can never serve again, and

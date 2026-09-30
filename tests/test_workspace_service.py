@@ -2,6 +2,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from django.db import transaction
 from django.utils import timezone
 
 from apps.users.models import Tenant, TenantMembership
@@ -11,6 +12,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.schema_manager import fail_view_schema_if_unbuildable
 from apps.workspaces.services.tenant_coverage import coverage_complete, coverage_warning
 from apps.workspaces.services.workspace_service import (
     LastWorkspaceTenant,
@@ -46,8 +48,9 @@ def tenant_membership3(db, user, tenant3):
 
 @pytest.mark.django_db
 def test_add_workspace_tenant_creates_record_and_marks_provisioning(
-    workspace, tenant2, tenant_membership2
+    workspace, tenant, tenant2, tenant_membership2
 ):
+    TenantSchema.objects.create(tenant=tenant, schema_name="live_one", state=SchemaState.ACTIVE)
     vs = WorkspaceViewSchema.objects.create(
         workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
     )
@@ -141,6 +144,7 @@ def test_adding_an_unloaded_source_leaves_unknown_coverage_unknown(
     workspace, tenant, user, tenant2, tenant_membership2, tenant3, tenant_membership3
 ):
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    TenantSchema.objects.create(tenant=tenant, schema_name="live_one", state=SchemaState.ACTIVE)
     vs = WorkspaceViewSchema.objects.create(
         workspace=workspace,
         schema_name="ws_test",
@@ -202,9 +206,10 @@ def test_remove_tenant_dispatches_view_schema_teardown_when_count_drops_to_one(
 
 @pytest.mark.django_db
 def test_remove_tenant_no_op_on_tenant_count_above_one(
-    workspace, tenant2, tenant_membership2, tenant3, tenant_membership3
+    workspace, tenant, tenant2, tenant_membership2, tenant3, tenant_membership3
 ):
     WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    TenantSchema.objects.create(tenant=tenant, schema_name="live_one", state=SchemaState.ACTIVE)
     wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
     vs = WorkspaceViewSchema.objects.create(
         workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
@@ -337,3 +342,174 @@ def test_removal_that_lost_to_a_workspace_delete_reports_the_last_source(workspa
 
     with pytest.raises(LastWorkspaceTenant):
         remove_workspace_tenant(workspace, stale)
+
+
+def _add_and_capture(workspace, tenant, actor_id):
+    with (
+        patch(
+            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        ) as rebuild,
+        patch(
+            "apps.workspaces.services.workspace_service.materialize_workspace.defer"
+        ) as materialize,
+    ):
+        add_workspace_tenant(workspace, tenant, actor_id=actor_id)
+    return rebuild, materialize
+
+
+@pytest.mark.parametrize("with_actor", [False, True])
+@pytest.mark.django_db
+def test_adding_a_source_when_nothing_is_served_queues_no_rebuild(
+    workspace, tenant, user, tenant2, tenant_membership2, with_actor
+):
+    """SCOUT-DJANGO-7: the rebuild could only fail, so it must not be queued; the
+    views record the same FAILED state the build would have."""
+    TenantSchema.objects.create(tenant=tenant, schema_name="gone_one", state=SchemaState.EXPIRED)
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
+    )
+
+    rebuild, materialize = _add_and_capture(
+        workspace, tenant2, actor_id=user.id if with_actor else None
+    )
+
+    rebuild.assert_not_called()
+    assert materialize.called is with_actor
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.FAILED
+    assert "has no active schema for any tenant" in vs.last_error
+    assert vs.tenant_coverage == {
+        "included_tenants": [],
+        "excluded_tenants": [_entry(tenant), _entry(tenant2)],
+    }
+
+
+@pytest.mark.django_db
+def test_removing_a_source_when_nothing_is_served_creates_the_failed_row(
+    workspace, tenant, tenant2, tenant_membership2, tenant3, tenant_membership3
+):
+    """The dependent-rebuild fan-out only reaches workspaces with a view row, so the
+    skipped rebuild must still leave one for a later load to rebuild."""
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
+
+    with patch(
+        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+    ) as mock_rebuild:
+        remove_workspace_tenant(workspace, wt3)
+
+    mock_rebuild.assert_not_called()
+    vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+    assert vs.state == SchemaState.FAILED
+    assert vs.schema_name.startswith("ws_")
+    assert "has no active schema for any tenant" in vs.last_error
+    assert vs.tenant_coverage == {
+        "included_tenants": [],
+        "excluded_tenants": [_entry(tenant), _entry(tenant2)],
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("state", [SchemaState.PROVISIONING, SchemaState.ACTIVE])
+def test_removing_a_source_behind_a_possible_build_still_rebuilds(
+    workspace, tenant2, tenant_membership2, tenant3, tenant_membership3, state
+):
+    """A build in flight planned over the removed source and would publish it; only
+    a rebuild queued behind it corrects that, even though nothing is served now. A
+    build over serving views leaves the row ACTIVE while it runs."""
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
+    TenantSchema.objects.create(tenant=tenant3, schema_name="live_three", state=SchemaState.ACTIVE)
+    vs = WorkspaceViewSchema.objects.create(workspace=workspace, schema_name="ws_test", state=state)
+
+    with patch(
+        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+    ) as mock_rebuild:
+        remove_workspace_tenant(workspace, wt3)
+
+    mock_rebuild.assert_called_once_with(workspace_id=str(workspace.id))
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.PROVISIONING
+
+
+@pytest.mark.django_db
+def test_adding_a_source_behind_a_provisioning_build_still_rebuilds(
+    workspace, user, tenant2, tenant_membership2
+):
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=SchemaState.PROVISIONING
+    )
+
+    rebuild, materialize = _add_and_capture(workspace, tenant2, actor_id=user.id)
+
+    rebuild.assert_called_once_with(workspace_id=str(workspace.id))
+    materialize.assert_called_once()
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.PROVISIONING
+
+
+@pytest.mark.django_db
+def test_a_single_source_workspace_gets_no_view_row(workspace):
+    """One source is served from its own schema; a view row would be an orphan."""
+    with transaction.atomic():
+        assert fail_view_schema_if_unbuildable(workspace) is True
+
+    assert not WorkspaceViewSchema.objects.filter(workspace=workspace).exists()
+
+
+@pytest.mark.parametrize("retired", [SchemaState.TEARDOWN, SchemaState.EXPIRED])
+@pytest.mark.django_db
+def test_adding_a_source_when_nothing_is_served_leaves_retired_views_retired(
+    workspace, user, tenant2, tenant_membership2, retired
+):
+    """Reviving a retired row only serves a rebuild; the load revives it itself."""
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=retired
+    )
+
+    rebuild, _ = _add_and_capture(workspace, tenant2, actor_id=user.id)
+
+    rebuild.assert_not_called()
+    vs.refresh_from_db()
+    assert vs.state == retired
+
+
+@pytest.mark.parametrize("with_actor", [False, True])
+@pytest.mark.django_db
+def test_adding_a_source_to_a_served_workspace_still_rebuilds(
+    workspace, tenant, user, tenant2, tenant_membership2, with_actor
+):
+    TenantSchema.objects.create(tenant=tenant, schema_name="live_one", state=SchemaState.ACTIVE)
+    WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
+    )
+
+    rebuild, _ = _add_and_capture(workspace, tenant2, actor_id=user.id if with_actor else None)
+
+    rebuild.assert_called_once_with(workspace_id=str(workspace.id))
+
+
+@pytest.mark.django_db
+def test_removing_a_source_when_nothing_is_served_queues_no_rebuild(
+    workspace, tenant, tenant2, tenant_membership2, tenant3, tenant_membership3
+):
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
+    TenantSchema.objects.create(tenant=tenant3, schema_name="live_three", state=SchemaState.ACTIVE)
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=SchemaState.FAILED
+    )
+
+    with patch(
+        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+    ) as mock_rebuild:
+        remove_workspace_tenant(workspace, wt3)
+
+    mock_rebuild.assert_not_called()
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.FAILED
+    assert "has no active schema for any tenant" in vs.last_error
+    assert vs.tenant_coverage == {
+        "included_tenants": [],
+        "excluded_tenants": [_entry(tenant), _entry(tenant2)],
+    }
