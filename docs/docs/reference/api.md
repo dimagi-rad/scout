@@ -10,6 +10,13 @@ Most endpoints are scoped to a workspace and live under
 `read_write` or `manage`. Unless a table says otherwise, any member can call an
 endpoint.
 
+When a shared connection limit is full (the database, the chat checkpointer
+pool, or Cube), any endpoint can answer HTTP 503 with a `Retry-After` header and
+`{"error": "busy", "code": "CAPACITY_EXHAUSTED", "message": "..."}`. The request
+is safe to retry after the delay; mutations may already have been applied. A
+chat turn that hits the limit mid-stream ends with a `data-chat-status` part
+`{"kind": "retryable-error", "reason": "busy", "retryAfter": 5}` instead.
+
 ## Authentication
 
 | Method | Path | Description |
@@ -239,6 +246,6 @@ transformation assets and runs:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health/` | Readiness check. Probes the database and the task queue. Returns 200 with `{"status": "ok", "checks": {...}}`, or 503 with `"status": "unhealthy"`. No authentication. |
+| GET | `/health/` | Readiness check. Probes the database and the task queue. Returns 200 with `{"status": "ok", "checks": {...}}`, or 503 with `"status": "unhealthy"`, or 503 with `"status": "busy"` and `Retry-After` when a probe was refused only because a connection limit is full. No authentication. |
 | GET | `/widget.js` | Embeddable widget script. |
 | — | `/admin/` | Django admin. |
