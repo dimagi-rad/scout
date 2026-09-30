@@ -59,3 +59,7 @@ WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
 
 # Tests exercise the enforced gate; fixtures provision genuine fresh proofs.
 UPSTREAM_ACCESS_FRESHNESS_ENFORCED = True
+
+# DATABASES above ignores a .env DATABASE_URL, which the checkpointer still reads;
+# tests that need a real saver build it from the test database themselves.
+SILENCED_SYSTEM_CHECKS = ["chat.E001"]

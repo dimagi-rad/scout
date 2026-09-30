@@ -13,7 +13,6 @@ from typing import Annotated, TypedDict
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.checks import run_checks
 from django.db import connection
@@ -369,8 +368,17 @@ def test_same_database(django_db, conninfo, expected):
     assert same_database(django_db, conninfo) is expected
 
 
-def test_checkpointer_on_the_default_database_passes_the_system_check(monkeypatch):
-    default = settings.DATABASES["default"]
+@pytest.fixture
+def unsilenced_checks(settings):
+    settings.SILENCED_SYSTEM_CHECKS = []
+    settings.DEBUG = False
+    return settings
+
+
+def test_checkpointer_on_the_default_database_passes_the_system_check(
+    unsilenced_checks, monkeypatch
+):
+    default = unsilenced_checks.DATABASES["default"]
     url = build_pg_url(
         host=str(default.get("HOST") or ""),
         port=default.get("PORT") or 5432,
@@ -380,23 +388,61 @@ def test_checkpointer_on_the_default_database_passes_the_system_check(monkeypatc
     )
     monkeypatch.setattr("apps.chat.checks.get_database_url", lambda: url)
 
-    assert not {"chat.W001", "chat.W002"} & {e.id for e in run_checks()}
+    assert not {e.id for e in run_checks()} & {"chat.E001", "chat.E002"}
 
 
-def test_unparseable_checkpointer_url_is_a_check_warning_without_the_password(monkeypatch):
+def test_unparseable_checkpointer_url_is_a_check_error_without_the_password(
+    unsilenced_checks, monkeypatch
+):
     monkeypatch.setattr(
         "apps.chat.checks.get_database_url", lambda: "pgsql://scout:hunter2@db.internal/scout"
     )
 
-    warnings = [e for e in run_checks() if e.id == "chat.W002"]
+    errors = [e for e in run_checks() if e.id == "chat.E002"]
 
-    assert len(warnings) == 1
-    assert "hunter2" not in str(warnings[0])
+    assert len(errors) == 1
+    assert "hunter2" not in str(errors[0])
 
 
-def test_checkpointer_on_another_database_fails_the_system_check(monkeypatch):
+def test_checkpointer_on_another_database_fails_the_system_check(unsilenced_checks, monkeypatch):
     monkeypatch.setattr(
         "apps.chat.checks.get_database_url", lambda: "postgresql://x@elsewhere:5432/not_scout"
     )
 
-    assert "chat.W001" in {e.id for e in run_checks()}
+    assert "chat.E001" in {e.id for e in run_checks()}
+
+
+def test_checkpointer_database_mismatch_only_warns_under_debug(unsilenced_checks, monkeypatch):
+    unsilenced_checks.DEBUG = True
+    monkeypatch.setattr(
+        "apps.chat.checks.get_database_url", lambda: "postgresql://x@elsewhere:5432/not_scout"
+    )
+
+    ids = {e.id for e in run_checks()}
+
+    assert "chat.W001" in ids
+    assert "chat.E001" not in ids
+
+
+def test_canvas_does_not_create_a_thread_over_a_deleted_threads_checkpoints(
+    checkpoint_tables, client, workspace, user
+):
+    thread_id = str(uuid.uuid4())
+    with PostgresSaver.from_conn_string(checkpoint_tables) as saver:
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        _stub_agent(saver).invoke(
+            {
+                "messages": [HumanMessage(content="old private question")],
+                "workspace_id": str(workspace.id),
+                "user_id": str(user.id),
+                "thread_id": thread_id,
+            },
+            config,
+        )
+    assert thread_has_checkpoint(thread_id) is True
+
+    client.force_login(user)
+    response = client.get(f"/api/workspaces/{workspace.id}/threads/{thread_id}/canvas/")
+
+    assert response.status_code == 404
+    assert not Thread.objects.filter(id=thread_id).exists()
