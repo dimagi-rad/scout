@@ -15,7 +15,7 @@ are pure attack surface.
 This module mounts ONLY the routes the SPA / OAuth round-trip actually needs:
 
 * per-provider ``<provider>/login/`` and ``<provider>/login/callback/`` routes
-  (built by ``build_provider_urlpatterns``) — the SPA links to these,
+  (built as allauth's ``build_provider_urlpatterns`` does) — the SPA links to these,
 * the OAuth ``login/cancelled/`` and ``login/error/`` landing pages,
 * an ``account_login`` *name* that redirects to the SPA root, so allauth's
   ``LOGIN_URL`` default and the adapter's allowlist-rejection redirect
@@ -30,49 +30,60 @@ instead of letting allauth's ``SocialApp.DoesNotExist`` surface as a 500.
 """
 
 from functools import wraps
+from importlib import import_module
 
-from allauth.socialaccount.models import SocialApp
+from allauth.socialaccount.adapter import get_adapter
+from allauth.socialaccount.providers import registry
 from allauth.socialaccount.views import login_cancelled, login_error
-from allauth.urls import build_provider_urlpatterns
 from django.http import Http404
 from django.urls import URLPattern, URLResolver, path
 from django.views.generic.base import RedirectView
 
 
-def _absent_when_unconfigured(view):
+def _absent_when_unconfigured(view, provider_id):
+    # Checked up front rather than by catching DoesNotExist from the view, so a
+    # configured provider's failure mid-callback still 500s and reaches Sentry.
     @wraps(view)
     def wrapped(request, *args, **kwargs):
-        try:
-            return view(request, *args, **kwargs)
-        except SocialApp.DoesNotExist as exc:
-            raise Http404("This sign-in provider is not configured.") from exc
+        if not get_adapter(request).list_apps(request, provider=provider_id):
+            raise Http404("This sign-in provider is not configured.")
+        return view(request, *args, **kwargs)
 
     return wrapped
 
 
-def _provider_urlpatterns(patterns):
-    wrapped = []
+def _gate(patterns, provider_id):
+    gated = []
     for pattern in patterns:
         if isinstance(pattern, URLResolver):
-            wrapped.append(
+            gated.append(
                 URLResolver(
                     pattern.pattern,
-                    _provider_urlpatterns(pattern.url_patterns),
+                    _gate(pattern.url_patterns, provider_id),
                     pattern.default_kwargs,
                     pattern.app_name,
                     pattern.namespace,
                 )
             )
         else:
-            wrapped.append(
+            gated.append(
                 URLPattern(
                     pattern.pattern,
-                    _absent_when_unconfigured(pattern.callback),
+                    _absent_when_unconfigured(pattern.callback, provider_id),
                     pattern.default_args,
                     pattern.name,
                 )
             )
-    return wrapped
+    return gated
+
+
+def _provider_urlpatterns():
+    """allauth's ``build_provider_urlpatterns``, with each provider's routes gated."""
+    patterns = []
+    for provider_class in registry.get_class_list():
+        module = import_module(f"{provider_class.get_package()}.urls")
+        patterns += _gate(getattr(module, "urlpatterns", []), provider_class.id)
+    return patterns
 
 
 # Note: allauth's LOGIN_REDIRECT_URL/LOGIN_URL and our adapter both reference the
@@ -83,5 +94,5 @@ urlpatterns = [
     path("login/", RedirectView.as_view(url="/", query_string=True), name="account_login"),
     path("login/cancelled/", login_cancelled, name="socialaccount_login_cancelled"),
     path("login/error/", login_error, name="socialaccount_login_error"),
-    *_provider_urlpatterns(build_provider_urlpatterns()),
+    *_provider_urlpatterns(),
 ]
