@@ -101,13 +101,17 @@ class TurnLease:
 
     async def _heartbeat(self, owner: asyncio.Task | None) -> None:
         loop = asyncio.get_running_loop()
-        last_renewed = loop.time()
+        # A previous heartbeat (the view's, before the stream's) may have renewed up
+        # to one interval ago, so don't assume a full TTL of headroom.
+        last_renewed = loop.time() - TURN_LEASE_HEARTBEAT_SECONDS
         while True:
             await asyncio.sleep(TURN_LEASE_HEARTBEAT_SECONDS)
             try:
                 renewed = await self.renew()
             except Exception:
-                logger.warning("turn lease: renew failed for thread %s", self.thread_id)
+                logger.warning(
+                    "turn lease: renew failed for thread %s", self.thread_id, exc_info=True
+                )
                 # Give up a heartbeat early: by the next one the lease may be claimable.
                 lapses_in = TURN_LEASE_TTL.total_seconds() - (loop.time() - last_renewed)
                 if lapses_in > TURN_LEASE_HEARTBEAT_SECONDS:
