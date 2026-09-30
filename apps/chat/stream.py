@@ -31,7 +31,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from anthropic import APIStatusError, InternalServerError, RateLimitError
@@ -261,9 +261,14 @@ async def langgraph_to_ui_stream(
     agent: Any,
     input_state: dict,
     config: dict,
+    *,
+    owns_thread: Callable[[], bool] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream LangGraph agent events as UI Message Stream Protocol (SSE) chunks.
+
+    ``owns_thread`` gates the stopped-reply write on cancellation: a run
+    cancelled because it lost the thread's turn lease must not write to it.
     """
     text_id = "text-0"
     text_started = False
@@ -547,7 +552,8 @@ async def langgraph_to_ui_stream(
                 await parent_pump
         with contextlib.suppress(Exception):
             await event_stream.aclose()
-        await _persist_stopped_response(agent, config, "".join(streamed_text))
+        if owns_thread is None or owns_thread():
+            await _persist_stopped_response(agent, config, "".join(streamed_text))
         raise
     except Exception as exc:
         capacity = classify_capacity_error(exc)

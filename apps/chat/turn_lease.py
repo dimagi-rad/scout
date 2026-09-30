@@ -80,6 +80,8 @@ class TurnLease:
     @contextlib.asynccontextmanager
     async def kept_alive(self) -> AsyncIterator[TurnLease]:
         """Heartbeat the lease for the body's duration, cancelling the body if it is lost."""
+        # For the chat stream body this is Django's connection task, so a loss ends
+        # the response mid-stream: abrupt, but better than writing a thread we lost.
         heartbeat = asyncio.create_task(self._heartbeat(asyncio.current_task()))
         try:
             yield self
@@ -106,7 +108,9 @@ class TurnLease:
                 renewed = await self.renew()
             except Exception:
                 logger.warning("turn lease: renew failed for thread %s", self.thread_id)
-                if loop.time() - last_renewed < TURN_LEASE_TTL.total_seconds():
+                # Give up a heartbeat early: by the next one the lease may be claimable.
+                lapses_in = TURN_LEASE_TTL.total_seconds() - (loop.time() - last_renewed)
+                if lapses_in > TURN_LEASE_HEARTBEAT_SECONDS:
                     continue
                 renewed = False
             if renewed:

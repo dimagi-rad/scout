@@ -119,20 +119,29 @@ _PROCRASTINATE_SUCCEEDED_STATUS = "succeeded"
 
 
 async def _resume_in_flight(thread_job_id) -> bool:
-    """True when a resume of this ThreadJob is queued or running, or we can't tell."""
+    """True when a live resume of this ThreadJob is queued or running.
+
+    A resume whose worker died stays ``doing`` forever, so stalled jobs don't
+    count. When the lookup fails this answers False: a duplicate resume is
+    harmless (the claim CAS and queueing lock absorb it), a stuck spinner is not.
+    """
     try:
-        return await ProcrastinateJob.objects.filter(
-            task_name=RESUME_TASK_NAME,
-            args__thread_job_id=str(thread_job_id),
-            status__in=["todo", "doing"],
-        ).aexists()
+        job_ids = {
+            job_id
+            async for job_id in ProcrastinateJob.objects.filter(
+                task_name=RESUME_TASK_NAME,
+                args__thread_job_id=str(thread_job_id),
+                status__in=list(_PROCRASTINATE_INFLIGHT_STATUSES),
+            ).values_list("id", flat=True)
+        }
     except Exception:
         logger.warning(
-            "Could not check for a queued resume of %s; skipping reconcile this tick",
+            "Could not check for a queued resume of %s; reconciling as if none",
             thread_job_id,
             exc_info=True,
         )
-        return True
+        return False
+    return bool(job_ids and job_ids - await _stalled_procrastinate_job_ids())
 
 
 async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
@@ -619,7 +628,8 @@ async def persist_synthetic_failure_message(
     """
     try:
         if holds_turn_lease:
-            await _append_synthetic_message(thread_job, text)
+            async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
+                await _append_synthetic_message(thread_job, text)
             return
         lease = await atry_acquire_turn_lease(thread_job.thread_id)
         if lease is None:

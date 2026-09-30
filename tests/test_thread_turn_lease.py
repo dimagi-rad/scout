@@ -22,6 +22,7 @@ from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat import turn_lease
 from apps.chat.models import Thread, ThreadJob
+from apps.chat.stream import langgraph_to_ui_stream
 from apps.chat.turn_lease import aacquire_turn_lease, atry_acquire_turn_lease
 from apps.chat.views import _TurnStreamingResponse
 from apps.users.models import Tenant, TenantMembership
@@ -538,6 +539,16 @@ class TestReconcilerDuringBackoff:
 
         assert await _resume_in_flight(tj.id)
 
+    async def test_a_resume_whose_worker_died_is_not_in_flight(self, queued_jobs):
+        tj = await _resumable_job("reconcile-dead-worker", 880013)
+        job_id = await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
+
+        with patch(
+            "apps.workspaces.services.reconciliation._stalled_procrastinate_job_ids",
+            return_value={job_id},
+        ):
+            assert not await _resume_in_flight(tj.id)
+
     async def test_the_reconciler_does_not_restart_a_backing_off_resume(self):
         tj = await _resumable_job("reconcile-skip", 880012)
         reconciliation = "apps.workspaces.services.reconciliation"
@@ -555,3 +566,29 @@ class TestReconcilerDuringBackoff:
 
 def test_the_in_flight_lookup_names_the_real_task():
     assert resume_thread_after_materialization.name == RESUME_TASK_NAME
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("owns", "persisted"), [(True, 1), (False, 0)])
+async def test_a_cancelled_stream_saves_its_partial_reply_only_while_it_owns_the_thread(
+    owns, persisted
+):
+    async def events(*_args, **_kwargs):
+        await asyncio.sleep(30)
+        yield {}
+
+    agent = MagicMock(astream_events=events, aupdate_state=AsyncMock())
+
+    async def consume():
+        async for _chunk in langgraph_to_ui_stream(
+            agent, {}, {"configurable": {}}, owns_thread=lambda: owns
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert agent.aupdate_state.await_count == persisted

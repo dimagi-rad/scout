@@ -351,7 +351,9 @@ async def _start_turn(
         async with lease.held():
             with trace_ctx:
                 async with contextlib.aclosing(
-                    langgraph_to_ui_stream(agent, input_state, config)
+                    langgraph_to_ui_stream(
+                        agent, input_state, config, owns_thread=lambda: not lease.lost
+                    )
                 ) as stream:
                     async for chunk in stream:
                         yield chunk
@@ -379,6 +381,10 @@ class _TurnStreamingResponse(StreamingHttpResponse):
             if not self.turn_started:
                 self.lease.release_sync()
         except Exception:
-            logger.warning("Could not release the turn lease of an unsent chat response")
+            logger.warning(
+                "Could not release the turn lease of unsent response on thread %s",
+                self.lease.thread_id,
+                exc_info=True,
+            )
         finally:
             super().close()
