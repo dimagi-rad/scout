@@ -358,6 +358,8 @@ def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[s
             return _conflict(entry, "It exists again, so it cannot be restored.")
         return _restore_conflict(workspace, model, entry, before, restoring)
     if current is None:
+        if _dataset_restored_first(entry, restoring):
+            return None
         return _conflict(entry, "It was removed afterwards.")
     if before is None:
         now = snapshot_object(object_type, current, deep=True)
@@ -374,6 +376,20 @@ def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[s
     if "name" in changed:
         return _rename_conflict(workspace, model, entry, before, after, removing)
     return None
+
+
+def _dataset_restored_first(entry: dict[str, Any], restoring: set[str]) -> bool:
+    """A later entry of this revision deleted the object's dataset, cascading it away.
+
+    Entries replay in reverse, so that dataset (with this object in its deep
+    snapshot) is restored before this entry is undone.
+    """
+    after = entry["after"]
+    if entry["object_type"] == FIELD:
+        return after["dataset_id"] in restoring
+    if entry["object_type"] == RELATIONSHIP:
+        return bool({after["from_dataset_id"], after["to_dataset_id"]} & restoring)
+    return False
 
 
 def _rename_conflict(workspace, model, entry, before, after, removing: set[str]):

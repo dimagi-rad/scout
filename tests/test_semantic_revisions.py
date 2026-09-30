@@ -311,6 +311,51 @@ def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(
     assert not SemanticDataset.objects.filter(name="visit_stats").exists()
 
 
+def test_undo_of_a_field_and_its_dataset_deleted_together_restores_both(
+    canvas, semantic_model, workspace, user, custom_sql
+):
+    _create_visit_stats(canvas, user)
+    _commit(
+        canvas,
+        user,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "visit_stats",
+                    "name": "total_visits",
+                    "field_type": "measure",
+                    "measure_type": "sum",
+                    "expression": "visit_count",
+                },
+            }
+        ],
+    )
+    # A fresh thread stages the field changes before the dataset delete, so they commit first.
+    fresh = resolve_thread_canvas(
+        workspace, Thread.objects.create(workspace=workspace, user=user), user
+    )
+    _commit(
+        fresh,
+        user,
+        [
+            {"op": "set", "target": "field/visit_stats.visit_count/label", "value": "Visits"},
+            {"op": "delete_object", "object": "field/visit_stats.total_visits"},
+            {"op": "delete_object", "object": "dataset/visit_stats"},
+        ],
+    )
+    deleted = SemanticModelRevision.objects.order_by("-created_at").first()
+    assert {entry["object_type"] for entry in deleted.changes} == {"field", "dataset"}
+
+    result = undo_revision(workspace, deleted.id, user)
+
+    assert "refused" not in result, result
+    restored = semantic_model.datasets.get(name="visit_stats")
+    assert restored.fields.filter(name="total_visits").exists()
+    assert restored.fields.get(name="visit_count").label != "Visits"
+
+
 def test_undo_twice_is_refused(canvas, semantic_model, workspace, user):
     _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
     revision = SemanticModelRevision.objects.get()
