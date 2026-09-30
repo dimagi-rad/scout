@@ -111,7 +111,10 @@ def _is_synthetic_summary(row: dict) -> bool:
     can also carry it (checkpoint sentinel), but those are user/assistant turns,
     so requiring the system role keeps them counted.
     """
-    return row["role"] == "system" and row["metadata"].get("compression_marker") == "summarize"
+    metadata = row["metadata"]
+    if not isinstance(metadata, dict):
+        return False
+    return row["role"] == "system" and metadata.get("compression_marker") == "summarize"
 
 
 def _map_message(session_id: str, index: int, row: dict, revision: str) -> dict:

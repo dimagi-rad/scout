@@ -507,6 +507,11 @@ def test_message_mapping_flags_only_synthetic_summaries():
     assert [r["is_synthetic_summary"] for r in rows] == [False, False, True, False, False]
 
 
+def test_message_mapping_tolerates_non_dict_metadata():
+    rows = map_session_messages("sess-1", [{"role": "system", "content": "x", "metadata": "oops"}])
+    assert rows[0]["is_synthetic_summary"] is False
+
+
 def test_message_loader_logs_only_real_messages(caplog):
     loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     with (
