@@ -132,6 +132,9 @@ def test_audit_lists_only_stored_sql_that_fails_validation(model):
     assert escalating["object_id"] == str(bad_measure.id)
     assert escalating["workspace_id"] == str(model.workspace_id)
     assert escalating["visible"] is False
+    assert escalating["impact"] == "not published"
+    assert findings[4]["impact"] == "workspace Cube schema build fails"
+    assert findings[5]["impact"] == "join dropped; schema still publishes"
     assert "pg_advisory_lock" in escalating["error"]
     assert {
         field.id: (field.metadata, field.is_visible)

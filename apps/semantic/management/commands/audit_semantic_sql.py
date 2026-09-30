@@ -19,10 +19,9 @@ from apps.semantic.services.cube import (
     publishable_datasets,
     published_member_references,
 )
-from apps.semantic.services.cube_sql import CubeSQLReferenceError, embed_cube_sql
-from apps.semantic.services.custom_datasets import CustomDatasetError, custom_dataset_dependencies
+from apps.semantic.services.cube_sql import embed_cube_sql
+from apps.semantic.services.custom_datasets import custom_dataset_dependencies
 from apps.semantic.services.field_sql import (
-    SemanticSQLValidationError,
     compile_dimension_sql,
     compile_join_sql,
     compile_measure_filter_sql,
@@ -58,10 +57,10 @@ class Command(BaseCommand):
             self.stdout.write(json.dumps(findings, indent=2, sort_keys=True))
             return
         for finding in findings:
-            visibility = "" if finding["visible"] else " (hidden)"
             self.stdout.write(
                 f"[{finding['kind']}] workspace_id={finding['workspace_id']} "
-                f"object={finding['object']}{visibility} path={finding['path']}\n"
+                f"object={finding['object']} path={finding['path']}\n"
+                f"  impact: {finding['impact']}\n"
                 f"  {finding['error']}"
             )
         self.stdout.write(f"Summary: {len(findings)} stored SQL fragment(s) fail validation.")
@@ -77,6 +76,16 @@ def audit_semantic_sql(*, workspace_ids=None) -> list[dict]:
     return findings
 
 
+def _impact(kind: str, *, visible: bool) -> str:
+    if not visible:
+        return "not published"
+    if kind == "relationship":
+        return "join dropped; schema still publishes"
+    if kind == "custom_dataset":
+        return "published as stored; SQL no longer passes validation"
+    return "workspace Cube schema build fails"
+
+
 def _audit_model(model: SemanticModel) -> list[dict]:
     findings: list[dict] = []
     datasets = list(
@@ -88,15 +97,11 @@ def _audit_model(model: SemanticModel) -> list[dict]:
     references = published_member_references([d for d in datasets if d.id in published])
 
     def check(kind, object_id, name, path, visible, validate):
-        # A malformed stored fragment must be reported, not abort the whole audit.
+        # A malformed stored fragment must be reported, not abort the whole audit. The
+        # validators and the Cube embedding boundary all raise ValueError subclasses.
         try:
             validate()
-        except (
-            SemanticSQLValidationError,
-            CustomDatasetError,
-            CubeSQLReferenceError,
-            SqlglotError,
-        ) as exc:
+        except (ValueError, SqlglotError) as exc:
             findings.append(
                 {
                     "kind": kind,
@@ -105,6 +110,7 @@ def _audit_model(model: SemanticModel) -> list[dict]:
                     "object_id": str(object_id),
                     "path": path,
                     "visible": visible,
+                    "impact": _impact(kind, visible=visible),
                     "error": str(exc),
                 }
             )
