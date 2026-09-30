@@ -810,10 +810,13 @@ async def _arecord_refresh_failure(
 
 def _settle_detached_persist(task: asyncio.Task) -> None:
     _DETACHED_PERSISTS.discard(task)
-    if not task.cancelled():
-        # Already logged (and the marker written) inside; retrieved so asyncio does not
-        # report it as never retrieved.
-        task.exception()
+    if task.cancelled():
+        return
+    # Retrieved so asyncio does not report it as never retrieved. Classified failures
+    # are already logged (and the marker written) inside; anything else would vanish.
+    exc = task.exception()
+    if exc is not None and not isinstance(exc, TokenRefreshError):
+        logger.warning("Detached OAuth persist failed unexpectedly", exc_info=exc)
 
 
 def _retry_pause(attempt: int, deadline, clock) -> float | None:

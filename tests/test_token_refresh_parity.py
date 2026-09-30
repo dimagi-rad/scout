@@ -20,7 +20,7 @@ import pytest
 import requests
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
-from django.db import DatabaseError
+from django.db import DatabaseError, InterfaceError
 from django.utils import timezone
 
 from apps.users.models import TenantConnection
@@ -468,6 +468,48 @@ async def test_a_detached_persist_that_fails_still_marks_and_leaves_nothing_unre
     assert not token_refresh._DETACHED_PERSISTS
     assert unhandled == []
     assert await _marker_recorded(connection) is True
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_a_detached_persist_that_fails_unexpectedly_is_logged(
+    oauth_identity, httpx_mock, monkeypatch, caplog
+):
+    token, _connection = oauth_identity
+    _register_provider("async", _status(200, ROTATED), httpx_mock, None)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def persist(*args, **kwargs):
+        started.set()
+        await release.wait()
+        raise InterfaceError("connection already closed")
+
+    monkeypatch.setattr(token_refresh, "_apersist_refresh_response", persist)
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        with caplog.at_level(logging.WARNING, logger=token_refresh.__name__):
+            task = asyncio.ensure_future(refresh_oauth_token_result(token, URL))
+            await asyncio.wait_for(started.wait(), timeout=5)
+            (detached,) = token_refresh._DETACHED_PERSISTS
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+            await asyncio.wait({detached}, timeout=5)
+            await asyncio.sleep(0)
+            del task, detached
+            gc.collect()
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert not token_refresh._DETACHED_PERSISTS
+    assert unhandled == []
+    assert "Detached OAuth persist failed unexpectedly" in caplog.text
 
 
 @pytest.mark.parametrize(
