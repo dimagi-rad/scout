@@ -132,13 +132,17 @@ automatically once the credential is usable again. While denied, a member can
 still leave, hand the manager role to someone else, remove the missing source
 (managers), or delete the workspace if no one else is in it.
 
-With `UPSTREAM_ACCESS_FRESHNESS_ENFORCED` on (off by default), access also
+With `UPSTREAM_ACCESS_FRESHNESS_ENFORCED` on (off by default; production runs
+with it on), access also
 needs proof from the provider, less than 5 minutes old, that the user still has
 the tenant. A stale proof is rechecked on the next request. If the provider
 confirms the user has lost access, the tenant membership is archived. If the
 provider can't be reached, the request is denied as retryable and nothing is
 archived. `POST /api/workspaces/<id>/access/verify/` lets a user retry the
 check.
+
+To roll back, set `UPSTREAM_ACCESS_FRESHNESS_ENFORCED` to `"False"` in all three
+deploy files (API, worker, MCP server) and redeploy.
 
 ---
 

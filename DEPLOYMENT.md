@@ -237,6 +237,12 @@ versa) and leave a dangling role — the teardown swallows and logs it, so it is
 noise rather than breakage, but it is why staging role errors can appear in
 production logs.
 
+The same applies to `scout_cube_catalog`, the `NOLOGIN` role Cube uses to read
+`semantic_cubeschema` (semantic migration 0005). Both databases grant `SELECT` on
+their own table to the one role, and reversing the migration in one environment
+revokes only that database's grant. Cube caps its connections to the shared
+instance at 21 per environment (24 briefly, while switching to the role). `cube_config/README.md` has the breakdown.
+
 Notes: it runs the API with 2 uvicorn workers (not 4) and no Redis (LocMemCache)
 to limit its footprint on the shared t3.medium, and uses Docker's `json-file` log
 driver so `kamal app logs` works directly.
