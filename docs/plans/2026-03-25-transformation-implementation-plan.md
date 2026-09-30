@@ -1315,6 +1315,8 @@ Test cases for agent context:
 
 ## Milestone 7: REST API for Transformation Assets
 
+> Removed 2026-09-30 in #760: no UI or other caller was ever built and no user-authored assets existed; system-scope assets and the pipeline are unchanged. Re-introducing custom assets would need the central authorizer, SQL/Jinja validation and a non-privileged DB role.
+
 **Goal:** Expose CRUD endpoints for transformation assets, run listing, and manual run triggering. This enables the future management and authoring UX.
 
 ### Task 7.1: Create serializers
