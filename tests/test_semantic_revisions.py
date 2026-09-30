@@ -1008,3 +1008,23 @@ async def test_renaming_a_used_field_waits_for_confirmation_and_redefining_it_is
     assert confirmed["committed"]
     assert confirmed["redefined_fields_used_by_artifacts"][0]["change"] == "redefine"
     assert await SemanticField.objects.filter(name="amount_total").aexists()
+
+
+def test_undo_clears_canvas_rows_of_members_removed_with_their_dataset(
+    canvas, semantic_model, workspace, user, custom_sql
+):
+    _create_visit_stats(canvas, user)
+    created = SemanticModelRevision.objects.get()
+    fields = semantic_model.datasets.get(name="visit_stats").fields
+    original = fields.get(name="username").label
+    label = "field/visit_stats.username/label"
+    # An edit set back to the saved value leaves an empty (settled) canvas row.
+    apply_operations(canvas, [{"op": "set", "target": label, "value": "User"}], user)
+    apply_operations(canvas, [{"op": "set", "target": label, "value": original}], user)
+    field_ids = list(fields.values_list("id", flat=True))
+    assert SemanticCanvasChange.objects.filter(object_uuid__in=field_ids, fields={}).exists()
+
+    undo_revision(workspace, created.id, user)
+
+    assert not SemanticCanvasChange.objects.filter(object_uuid__in=field_ids).exists()
+    _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "V"}])

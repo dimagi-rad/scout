@@ -295,7 +295,17 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
             )
         if undo_entries is None:
             return refused("CONFLICT", "The restored objects collide with the current data model.")
-        removed = [entry["object_uuid"] for entry in undo_entries if entry["after"] is None]
+        removed = [
+            object_uuid
+            for entry in undo_entries
+            if entry["after"] is None
+            # A dataset's fields and joins are deleted with it, so their rows go too.
+            for object_uuid in (
+                entry["object_uuid"],
+                *(field["id"] for field in (entry["before"] or {}).get("fields") or []),
+                *(rel["id"] for rel in (entry["before"] or {}).get("relationships") or []),
+            )
+        ]
         # A settled canvas row over a now-missing object would read as a conflict.
         SemanticCanvasChange.objects.filter(
             canvas__workspace=workspace,
