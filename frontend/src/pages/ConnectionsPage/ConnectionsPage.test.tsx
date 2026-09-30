@@ -84,6 +84,35 @@ describe("ConnectionsPage", () => {
     expect(screen.getByTestId("disconnect-ocs")).toBeTruthy()
   })
 
+  it.each([
+    ["unavailable", "Connected, but we couldn't check right now. Try again later.", false],
+    ["expired", "Connection expired", true],
+  ])("renders a %s provider with the right Reconnect affordance", async (status, label, reconnect) => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(
+        path === "/api/auth/providers/"
+          ? {
+              providers: [
+                {
+                  id: "commcare",
+                  name: "CommCare HQ",
+                  login_url: "/accounts/commcare/login/",
+                  connected: true,
+                  status,
+                },
+              ],
+            }
+          : [],
+      ),
+    )
+    render(<ConnectionsPage />)
+
+    expect((await screen.findByTestId("provider-status-commcare")).textContent).toBe(label)
+    expect(screen.queryByTestId("connect-commcare") !== null).toBe(reconnect)
+    expect(screen.queryByText("Reconnect") !== null).toBe(reconnect)
+    expect(screen.queryByTestId("disconnect-commcare") !== null).toBe(status === "unavailable")
+  })
+
   it("marks a CommCare connection on the EU server", async () => {
     vi.mocked(api.get).mockImplementation((path) =>
       Promise.resolve(
