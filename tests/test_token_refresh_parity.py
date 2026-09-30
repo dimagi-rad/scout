@@ -39,6 +39,11 @@ UNROTATED = {"access_token": "new-access", "expires_in": 900}
 NOTHING_LOGGED = 0
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_pause(monkeypatch):
+    monkeypatch.setattr(token_refresh, "SPENT_GRANT_PERSIST_RETRY_DELAYS", (0, 0))
+
+
 @pytest.fixture
 def oauth_identity(user):
     app = SocialApp.objects.create(
@@ -85,25 +90,35 @@ def _register_provider(mode, spec, httpx_mock, requests_mock):
 
 
 def _install_persist_hook(mode, hook, token, monkeypatch):
-    """Make the persist step fail, or lose the CAS race, the same way in either transport."""
+    """Make the persist step fail, or lose the CAS race, the same way in either transport.
+
+    Returns the list of persist attempts, so a case can pin how often the write was tried.
+    """
+    attempts = []
     if hook is None:
-        return
+        return attempts
     error = {
         "database_error": DatabaseError("persist failed"),
+        "database_error_once": DatabaseError("persist failed"),
         "deadline": token_refresh._RefreshDeadlineExceeded(),
     }.get(hook)
     changes = {
         "advance": {"token": "winner-access", "token_secret": "winner-refresh"},
         "touch_expiry": {"expires_at": timezone.now() + timedelta(hours=1)},
-    }.get(hook)
+    }.get(hook, {})
+
+    def should_fail():
+        attempts.append(hook)
+        return error is not None and (hook != "database_error_once" or len(attempts) == 1)
 
     if mode == "async":
         original = token_refresh._apersist_refresh_response
 
         async def persist(*args, **kwargs):
-            if error:
+            if should_fail():
                 raise error
-            await SocialToken.objects.filter(pk=token.pk).aupdate(**changes)
+            if changes:
+                await SocialToken.objects.filter(pk=token.pk).aupdate(**changes)
             return await original(*args, **kwargs)
 
         monkeypatch.setattr(token_refresh, "_apersist_refresh_response", persist)
@@ -111,12 +126,14 @@ def _install_persist_hook(mode, hook, token, monkeypatch):
         original = token_refresh._persist_refresh_response
 
         def persist(*args, **kwargs):
-            if error:
+            if should_fail():
                 raise error
-            SocialToken.objects.filter(pk=token.pk).update(**changes)
+            if changes:
+                SocialToken.objects.filter(pk=token.pk).update(**changes)
             return original(*args, **kwargs)
 
         monkeypatch.setattr(token_refresh, "_persist_refresh_response", persist)
+    return attempts
 
 
 def _describe(outcome) -> str:
@@ -197,6 +214,22 @@ CASES = [
         "persist-database-error-spent-grant",
         _status(200, ROTATED),
         "database_error",
+        "TokenRefreshRejected",
+        True,
+        logging.WARNING,
+    ),
+    (
+        "persist-database-error-spent-grant-recovers",
+        _status(200, ROTATED),
+        "database_error_once",
+        "applied:advanced=True",
+        False,
+        logging.WARNING,
+    ),
+    (
+        "persist-database-error-once-grant-kept",
+        _status(200, UNROTATED),
+        "database_error_once",
         "TokenRefreshUnavailable",
         False,
         logging.WARNING,
@@ -271,6 +304,71 @@ async def test_both_transports_reach_the_same_verdict(
         default=NOTHING_LOGGED,
     )
     assert logged == severity
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("provider", "hook", "attempts"),
+    [
+        (_status(200, ROTATED), "database_error", 3),
+        (_status(200, ROTATED), "database_error_once", 2),
+        (_status(200, ROTATED), "deadline", 1),
+        (_status(200, UNROTATED), "database_error", 1),
+        (_status(200, UNROTATED), "deadline", 1),
+    ],
+    ids=[
+        "spent-grant-retries-until-exhausted",
+        "spent-grant-stops-once-stored",
+        "spent-grant-deadline-not-retried",
+        "kept-grant-not-retried",
+        "kept-grant-deadline-not-retried",
+    ],
+)
+async def test_both_transports_retry_only_a_spent_grant_after_a_database_error(
+    oauth_identity, mode, provider, hook, attempts, httpx_mock, requests_mock, monkeypatch
+):
+    token, _connection = oauth_identity
+    _register_provider(mode, provider, httpx_mock, requests_mock)
+    made = _install_persist_hook(mode, hook, token, monkeypatch)
+
+    await _run(mode, token)
+
+    assert len(made) == attempts
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_spent_grant_stored_on_retry_holds_the_rotated_credential(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    token, connection = oauth_identity
+    _register_provider(mode, _status(200, ROTATED), httpx_mock, requests_mock)
+    _install_persist_hook(mode, "database_error_once", token, monkeypatch)
+
+    result = await _run(mode, token)
+
+    stored = await SocialToken.objects.aget(pk=token.pk)
+    assert (stored.token, stored.token_secret) == ("new-access", "new-refresh")
+    assert (result.snapshot.access_token, token.token_secret) == ("new-access", "new-refresh")
+    assert await _marker_recorded(connection) is False
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_async_record_failure_false_leaves_no_marker_for_an_unstorable_spent_grant(
+    oauth_identity, httpx_mock, monkeypatch
+):
+    token, connection = oauth_identity
+    _register_provider("async", _status(200, ROTATED), httpx_mock, None)
+    _install_persist_hook("async", "database_error", token, monkeypatch)
+
+    with pytest.raises(TokenRefreshRejected):
+        await refresh_oauth_token_result(token, URL, record_failure=False)
+
+    assert await _marker_recorded(connection) is False
 
 
 @pytest.mark.django_db(transaction=True)
@@ -353,15 +451,22 @@ def test_classify_http_failure(status, flags, error, marker, level, reason):
 
 
 @pytest.mark.parametrize(
-    ("exc", "grant_spent", "error"),
+    ("exc", "grant_spent", "error", "retry", "marker"),
     [
-        (token_refresh._RefreshDeadlineExceeded(), True, TokenRefreshRejected),
-        (token_refresh._RefreshDeadlineExceeded(), False, TokenRefreshDeadlineExceeded),
-        (DatabaseError("down"), True, TokenRefreshUnavailable),
-        (DatabaseError("down"), False, TokenRefreshUnavailable),
+        (token_refresh._RefreshDeadlineExceeded(), True, TokenRefreshRejected, False, False),
+        (
+            token_refresh._RefreshDeadlineExceeded(),
+            False,
+            TokenRefreshDeadlineExceeded,
+            False,
+            False,
+        ),
+        (DatabaseError("down"), True, TokenRefreshRejected, True, True),
+        (DatabaseError("down"), False, TokenRefreshUnavailable, False, False),
     ],
 )
-def test_classify_persist_failure(exc, grant_spent, error):
-    classified, _message = classify_persist_failure(exc, grant_spent=grant_spent)
+def test_classify_persist_failure(exc, grant_spent, error, retry, marker):
+    verdict = classify_persist_failure(exc, grant_spent=grant_spent)
 
-    assert type(classified) is error
+    assert type(verdict.error) is error
+    assert (verdict.retry, verdict.record_marker) == (retry, marker)
