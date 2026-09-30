@@ -351,14 +351,14 @@ def _blocking_message(canvas, user, operations):
     return problem["message"]
 
 
-def _total_and_user(canvas, user, cube_sql):
+def _commit_total_and_a_measure_using_it(canvas, user, cube_sql):
     _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
     _commit(canvas, user, [_measure_op("ratio", measure_type="number", cube_sql=cube_sql)])
 
 
 @pytest.mark.parametrize("cube_sql", ["{ total_amount } / 2", "{CUBE.total_amount} / 2"])
 def test_commit_sees_every_reference_form_cube_accepts(canvas, semantic_model, user, cube_sql):
-    _total_and_user(canvas, user, cube_sql)
+    _commit_total_and_a_measure_using_it(canvas, user, cube_sql)
 
     assert "raw_visits.ratio" in _blocking_message(canvas, user, [RENAME_TOTAL])
 
@@ -381,7 +381,7 @@ def test_commit_sees_a_join_drafted_in_the_same_batch(canvas, semantic_model, us
 
 
 def test_commit_ignores_references_cube_never_publishes(canvas, semantic_model, user):
-    _total_and_user(canvas, user, "{total_amount} / 2")
+    _commit_total_and_a_measure_using_it(canvas, user, "{total_amount} / 2")
     semantic_model.datasets.get(name="raw_visits").fields.filter(name="ratio").update(
         is_visible=False
     )
@@ -419,10 +419,10 @@ def test_undo_sees_a_cube_prefixed_reference(canvas, semantic_model, workspace, 
     assert "raw_visits.ratio" in refusal["conflicts"][0]["message"]
 
 
-def test_undo_refuses_to_restore_sql_that_fails_todays_field_rules(
-    canvas, semantic_model, workspace, user
-):
-    paid = "CASE WHEN {CUBE}.\"amount\" > 0 THEN 'Paid' ELSE 'Unpaid' END"
+PAID_SQL = "CASE WHEN {CUBE}.\"amount\" > 0 THEN 'Paid' ELSE 'Unpaid' END"
+
+
+def _commit_paid_status(canvas, user):
     _commit(
         canvas,
         user,
@@ -435,11 +435,18 @@ def test_undo_refuses_to_restore_sql_that_fails_todays_field_rules(
                     "name": "paid_status",
                     "field_type": "dimension",
                     "data_type": "text",
-                    "cube_sql": paid,
+                    "cube_sql": PAID_SQL,
                 },
             }
         ],
     )
+
+
+def test_undo_refuses_to_restore_sql_that_fails_todays_field_rules(
+    canvas, semantic_model, workspace, user
+):
+    paid = PAID_SQL
+    _commit_paid_status(canvas, user)
     _commit(
         canvas,
         user,
@@ -464,6 +471,39 @@ def test_undo_refuses_to_restore_sql_that_fails_todays_field_rules(
     field = semantic_model.datasets.get(name="raw_visits").fields.get(name="paid_status")
     assert "> 10" in field.metadata["cube_sql"]
     assert not SemanticModelRevision.objects.filter(reverts=edit).exists()
+
+
+def test_undo_of_a_dataset_create_refuses_while_it_is_named_bare(
+    canvas, semantic_model, workspace, user, custom_sql
+):
+    _create_visit_stats(canvas, user)
+    created = SemanticModelRevision.objects.get()
+    _commit(
+        canvas,
+        user,
+        [_measure_op("stat_rows", measure_type="number", cube_sql="(select 1 from {visit_stats})")],
+    )
+
+    refusal = undo_revision(workspace, created.id, user)["refused"]
+
+    assert "raw_visits.stat_rows" in refusal["conflicts"][0]["message"]
+
+
+def test_undo_ignores_references_cube_never_publishes(canvas, semantic_model, workspace, user):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    created = SemanticModelRevision.objects.get()
+    SemanticField.objects.create(
+        dataset=semantic_model.datasets.get(name="raw_users"),
+        name="visit_total",
+        field_type=SemanticField.FieldType.MEASURE,
+        measure_type="number",
+        metadata={"source": "canvas", "cube_sql": "{raw_visits.total_amount}"},
+    )
+    semantic_model.datasets.filter(name="raw_users").update(is_visible=False)
+
+    result = undo_revision(workspace, created.id, user)
+
+    assert "refused" not in result, result
 
 
 def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(

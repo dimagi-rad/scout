@@ -230,7 +230,8 @@ def _published_references(model, changes, targets: list[_Target]) -> list[_Refer
         names[str(id_)] = name
         if not is_visible:
             hidden.add(str(id_))
-    visible = {id_: name for id_, name in names.items() if id_ not in hidden | gone_datasets}
+    unpublished = hidden | gone_datasets
+    visible = {id_: name for id_, name in names.items() if id_ not in unpublished}
     pending = {str(change.object_uuid): change for change in changes}
     references = []
     for field in SemanticField.objects.filter(dataset__semantic_model=model, is_visible=True):

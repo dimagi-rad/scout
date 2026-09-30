@@ -22,6 +22,7 @@ from apps.semantic.canvas.diagnostics import saved_field_diagnostics
 from apps.semantic.canvas.objects import (
     field_sql_text,
     normalize_member_references,
+    references_dataset,
     references_field,
 )
 from apps.semantic.canvas.service import allowed_custom_dataset_tables
@@ -465,10 +466,7 @@ def _removal_user(refs, object_type: str, now: dict[str, Any], removing: set[str
         *(field["id"] for field in fields),
         *(relationship["id"] for relationship in now.get("relationships") or []),
     }
-    for field in fields:
-        if user := refs.user_of(field, going):
-            return user
-    return ""
+    return refs.user_of_dataset(now["name"], going)
 
 
 def _rename_conflict(workspace, entry, before, after, removing: set[str], refs):
@@ -487,20 +485,29 @@ def _rename_conflict(workspace, entry, before, after, removing: set[str], refs):
 
 
 class _References:
-    """Every field's SQL text and every join, read once per undo on first use.
+    """The field SQL and joins the Cube build publishes, read once per undo on first use.
 
-    The conflict pass writes nothing, so one read serves every entry.
+    The conflict pass writes nothing, so one read serves every entry. Hidden
+    datasets and fields, and joins with a hidden endpoint, are skipped as in
+    ``generate_cube_schema`` (and the commit gate), since they cannot break it.
     """
 
     def __init__(self, model) -> None:
         self._model = model
 
     @cached_property
+    def _visible_datasets(self) -> set[str]:
+        return {
+            str(id_)
+            for id_ in self._model.datasets.filter(is_visible=True).values_list("id", flat=True)
+        }
+
+    @cached_property
     def _fields(self) -> list[tuple[str, str, str, str]]:
         rows = []
-        fields = SemanticField.objects.filter(dataset__semantic_model=self._model).select_related(
-            "dataset"
-        )
+        fields = SemanticField.objects.filter(
+            dataset__semantic_model=self._model, dataset__is_visible=True, is_visible=True
+        ).select_related("dataset")
         for field in fields:
             text = field_sql_text({**(field.metadata or {}), "expression": field.expression})
             rows.append((str(field.id), field.dataset.name, field.name, text))
@@ -510,10 +517,22 @@ class _References:
     def _joins(self) -> list[tuple[str, str, str]]:
         return [
             (str(id_), name, normalize_member_references(expression or ""))
-            for id_, name, expression in SemanticRelationship.objects.filter(
+            for id_, name, expression, from_id, to_id in SemanticRelationship.objects.filter(
                 workspace_id=self._model.workspace_id
-            ).values_list("id", "name", "join_expression")
+            ).values_list("id", "name", "join_expression", "from_dataset_id", "to_dataset_id")
+            if {str(from_id), str(to_id)} <= self._visible_datasets
         ]
+
+    def user_of_dataset(self, dataset: str, removing: set[str]) -> str:
+        """Name a field or join that references the dataset itself or any of its members."""
+        excluded = set(map(str, removing))
+        for field_id, field_dataset, field_name, text in self._fields:
+            if field_id not in excluded and references_dataset(text, dataset):
+                return f"Field {field_dataset}.{field_name}"
+        for join_id, join_name, expression in self._joins:
+            if join_id not in excluded and references_dataset(expression, dataset):
+                return f"Relationship {join_name}"
+        return ""
 
     def user_of(self, field_snapshot: dict[str, Any], removing: set[str]) -> str:
         """Name a field or join that references this field."""
