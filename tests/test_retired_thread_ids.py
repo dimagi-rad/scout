@@ -13,6 +13,7 @@ from typing import Annotated, TypedDict
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.checks import run_checks
 from django.db import connection
@@ -63,13 +64,13 @@ def _stub_agent(checkpointer):
 
 
 def _test_db_conninfo() -> str:
-    settings = connection.settings_dict
+    db = connection.settings_dict
     params = {
-        "dbname": settings["NAME"],
-        "host": settings.get("HOST"),
-        "port": settings.get("PORT"),
-        "user": settings.get("USER"),
-        "password": settings.get("PASSWORD"),
+        "dbname": db["NAME"],
+        "host": db.get("HOST"),
+        "port": db.get("PORT"),
+        "user": db.get("USER"),
+        "password": db.get("PASSWORD"),
     }
     return make_conninfo(**{key: str(value) for key, value in params.items() if value})
 
@@ -368,7 +369,7 @@ def test_same_database(django_db, conninfo, expected):
     assert same_database(django_db, conninfo) is expected
 
 
-def test_checkpointer_on_the_default_database_passes_the_system_check(settings, monkeypatch):
+def test_checkpointer_on_the_default_database_passes_the_system_check(monkeypatch):
     default = settings.DATABASES["default"]
     url = build_pg_url(
         host=str(default.get("HOST") or ""),
@@ -379,18 +380,18 @@ def test_checkpointer_on_the_default_database_passes_the_system_check(settings, 
     )
     monkeypatch.setattr("apps.chat.checks.get_database_url", lambda: url)
 
-    assert "chat.E001" not in {e.id for e in run_checks()}
+    assert not {"chat.W001", "chat.W002"} & {e.id for e in run_checks()}
 
 
-def test_unparseable_checkpointer_url_is_a_check_error_without_the_password(monkeypatch):
+def test_unparseable_checkpointer_url_is_a_check_warning_without_the_password(monkeypatch):
     monkeypatch.setattr(
         "apps.chat.checks.get_database_url", lambda: "pgsql://scout:hunter2@db.internal/scout"
     )
 
-    errors = [e for e in run_checks() if e.id == "chat.E001"]
+    warnings = [e for e in run_checks() if e.id == "chat.W002"]
 
-    assert len(errors) == 1
-    assert "hunter2" not in str(errors[0])
+    assert len(warnings) == 1
+    assert "hunter2" not in str(warnings[0])
 
 
 def test_checkpointer_on_another_database_fails_the_system_check(monkeypatch):
@@ -398,4 +399,4 @@ def test_checkpointer_on_another_database_fails_the_system_check(monkeypatch):
         "apps.chat.checks.get_database_url", lambda: "postgresql://x@elsewhere:5432/not_scout"
     )
 
-    assert "chat.E001" in {e.id for e in run_checks()}
+    assert "chat.W001" in {e.id for e in run_checks()}
