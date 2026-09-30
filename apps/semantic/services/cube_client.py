@@ -269,26 +269,30 @@ class CubeClient:
         deadline = time.monotonic() + budget_seconds
         async with httpx.AsyncClient(timeout=limits) as client:
             for attempt in range(1, attempts + 1):
-                remaining = deadline - time.monotonic()
+                read_seconds = min(limits.read, deadline - time.monotonic())
                 try:
                     response = await client.request(
                         method,
                         url,
-                        timeout=httpx.Timeout(min(limits.read, remaining), connect=limits.connect),
+                        timeout=httpx.Timeout(read_seconds, connect=limits.connect),
                         **kwargs,
                     )
                     response.raise_for_status()
                 except httpx.TransportError as exc:
-                    # A budget-shortened retry timing out says less than the 503 before it.
+                    failure: Exception = exc
+                    # A read the budget cut short timing out says less than the 503
+                    # before it; any other transport failure is the newer truth.
+                    shortened_read_timed_out = (
+                        isinstance(exc, httpx.ReadTimeout) and read_seconds < limits.read
+                    )
                     if not (
-                        isinstance(exc, httpx.TimeoutException)
-                        and isinstance(last_error, httpx.HTTPStatusError)
+                        shortened_read_timed_out and isinstance(last_error, httpx.HTTPStatusError)
                     ):
                         last_error = exc
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code not in RETRYABLE_HTTP_STATUSES:
                         raise
-                    last_error = exc
+                    failure = last_error = exc
                 else:
                     if attempt > 1:
                         logger.info(
@@ -305,7 +309,7 @@ class CubeClient:
                 logger.info(
                     "Retrying Cube %s after transient failure (%s), retry %s/%s",
                     operation,
-                    _describe_transient(last_error),
+                    _describe_transient(failure),
                     attempt,
                     attempts - 1,
                 )

@@ -449,7 +449,11 @@ async def test_slow_validator_failure_is_not_retried_past_the_budget(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_exhaustion_reports_the_503_not_a_later_shortened_timeout(monkeypatch, validator_url):
+async def test_exhaustion_reports_the_503_not_a_later_shortened_timeout(
+    monkeypatch, caplog, validator_url
+):
+    # Leave less than a full read window after the first attempt.
+    monkeypatch.setattr(cube_client_module, "VALIDATE_BUDGET_SECONDS", 60.0)
     calls = []
 
     def handler(request):
@@ -459,6 +463,28 @@ async def test_exhaustion_reports_the_503_not_a_later_shortened_timeout(monkeypa
         raise httpx.ReadTimeout("timed out", request=request)
 
     _patched_async_client(monkeypatch, handler)
-    with pytest.raises(cube_client_module.CubeServiceUnavailable, match="HTTP 503"):
+    with (
+        caplog.at_level(logging.INFO, logger=cube_client_module.__name__),
+        pytest.raises(cube_client_module.CubeServiceUnavailable, match="HTTP 503"),
+    ):
         await _schema_operation("validate")
     assert len(calls) == 3
+    # Each retry line names what that attempt actually hit.
+    assert "(ReadTimeout), retry 2/2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_reports_a_later_connect_failure_over_an_earlier_503(
+    monkeypatch, validator_url
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, json={"valid": False})
+        raise httpx.ConnectTimeout("validator gone", request=request)
+
+    _patched_async_client(monkeypatch, handler)
+    with pytest.raises(cube_client_module.CubeServiceUnavailable, match="ConnectTimeout"):
+        await _schema_operation("validate")
