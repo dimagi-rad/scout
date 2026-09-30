@@ -74,7 +74,11 @@ def destructive_deletions(canvas) -> list[dict[str, Any]]:
     a field a saved artifact queries, breaks things people rely on, so the user
     must confirm.
     """
-    return [item for item in _pending_impact(canvas) if item.get("change") != "redefine"]
+    return _needs_confirmation(_pending_impact(canvas))
+
+
+def _needs_confirmation(impact: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in impact if item.get("change") != "redefine"]
 
 
 def _pending_impact(canvas) -> list[dict[str, Any]]:
@@ -93,8 +97,10 @@ def _pending_impact(canvas) -> list[dict[str, Any]]:
     for change in changes:
         is_delete = change.change_type == SemanticCanvasChange.ChangeType.DELETE
         if change.object_type == SemanticCanvasChange.ObjectType.DATASET:
+            if not is_delete:
+                continue
             dataset = SemanticDataset.objects.filter(id=change.object_uuid).first()
-            if is_delete and dataset is not None:
+            if dataset is not None:
                 targets.append((dataset.name, None, "delete"))
             continue
         edited = set(change.fields or {})
@@ -107,9 +113,11 @@ def _pending_impact(canvas) -> list[dict[str, Any]]:
             continue
         if is_delete:
             targets.append((field.dataset.name, field.name, "delete"))
-        elif "name" in edited and change.fields["name"] != field.name:
+            continue
+        # One edit can both rename and redefine; the user hears about each.
+        if "name" in edited and change.fields["name"] != field.name:
             targets.append((field.dataset.name, field.name, "rename"))
-        elif edited - FIELD_CURATION_KEYS - {"name"}:
+        if edited - FIELD_CURATION_KEYS - {"name"}:
             targets.append((field.dataset.name, field.name, "redefine"))
     return _deletions_needing_confirmation(canvas.workspace, targets)
 
@@ -388,10 +396,12 @@ def create_canvas_tools(
         rebuilt so new fields/datasets become queryable; committed objects stay
         on the canvas as the thread's working set.
 
-        Deleting a dataset, or a field an artifact uses, is blocked with
-        CONFIRMATION_REQUIRED until the user has explicitly confirmed it; then
-        pass the confirmed objects (e.g. "dataset/visit_stats") in
-        confirmed_deletions.
+        Deleting a dataset, or deleting or renaming a field an artifact uses,
+        is blocked with CONFIRMATION_REQUIRED until the user has explicitly
+        confirmed it; then pass the confirmed objects (e.g.
+        "dataset/visit_stats") in confirmed_deletions. A saved change to the
+        definition of a field an artifact uses is listed in
+        redefined_fields_used_by_artifacts.
         """
 
         def _commit() -> dict[str, Any]:
@@ -402,7 +412,7 @@ def create_canvas_tools(
             except SemanticCatalogUnavailable as exc:
                 return {"errors": [{"op_index": 0, "code": "UNAVAILABLE", "message": str(exc)}]}
             impact = _pending_impact(canvas)
-            deletions = [item for item in impact if item.get("change") != "redefine"]
+            deletions = _needs_confirmation(impact)
             refusal = _gate_deletions(
                 canvas, deletions, confirmed_deletions, human_turn, retry="commit"
             )

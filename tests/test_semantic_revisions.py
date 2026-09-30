@@ -801,7 +801,12 @@ async def test_renaming_a_used_field_waits_for_confirmation_and_redefining_it_is
     ]
 
     await tools["canvas_apply"].ainvoke(
-        {"operations": [{"op": "set", "target": f"{field}/name", "value": "amount_total"}]}
+        {
+            "operations": [
+                {"op": "set", "target": f"{field}/name", "value": "amount_total"},
+                {"op": "set", "target": f"{field}/measure_type", "value": "min"},
+            ]
+        }
     )
     asked = await tools["canvas_commit"].ainvoke({})
 
@@ -813,4 +818,5 @@ async def test_renaming_a_used_field_waits_for_confirmation_and_redefining_it_is
         {"confirmed_deletions": [field]}
     )
     assert confirmed["committed"]
+    assert confirmed["redefined_fields_used_by_artifacts"][0]["change"] == "redefine"
     assert await SemanticField.objects.filter(name="amount_total").aexists()
