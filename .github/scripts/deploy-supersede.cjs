@@ -6,6 +6,64 @@ const WAITING = new Set(['queued', 'pending', 'waiting', 'requested']);
 // Superseded runs (deploy job skipped) are among the candidates, so this must
 // reach past a burst of them; each lookup is one API call.
 const MAX_JOB_LOOKUPS = 50;
+// Runs created this long before main's head commit still count as "since head":
+// the commit date can differ from the push by a little (clock skew, a slow merge).
+const RECENT_MARGIN_MS = 60 * 60 * 1000;
+
+const newestNumber = (runs) => runs.reduce((max, run) => Math.max(max, run.run_number), 0);
+const newestCreated = (runs) => runs.reduce(
+  (max, run) => Math.max(max, Date.parse(run.created_at) || 0), 0,
+);
+
+function mergeRuns(...lists) {
+  const byId = new Map();
+  for (const run of lists.flat()) byId.set(run.id, run);
+  return [...byId.values()];
+}
+
+// listWorkflowRuns intermittently answers with a weeks-old slice of runs (#769):
+// the page then lacks both head's run and the true live run. Cross-check the page
+// against head's own runs, and, when it could be stale, against the runs created
+// since its newest one: a differently filtered query that exposes any newer run.
+// A page that stays behind them after one retry is unreliable: callers then get
+// only the filtered runs, which tell "head is live or on its way" and little else.
+async function listMainRuns({ github, context, core, workflowId, branch, floor = 0 }) {
+  const list = async (filters = {}) => {
+    const { data } = await github.rest.actions.listWorkflowRuns({
+      ...context.repo, workflow_id: workflowId, branch: 'main', per_page: 100, ...filters,
+    });
+    return data.workflow_runs;
+  };
+  const head = branch.commit.sha;
+  const headTime = Date.parse(branch.commit.commit.committer.date);
+  let page = await list();
+  let headRuns = await list({ head_sha: head });
+  let recent = [];
+  let known = Math.max(floor, newestNumber(headRuns));
+  const suspicious = newestNumber(page) < known
+    || (!headRuns.length && !(newestCreated(page) >= headTime));
+  if (suspicious) {
+    const sinceHead = Number.isFinite(headTime) ? headTime - RECENT_MARGIN_MS : Infinity;
+    const since = Math.min(newestCreated(page), sinceHead);
+    const created = new Date(since).toISOString().replace(/\.\d+Z$/, 'Z');
+    recent = await list({ created: `>=${created}` });
+    known = Math.max(known, newestNumber(recent));
+    headRuns = mergeRuns(headRuns, recent.filter((run) => run.head_sha === head));
+    // Run numbers only grow, so a stale retry must not replace a fresh first answer.
+    const retry = await list();
+    if (newestNumber(retry) > newestNumber(page)) page = retry;
+  }
+  const reliable = newestNumber(page) >= known;
+  if (!reliable) {
+    core.warning(
+      `The deploy run list stayed stale after a retry (newest run #${newestNumber(page)}, `
+      + `expected at least #${known}); deciding only from runs of main's head `
+      + `${head.slice(0, 12)} and runs created since the list's newest.`,
+    );
+  }
+  const runs = reliable ? mergeRuns(page, headRuns) : mergeRuns(headRuns, recent);
+  return { head, headRuns, reliable, runs };
+}
 
 async function contains({ github, context, sha }) {
   if (sha === context.sha) return true;
@@ -52,10 +110,11 @@ async function findLiveRun({
 
 async function findReasonToSkip({ github, context, core, workflowId, jobName }) {
   if (context.ref !== 'refs/heads/main') return null;
-  const { data } = await github.rest.actions.listWorkflowRuns({
-    ...context.repo, workflow_id: workflowId, branch: 'main', per_page: 100,
+  const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: 'main' });
+  // Our own run is on the list, so a page that tops out below it is stale too.
+  const { runs } = await listMainRuns({
+    github, context, core, workflowId, branch, floor: context.runNumber,
   });
-  const runs = data.workflow_runs;
 
   const queued = await findSupersedingRun({ github, context, runs });
   if (queued) return { run: queued, why: 'is queued to deploy' };
@@ -87,4 +146,6 @@ async function checkSuperseded({ github, context, core, workflowId, jobName }) {
   return reason;
 }
 
-module.exports = { WAITING, findLiveRun, findReasonToSkip, checkSuperseded };
+module.exports = {
+  WAITING, findLiveRun, listMainRuns, findReasonToSkip, checkSuperseded,
+};

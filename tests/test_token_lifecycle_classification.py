@@ -78,6 +78,7 @@ class TestSyncRefreshLogLevels:
             return_value=SimpleNamespace(
                 refresh_token="refresh-token",
                 expires_at=None,
+                account_provider="commcare",
             ),
         )
         mocker.patch("apps.users.services.token_refresh._record_refresh_failure")
@@ -86,16 +87,11 @@ class TestSyncRefreshLogLevels:
         ("error_code", "body_marker"),
         [
             ("invalid_grant", "dead-token-body-marker"),
-            ("invalid_client", "bad-secret-body-marker"),
+            ("other_error", "other-body-marker"),
         ],
     )
     def test_4xx_logs_the_oauth_error_code_but_not_the_body(self, caplog, error_code, body_marker):
-        """Both causes are warnings, but they must not read identically in the logs.
-
-        invalid_client is our own misconfiguration and needs paging; invalid_grant is a
-        routine reconnect. The OAuth error code is a fixed enum, so it is the signal
-        that separates them -- while the provider's body still stays out.
-        """
+        """A routine 4xx is a warning; the body stays out of the log."""
         caplog.set_level(logging.DEBUG)
         body = json.dumps({"error": error_code, "error_description": body_marker})
         with patch(
@@ -114,9 +110,26 @@ class TestSyncRefreshLogLevels:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warnings, "expected a WARNING record"
         message = warnings[0].getMessage()
-        assert error_code in message, "the classified OAuth error code is the only signal"
-        assert body_marker not in message, "the provider body must stay out of logs"
+        assert error_code in message or error_code == "other_error"
+        assert body_marker not in message, "the provider body must stay out"
         assert body_marker not in caplog.text
+
+    def test_invalid_client_is_a_retryable_error_log_without_the_body_or_secret(self, caplog):
+        """invalid_client is Scout's own misconfiguration: page ops, don't blame the user."""
+        caplog.set_level(logging.DEBUG)
+        body = json.dumps({"error": "invalid_client", "error_description": "bad-secret-body"})
+        with patch(
+            "apps.users.services.token_refresh.requests.post",
+            return_value=_post_returning(400, body),
+        ):
+            with pytest.raises(TokenRefreshUnavailable):
+                refresh_oauth_token_sync(_social_token(), "https://provider.test/o/token/")
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert "client-abc" in errors[0].getMessage()
+        assert "bad-secret-body" not in caplog.text
+        assert "shh" not in caplog.text
 
     def test_an_unrecognised_error_code_is_withheld_rather_than_echoed(self, caplog):
         """Only the known OAuth enum is named; anything else could carry provider text."""

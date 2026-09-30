@@ -49,7 +49,8 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-from apps.common.capacity import CapacityResource, classify_capacity_error
+from apps.common.capacity import CapacityResource
+from apps.common.capacity_pool import CapacityTaggingPool
 
 logger = logging.getLogger(__name__)
 
@@ -75,40 +76,10 @@ class ManagedPoolExhausted(PoolTimeout):
     capacity_resource = CapacityResource.DATABASE
 
 
-class ManagedPool(AsyncConnectionPool):
-    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy".
+class ManagedPool(CapacityTaggingPool):
+    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy"."""
 
-    A checkout timeout is capacity when the pool is at ``max_size`` (every slot
-    held by a slow query) or when the last connect attempt was refused for lack
-    of server slots. The libpq FATAL is raised on the pool's background worker,
-    never to the caller, so ``_connect`` records it. A timeout on a pool that has
-    room but cannot fill it for any other reason means the database is
-    unreachable, which retrying would not fix. ``open()`` timeouts are not tagged
-    for the same reason.
-    """
-
-    _last_connect_error: BaseException | None = None
-
-    async def _connect(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
-        try:
-            conn = await super()._connect(timeout)
-        except BaseException as exc:
-            self._last_connect_error = exc
-            raise
-        self._last_connect_error = None
-        return conn
-
-    async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
-        try:
-            conn = await super().getconn(timeout)
-        except PoolTimeout as exc:
-            last = self._last_connect_error
-            full = self.get_stats().get("pool_size", 0) >= self.max_size
-            if full or (last is not None and classify_capacity_error(last) is not None):
-                raise ManagedPoolExhausted(str(exc)) from exc
-            raise
-        self._last_connect_error = None
-        return conn
+    exhausted_error = ManagedPoolExhausted
 
 
 @dataclass

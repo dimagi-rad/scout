@@ -142,6 +142,7 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
                 // agent-generated code. With allow-same-origin, that code could read
                 // cookies/CSRF token, issue credentialed /api/ requests, and reach
                 // window.parent. Omitting it gives the frame an opaque origin.
+                // Keep in sync with SANDBOX_FLAGS in apps/artifacts/views.py.
                 sandbox="allow-scripts allow-modals"
                 title={artifact.title || "Artifact"}
                 data-testid={`artifact-frame-${artifactId}`}

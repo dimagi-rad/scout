@@ -7,9 +7,10 @@ import os
 from django.conf import settings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.conninfo import make_conninfo
-from psycopg_pool import AsyncConnectionPool, PoolTimeout
+from psycopg_pool import PoolTimeout
 
 from apps.common.capacity import CapacityResource
+from apps.common.capacity_pool import CapacityTaggingPool
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +26,10 @@ class CheckpointerPoolExhausted(PoolTimeout):
     capacity_resource = CapacityResource.CHECKPOINTER_POOL
 
 
-class CheckpointerPool(AsyncConnectionPool):
-    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy".
+class CheckpointerPool(CapacityTaggingPool):
+    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy"."""
 
-    Only a checkout timeout is tagged: ``open()`` also raises ``PoolTimeout`` when
-    the database is down or refusing auth, which retrying would not fix.
-    """
-
-    async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
-        try:
-            return await super().getconn(timeout)
-        except PoolTimeout as exc:
-            raise CheckpointerPoolExhausted(str(exc)) from exc
+    exhausted_error = CheckpointerPoolExhausted
 
 
 def get_database_url() -> str:
