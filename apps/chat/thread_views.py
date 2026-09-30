@@ -10,7 +10,7 @@ from apps.chat.artifact_links import (
     latest_version_links,
     serialize_thread_artifact_link,
 )
-from apps.chat.checkpointer import ensure_checkpointer
+from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.helpers import (
     CheckpointerUnavailable,
     async_login_required,
@@ -34,6 +34,14 @@ async def _get_thread(thread_id, user, *, workspace_id=None):
         return await Thread.objects.aget(id=thread_id, user=user)
     except Thread.DoesNotExist:
         return None
+
+
+async def _thread_id_taken(thread_id) -> bool:
+    """True when ``thread_id`` belongs to another user's row or to a deleted thread's
+    checkpoints, so the caller may not create a Thread under it."""
+    return await Thread.objects.filter(id=thread_id).aexists() or await athread_has_checkpoint(
+        thread_id
+    )
 
 
 def _thread_summary(thread, *, history_title: str | None = None):
@@ -179,6 +187,8 @@ async def thread_detail_view(request, workspace_id, thread_id):
             return err
         title = _short_thread_title(str(body.get("title", "")))
         if thread is None:
+            if await _thread_id_taken(thread_id):
+                return JsonResponse({"error": "Thread not found"}, status=404)
             thread = Thread(
                 id=thread_id,
                 user=user,
@@ -215,10 +225,9 @@ async def thread_messages_view(request, workspace_id, thread_id):
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
         # New chats use client-generated UUIDs with no row until first POST, so a
-        # missing row returns [] 200. A row that exists but isn't this (user, workspace)
-        # is stale/cross-workspace — 404 so the client recovers instead of showing
-        # an empty "haunted" chat.
-        if await Thread.objects.filter(id=thread_id).aexists():
+        # missing row returns [] 200. Another user's row, or a deleted thread's id, is
+        # stale — 404 so the client recovers instead of showing an empty "haunted" chat.
+        if await _thread_id_taken(thread_id):
             return JsonResponse({"error": "Thread not found"}, status=404)
         return JsonResponse([], safe=False)
 
