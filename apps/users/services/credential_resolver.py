@@ -11,6 +11,7 @@ from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import (
     account_scope,
+    canonical_provider,
     is_active_identity,
     oauth_membership_scope_mismatch,
     ocs_scope_unusable,
@@ -102,8 +103,8 @@ async def aget_connection_token(conn) -> SocialToken | None:
     safe: the connection names the identity whose token it is, so no ordering
     heuristic decides which team Scout authenticates as. Connections written
     before the scope backfill have no linked account and fall back to the
-    provider-wide (now ordered) read, limited to identities in the connection's
-    scope so a legacy www connection never picks up a newer EU token.
+    provider-wide (now ordered) read. For CommCare that read is limited to the
+    connection's server, so a legacy www connection never picks up an EU token.
     """
     if conn.social_account_id:
         return (
@@ -113,9 +114,12 @@ async def aget_connection_token(conn) -> SocialToken | None:
         )
     # user_id, not user: callers select_related("connection") but not its user, so
     # touching conn.user here would be a sync FK fetch inside an async view.
-    async for token in _social_token_qs(conn.user_id, conn.provider).select_related(
-        "account", "app"
-    ):
+    tokens = _social_token_qs(conn.user_id, conn.provider).select_related("account", "app")
+    # OCS keeps the unfiltered read: the membership team check below it turns a
+    # wrong-team token into an actionable "connect that team" error (07#3).
+    if canonical_provider(conn.provider) != "commcare":
+        return await tokens.afirst()
+    async for token in tokens:
         if account_scope(token.account) == conn.scope_key:
             return token
     return None
