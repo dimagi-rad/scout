@@ -28,7 +28,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.access_freshness import CREDENTIAL_EXPIRED
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
-from apps.workspaces.services.failure_guidance import compose_failure_summary
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE, compose_failure_summary
 from apps.workspaces.services.schema_manager import NoActiveTenantSchema
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
@@ -1429,8 +1429,7 @@ async def test_refused_load_advises_reconnect_for_an_unusable_sign_in(
     assert missing["error_code"] == ErrorCode.AUTH_CREDENTIAL_MISSING
     assert "no live" not in missing["error"]
     assert result["guidance"] == [
-        f"{other.external_id}: "
-        f"{workspaces_tasks._CREDENTIAL_GUIDANCE[ErrorCode.AUTH_CREDENTIAL_MISSING]}"
+        f"{other.external_id}: {CREDENTIAL_GUIDANCE[ErrorCode.AUTH_CREDENTIAL_MISSING]}"
     ]
 
 
@@ -1542,10 +1541,9 @@ async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
     assert unreachable["success"] is False
     assert unreachable["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
     assert other.external_id in unreachable["error"]
-    # Advice reaches the caller from _CREDENTIAL_GUIDANCE, attributed to the tenant.
+    # Advice reaches the caller from CREDENTIAL_GUIDANCE, attributed to the tenant.
     assert result["guidance"] == [
-        f"{other.external_id}: "
-        f"{workspaces_tasks._CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE]}"
+        f"{other.external_id}: {CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE]}"
     ]
 
 

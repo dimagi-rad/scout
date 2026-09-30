@@ -37,8 +37,9 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.data_operation import workspace_data_lock
 from apps.workspaces.services.data_recovery import artifact_data_state
+from apps.workspaces.services.reconciliation import reconcile_workspace_data_recovery
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.tasks import reconcile_workspace_data_recovery, recover_workspace_data
+from apps.workspaces.tasks import recover_workspace_data
 from tests.tenant_access import usable_connection
 
 pytestmark = [pytest.mark.django_db(transaction=True)]
@@ -612,7 +613,8 @@ async def test_successful_queue_status_cannot_certify_missing_requested_source(r
     recovery.procrastinate_job_id = 903
     await recovery.asave(update_fields=["procrastinate_job_id"])
     with patch(
-        "apps.workspaces.tasks._procrastinate_job_status", new=AsyncMock(return_value="succeeded")
+        "apps.workspaces.services.reconciliation._procrastinate_job_status",
+        new=AsyncMock(return_value="succeeded"),
     ):
         assert await reconcile_workspace_data_recovery(recovery) == "failed"
     await recovery.arefresh_from_db()

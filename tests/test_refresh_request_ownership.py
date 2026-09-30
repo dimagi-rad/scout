@@ -32,6 +32,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.data_operation import LockOrderError, sync_tenant_data_lock
 from apps.workspaces.services.load_candidates import promote_candidate_schema
 from apps.workspaces.services.load_generations import begin_load_generation
+from apps.workspaces.services.reconciliation import MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
     DENIED_ROLE_REQUIRED,
@@ -47,7 +48,6 @@ from apps.workspaces.services.refresh_requests import (
 )
 from apps.workspaces.tasks import (
     JOB_RETENTION_HOURS,
-    MATERIALIZATION_STALLED_HEARTBEAT_SECONDS,
     drop_failed_refresh_schema,
     reconcile_refresh_candidates,
     refresh_tenant_schema,

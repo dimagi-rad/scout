@@ -29,7 +29,7 @@ from apps.users.models import Tenant
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 from apps.workspaces.services import load_generations
 from apps.workspaces.services.load_generations import pipeline_fingerprint
-from apps.workspaces.tasks import _fail_zombie_materialization_run
+from apps.workspaces.services.reconciliation import fail_zombie_materialization_run
 from mcp_server.pipeline_registry import PipelineConfig, SourceConfig, get_registry
 from mcp_server.services import materializer
 from mcp_server.services.materializer import (
@@ -95,7 +95,7 @@ def _zombie_run(schema: TenantSchema, source: str, lagging_last_id: int) -> Mate
             },
         },
     )
-    assert async_to_sync(_fail_zombie_materialization_run)(run, "worker died")
+    assert async_to_sync(fail_zombie_materialization_run)(run, "worker died")
     run.refresh_from_db()
     assert run.state == MaterializationRun.RunState.FAILED
     # The janitor keeps the cursor: resuming a dead writer's candidate is the design.
