@@ -31,7 +31,6 @@ sign-in may take their access away (#561 G1).
 from __future__ import annotations
 
 import logging
-from urllib.parse import urljoin
 
 import httpx
 from allauth.socialaccount.models import SocialToken
@@ -57,6 +56,7 @@ from apps.users.services.upstream_denial import (
     credential_is_current,
 )
 from apps.workspaces import access_cache
+from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +506,7 @@ async def _fetch_all_domains(access_token: str, domains_url: str) -> list[dict]:
     Raises CommCareAuthError on 401/403; TenantResolutionError on shape drift.
     """
     results: list[dict] = []
+    policy = ProviderURLPolicy(domains_url)
     url: str | None = domains_url
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
@@ -522,5 +523,9 @@ async def _fetch_all_domains(access_token: str, domains_url: str) -> list[dict]:
                 raise TenantResolutionError("CommCare response missing 'objects' key")
             results.extend(data["objects"])
             next_url = (data.get("meta") or {}).get("next")
-            url = urljoin(domains_url, next_url) if next_url else None
+            try:
+                url = policy.resolve(next_url, relative_to=url) if next_url else None
+            except UnsafeProviderURL as error:
+                # Following it would send this server's token to another origin.
+                raise TenantResolutionError("CommCare pagination left its server") from error
     return results
