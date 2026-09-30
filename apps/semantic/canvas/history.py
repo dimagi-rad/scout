@@ -365,7 +365,7 @@ def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[s
         now = snapshot_object(object_type, current, deep=True)
         if _authored(object_type, now) != _authored(object_type, after):
             return _conflict(entry, "It was edited afterwards, so removing it would lose that.")
-        if object_type == FIELD and (user := _field_user(model, after, removing)):
+        if user := _removal_user(model, object_type, now, removing):
             return _conflict(entry, f"{user} uses it, so removing it would break that.")
         return None
     now = snapshot_object(object_type, current)
@@ -390,6 +390,23 @@ def _dataset_restored_first(entry: dict[str, Any], restoring: set[str]) -> bool:
     if entry["object_type"] == RELATIONSHIP:
         return bool({after["from_dataset_id"], after["to_dataset_id"]} & restoring)
     return False
+
+
+def _removal_user(model, object_type: str, now: dict[str, Any], removing: set[str]) -> str:
+    if object_type == FIELD:
+        return _field_user(model, now, removing)
+    if object_type != DATASET:
+        return ""
+    fields = now.get("fields") or []
+    going = {
+        *removing,
+        *(field["id"] for field in fields),
+        *(relationship["id"] for relationship in now.get("relationships") or []),
+    }
+    for field in fields:
+        if user := _field_user(model, field, going):
+            return user
+    return ""
 
 
 def _rename_conflict(workspace, model, entry, before, after, removing: set[str]):

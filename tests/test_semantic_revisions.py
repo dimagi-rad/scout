@@ -356,6 +356,24 @@ def test_undo_of_a_field_and_its_dataset_deleted_together_restores_both(
     assert restored.fields.get(name="visit_count").label != "Visits"
 
 
+def test_undo_of_a_dataset_create_refuses_while_another_dataset_references_it(
+    canvas, semantic_model, workspace, user, custom_sql
+):
+    _create_visit_stats(canvas, user)
+    created = SemanticModelRevision.objects.get()
+    _commit(
+        canvas,
+        user,
+        [_measure_op("stat_visits", measure_type="number", cube_sql="{visit_stats.visit_count}")],
+    )
+
+    refusal = undo_revision(workspace, created.id, user)["refused"]
+
+    assert refusal["code"] == "CONFLICT"
+    assert "raw_visits.stat_visits" in refusal["conflicts"][0]["message"]
+    assert semantic_model.datasets.filter(name="visit_stats").exists()
+
+
 def test_undo_twice_is_refused(canvas, semantic_model, workspace, user):
     _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
     revision = SemanticModelRevision.objects.get()
