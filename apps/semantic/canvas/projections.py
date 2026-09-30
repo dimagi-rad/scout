@@ -119,7 +119,7 @@ def render_projection_text(projection: dict[str, Any], selector: str = "graph") 
                     lines.append(f"  Inferred output columns: {names}.")
                 lines.append(
                     "  Output dimensions and count are generated on commit. "
-                    "Commit only if authorized, then describe_dataset before field operations."
+                    "Commit if the task says to, then describe_dataset before field operations."
                 )
     if selector in {"diff", "all"}:
         pending = [e for e in objects if e["state"] not in {"unchanged"}]

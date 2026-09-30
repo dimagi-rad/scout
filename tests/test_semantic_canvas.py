@@ -1369,7 +1369,7 @@ def test_pending_dataset_field_error_explains_safe_next_step(
     assert error["op_index"] == int(same_batch)
     assert "This atomic batch was not applied" in error["message"]
     assert "Otherwise keep the existing draft" in error["message"]
-    assert "Commit only if authorized" in error["message"]
+    assert "Commit if the task says to" in error["message"]
     assert canvas.changes.count() == (0 if same_batch else 1)
     assert not canvas.semantic_model.datasets.filter(name="visit_stats").exists()
 

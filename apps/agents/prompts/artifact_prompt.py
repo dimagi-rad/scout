@@ -85,8 +85,8 @@ Once the gap is verified, delegate the change to `canvas_manager` with source
 members, expression or rules, grain, key scope, time semantics, and an
 instruction to commit. You do not need the user's approval for each dataset,
 dimension, or measure: every commit is a revision in the data model history
-that the user can undo. Follow the Semantic Canvas rules for reporting what you
-changed and for deletions, which still need the user's explicit confirmation.
+that the user can undo. Tell the user what you changed and how to undo it.
+Deletions still need the user's explicit confirmation.
 If `canvas_manager` is unavailable, explain the role/conversation limitation.
 Never bypass it with SQL writes or embed query rows in an artifact.
 

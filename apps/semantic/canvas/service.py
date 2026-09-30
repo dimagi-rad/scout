@@ -448,8 +448,8 @@ def _require_committed_dataset(canvas, index: int, ref: str) -> None:
             "and count measure are generated on commit; field operations require the saved "
             "dataset. This atomic batch was not applied. If this batch also creates the "
             "dataset, retry the create without field operations. Otherwise keep the existing "
-            "draft. Commit only if authorized, then describe_dataset and curate the generated "
-            "fields or add additional measures. Without commit authorization, leave it staged.",
+            "draft. Commit if the task says to, then describe_dataset and curate the generated "
+            "fields or add additional measures. If the task does not say to commit, leave it staged.",
         )
 
 
