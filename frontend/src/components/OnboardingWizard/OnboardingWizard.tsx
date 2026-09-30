@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { BASE_PATH } from "@/config"
 import { oauthConnectUrl, type OAuthProvider } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
@@ -8,7 +7,14 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
-type Step = "choose" | "api-key"
+// Shown before providers load (or if they fail); the same connect flow as once loaded.
+const WWW_COMMCARE_FALLBACK: OAuthProvider = {
+  id: "commcare",
+  name: "CommCare HQ",
+  login_url: "/accounts/commcare/login/",
+}
+
+type Step ="choose" | "api-key"
 
 interface MembershipResult {
   membership_id: string
@@ -45,6 +51,9 @@ export function OnboardingWizard() {
   // An OCS-only user lands here too, e.g. once their team-less memberships are
   // archived (#379), so the wizard must offer OCS or they have no way forward.
   const [ocs, setOcs] = useState<OAuthProvider | null>(null)
+  // Listed only once its OAuth app is configured on this deployment (#719).
+  const [commcareEu, setCommcareEu] = useState<OAuthProvider | null>(null)
+  const [commcare, setCommcare] = useState<OAuthProvider | null>(null)
   const [providersState, setProvidersState] = useState<"loading" | "loaded" | "failed">(
     "loading",
   )
@@ -54,10 +63,14 @@ export function OnboardingWizard() {
     try {
       const data = await api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
       setOcs(data.providers.find((p) => p.id === "ocs") ?? null)
+      setCommcareEu(data.providers.find((p) => p.id === "commcare_eu") ?? null)
+      setCommcare(data.providers.find((p) => p.id === "commcare") ?? null)
       setProvidersState("loaded")
     } catch (err) {
       console.error("Failed to load sign-in options", err)
       setOcs(null)
+      setCommcareEu(null)
+      setCommcare(null)
       setProvidersState("failed")
     }
   }, [])
@@ -242,14 +255,30 @@ export function OnboardingWizard() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <Button
-            className="w-full"
-            variant="outline"
-            data-testid="onboarding-oauth"
-            asChild
-          >
-            <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>Connect with OAuth</a>
-          </Button>
+          {/* Until providers load, the www link is the historical default; once they
+              have, it is offered only if this deployment configured it. */}
+          {(commcare || providersState !== "loaded") && (
+            <Button
+              className="w-full"
+              variant="outline"
+              data-testid="onboarding-oauth"
+              asChild
+            >
+              <a href={oauthConnectUrl(commcare ?? WWW_COMMCARE_FALLBACK, "/")}>
+                {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
+              </a>
+            </Button>
+          )}
+          {commcareEu && (
+            <Button
+              className="w-full"
+              variant="outline"
+              data-testid="onboarding-oauth-commcare-eu"
+              asChild
+            >
+              <a href={oauthConnectUrl(commcareEu, "/")}>Connect with {commcareEu.name}</a>
+            </Button>
+          )}
           <Button
             className="w-full"
             data-testid="onboarding-api-key-option"

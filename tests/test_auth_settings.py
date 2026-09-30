@@ -13,7 +13,7 @@ def test_email_authentication_auto_connect_is_enabled():
 
 def test_dimagi_providers_have_verified_email():
     providers = settings.SOCIALACCOUNT_PROVIDERS
-    for pid in ("commcare", "commcare_connect", "ocs"):
+    for pid in ("commcare", "commcare_eu", "commcare_connect", "ocs"):
         assert providers[pid].get("VERIFIED_EMAIL") is True, (
             f"{pid} must declare VERIFIED_EMAIL=True so allauth treats its emails as verified"
         )

@@ -96,7 +96,9 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         Runs after a successful OAuth callback but before any User/SocialAccount
         is created or login session established. Configured by the
         SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS setting (provider id -> list of
-        allowed email domains). A provider with no entry (or an empty list) is
+        allowed email domains). A provider without an entry inherits its canonical
+        provider's, so a second CommCare HQ server (``commcare_eu``) cannot be a way
+        around the ``commcare`` restriction; one with neither (or an empty list) is
         unrestricted.
 
         For a provider WITH a non-empty allow-list, a login that returns no email
@@ -107,7 +109,8 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         """
         self._reject_cross_server_commcare_login(request, sociallogin)
         provider = sociallogin.account.provider
-        allowed = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS.get(provider) or []
+        restrictions = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS
+        allowed = restrictions.get(provider, restrictions.get(canonical_provider(provider))) or []
         if not allowed:
             return
 

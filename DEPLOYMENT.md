@@ -131,7 +131,7 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
 
-Connect staging is a separate OAuth provider and does not use the two production
+Connect staging is a separate OAuth provider and does not use the production `CONNECT_OAUTH_*`
 AWS secrets above. Store its application credentials as
 `SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID` and
 `SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET` in the GitHub `staging` environment.
@@ -145,6 +145,31 @@ the production workflow validates before building and Kamal resolves through
 `.kamal/secrets-common`. Generate the two values independently (for example,
 `openssl rand -hex 32`) so a staging credential can never sign a production
 Cube security context.
+
+### Enabling CommCare HQ (EU) sign-in
+
+EU HQ (`eu.commcarehq.org`) is a separate deployment with its own OAuth
+applications, so it is a separate provider (`commcare_eu`). Until its
+credentials exist, `setup_oauth_apps` skips it and EU sign-in is hidden. EU
+project spaces can still be connected with an API key. To turn EU sign-in on:
+
+1. Register an OAuth2 application on `eu.commcarehq.org` the same way the www
+   application was registered: a confidential client with the authorization-code
+   grant (HQ admin access is needed). Redirect URIs:
+   `https://scout.dimagi.com/accounts/commcare_eu/login/callback/` and
+   `https://scout-staging.dimagi.com/accounts/commcare_eu/login/callback/`.
+2. Store the client ID and secret in AWS Secrets Manager as
+   `COMMCARE_EU_OAUTH_CLIENT_ID` and `COMMCARE_EU_OAUTH_CLIENT_SECRET`, next to
+   `COMMCARE_OAUTH_*`, and add them to the secrets table above.
+3. In the same PR as the next deploy, add both names to the
+   `kamal secrets fetch` list and the `extract` lines in `.kamal/secrets-common`,
+   and to the API role's `env.secret` list in `config/deploy.yml` and
+   `config/deploy.staging.yml`, next to `COMMCARE_OAUTH_*`. Do this only once
+   the secrets exist, because fetching a missing secret fails the deploy.
+4. Deploy. The API entrypoint runs `setup_oauth_apps`, which creates the
+   `commcare_eu` SocialApp, and "CommCare HQ (EU)" appears on the Connections
+   page and in the onboarding wizard. `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS`
+   applies the `commcare` restriction to EU too unless it has its own entry.
 
 ### Adding a new secret
 
