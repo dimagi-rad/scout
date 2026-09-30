@@ -33,7 +33,8 @@ KEEP_INACTIVE_CUBE_SCHEMAS = 5
 # past 60s, so one at a time; session advisory locks enforce it across processes.
 VALIDATOR_CONCURRENCY = 1
 VALIDATOR_LOCK_CLASS = 0x53435656
-VALIDATOR_SLOT_WAIT_SECONDS = 300.0
+# Validations are serial, so a burst of reloads queues here.
+VALIDATOR_SLOT_WAIT_SECONDS = 600.0
 # A canvas commit builds on its request thread: this wait, VALIDATE_BUDGET_SECONDS
 # (70s) and the 30s warm-up must stay under the API proxy's 120s read timeout
 # (frontend/nginx.prod-kamal.conf), or the user gets a 504 for a commit that landed.
@@ -61,9 +62,9 @@ class CubeValidatorBusyError(CubeValidatorUnavailableError):
 class _ValidatorSlot:
     """One of ``VALIDATOR_CONCURRENCY`` slots shared by every worker process.
 
-    Taken just before validation, or before the refresh transaction when
-    validation runs inside one, so the wait never holds row locks. Released as
-    soon as validation returns, so promotion and the Cube warm-up never hold it.
+    Taken just before validation. Inside the refresh transaction it is only
+    tried, never waited for, so a wait never holds row locks. Released as soon
+    as validation returns, so promotion and the Cube warm-up never hold it.
     """
 
     def __init__(self, slot: int) -> None:
@@ -232,11 +233,14 @@ def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> C
             raise
 
     try:
-        # Validation runs inside this transaction; waiting for a slot there would
-        # hold the catalog refresh's row locks, so take it first.
-        with _validator_slot(slot_wait_seconds) as slot, transaction.atomic():
-            model = ensure_semantic_model(workspace)
-            return _build_validate_and_promote(workspace, model, slot=slot)
+        try:
+            return _refresh_validate_and_promote(workspace, slot_wait_seconds=0)
+        except CubeValidatorBusyError:
+            # Validation runs inside the refresh transaction, where waiting would hold
+            # its row locks. Only under contention, wait outside it and redo the
+            # refresh while holding the slot.
+            with _validator_slot(slot_wait_seconds) as slot:
+                return _refresh_validate_and_promote(workspace, slot=slot)
     except Exception as exc:
         # The atomic block rolled back the attempted catalog refresh, so record
         # the failure on the last-known-good model rather than the rolled-back
@@ -245,6 +249,19 @@ def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> C
         if fallback_model is not None:
             _record_build_failure(workspace, fallback_model, exc)
         raise
+
+
+def _refresh_validate_and_promote(
+    workspace,
+    *,
+    slot: _ValidatorSlot | None = None,
+    slot_wait_seconds: float = VALIDATOR_SLOT_WAIT_SECONDS,
+) -> CubeSchema:
+    with transaction.atomic():
+        model = ensure_semantic_model(workspace)
+        return _build_validate_and_promote(
+            workspace, model, slot=slot, slot_wait_seconds=slot_wait_seconds
+        )
 
 
 def _build_validate_and_promote(

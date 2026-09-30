@@ -1,6 +1,7 @@
 """A failed rebuild must never demote the schema Cube is serving."""
 
 import logging
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -348,3 +349,101 @@ def test_explicit_model_build_generates_without_holding_a_validator_slot(
     build_and_promote_cube_schema(workspace, model=model)
 
     assert seen["generate"] == list(range(cube_schema.VALIDATOR_CONCURRENCY))
+
+
+@pytest.fixture
+def raw_holder():
+    """A plain psycopg session another thread may use to hold and release slots."""
+    settings_dict = connection.settings_dict
+    holder = psycopg.connect(
+        dbname=settings_dict["NAME"],
+        user=settings_dict["USER"],
+        password=settings_dict["PASSWORD"],
+        host=settings_dict["HOST"],
+        port=settings_dict["PORT"] or None,
+        autocommit=True,
+    )
+    yield holder
+    holder.close()
+
+
+@pytest.fixture
+def refreshed_model(workspace, model, cube_http, monkeypatch):
+    """Drive the refreshed-model path (model=None) with an ACTIVE schema to protect."""
+    refreshes = []
+
+    def ensure(ws):
+        refreshes.append(connection.in_atomic_block)
+        return model
+
+    monkeypatch.setattr(cube_schema, "ensure_semantic_model", ensure)
+    build_and_promote_cube_schema(workspace)
+    refreshes.clear()
+    SemanticDataset.objects.filter(name="visits").update(description="Changed")
+    return SimpleNamespace(refreshes=refreshes)
+
+
+def _record_slot_attempts(monkeypatch):
+    attempts = []
+    real_try = cube_schema._try_acquire_validator_slot
+
+    def recording_try():
+        attempts.append(connection.in_atomic_block)
+        return real_try()
+
+    monkeypatch.setattr(cube_schema, "_try_acquire_validator_slot", recording_try)
+    return attempts
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_under_contention_waits_outside_its_transaction_then_redoes_it(
+    workspace, refreshed_model, cube_http, raw_holder, monkeypatch
+):
+    monkeypatch.setattr(cube_schema, "VALIDATOR_SLOT_POLL_SECONDS", 0.05)
+    attempts = _record_slot_attempts(monkeypatch)
+    raw_holder.execute("SELECT pg_advisory_lock(%s, 0)", [cube_schema.VALIDATOR_LOCK_CLASS])
+    release = threading.Timer(
+        0.5,
+        raw_holder.execute,
+        ["SELECT pg_advisory_unlock(%s, 0)", [cube_schema.VALIDATOR_LOCK_CLASS]],
+    )
+    release.start()
+    try:
+        promoted = build_and_promote_cube_schema(workspace, slot_wait_seconds=10)
+    finally:
+        release.join()
+
+    assert promoted.status == CubeSchema.Status.ACTIVE
+    # One optimistic try inside the refresh transaction, then every wait outside it.
+    assert attempts[0] is True
+    assert len(attempts) > 2
+    assert not any(attempts[1:])
+    assert refreshed_model.refreshes == [True, True]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_uncontended_refresh_takes_the_slot_once_inside_its_transaction(
+    workspace, refreshed_model, cube_http, monkeypatch
+):
+    attempts = _record_slot_attempts(monkeypatch)
+
+    build_and_promote_cube_schema(workspace)
+
+    assert attempts == [True]
+    assert refreshed_model.refreshes == [True]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_that_never_gets_a_slot_keeps_serving(
+    workspace, model, refreshed_model, cube_http, raw_holder
+):
+    raw_holder.execute("SELECT pg_advisory_lock(%s, 0)", [cube_schema.VALIDATOR_LOCK_CLASS])
+
+    with pytest.raises(cube_schema.CubeValidatorBusyError):
+        build_and_promote_cube_schema(workspace, slot_wait_seconds=0)
+
+    serving = CubeSchema.objects.get(semantic_model=model, status=CubeSchema.Status.ACTIVE)
+    assert serving is not None
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is False
+    assert refreshed_model.refreshes == [True]
