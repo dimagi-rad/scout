@@ -8,7 +8,7 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test.utils import CaptureQueriesContext
 
-from apps.workspaces.models import WorkspaceViewSchema
+from apps.workspaces.models import Workspace, WorkspaceViewSchema
 from apps.workspaces.services.view_sources import parse_view_sources
 
 BEFORE = ("workspaces", "0011_workspacedatarecovery")
@@ -57,7 +57,8 @@ def test_preexisting_rows_and_old_model_writes_survive_provenance_migration(old_
 
     with CaptureQueriesContext(connection) as queries:
         added = old_view.objects.create(
-            workspace=old_workspace.objects.create(name="Old process after migration"),
+            # Workspace columns dropped in 0019 are gone; only the view model is under test.
+            workspace_id=Workspace.objects.create(name="Old process after migration").pk,
             schema_name="ws_old_process_after_migration",
             state="provisioning",
         )
