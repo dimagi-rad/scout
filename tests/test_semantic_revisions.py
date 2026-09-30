@@ -1060,3 +1060,55 @@ def test_undo_refuses_to_restore_a_join_on_a_member_removed_since(
     assert refusal["code"] == "INVALID"
     assert refusal["conflicts"][0]["object"].startswith("relationship/")
     assert not SemanticDataset.objects.filter(name="visit_stats").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_undoing_a_rename_or_redefinition_is_gated_and_reported_like_a_commit(
+    workspace, user, semantic_model
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tools = _tools(workspace, user, thread)
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [_measure_op("total_amount", measure_type="sum", expression="amount")]}
+    )
+    await tools["canvas_commit"].ainvoke({})
+    await tools["canvas_apply"].ainvoke(
+        {
+            "operations": [
+                {
+                    "op": "set",
+                    "target": "field/raw_visits.total_amount/name",
+                    "value": "amount_total",
+                },
+                {
+                    "op": "set",
+                    "target": "field/raw_visits.total_amount/measure_type",
+                    "value": "max",
+                },
+            ]
+        }
+    )
+    edit = (await tools["canvas_commit"].ainvoke({}))["revision"]["id"]
+    await Artifact.objects.acreate(
+        workspace=workspace,
+        title="Totals",
+        code="",
+        conversation_id=str(thread.id),
+        semantic_queries=[{"measures": ["raw_visits.amount_total"]}],
+    )
+
+    asked = await tools["canvas_undo"].ainvoke({"revision_id": edit})
+
+    assert asked["confirmation_required"] == [
+        {
+            "object": "field/raw_visits.amount_total",
+            "used_by_artifacts": ["Totals"],
+            "change": "rename",
+        }
+    ]
+    undone = await _tools(workspace, user, thread, human_turn=2)["canvas_undo"].ainvoke(
+        {"revision_id": edit, "confirmed_deletions": ["field/raw_visits.amount_total"]}
+    )
+    assert undone["redefined_fields_used_by_artifacts"][0]["change"] == "redefine"
+    assert await SemanticField.objects.filter(name="total_amount").aexists()

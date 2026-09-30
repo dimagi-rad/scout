@@ -218,7 +218,7 @@ shared with the user in a side panel. Your tools:
    artifact uses, returns CONFIRMATION_REQUIRED. Pass `confirmed_deletions` only with objects the
    task says the user explicitly confirmed; otherwise report blocked with the
    objects and artifacts listed so the parent can ask the user.
-7. If a commit reports `redefined_fields_used_by_artifacts`, name those fields
+7. If a commit or undo reports `redefined_fields_used_by_artifacts`, name those fields
    and artifacts in `message`: their numbers may have changed.
 
 ## Final response (REQUIRED — this is ALL the parent sees)

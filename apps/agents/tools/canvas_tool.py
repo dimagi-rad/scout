@@ -33,6 +33,7 @@ from apps.semantic.canvas import (
     resolve_thread_canvas,
     undo_revision,
 )
+from apps.semantic.canvas.history import changes_definition
 from apps.semantic.canvas.objects import FIELD_CURATION_KEYS
 from apps.semantic.models import (
     SemanticCanvasChange,
@@ -123,17 +124,31 @@ def _pending_impact(canvas) -> list[dict[str, Any]]:
 
 
 def undo_deletions(workspace, revision_id) -> list[dict[str, Any]]:
-    """What undoing a revision would delete, under the same rule as a commit."""
+    """What undoing a revision would delete or rename, under the same rule as a commit."""
+    return _needs_confirmation(_undo_impact(workspace, revision_id))
+
+
+def _undo_impact(workspace, revision_id) -> list[dict[str, Any]]:
+    """Like ``_pending_impact``, for the changes an undo writes: the reverse of each entry."""
     revision = SemanticModelRevision.objects.filter(id=revision_id, workspace=workspace).first()
     targets = []
     for entry in (revision.changes or []) if revision else []:
-        after = entry.get("after")
-        if entry.get("before") is not None or not after:
+        before, after = entry.get("before"), entry.get("after")
+        if not after:
             continue
-        if entry["object_type"] == "dataset":
-            targets.append((after["name"], None, "delete"))
-        elif entry["object_type"] == "field":
-            targets.append((after["dataset_name"], after["name"], "delete"))
+        if before is None:
+            if entry["object_type"] == "dataset":
+                targets.append((after["name"], None, "delete"))
+            elif entry["object_type"] == "field":
+                targets.append((after["dataset_name"], after["name"], "delete"))
+            continue
+        if entry["object_type"] != "field":
+            continue
+        # Artifacts saved since the revision use its after-state names.
+        if before.get("name") != after.get("name"):
+            targets.append((after["dataset_name"], after["name"], "rename"))
+        if changes_definition(before, after):
+            targets.append((after["dataset_name"], after["name"], "redefine"))
     return _deletions_needing_confirmation(workspace, targets)
 
 
@@ -451,8 +466,10 @@ def create_canvas_tools(
 
         Refused without writing anything if a later change touched the same
         objects; undo the later revision first. The undo is itself a revision.
-        Undoing a create deletes the object, so the same CONFIRMATION_REQUIRED
-        rule as canvas_commit applies, with the same confirmed_deletions.
+        Undoing a create deletes the object and undoing a rename renames it
+        back, so the same CONFIRMATION_REQUIRED rule as canvas_commit applies,
+        with the same confirmed_deletions, and redefined_fields_used_by_artifacts
+        is reported the same way.
         """
 
         def _undo() -> dict[str, Any]:
@@ -467,7 +484,8 @@ def create_canvas_tools(
                 canvas = _resolve_canvas_sync(workspace, user, conversation_id)
             except SemanticCatalogUnavailable as exc:
                 return {"errors": [{"code": "UNAVAILABLE", "message": str(exc)}]}
-            deletions = undo_deletions(workspace, revision_uuid)
+            impact = _undo_impact(workspace, revision_uuid)
+            deletions = _needs_confirmation(impact)
             refusal = _gate_deletions(
                 canvas, deletions, confirmed_deletions, human_turn, retry="undo"
             )
@@ -477,6 +495,8 @@ def create_canvas_tools(
             if refusal := result.get("refused"):
                 return {"errors": [refusal]}
             _clear_confirmations(canvas, deletions)
+            if redefined := [item for item in impact if item.get("change") == "redefine"]:
+                result["redefined_fields_used_by_artifacts"] = redefined
             return result
 
         return await sync_to_async(_undo, thread_sensitive=True)()
