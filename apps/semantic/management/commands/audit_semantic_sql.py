@@ -6,7 +6,7 @@ from functools import partial
 
 from django.core.management.base import BaseCommand
 from django.db.models import Prefetch
-from sqlglot.errors import TokenError
+from sqlglot.errors import SqlglotError
 
 from apps.semantic.models import (
     SemanticDataset,
@@ -19,9 +19,10 @@ from apps.semantic.services.cube import (
     publishable_datasets,
     published_member_references,
 )
-from apps.semantic.services.cube_sql import embed_cube_sql
-from apps.semantic.services.custom_datasets import custom_dataset_dependencies
+from apps.semantic.services.cube_sql import CubeSQLReferenceError, embed_cube_sql
+from apps.semantic.services.custom_datasets import CustomDatasetError, custom_dataset_dependencies
 from apps.semantic.services.field_sql import (
+    SemanticSQLValidationError,
     compile_dimension_sql,
     compile_join_sql,
     compile_measure_filter_sql,
@@ -90,7 +91,12 @@ def _audit_model(model: SemanticModel) -> list[dict]:
         # A malformed stored fragment must be reported, not abort the whole audit.
         try:
             validate()
-        except (TokenError, ValueError) as exc:
+        except (
+            SemanticSQLValidationError,
+            CustomDatasetError,
+            CubeSQLReferenceError,
+            SqlglotError,
+        ) as exc:
             findings.append(
                 {
                     "kind": kind,
