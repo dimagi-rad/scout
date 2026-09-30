@@ -131,6 +131,21 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
 
+Connect staging is a separate OAuth provider and does not use the production `CONNECT_OAUTH_*`
+AWS secrets above. Store its application credentials as
+`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID` and
+`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET` in the GitHub `staging` environment.
+The staging workflow maps them to `STAGING_CONNECT_OAUTH_*` inside the API
+container; production continues to use the AWS-backed `CONNECT_OAUTH_*` values.
+Store a random signing key as `SCOUT_STAGING_CUBEJS_API_SECRET` in the same
+environment. The workflow shares it only among staging's API, worker, MCP, and
+Cube containers so semantic-query security contexts are accepted end to end.
+Production uses the AWS Secrets Manager value `SCOUT_CUBEJS_API_SECRET`, which
+the production workflow validates before building and Kamal resolves through
+`.kamal/secrets-common`. Generate the two values independently (for example,
+`openssl rand -hex 32`) so a staging credential can never sign a production
+Cube security context.
+
 ### Enabling CommCare HQ (EU) sign-in
 
 EU HQ (`eu.commcarehq.org`) is a separate deployment with its own OAuth
@@ -155,21 +170,6 @@ project spaces can still be connected with an API key. To turn EU sign-in on:
    `commcare_eu` SocialApp, and "CommCare HQ (EU)" appears on the Connections
    page and in the onboarding wizard. `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS`
    applies the `commcare` restriction to EU too unless it has its own entry.
-
-Connect staging is a separate OAuth provider and does not use the production `CONNECT_OAUTH_*`
-AWS secrets above. Store its application credentials as
-`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID` and
-`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET` in the GitHub `staging` environment.
-The staging workflow maps them to `STAGING_CONNECT_OAUTH_*` inside the API
-container; production continues to use the AWS-backed `CONNECT_OAUTH_*` values.
-Store a random signing key as `SCOUT_STAGING_CUBEJS_API_SECRET` in the same
-environment. The workflow shares it only among staging's API, worker, MCP, and
-Cube containers so semantic-query security contexts are accepted end to end.
-Production uses the AWS Secrets Manager value `SCOUT_CUBEJS_API_SECRET`, which
-the production workflow validates before building and Kamal resolves through
-`.kamal/secrets-common`. Generate the two values independently (for example,
-`openssl rand -hex 32`) so a staging credential can never sign a production
-Cube security context.
 
 ### Adding a new secret
 
