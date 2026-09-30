@@ -14,11 +14,13 @@ across a chained query within one expression, so splitting them over two
 shape (e.g. checking whether a *target* is already a member) opt out with an
 inline ``# authz-exempt`` comment on or just above the call.
 
-This is a narrow lint, not proof of coverage: ``Q`` objects, ``**kwargs``, ``__in``
-lookups, aliased managers and a query built up across statements are not
-recognised. Filtering by user alone (listing a
-user's workspaces) or by workspace alone (listing members) is not an access
-decision and is not flagged. ``.memberships`` is also the related name of
+This is a narrow lint, not proof of coverage. Not recognised: ``Q`` objects,
+``**kwargs``, ``__in`` lookups, aliased managers, a query built up across
+statements, multi-hop traversals (``workspace__memberships__user``) and an owning
+row pinned by anything but ``id``/``pk``. An owning ``id`` that appears only in
+``.exclude()`` pins nothing ("the user's other workspaces" is a listing). Filtering
+by user alone (listing a user's workspaces) or by workspace alone (listing
+members) is not an access decision and is not flagged. ``.memberships`` is also the related name of
 ``Tenant`` and ``TenantConnection`` memberships; a user-filtered read of those
 is flagged too and needs an exemption saying so.
 """
@@ -67,7 +69,7 @@ def _query_chain(call: ast.Call) -> tuple[set[str], set[str], set[str]]:
 
 
 def _pinned_fields(keywords: set[str]) -> set[str]:
-    return {_lookup_field(k) for k in keywords} - {None}
+    return {field for k in keywords if (field := _lookup_field(k))}
 
 
 def _reverse_traversal_keys(keywords: set[str], included: set[str]) -> set[str]:
@@ -161,13 +163,13 @@ def test_workspace_access_resolved_only_in_authorizer():
                 known.add(hit)
             else:
                 violations.append(f"{rel}:{lineno}")
-    assert known == KNOWN_BYPASSES, (
-        f"Stale KNOWN_BYPASSES entries; remove them: {sorted(KNOWN_BYPASSES - known)}"
-    )
     assert not violations, (
         "Workspace access resolved outside apps/workspaces/access.py. Route these "
         "through resolve_workspace_access_ex / aresolve_workspace_access_ex, or mark a "
         "genuine non-auth use with `# authz-exempt`:\n  " + "\n  ".join(violations)
+    )
+    assert known == KNOWN_BYPASSES, (
+        f"Stale KNOWN_BYPASSES entries; remove them: {sorted(KNOWN_BYPASSES - known)}"
     )
 
 

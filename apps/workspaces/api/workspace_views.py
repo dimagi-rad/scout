@@ -506,6 +506,7 @@ def _workspace_delete_refusal(user, workspace, *, last_source=False) -> Response
         if str(tid) not in missing
     ]
     for tid in tenant_ids:
+        # authz-exempt: lists the user's OTHER workspaces; this one was already admitted.
         other_workspaces = Workspace.objects.filter(
             workspace_tenants__tenant_id=tid,
             memberships__user=user,
