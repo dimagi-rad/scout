@@ -340,7 +340,9 @@ def _lock_model(workspace) -> SemanticModel | None:
     refresh that re-syncs the custom datasets it adds or removes.
     """
     try:
-        return SemanticModel.objects.select_for_update(nowait=True).get(workspace=workspace)
+        # Savepoint: a refused NOWAIT aborts the transaction it runs in.
+        with transaction.atomic():
+            return SemanticModel.objects.select_for_update(nowait=True).get(workspace=workspace)
     except OperationalError as exc:
         if getattr(exc.__cause__, "sqlstate", None) == "55P03":
             return None
