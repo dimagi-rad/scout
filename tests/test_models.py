@@ -59,7 +59,7 @@ class TestKnowledgeModels:
 
         assert tk.table_name == "orders"
         assert "Revenue reporting" in tk.use_cases
-        assert str(tk) == f"orders ({workspace.tenant_name})"
+        assert str(tk) == f"orders ({workspace.name})"
 
     def test_knowledge_entry(self, workspace, user):
         entry = KnowledgeEntry.objects.create(
@@ -72,7 +72,7 @@ class TestKnowledgeModels:
 
         assert entry.title == "MRR"
         assert "metric" in entry.tags
-        assert str(entry) == f"MRR ({workspace.tenant_name})"
+        assert str(entry) == f"MRR ({workspace.name})"
 
     def test_agent_learning(self, workspace, user):
         learning = AgentLearning.objects.create(

@@ -160,7 +160,7 @@ async def test_partial_publication_missing_source_dispatches_materialization(
             state=SchemaState.TEARDOWN
         )
         await teardown_schema.func(str(setup.schemas[1].id))
-        with pytest.raises(ValueError, match="no active schema"):
+        with pytest.raises(ValueError, match="No active data schema"):
             await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
 
     with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query:

@@ -38,6 +38,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.errors import validation_error_code
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
@@ -210,7 +211,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(validation_error_code(e), str(e))
             return tc["result"]
 
         # Multi-tenant workspaces point at a WorkspaceViewSchema (namespaced
@@ -283,7 +284,7 @@ async def describe_table(
             tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(validation_error_code(e), str(e))
             return tc["result"]
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
@@ -343,7 +344,7 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
             tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(validation_error_code(e), str(e))
             return tc["result"]
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
@@ -408,7 +409,7 @@ async def get_lineage(
             tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(validation_error_code(e), str(e))
             return tc["result"]
 
         try:
@@ -818,6 +819,7 @@ async def list_datasets(
                         "workspace_id": str(workspace.id),
                         "workspace_name": workspace.name,
                         "error": str(exc),
+                        "code": exc.code,
                         "schema_status": exc.schema_status,
                     }
                 )
@@ -892,7 +894,7 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
             tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(validation_error_code(e), str(e))
             return tc["result"]
 
         result = await execute_query(ctx, sql)
@@ -955,7 +957,7 @@ async def semantic_catalog(workspace_id: str = "", user_id: str = "", thread_id:
             tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
         except SemanticCatalogUnavailable as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(e.code, str(e))
             return tc["result"]
 
         tc["result"] = success_response(
@@ -1004,7 +1006,7 @@ async def describe_dataset(
             tc["result"] = error_response(NOT_FOUND, f"Dataset '{dataset_name}' not found")
             return tc["result"]
         except SemanticCatalogUnavailable as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(e.code, str(e))
             return tc["result"]
 
         tc["result"] = success_response(
@@ -1184,7 +1186,7 @@ async def get_materialization_status(
                 tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
                 return tc["result"]
             except (ValueError, _ValidationError) as e:
-                tc["result"] = error_response(VALIDATION_ERROR, str(e))
+                tc["result"] = error_response(validation_error_code(e), str(e))
                 return tc["result"]
 
         try:
@@ -1849,7 +1851,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tc["result"] = error_response(WORKSPACE_ACCESS_DENIED, str(e))
             return tc["result"]
         except (ValueError, _ValidationError) as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            tc["result"] = error_response(validation_error_code(e), str(e))
             return tc["result"]
 
         try:

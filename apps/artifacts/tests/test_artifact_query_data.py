@@ -300,11 +300,12 @@ def workspace(db):
 
 @pytest.fixture
 def member_user(db, workspace):
+    tenant = workspace.tenants.get()
     user = User.objects.create_user(email="member@example.com", password="pass")
     TenantMembership.objects.create(
         user=user,
-        tenant=workspace.tenant,
-        connection=usable_connection(user, workspace.tenant.provider),
+        tenant=tenant,
+        connection=usable_connection(user, tenant.provider),
     )
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user
@@ -334,10 +335,11 @@ def other_workspace(db):
 @pytest.fixture
 def other_membership(db, other_workspace, other_user):
     """Returns the other workspace (used as the URL parameter)."""
+    other_tenant = other_workspace.tenants.get()
     TenantMembership.objects.create(
         user=other_user,
-        tenant=other_workspace.tenant,
-        connection=usable_connection(other_user, other_workspace.tenant.provider),
+        tenant=other_tenant,
+        connection=usable_connection(other_user, other_tenant.provider),
     )
     WorkspaceMembership.objects.create(
         workspace=other_workspace, user=other_user, role=WorkspaceRole.MANAGE
