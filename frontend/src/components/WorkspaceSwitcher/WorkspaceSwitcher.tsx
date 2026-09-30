@@ -57,9 +57,11 @@ function DataIndicator({ ws }: { ws: WorkspaceListItem }) {
       ? "Loading data…"
       : state === "failed"
         ? "Data setup failed."
-        : state === "unavailable"
-          ? "Data setup unavailable."
-          : ""
+        : state === "not_loaded"
+          ? "No data loaded yet."
+          : state === "unavailable"
+            ? "Data setup unavailable."
+            : ""
   const loadLabel = ws.last_synced_at
     ? `Last recorded load: ${formatRelativeTime(ws.last_synced_at)}.`
     : "No load time recorded."
