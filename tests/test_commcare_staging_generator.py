@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from apps.transformations.models import TransformationAsset, TransformationScope
@@ -462,7 +464,7 @@ class TestRepeatGroupGeneration:
 
 @pytest.mark.django_db
 class TestDisambiguation:
-    def test_duplicate_form_names_get_app_suffix(self, tenant):
+    def test_duplicate_form_names_get_xmlns_digests(self, tenant):
         metadata = _make_metadata(
             app_definitions=[
                 {"id": "app1", "name": "App One", "modules": []},
@@ -484,8 +486,8 @@ class TestDisambiguation:
         )
         assets = generate_system_assets(tenant, metadata)
         names = {a.name for a in assets}
-        assert "stg_form_registration" in names
-        assert "stg_form_registration_app_two_1" in names
+        assert len(names) == 2
+        assert all(re.fullmatch(r"stg_form_registration_[0-9a-f]{8}", name) for name in names)
 
 
 # ── Column alias deduplication ──────────────────────────────────────────────

@@ -6,7 +6,7 @@ const { evaluateClaudeRun, evaluateClaudeReview, describeDenials, finalResult, r
 const { evaluateReview } = require('./ocr-gate.cjs');
 const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheckpointMatches } = require('./ocr-state.cjs');
 
-const policyFiles = ['.github/workflows/ocr.yml', '.github/scripts/ocr-gate.cjs',
+const policyFiles = ['.github/workflows/ocr.yml', '.github/ocr-rule.json', '.github/scripts/ocr-gate.cjs',
   '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs', '.github/scripts/claude-review-gate.cjs'];
 const trustedComment = (comment) => comment?.user?.login === 'github-actions[bot]'
   && comment.user?.type === 'Bot'
@@ -146,6 +146,29 @@ function scaledBudget({ files, lines, full, firstReview }) {
   return full && !firstReview ? Math.max(tier.budget, FULL_RERUN_FLOOR) : tier.budget;
 }
 
+async function mergeBaseOf(github, context, base, head) {
+  const { data } = await github.rest.repos.compareCommitsWithBasehead({
+    ...context.repo, basehead: `${base}...${head}`, per_page: 1,
+  });
+  const sha = data?.merge_base_commit?.sha;
+  if (!/^[a-f0-9]{40}$/.test(sha || '')) throw new Error('Missing merge base.');
+  return sha;
+}
+
+// Any doubt reviews the full PR. OCR's own checkpoint also rejects a moved merge-base.
+async function sameMergeBase(github, context, core, previous, env) {
+  try {
+    const [before, now] = await retryRead('the merge-base compare', () => Promise.all([
+      mergeBaseOf(github, context, previous.base, previous.head),
+      mergeBaseOf(github, context, env.REVIEW_BASE, env.REVIEW_HEAD),
+    ]), { core });
+    return before === now;
+  } catch (error) {
+    core.warning(`Could not compare merge bases (${safeErrorSummary(error)}); reviewing the full PR.`);
+    return false;
+  }
+}
+
 async function prepareReview({ github, context, core, fs, env }) {
   const pr = await currentPR(github, context, env);
   const hash = crypto.createHash('sha256');
@@ -157,9 +180,12 @@ async function prepareReview({ github, context, core, fs, env }) {
   const claudeReusable = previous?.claudeHead && receipt?.status === 'verified'
     && receipt.run === previous.run && receipt.head === previous.claudeHead && receipt.base === previous.base;
   const accepted = previous && !claudeReusable ? { ...previous, claudeHead: null } : previous;
-  let selection = chooseReview(accepted, {
-    head: env.REVIEW_HEAD, base: env.REVIEW_BASE, policy, forceFull: env.FORCE_FULL === 'true',
-  });
+  const current = { head: env.REVIEW_HEAD, base: env.REVIEW_BASE, policy, forceFull: env.FORCE_FULL === 'true' };
+  let selection = chooseReview(accepted, current);
+  // Only worth two API calls when a moved base tip is the sole reason for a full review.
+  if (selection.reason === 'base changed' && await sameMergeBase(github, context, core, previous, env)) {
+    selection = chooseReview(accepted, { ...current, mergeBaseUnchanged: true });
+  }
   if (!selection.full && !nativeCheckpointMatches(comments, {
     head: selection.checkpoint, run: selection.sourceRun, pr: env.PR_NUMBER,
   })) {
@@ -171,7 +197,7 @@ async function prepareReview({ github, context, core, fs, env }) {
   // whatever happens to be checked out afterward.
   const snapshot = path.join(env.RUNNER_TEMP, 'scout-ocr-policy');
   fs.mkdirSync(snapshot, { recursive: true });
-  for (const file of policyFiles.filter((file) => file.endsWith('.cjs'))) {
+  for (const file of policyFiles.filter((file) => !file.endsWith('.yml'))) {
     fs.copyFileSync(path.join(env.GITHUB_WORKSPACE, file), path.join(snapshot, path.basename(file)));
   }
   const manualBudget = Number(env.MANUAL_BUDGET);

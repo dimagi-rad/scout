@@ -8,7 +8,7 @@ const { MARKER, encodeState, readState } = require('./ocr-state.cjs');
 
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40), PRIOR = 'c'.repeat(40), MERGE = 'd'.repeat(40);
 const POLICY = 'e'.repeat(64);
-const policyFiles = ['.github/workflows/ocr.yml', '.github/scripts/ocr-gate.cjs',
+const policyFiles = ['.github/workflows/ocr.yml', '.github/ocr-rule.json', '.github/scripts/ocr-gate.cjs',
   '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs', '.github/scripts/claude-review-gate.cjs'];
 function state(overrides = {}) {
   return { version: 1, head: PRIOR, base: BASE, policy: POLICY, run: '10', passed: true, claudeHead: null, ...overrides };
@@ -38,7 +38,7 @@ function harness(overrides = {}) {
       POSTING_FAILED: '0', SAME_REPO: 'true', GITHUB_SERVER_URL: 'https://github.com',
       GITHUB_REPOSITORY: 'owner/repo', GITHUB_RUN_ATTEMPT: '1', ...overrides },
     context: { repo: { owner: 'owner', repo: 'repo' }, runId: 20 },
-    comments: [], outputs: {}, outputHistory: [], writes: [], copies: [], gitCalls: [], failures: [],
+    comments: [], outputs: {}, outputHistory: [], writes: [], copies: [], gitCalls: [], failures: [], compares: [],
     result: report(), pr: { state: 'open', head: { sha: HEAD }, base: { sha: BASE } },
     files: new Map(policyFiles.map(file => [`/workspace/${file}`, `trusted ${file}`])),
   };
@@ -66,6 +66,10 @@ function harness(overrides = {}) {
   h.github = {
     paginate: async () => h.comments,
     rest: { pulls: { get: async () => ({ data: h.pr }) },
+      repos: { compareCommitsWithBasehead: async ({ basehead }) => {
+        h.compares.push(basehead);
+        return { data: { merge_base_commit: { sha: MERGE } } };
+      } },
       issues: { listComments() {}, updateComment: publish, createComment: publish } },
   };
   h.execFileSync = (command, args) => {
@@ -114,6 +118,47 @@ test('trusted prior checkpoint selects and verifies the exact incremental range'
   assert.equal(h.writes[0].comment_id, 7);
   assert.ok(h.gitCalls.some(([command, args]) => command === 'git'
     && JSON.stringify(args) === JSON.stringify(['merge-base', '--is-ancestor', PRIOR, HEAD])));
+});
+
+test('a moved base tip keeps the checkpoint only when the merge-base is unchanged', async () => {
+  const NEW_BASE = 'f'.repeat(40);
+  const cases = [
+    [{ [`${BASE}...${PRIOR}`]: MERGE, [`${NEW_BASE}...${HEAD}`]: MERGE }, 'false', 'accepted checkpoint'],
+    [{ [`${BASE}...${PRIOR}`]: MERGE, [`${NEW_BASE}...${HEAD}`]: '1'.repeat(40) }, 'true', 'base changed'],
+    [{ [`${BASE}...${PRIOR}`]: MERGE }, 'true', 'base changed'],
+    [{ [`${BASE}...${PRIOR}`]: MERGE, [`${NEW_BASE}...${HEAD}`]: 'not-a-sha' }, 'true', 'base changed'],
+  ];
+  for (const [mergeBases, full, reason] of cases) {
+    const h = harness({ REVIEW_BASE: NEW_BASE });
+    h.pr.base.sha = NEW_BASE;
+    const compared = [];
+    h.github.rest.repos = { compareCommitsWithBasehead: async ({ basehead }) => {
+      compared.push(basehead);
+      if (!Object.hasOwn(mergeBases, basehead)) throw Object.assign(new Error('Not Found'), { status: 404 });
+      return { data: { merge_base_commit: { sha: mergeBases[basehead] } } };
+    } };
+    await prepareReview(h);
+    h.comments = [comment(state({ policy: h.outputs.policy })), nativeComment()];
+    await prepareReview(h);
+    assert.equal(h.outputs.full_review, full);
+    assert.equal(h.outputs.reason, reason);
+    assert.equal(h.outputs.checkpoint, full === 'false' ? PRIOR : '');
+    assert.deepEqual(compared.sort(), [`${BASE}...${PRIOR}`, `${NEW_BASE}...${HEAD}`]);
+  }
+});
+
+test('merge bases are compared only when a moved base tip is the sole full-review reason', async () => {
+  const MOVED = 'f'.repeat(40);
+  for (const [base, prior, force, full] of [[BASE, {}, 'false', 'false'], [MOVED, { passed: false }, 'false', 'true'],
+    [MOVED, {}, 'true', 'true'], [MOVED, { policy: 'e'.repeat(64) }, 'false', 'true'], [MOVED, { head: HEAD }, 'false', 'true']]) {
+    const h = harness({ REVIEW_BASE: base, FORCE_FULL: force });
+    h.pr.base.sha = base;
+    await prepareReview(h);
+    h.comments = [comment(state({ policy: h.outputs.policy, ...prior })), nativeComment()];
+    await prepareReview(h);
+    assert.deepEqual(h.compares, []);
+    assert.equal(h.outputs.full_review, full);
+  }
 });
 
 test('blocked or partial reviews overwrite eligibility and force the next run to be full', async () => {
@@ -227,7 +272,7 @@ test('the Claude prompt carries the gate scope note', () => {
 test('prepare snapshots every trusted script and fingerprints changes to each policy file', async () => {
   const original = harness(); await prepareReview(original);
   assert.match(original.outputs.policy, /^[a-f0-9]{64}$/);
-  assert.deepEqual(original.copies.map(([source]) => source), policyFiles.filter(file => file.endsWith('.cjs')).map(file => `/workspace/${file}`));
+  assert.deepEqual(original.copies.map(([source]) => source), policyFiles.filter(file => !file.endsWith('.yml')).map(file => `/workspace/${file}`));
   for (const [source, destination] of original.copies) {
     assert.equal(destination, path.join('/runner/scout-ocr-policy', path.basename(source)));
     assert.equal(original.files.get(destination), original.files.get(source));

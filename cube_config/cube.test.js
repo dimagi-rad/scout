@@ -1,20 +1,52 @@
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
 // Exercise the production configuration without a network connection or npm
-// install. Only pg.Pool is stubbed; ID generation and driver configuration run.
-function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = []) {
+// install. pg.Pool and Cube's PostgresDriver are stubbed; ID generation, driver
+// configuration and the connection limit run for real.
+class FakeClient extends EventEmitter {
+  end() { this.emit('end'); }
+}
+
+class FakePostgresDriver {
+  constructor(config) { this.config = config; this.options = config.options; }
+  async createConnection() {
+    if (this.config.failConnect) throw new Error('Synthetic connect failure');
+    return new FakeClient();
+  }
+}
+
+function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = [], env = {}, catalog = { roleExists: true, probes: 0, warnings: [] }, PostgresDriver = FakePostgresDriver) {
   const sandbox = {
     module: { exports: {} },
-    process: { env: {} },
+    process: { env },
     URL,
-    require: (name) => name === 'pg' ? { Pool: class {
-      constructor(options) { pools.push(options); }
-      query(...args) { return query(...args); }
-    } } : require(name),
+    console: { warn: (message) => catalog.warnings.push(message) },
+    require: (name) => {
+      if (name === 'pg') {
+        return { Pool: class {
+          constructor(options) { this.options = options; this.listeners = {}; pools.push(options); options.pool = this; }
+          on(event, listener) { this.listeners[event] = listener; }
+          query(text, values) {
+            if (text.includes('to_regrole')) {
+              catalog.probes += 1;
+              assert.deepEqual(Array.from(values), ['scout_cube_catalog']);
+              if (catalog.probeError) return Promise.reject(new Error('synthetic probe failure'));
+              assert.match(text, /has_table_privilege\(to_regrole\(\$1\)::oid, 'public\.semantic_cubeschema', 'SELECT'\)/);
+              return Promise.resolve({ rows: [{ ready: catalog.roleExists }] });
+            }
+            return query(text, values, this.options);
+          }
+        } };
+      }
+      if (name === '@cubejs-backend/postgres-driver') return { PostgresDriver };
+      if (name.startsWith('./')) return require(join(__dirname, name));
+      return require(name);
+    },
   };
   vm.runInNewContext(readFileSync(join(__dirname, 'cube.js'), 'utf8'), sandbox);
   return sandbox.module.exports;
@@ -191,12 +223,54 @@ test('publication lookup preserves health checks and rejects partial tenant cont
   }
 });
 
-test('catalog connection acquisition and query execution have finite time budgets', () => {
+test('catalog connection acquisition and query execution have finite time budgets', async () => {
   const pools = [];
-  loadConfig(undefined, pools);
-  assert.equal(pools.length, 1);
-  for (const option of ['connectionTimeoutMillis', 'statement_timeout', 'query_timeout']) {
-    assert.equal(pools[0][option], 5000);
+  const config = loadConfig(async () => ({ rows: [{ data_revision: 'r' }] }), pools);
+  await config.queryRewrite({}, context());
+  assert.equal(pools.length, 2);
+  for (const pool of pools) {
+    for (const option of ['connectionTimeoutMillis', 'statement_timeout', 'query_timeout']) {
+      assert.equal(pool[option], 5000);
+    }
+  }
+});
+
+test('catalog reads run as the SELECT-only role once it exists, and never fall back', async () => {
+  const pools = [];
+  const seen = [];
+  const catalog = { roleExists: true, probes: 0, warnings: [] };
+  const config = loadConfig(async (text, values, options) => {
+    seen.push(options);
+    return { rows: [{ data_revision: 'r', filename: 'f', content: 'c', content_hash: 'h', updated_at: new Date(0) }] };
+  }, pools, {}, catalog);
+  await config.queryRewrite({}, context());
+  await config.repositoryFactory(context()).dataSchemaFiles();
+  catalog.roleExists = false;
+  await config.schemaVersion(context());
+  assert.equal(catalog.probes, 1);
+  assert.equal(seen.length, 3);
+  for (const options of seen) {
+    assert.equal(options.options, '-c role=scout_cube_catalog -c search_path=public -c default_transaction_read_only=on');
+    assert.equal(options.max, 3);
+  }
+  assert.deepEqual(catalog.warnings, []);
+});
+
+test('before the migration creates the role, catalog reads use the owner and re-probe later', async () => {
+  const seen = [];
+  const catalog = { roleExists: false, probes: 0, warnings: [] };
+  const config = loadConfig(async (text, values, options) => {
+    seen.push(options);
+    return { rows: [{ data_revision: 'r' }] };
+  }, [], {}, catalog);
+  await config.queryRewrite({}, context());
+  await config.queryRewrite({}, context());
+  assert.equal(catalog.probes, 1, 'a missing role is not re-probed on every request');
+  assert.equal(catalog.warnings.length, 1);
+  assert.match(catalog.warnings[0], /scout_cube_catalog cannot read semantic_cubeschema yet/);
+  for (const options of seen) {
+    assert.equal(options.options, '-c search_path=public');
+    assert.equal(options.max, 3);
   }
 });
 
@@ -206,5 +280,132 @@ test('the readiness driver is time-bounded, read-only, and cannot resolve tenant
     assert.match(driver.options ?? '', /-c statement_timeout=30000(\s|$)/);
     assert.match(driver.options ?? '', /-c default_transaction_read_only=on(\s|$)/);
     assert.match(driver.options ?? '', /-c search_path=pg_catalog(\s|$)/);
+  }
+});
+
+test('every pool is capped and sheds idle connections', () => {
+  const pools = [];
+  const config = loadConfig(undefined, pools);
+  assert.equal(pools[0].max, 3);
+  for (const [ctx, max] of [[context(), 2], [{}, 1]]) {
+    const driver = config.driverFactory(ctx);
+    assert.equal(driver.config.maxPoolSize, max);
+    assert.equal(driver.config.idleTimeoutMillis, 10000);
+    assert.equal(driver.config.softIdleTimeoutMillis, 10000);
+    assert.equal(driver.config.dataSource, 'default');
+  }
+});
+
+test('tenant connections share one process-wide limit across workspaces', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '2' });
+  const a = config.driverFactory(context());
+  const b = config.driverFactory(context({ workspaceId: 'workspace-b', schemaName: 'workspace_b', readonlyRole: 'workspace_b_ro' }));
+  const first = await a.createConnection();
+  await b.createConnection();
+  let third = null;
+  const waiting = b.createConnection().then((client) => { third = client; });
+  await new Promise(setImmediate);
+  assert.equal(third, null);
+
+  first.end();
+  first.end();
+  await waiting;
+  assert.ok(third);
+  let fourth = null;
+  const pendingFourth = a.createConnection().then((client) => { fourth = client; });
+  await new Promise(setImmediate);
+  assert.equal(fourth, null, 'a repeated end must not free a second slot');
+  third.end();
+  await pendingFourth;
+  assert.ok(fourth);
+});
+
+test('a connection that errors returns its slot even without an end event', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
+  const driver = config.driverFactory(context());
+  const client = await driver.createConnection();
+  client.on('error', () => {});
+  client.emit('error', new Error('Connection terminated unexpectedly'));
+  client.end();
+  const second = await driver.createConnection();
+  let extra = null;
+  const pending = driver.createConnection().then((c) => { extra = c; });
+  await new Promise(setImmediate);
+  assert.equal(extra, null, 'error followed by end must free only one slot');
+  second.end();
+  await pending;
+  assert.ok(extra);
+});
+
+test('a failed connect returns its slot', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
+  const failing = config.driverFactory(context());
+  failing.config.failConnect = true;
+  await assert.rejects(failing.createConnection(), /Synthetic connect failure/);
+  failing.config.failConnect = false;
+  assert.ok(await failing.createConnection());
+});
+
+test('readiness connections stay outside the tenant limit', async () => {
+  const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
+  await config.driverFactory(context()).createConnection();
+  assert.ok(await config.driverFactory({}).createConnection());
+});
+
+test('an idle catalog connection error is logged instead of crashing Cube', async () => {
+  const pools = [];
+  const catalog = { roleExists: true, probes: 0, warnings: [] };
+  const config = loadConfig(async () => ({ rows: [{ data_revision: 'r' }] }), pools, {}, catalog);
+  await config.queryRewrite({}, context());
+  assert.equal(pools.length, 2);
+  for (const options of pools) {
+    options.pool.listeners.error(new Error('Connection terminated unexpectedly'));
+  }
+  assert.equal(catalog.warnings.length, 2);
+  assert.match(catalog.warnings[0], /Connection terminated unexpectedly/);
+});
+
+test('a failed role check falls back to the owner instead of failing the read', async () => {
+  const seen = [];
+  const catalog = { roleExists: true, probeError: true, probes: 0, warnings: [] };
+  const config = loadConfig(async (text, values, options) => {
+    seen.push(options);
+    return { rows: [{ data_revision: 'r' }] };
+  }, [], {}, catalog);
+  await config.queryRewrite({}, context());
+  await config.queryRewrite({}, context());
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].options, '-c search_path=public');
+  assert.equal(catalog.warnings.length, 1, 'a failed check backs off instead of re-probing every request');
+  assert.match(catalog.warnings[0], /synthetic probe failure/);
+});
+
+test('a slot wait is bounded and a timed-out waiter leaves the queue', async () => {
+  const { createConnectionSlots } = require('./connection-slots');
+  const timers = [];
+  const slots = createConnectionSlots(1, 50, {
+    setTimeout: (callback) => { const timer = { callback }; timers.push(timer); return timer; },
+    clearTimeout: (timer) => { timer.cleared = true; },
+  });
+  const release = await slots.acquire();
+  const expired = slots.acquire();
+  const waiting = slots.acquire();
+  timers[0].callback();
+  await assert.rejects(expired, /No Cube database connection slot freed within 50ms \(limit 1\)/);
+  release();
+  const next = await waiting;
+  assert.equal(timers[1].cleared, true);
+  next();
+  assert.ok(await slots.acquire());
+});
+
+test('a driver without the createConnection hook fails startup instead of leaving the limit inert', () => {
+  class HooklessDriver {}
+  assert.throws(() => loadConfig(undefined, [], {}, undefined, HooklessDriver), /tenant connection limit would be inert/);
+});
+
+test('an invalid tenant connection limit fails startup', () => {
+  for (const value of ['0', '-1', '1.5', 'many', '9007199254740993']) {
+    assert.throws(() => loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: value }), /positive safe integer/);
   }
 });

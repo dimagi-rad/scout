@@ -185,5 +185,5 @@ test('image build and both startup paths validate the pinned package patch', () 
   assert.match(dockerfile, /CMD .*patch-local-cache\.js --verify && exec \/start-cube-with-validator\.sh/);
   const packageJson = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts.start,
-    'node /cube/conf/patch-local-cache.js --verify && /start-cube-with-validator.sh');
+    'node /cube/conf/patch-orchestrator-storage.js --verify && node /cube/conf/patch-local-cache.js --verify && /start-cube-with-validator.sh');
 });

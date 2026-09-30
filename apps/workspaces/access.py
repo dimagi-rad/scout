@@ -97,6 +97,7 @@ _PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 # The access_cache tags that limit each denial log to once per request.
 _COVERAGE_DENIAL_LOGGED = "coverage_denial_logged"
 _NO_SOURCES_LOGGED = "no_sources_logged"
+_FRESHNESS_DENIAL_LOGGED = "freshness_denial_logged"
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +131,24 @@ class WorkspaceAccess:
         return self.denied_reason in RETRYABLE_REASONS
 
 
-def _freshness_denied(reason: str | None) -> WorkspaceAccess:
-    return WorkspaceAccess(denied_reason=reason or VERIFICATION_UNAVAILABLE)
+def _freshness_denied(user, workspace, reason: str | None) -> WorkspaceAccess:
+    """An upstream-freshness denial, logged so a revocation wave can be told from
+    a provider outage (``verification_unavailable`` denies the whole workspace).
+
+    INFO, like the coverage denial: expected, and not a Sentry event. User id,
+    workspace id and reason code only. ``workspace`` is the granted row, never the
+    caller's raw value.
+    """
+    reason = reason or VERIFICATION_UNAVAILABLE
+    if access_cache.first_in_scope(user, workspace.pk, _FRESHNESS_DENIAL_LOGGED):
+        logger.info(
+            "workspace_access_denied_freshness user_id=%s workspace_id=%s reason=%s",
+            user.pk,
+            workspace.pk,
+            reason,
+            extra={"user_id": user.pk, "workspace_id": str(workspace.pk), "reason": reason},
+        )
+    return WorkspaceAccess(denied_reason=reason)
 
 
 def _attribute_observed_denial(result: WorkspaceAccess, admission) -> WorkspaceAccess:
@@ -596,12 +613,20 @@ def _resolve_with_freshness(
         return result
     admission = admit_upstream(user.pk, _live_tenant_ids(result.workspace), budget=verification)
     if not admission.rechecked:
-        return result if admission.admitted else _freshness_denied(admission.reason)
+        return (
+            result
+            if admission.admitted
+            else _freshness_denied(user, result.workspace, admission.reason)
+        )
     result = local()
     if not result.granted:
         return _attribute_observed_denial(result, admission)
     final = check_freshness(user.pk, _live_tenant_ids(result.workspace))
-    return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
+    return (
+        result
+        if final.fresh
+        else _freshness_denied(user, result.workspace, final_denial_reason(admission, final))
+    )
 
 
 async def aresolve_workspace_access_ex(
@@ -685,12 +710,20 @@ async def _aresolve_workspace_access_ex(
         user.pk, await _alive_tenant_ids(result.workspace), budget=verification
     )
     if not admission.rechecked:
-        return result if admission.admitted else _freshness_denied(admission.reason)
+        return (
+            result
+            if admission.admitted
+            else _freshness_denied(user, result.workspace, admission.reason)
+        )
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=minimum_role)
     if not result.granted:
         return _attribute_observed_denial(result, admission)
     final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
-    return result if final.fresh else _freshness_denied(final_denial_reason(admission, final))
+    return (
+        result
+        if final.fresh
+        else _freshness_denied(user, result.workspace, final_denial_reason(admission, final))
+    )
 
 
 async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
@@ -733,7 +766,7 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
                     for t in replayed.get("missing", ())
                 ),
             )
-        return _freshness_denied(VERIFICATION_IN_PROGRESS)
+        return _freshness_denied(user, workspace, VERIFICATION_IN_PROGRESS)
     retry_reason = await averify_membership_history(
         user.pk, tenant_ids, budget=VerificationBudget.INTERACTIVE
     )
@@ -741,13 +774,15 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
     if not result.granted:
         if retry_reason in RETRYABLE_REASONS:
-            result = _freshness_denied(retry_reason)
+            result = _freshness_denied(user, workspace, retry_reason)
         else:
             result = _attribute_observed_denial(result, admission)
     else:
         final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
         if not final.fresh:
-            result = _freshness_denied(final_denial_reason(admission, final))
+            result = _freshness_denied(
+                user, result.workspace, final_denial_reason(admission, final)
+            )
     # Re-arm after the check: a slow provider can outlast the first window.
     # Kept even on success: a tombstoned history can never short-circuit as fresh, so
     # a granted retry still cost a provider call and must stay throttled.
