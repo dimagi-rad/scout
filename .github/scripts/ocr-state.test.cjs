@@ -56,7 +56,7 @@ test('forged ranges and run IDs, invalid modes and nonancestor fail closed', () 
   assert.throws(() => validateRange({ mode: 'full', from: '', to: C }, { ...expected, mergeBase: 'unknown' }));
 });
 test('manual commands allow full and a bounded budget in either order', () => {
-  assert.deepEqual(parseCommand('@ocr'), { full: false, budget: 500000 });
+  assert.deepEqual(parseCommand('@ocr'), { full: false, budget: null });
   assert.deepEqual(parseCommand('@OCR FULL BUDGET=750000'), { full: true, budget: 750000 });
   assert.deepEqual(parseCommand('@ocr full budget=750000'), { full: true, budget: 750000 });
   assert.deepEqual(parseCommand('@ocr budget=5000000 full\n'), { full: true, budget: 5000000 });

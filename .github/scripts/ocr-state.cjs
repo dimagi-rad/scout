@@ -86,7 +86,7 @@ function validateRange(actual, expected) {
 function parseCommand(body) {
   const tokens = typeof body === 'string' ? body.trim().toLowerCase().split(/\s+/) : [];
   if (tokens.shift() !== '@ocr') throw new Error('Expected @ocr [full] [budget=N]');
-  let full = false, budget = 500000, hasBudget = false;
+  let full = false, budget = null, hasBudget = false;
   for (const token of tokens) {
     if (token === 'full' && !full) full = true;
     else if (/^budget=[1-9][0-9]*$/.test(token) && !hasBudget) {

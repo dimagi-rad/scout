@@ -54,10 +54,10 @@ Configuration lives in `.github/workflows/ocr.yml`:
 - Self-updates disabled with job-level `OCR_NO_UPDATE=1`, including the initial version check. Without this, the npm launcher can replace the pinned install while later workflow steps are using it.
 - OCR action pinned to commit `b3dbcb634cbb39344e0a3c48ccb1cef3ecd51532`, CLI `1.12.2`.
 - Anthropic Opus 5, adaptive thinking, high model effort; medium OCR review effort.
-- Two concurrent OCR tasks, 15-minute per-task timeout, 500,000 total-token budget.
+- Two concurrent OCR tasks, 15-minute per-task timeout, and a total-token budget scaled to PR size (500,000 to 4,000,000; see [Token budget and manual overrides](#token-budget-and-manual-overrides)).
 - Native cross-push checkpoints enabled, subject to Scout’s accepted-state validation.
 - Low-severity findings go to the summary; their severity is still evaluated by the gate. The review prompt asks for demonstrated defects rather than speculative API mismatches or style/test-coverage requests without a concrete failure.
-- 45-minute job timeout, including the Claude follow-up.
+- 90-minute job timeout, including the Claude follow-up.
 - Claude follow-up uses Opus 5 with a $10 CLI budget.
 
 The OCR token limit stops further dispatch after it is exceeded; in-flight work can overshoot. It is not a hard dollar spending limit. Configure an Anthropic workspace spending limit for a billing ceiling. Both review stages consume API quota; low/medium-only PRs still receive both reviews. The limit gates whether each file group may start rather than capping spend; see [How the token budget works](#how-the-token-budget-works-size-prs-by-file-groups-not-lines).
@@ -77,9 +77,19 @@ Inspect the Actions log, OCR JSON artifact and sticky gate comment when a run bl
 - [Pinned action inputs and outputs](https://github.com/alibaba/open-code-review/blob/v1.12.2/action.yml)
 - [Anthropic Opus 5](https://platform.claude.com/docs/en/models/opus-5/whats-new-opus-5)
 
-### Larger manual reviews
+### Token budget and manual overrides
 
-An authorized collaborator can request a one-run token budget with `@ocr budget=5000000` (maximum 5 million). The default remains 500,000 for automatic runs and plain `@ocr`. This is a soft limit: in-flight work can overshoot it. A larger budget does not relax finding severity or completeness checks.
+An authorized collaborator can request a one-run token budget with `@ocr budget=5000000` (maximum 5 million). Without `budget=`, automatic runs and plain `@ocr` scale the budget with the PR's changed files and lines (from the PR API, since OCR only prints its own estimate after dispatch):
+
+| PR size | Budget |
+|---|---|
+| under 10 files and under 500 lines | 500,000 |
+| under 25 files and under 2,000 lines | 2,000,000 |
+| larger | 4,000,000 |
+
+A repeat full review (policy change, base change or a blocked prior run) is at least 2,000,000. A PR's first review (no earlier gate state), including `@ocr full`, uses the size tier alone. An explicit `budget=N` always wins. Real usage over ~260 runs had a median of about 306K tokens, a mean of about 644K and a maximum of 6.34M, so a flat 500K exhausted most medium and large PRs and forced a manual re-run.
+
+Cost trade-off: a higher ceiling avoids a wasted run per push but lets a run spend more. The budget gates whether a file group may start, so small groups do not consume it; at Opus rates a million tokens cost roughly $1.9. The review job's wall-clock limit is 90 minutes: at the top tier a wide PR can now be cut off by the timeout rather than skipped for budget, and a timeout leaves no gate comment, so check the run log first if a review is cancelled. This is a soft limit: in-flight work can overshoot it. A larger budget does not relax finding severity or completeness checks.
 
 ## Grouping and remaining limits
 
