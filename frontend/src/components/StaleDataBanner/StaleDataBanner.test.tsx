@@ -34,7 +34,7 @@ type HarnessProps = { loading?: boolean; onRefreshStarted?: () => void }
 
 // Fetches as ChatPanel does, so the tests cover the banner against the real endpoint call.
 function Harness({ loading = false, onRefreshStarted }: HarnessProps) {
-  const freshness = useRefetchOnLoadEnd(workspaceApi.getFreshness, WS, loading)
+  const [freshness] = useRefetchOnLoadEnd(workspaceApi.getFreshness, WS, loading)
   return (
     <StaleDataBanner
       workspaceId={WS}

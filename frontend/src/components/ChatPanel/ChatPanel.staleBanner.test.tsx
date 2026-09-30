@@ -1,8 +1,9 @@
 import type { UIMessage } from "ai"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { jobsApi } from "@/api/jobs"
 import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
 import { freshness, freshSource } from "@/components/StaleDataBanner/testFixtures"
 import { useAppStore } from "@/store/store"
@@ -90,5 +91,20 @@ describe("ChatPanel stale-data banner", () => {
 
     await screen.findByTestId("workspace-load-banner")
     expect(screen.queryByTestId("stale-data-banner")).toBeNull()
+  })
+
+  it("hides once a refresh is queued, before any worker starts it", async () => {
+    vi.spyOn(jobsApi, "retryMaterialization").mockResolvedValue({ status: "started" })
+    mockMessages([])
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+
+    const refresh = await screen.findByTestId("stale-data-banner-refresh")
+    vi.mocked(workspaceApi.getFreshness).mockResolvedValue(
+      freshness([freshSource("Alpha", 72)], { in_progress: true }),
+    )
+    fireEvent.click(refresh)
+
+    await vi.waitFor(() => expect(screen.queryByTestId("stale-data-banner")).toBeNull())
+    expect(workspaceApi.getFreshness).toHaveBeenCalledTimes(2)
   })
 })

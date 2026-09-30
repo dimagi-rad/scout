@@ -85,18 +85,24 @@ export function ChatPanel() {
     Boolean(activeMaterializationJob) || (workspaceLoads ?? []).length > 0
   // Fetched here, not in the banner and the data-as-of lines, so both read one
   // response and it survives the switch between the empty and thread layouts.
-  const freshness = useRefetchOnLoadEnd(
+  const [freshness, refetchFreshness] = useRefetchOnLoadEnd(
     workspaceApi.getFreshness,
     activeDomainId,
     workspaceLoading,
   )
+  // A refresh queues a job the load poll cannot see until a worker starts it;
+  // the freshness endpoint does, so the banner hides instead of re-offering Refresh.
+  const handleRefreshStarted = useCallback(() => {
+    notifyJobLikelyStarted()
+    refetchFreshness()
+  }, [notifyJobLikelyStarted, refetchFreshness])
   const staleBanner = activeDomainId && (
     <StaleDataBanner
       key={activeDomainId}
       workspaceId={activeDomainId}
       freshness={freshness}
       loading={workspaceLoading}
-      onRefreshStarted={notifyJobLikelyStarted}
+      onRefreshStarted={handleRefreshStarted}
     />
   )
   const currentThread = threads.find((thread) => thread.id === threadId)

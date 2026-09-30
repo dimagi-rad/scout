@@ -23,7 +23,7 @@ describe("useRefetchOnLoadEnd", () => {
 
     await act(async () => pending[0]("before load"))
 
-    expect(result.current).toBe("before load")
+    expect(result.current[0]).toBe("before load")
   })
 
   it("does not let an older response overwrite a newer one", async () => {
@@ -39,7 +39,7 @@ describe("useRefetchOnLoadEnd", () => {
     await act(async () => pending[1]("after load"))
     await act(async () => pending[0]("before load"))
 
-    expect(result.current).toBe("after load")
+    expect(result.current[0]).toBe("after load")
   })
 
   it("never returns another workspace's data", async () => {
@@ -52,6 +52,17 @@ describe("useRefetchOnLoadEnd", () => {
 
     rerender({ workspaceId: "ws-2", loading: true })
 
-    expect(result.current).toBeNull()
+    expect(result.current[0]).toBeNull()
+  })
+
+  it("fetches again on demand", async () => {
+    const { fetcher, pending } = deferredFetcher()
+    const { result } = renderHook(() => useRefetchOnLoadEnd(fetcher, "ws-1"))
+    await act(async () => pending[0]("first"))
+
+    act(() => result.current[1]())
+    await act(async () => pending[1]("second"))
+
+    expect(result.current[0]).toBe("second")
   })
 })

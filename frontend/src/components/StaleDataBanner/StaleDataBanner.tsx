@@ -42,7 +42,7 @@ export function StaleDataBanner({
     const ok = await refresh.run(() => jobsApi.retryMaterialization(workspaceId, {}))
     if (!ok) return
     onRefreshStarted?.()
-    // Stay disabled until the job poll sees the load and hides this banner.
+    // Stay disabled until the refetched freshness sees the queued load and hides this banner.
     refresh.settle(5000)
   }
 
