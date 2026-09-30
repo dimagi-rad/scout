@@ -6,6 +6,7 @@ serving its last snapshot while a healthy sibling refreshes. The run looked
 stale and to reconnect.
 """
 
+import re
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -166,12 +167,13 @@ async def test_prompt_names_the_stale_source_and_says_reconnect(
         )
 
     hq_line = next(line for line in volatile.splitlines() if "Test Domain (CommCare HQ)" in line)
-    assert "30 days ago" in hq_line
+    # Calendar days: a run straddling UTC midnight may count one more.
+    assert re.search(r"\b3[01] days ago", hq_line)
     assert "NOT refreshed" in hq_line
     assert ErrorCode.AUTH_TOKEN_EXPIRED in hq_line
     assert RECONNECT_HQ in hq_line
     connect_line = next(line for line in volatile.splitlines() if "Reading Opp" in line)
-    assert "today" in connect_line
+    assert "today" in connect_line or "1 day ago" in connect_line
     assert "refreshed by the latest load" in connect_line
     assert "NOT refreshed" not in connect_line
     assert "do not tell the user that a refresh cannot help" in volatile
@@ -373,7 +375,12 @@ async def test_prompt_says_when_a_stale_source_is_left_out_of_the_queryable_data
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    "code", [ErrorCode.WORKSPACE_TENANT_SKIPPED, ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE]
+    "code",
+    [
+        ErrorCode.WORKSPACE_TENANT_SKIPPED,
+        ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
+        ErrorCode.WORKSPACE_ROLE_INSUFFICIENT,
+    ],
 )
 async def test_a_denial_about_the_requester_keeps_the_last_real_load(workspace, tenant, user, code):
     """Another member losing a different source says nothing about this one."""
@@ -437,3 +444,51 @@ def test_a_mid_run_role_loss_is_not_told_to_just_retry():
 
     assert "write access" in advice
     assert "refresh the data again" not in advice
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("same_member", [True, False])
+async def test_a_refused_sign_in_downgrades_only_that_members_own_refresh(
+    workspace, tenant, user, other_user, same_member
+):
+    """Another member's working sign-in just refreshed the data; the refusal is not about it."""
+    loader = user if same_member else other_user
+    await WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).aupdate(
+        last_load={"refresh": REFRESHED, "at": timezone.now().isoformat(), "by": str(loader.id)}
+    )
+    entry = {
+        "tenant": tenant.external_id,
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "success": False,
+        "error_code": ErrorCode.AUTH_TOKEN_EXPIRED,
+    }
+
+    await arecord_load_outcomes(workspace.id, [entry], str(user.id), refused=True)
+
+    (source,) = await aworkspace_source_freshness(workspace.id)
+    assert source["not_refreshed"] is same_member
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_headless_load_refused_for_an_expired_sign_in_records_the_skip(
+    workspace, tenant, user
+):
+    """Recipes check access before the wrapped core does, so they record it themselves."""
+    entry = {
+        "tenant": tenant.external_id,
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "success": False,
+        "error_code": ErrorCode.AUTH_TOKEN_EXPIRED,
+    }
+    denial = {"status": "denied", "error_code": ErrorCode.AUTH_TOKEN_EXPIRED, "tenants": [entry]}
+    with patch(
+        "apps.workspaces.tasks._materialization_write_denial", AsyncMock(return_value=denial)
+    ):
+        await workspaces_tasks.materialize_workspace_blocking(str(workspace.id), str(user.id))
+
+    (source,) = await aworkspace_source_freshness(workspace.id, user.id)
+    assert source["not_refreshed"] is True

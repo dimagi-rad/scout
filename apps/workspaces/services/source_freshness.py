@@ -117,14 +117,14 @@ async def _last_fetched(tenant_ids: Iterable) -> dict[str, datetime]:
 
 
 async def arecord_load_outcomes(
-    workspace_id, tenant_results: list[dict], user_id="", *, only_listed: bool = False
+    workspace_id, tenant_results: list[dict], user_id="", *, refused: bool = False
 ) -> list:
     """Persist what this load did with each source and return it for the run result.
 
     A source that was only published as already loaded keeps a standing skip:
     nothing checked its credential, so "reused" must not clear it. A
     source the load never reached (it was cancelled first) is recorded as skipped,
-    unless ``only_listed`` says the results cover only some sources on purpose.
+    unless the load was ``refused``: a refusal lists only the sources it is about.
     Never raises: the load already happened, and its summary must still return.
     """
     try:
@@ -141,7 +141,7 @@ async def arecord_load_outcomes(
         for wt in workspace_tenants:
             tenant_id = str(wt.tenant_id)
             entry = entries.get(tenant_id)
-            if entry is None and only_listed:
+            if entry is None and refused:
                 continue
             if entry is None:
                 outcome = {"refresh": SKIPPED, "error_code": "", "not_reached": True}
@@ -152,7 +152,15 @@ async def arecord_load_outcomes(
                 (entry.get("result") or {}).get("status") == "already_loaded"
             )
             stored = wt.last_load if isinstance(wt.last_load, dict) else {}
-            if not (only_published and stored.get("refresh") == SKIPPED):
+            # A refusal of one member's sign-in says nothing about data another
+            # member's working sign-in just refreshed.
+            refused_after_other_refresh = (
+                refused
+                and stored.get("refresh") in {REFRESHED, REUSED}
+                and stored.get("by") != outcome["by"]
+            )
+            keep_skip = only_published and stored.get("refresh") == SKIPPED
+            if not (keep_skip or refused_after_other_refresh):
                 await WorkspaceTenant.objects.filter(id=wt.id).aupdate(last_load=outcome)
             last = fetched.get(tenant_id)
             source = {

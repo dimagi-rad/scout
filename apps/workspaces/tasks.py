@@ -712,23 +712,6 @@ async def _workspace_tenant_ids(workspace_id) -> list:
     ]
 
 
-async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
-    """A load refused before it started still left some sources unrefreshed (#715).
-
-    Only a source the requester's own sign-in failed for is recorded. A role
-    denial, a source skipped for another one, or an inconclusive check says
-    nothing about the source, so its record from the last real load stands.
-    """
-    failed = [
-        entry
-        for entry in denial.get("tenants") or []
-        if entry.get("error_code") in _DENIAL_CODES_ABOUT_THE_SOURCE
-    ]
-    if failed:
-        await arecord_load_outcomes(workspace_id, failed, user_id, only_listed=True)
-    return denial
-
-
 _DENIAL_CODES_ABOUT_THE_SOURCE = frozenset(
     {
         ErrorCode.AUTH_TOKEN_EXPIRED,
@@ -737,6 +720,23 @@ _DENIAL_CODES_ABOUT_THE_SOURCE = frozenset(
         ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
     }
 )
+
+
+async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
+    """A load refused before it started still left some sources unrefreshed (#715).
+
+    Only a source the requester's own sign-in or membership failed for is
+    recorded. A role denial, a source skipped for another one, or an
+    inconclusive check says nothing about the source, so its record stands.
+    """
+    failed = [
+        entry
+        for entry in denial.get("tenants") or []
+        if entry.get("error_code") in _DENIAL_CODES_ABOUT_THE_SOURCE
+    ]
+    if failed:
+        await arecord_load_outcomes(workspace_id, failed, user_id, refused=True)
+    return denial
 
 
 def serialized_workspace_materialization(function):
@@ -1336,7 +1336,7 @@ async def materialize_workspace_blocking(
     """
     denial = await _materialization_write_denial(workspace_id, user_id)
     if denial is not None:
-        return denial
+        return await _recorded_denial(workspace_id, user_id, denial)
     await _await_in_progress_materializations(workspace_id)
     return await materialize_workspace_core(workspace_id, user_id, job_id)
 
