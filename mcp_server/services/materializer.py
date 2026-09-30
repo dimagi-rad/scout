@@ -625,7 +625,9 @@ def _run_discover_phase(
         )
     else:
         loader = CommCareMetadataLoader(
-            domain=tenant_membership.tenant.external_id, credential=credential
+            domain=tenant_membership.tenant.external_id,
+            credential=credential,
+            server=tenant_membership.tenant.server,
         )
     metadata = loader.load()
 
@@ -879,11 +881,12 @@ def _load_source(
             source_name, tenant_membership, credential, schema_name, conn, on_page
         )
     domain = tenant_membership.tenant.external_id
+    server = tenant_membership.tenant.server
     if source_name == "cases":
-        loader = CommCareCaseLoader(domain=domain, credential=credential)
+        loader = CommCareCaseLoader(domain=domain, credential=credential, server=server)
         return _write_cases(loader.load_pages(), schema_name, conn, on_page=on_page)
     if source_name == "forms":
-        loader = CommCareFormLoader(domain=domain, credential=credential)
+        loader = CommCareFormLoader(domain=domain, credential=credential, server=server)
         return _write_forms(loader.load_pages(), schema_name, conn, on_page=on_page)
     raise ValueError(f"Unknown source '{source_name}'. Known sources: cases, forms")
 

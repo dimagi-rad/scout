@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import requests_mock
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
 from django.db import IntegrityError
 from django.utils import timezone
 
+from apps.common.commcare_servers import UnknownCommCareServer
 from apps.common.identifiers import refresh_schema_name, tenant_schema_name
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.access_verification_providers import verify_provider
@@ -22,9 +25,14 @@ from apps.users.services.access_verification_types import (
 from apps.users.services.credential_resolver import aresolve_credential
 from apps.users.services.tenant_resolution import resolve_commcare_domains
 from apps.users.services.token_refresh import get_token_url
+from mcp_server.loaders.commcare_cases import CommCareCaseLoader
+from mcp_server.loaders.commcare_forms import CommCareFormLoader
+from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
+from mcp_server.services.materializer import _run_discover_phase
 
 EU = "https://eu.commcarehq.org"
 WWW = "https://www.commcarehq.org"
+CREDENTIAL = {"type": "oauth", "value": "secret"}
 
 
 def _domains(*names):
@@ -50,6 +58,60 @@ def _eu_identity(user, *, token="eu-access", expires_at=None):
 
 
 _aeu_identity = sync_to_async(_eu_identity)
+
+
+class TestLoaders:
+    def test_case_loader_reads_the_eu_server(self):
+        with requests_mock.Mocker() as mock:
+            mock.get(f"{EU}/a/dom/api/case/v2/", json={"cases": [{"case_id": "c"}], "next": None})
+            cases = CommCareCaseLoader("dom", CREDENTIAL, server="eu").load()
+        assert [c["case_id"] for c in cases] == ["c"]
+        assert mock.last_request.url.startswith(f"{EU}/a/dom/api/case/v2/")
+
+    def test_form_loader_reads_the_eu_server(self):
+        with requests_mock.Mocker() as mock:
+            mock.get(f"{EU}/a/dom/api/v0.5/form/", json={"objects": [], "meta": {"next": None}})
+            assert CommCareFormLoader("dom", CREDENTIAL, server="eu").load() == []
+        assert mock.last_request.url.startswith(f"{EU}/a/dom/api/v0.5/form/")
+
+    def test_metadata_loader_reads_the_eu_server(self):
+        with requests_mock.Mocker() as mock:
+            mock.get(
+                f"{EU}/a/dom/api/v0.5/application/", json={"objects": [], "meta": {"next": None}}
+            )
+            CommCareMetadataLoader("dom", CREDENTIAL, server="eu").load()
+        assert mock.last_request.url.startswith(f"{EU}/a/dom/api/v0.5/application/")
+
+    def test_eu_loader_never_follows_a_next_link_to_www(self):
+        with requests_mock.Mocker() as mock:
+            mock.get(
+                f"{EU}/a/dom/api/case/v2/",
+                json={"cases": [], "next": f"{WWW}/a/dom/api/case/v2/?cursor=x"},
+            )
+            with pytest.raises(ValueError, match="origin"):
+                CommCareCaseLoader("dom", CREDENTIAL, server="eu").load()
+        assert mock.call_count == 1
+
+    def test_default_loader_still_reads_www(self):
+        with requests_mock.Mocker() as mock:
+            mock.get(f"{WWW}/a/dom/api/case/v2/", json={"cases": [], "next": None})
+            CommCareCaseLoader("dom", CREDENTIAL).load()
+        assert mock.last_request.url.startswith(f"{WWW}/a/dom/api/case/v2/")
+
+    def test_unknown_server_is_refused_rather_than_sent_to_www(self):
+        with pytest.raises(UnknownCommCareServer):
+            CommCareCaseLoader("dom", CREDENTIAL, server="mars")
+
+    @pytest.mark.django_db
+    def test_discovery_phase_uses_the_tenant_server(self):
+        tenant = Tenant.objects.create(provider="commcare", server="eu", external_id="dom")
+        pipeline = SimpleNamespace(has_metadata_discovery=True, provider="commcare")
+        with requests_mock.Mocker() as mock:
+            mock.get(
+                f"{EU}/a/dom/api/v0.5/application/", json={"objects": [], "meta": {"next": None}}
+            )
+            _run_discover_phase(SimpleNamespace(tenant=tenant), CREDENTIAL, pipeline)
+        assert mock.last_request.url.startswith(f"{EU}/")
 
 
 @pytest.mark.django_db(transaction=True)

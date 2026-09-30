@@ -12,6 +12,7 @@ import logging
 import requests
 from requests.adapters import HTTPAdapter
 
+from apps.common.commcare_servers import DEFAULT_SERVER, commcare_base_url
 from apps.common.errors import (
     CommCareAccessDeniedError,
     CommCareAuthError,  # noqa: F401  — re-exported; callers catch the provider base
@@ -66,8 +67,12 @@ class CommCareBaseLoader:
     applies consistent timeouts and auth headers to every request.
     """
 
-    def __init__(self, domain: str, credential: dict[str, str]) -> None:
+    def __init__(
+        self, domain: str, credential: dict[str, str], server: str = DEFAULT_SERVER
+    ) -> None:
         self.domain = domain
+        # The tenant's HQ server; an unknown key raises rather than defaulting to www.
+        self.base_url = commcare_base_url(server)
         # A mid-run token refresher (OAuth only); None for API keys, which never
         # expire mid-run (arch #252, finding 14#3).
         self._refresh = credential.get("refresh")
@@ -81,7 +86,7 @@ class CommCareBaseLoader:
         """Resolve a next link against the last page, enforcing the HQ origin."""
         if not next_url:
             return None
-        return ProviderURLPolicy("https://www.commcarehq.org").resolve(
+        return ProviderURLPolicy(self.base_url).resolve(
             next_url, relative_to=getattr(self, "_response_url", base_url)
         )
 
@@ -96,7 +101,7 @@ class CommCareBaseLoader:
             resp = get_with_auth_refresh(
                 self._session,
                 url,
-                trusted_origin="https://www.commcarehq.org",
+                trusted_origin=self.base_url,
                 refresh=self._refresh,
                 params=params,
                 timeout=HTTP_TIMEOUT,
