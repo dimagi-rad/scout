@@ -9,8 +9,9 @@ from uuid import uuid4
 import pytest
 import requests_mock
 from allauth.core.exceptions import ImmediateHttpResponse
-from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialLogin, SocialToken
 from asgiref.sync import sync_to_async
+from django.contrib.sites.models import Site
 from django.db import IntegrityError
 from django.test import override_settings
 from django.utils import timezone
@@ -27,7 +28,7 @@ from apps.users.services.access_verification_types import (
     CredentialRequestSnapshot,
     VerificationOutcome,
 )
-from apps.users.services.credential_resolver import aresolve_credential
+from apps.users.services.credential_resolver import aget_connection_token, aresolve_credential
 from apps.users.services.oauth_scope import account_scope
 from apps.users.services.tenant_resolution import resolve_commcare_domains
 from apps.users.services.token_refresh import get_token_url, token_health
@@ -300,8 +301,9 @@ class TestCrossServerSignInGuard:
         login = _make_sociallogin(stored_id, "a@dimagi.com", adapter_id="commcare")
         assert EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login) is None
 
+    @pytest.mark.django_db
     @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
-    def test_a_commcare_login_with_no_provider_fails_closed(self):
+    def test_a_commcare_login_with_no_findable_provider_fails_closed(self):
         login = _make_sociallogin("commcare", "a@dimagi.com")
         login.provider = None
         with pytest.raises(ImmediateHttpResponse):
@@ -319,8 +321,34 @@ class TestCrossServerSignInGuard:
             request, {"id": 7, "email": "a@dimagi.com", "username": "a"}
         )
         assert login.account.provider == "commcare_eu_prod"
+        assert login.provider.id == "commcare"
         with pytest.raises(ImmediateHttpResponse):
             EncryptingSocialAccountAdapter().pre_social_login(request, login)
+
+    @pytest.mark.django_db
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    @pytest.mark.parametrize("round_trip", [False, True])
+    def test_a_real_www_alias_sign_in_passes(self, round_trip):
+        app = SocialApp.objects.create(
+            provider="commcare", provider_id="commcare_prod", name="HQ", client_id="c"
+        )
+        request = _make_request()
+        login = CommCareProvider(request, app=app).sociallogin_from_response(
+            request, {"id": 7, "email": "a@dimagi.com", "username": "a"}
+        )
+        if round_trip:
+            login = SocialLogin.deserialize(login.serialize())
+        assert login.provider is not None
+        assert EncryptingSocialAccountAdapter().pre_social_login(request, login) is None
+
+    @pytest.mark.django_db
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
+    def test_a_login_without_its_provider_is_placed_through_its_app(self):
+        site, _ = Site.objects.get_or_create(id=1, defaults={"domain": "testserver"})
+        SocialApp.objects.create(provider="commcare", name="HQ", client_id="c").sites.add(site)
+        login = _make_sociallogin("commcare", "a@dimagi.com")
+        login.provider = None
+        assert EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login) is None
 
 
 def test_token_health_reads_the_credential_server():
@@ -342,3 +370,14 @@ async def test_discovery_without_a_named_identity_binds_the_eu_one(user, httpx_m
 
     conn = await TenantConnection.objects.aget(user=user, provider="commcare")
     assert (conn.scope_key, conn.social_account_id) == ("eu", account.pk)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_an_unbound_www_connection_never_falls_back_to_an_eu_token(user):
+    await _aeu_identity(user)
+    conn = await TenantConnection.objects.acreate(
+        user=user, provider="commcare", credential_type=TenantConnection.OAUTH
+    )
+
+    assert await aget_connection_token(conn) is None

@@ -115,9 +115,10 @@ async def aget_connection_token(conn) -> SocialToken | None:
     # user_id, not user: callers select_related("connection") but not its user, so
     # touching conn.user here would be a sync FK fetch inside an async view.
     tokens = _social_token_qs(conn.user_id, conn.provider).select_related("account", "app")
-    # OCS keeps the unfiltered read: the membership team check below it turns a
-    # wrong-team token into an actionable "connect that team" error (07#3).
-    if canonical_provider(conn.provider) != "commcare":
+    # A scope-less OCS connection keeps the unfiltered read: the membership team check
+    # turns a wrong-team token into an actionable "connect that team" error (07#3).
+    # A scoped one must match, since that check trusts the connection's own scope.
+    if canonical_provider(conn.provider) != "commcare" and not conn.scope_key:
         return await tokens.afirst()
     async for token in tokens:
         if account_scope(token.account) == conn.scope_key:
