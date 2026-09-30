@@ -1,7 +1,21 @@
+import datetime
+import uuid
+import uuid as uuid_module
+
+import freezegun
 import pytest
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 
 from apps.users.models import Tenant
-from apps.workspaces.models import SchemaState, Workspace, WorkspaceTenant, WorkspaceViewSchema
+from apps.workspaces.models import (
+    SchemaState,
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 
 
 @pytest.fixture
@@ -20,11 +34,9 @@ def tenant2(db):
 
 @pytest.fixture
 def workspace(db):
-    from django.contrib.auth import get_user_model
 
     User = get_user_model()
     user = User.objects.create_user(email="user@example.com", password="pass")
-    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     ws = Workspace.objects.create(name="Multi-Tenant WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
@@ -44,9 +56,6 @@ def test_workspace_view_schema_can_be_created(workspace):
 
 
 def test_workspace_view_schema_touch_updates_last_accessed_at(workspace):
-    import datetime
-
-    import freezegun
 
     vs = WorkspaceViewSchema.objects.create(
         workspace=workspace,
@@ -60,7 +69,6 @@ def test_workspace_view_schema_touch_updates_last_accessed_at(workspace):
 
 
 def test_workspace_view_schema_is_one_to_one(workspace):
-    from django.db import IntegrityError
 
     WorkspaceViewSchema.objects.create(
         workspace=workspace,
@@ -77,7 +85,6 @@ def test_workspace_view_schema_is_one_to_one(workspace):
 
 def test_workspace_tenant_has_uuid_pk(workspace, tenant):
     """WorkspaceTenant must have a UUID primary key (Amendment A)."""
-    import uuid
 
     wt = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
     assert isinstance(wt.id, uuid.UUID)
@@ -85,7 +92,6 @@ def test_workspace_tenant_has_uuid_pk(workspace, tenant):
 
 def test_workspace_view_schema_has_uuid_pk(workspace):
     """WorkspaceViewSchema must have a UUID primary key matching other models."""
-    import uuid as uuid_module
 
     vs = WorkspaceViewSchema.objects.create(workspace=workspace, schema_name="ws_aabbccdd11223344")
     assert isinstance(vs.pk, uuid_module.UUID)

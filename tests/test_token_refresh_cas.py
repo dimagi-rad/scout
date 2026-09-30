@@ -25,6 +25,7 @@ from apps.users.services.token_refresh import (
     TokenRefreshRejected,
     TokenRefreshStatus,
     TokenRefreshUnavailable,
+    _preflight_token,
     refresh_oauth_token_result,
     refresh_oauth_token_result_sync,
 )
@@ -99,8 +100,6 @@ async def test_refresh_loser_returns_explicit_superseded_persisted_snapshot(
 ):
     token, _connection = oauth_identity
     if mode == "async":
-        from apps.users.services import token_refresh
-
         original = token_refresh._apersist_refresh_response
 
         async def replace_then_persist(*args, **kwargs):
@@ -111,8 +110,6 @@ async def test_refresh_loser_returns_explicit_superseded_persisted_snapshot(
 
         monkeypatch.setattr(token_refresh, "_apersist_refresh_response", replace_then_persist)
     else:
-        from apps.users.services import token_refresh
-
         original = token_refresh._persist_refresh_response
 
         def replace_then_persist(*args, **kwargs):
@@ -173,8 +170,6 @@ async def test_refresh_cas_rejects_changed_connection_identity(
         TenantConnection.objects.filter(pk=connection.pk).update(**{changed_field: value})
 
     if mode == "async":
-        from apps.users.services import token_refresh
-
         original = token_refresh._apersist_refresh_response
 
         async def mutate_then_persist(*args, **kwargs):
@@ -183,8 +178,6 @@ async def test_refresh_cas_rejects_changed_connection_identity(
 
         monkeypatch.setattr(token_refresh, "_apersist_refresh_response", mutate_then_persist)
     else:
-        from apps.users.services import token_refresh
-
         original = token_refresh._persist_refresh_response
 
         def mutate_then_persist(*args, **kwargs):
@@ -217,8 +210,6 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
     token, connection = oauth_identity
     attempted = []
     if mode == "async":
-        from apps.users.services import token_refresh
-
         original = token_refresh._apersist_refresh_failure
 
         async def deny_then_record(*args, **kwargs):
@@ -233,8 +224,6 @@ async def test_refresh_failure_marker_rejects_newer_denial_fence(
         with pytest.raises(TokenRefreshRejected):
             await refresh_oauth_token_result(token, URL)
     else:
-        from apps.users.services import token_refresh
-
         original = token_refresh._persist_refresh_failure
 
         def deny_then_record(*args, **kwargs):
@@ -550,7 +539,6 @@ async def test_invalid_grant_stays_terminal_when_failure_recording_is_unavailabl
 
 @pytest.mark.django_db(transaction=True)
 def test_nested_refresh_preflight_restores_callers_timeouts(oauth_identity):
-    from apps.users.services.token_refresh import _preflight_token
 
     token, _ = oauth_identity
     with transaction.atomic():

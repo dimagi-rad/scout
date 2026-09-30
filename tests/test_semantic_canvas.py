@@ -14,8 +14,13 @@ import pytest
 from django.db import connections, transaction
 from langchain_core.messages import AIMessage, ToolMessage
 
+from apps.agents.graph.base import _build_tools
 from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
-from apps.agents.tools.canvas_tool import create_canvas_tools
+from apps.agents.tools.canvas_tool import (
+    can_write_canvas,
+    create_canvas_read_tool,
+    create_canvas_tools,
+)
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
     apply_operations,
@@ -1790,7 +1795,6 @@ def _empty_registry():
 
 
 def test_can_write_canvas_matches_rest_policy(workspace, user, read_user):
-    from apps.agents.tools.canvas_tool import can_write_canvas
 
     assert can_write_canvas(workspace, user) is True
     assert can_write_canvas(workspace, read_user) is False
@@ -1800,7 +1804,6 @@ def test_can_write_canvas_matches_rest_policy(workspace, user, read_user):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_canvas_write_tools_forbidden_for_read_role(workspace, read_user, semantic_model):
-    from apps.agents.tools.canvas_tool import create_canvas_tools
 
     thread = await Thread.objects.acreate(workspace=workspace, user=read_user)
     tools = {t.name: t for t in create_canvas_tools(workspace, read_user, str(thread.id))}
@@ -1822,7 +1825,6 @@ async def test_canvas_write_tools_forbidden_for_read_role(workspace, read_user, 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_canvas_read_rechecks_removed_membership_before_thread_lookup(workspace, read_user):
-    from apps.agents.tools.canvas_tool import create_canvas_read_tool
 
     conversation_id = str(uuid.uuid4())
     tool = create_canvas_read_tool(workspace, read_user, conversation_id)
@@ -1836,7 +1838,6 @@ async def test_canvas_read_rechecks_removed_membership_before_thread_lookup(work
 
 @pytest.mark.django_db
 def test_build_tools_gates_canvas_manager_on_write_role(workspace, user):
-    from apps.agents.graph.base import _build_tools
 
     writable = {
         t.name

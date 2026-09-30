@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from allauth.socialaccount import providers
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from cryptography.fernet import Fernet
@@ -22,8 +23,11 @@ from apps.common.error_codes import ErrorCode
 from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.services.credential_resolver import _social_token_qs
 from apps.users.services.token_refresh import (
+    PersistedTokenSnapshot,
     TokenRefreshError,
     TokenRefreshRejected,
+    TokenRefreshResult,
+    TokenRefreshStatus,
     TokenRefreshUnavailable,
     refresh_oauth_token,
     token_needs_refresh,
@@ -46,7 +50,6 @@ class TestTokenEncryptionAdapter:
 
     @pytest.fixture
     def adapter(self):
-        from apps.users.adapters import EncryptingSocialAccountAdapter
 
         return EncryptingSocialAccountAdapter()
 
@@ -111,7 +114,6 @@ class TestCommCareConnectProvider:
 
     def test_provider_registered(self):
         """CommCare Connect provider should be discoverable by allauth."""
-        from allauth.socialaccount import providers
 
         registry = providers.registry
         provider_cls = registry.get_class("commcare_connect")
@@ -141,12 +143,6 @@ class TestTokenRefresh:
 
     @pytest.mark.asyncio
     async def test_refresh_updates_token(self, httpx_mock):
-        from apps.users.services.token_refresh import (
-            PersistedTokenSnapshot,
-            TokenRefreshResult,
-            TokenRefreshStatus,
-            refresh_oauth_token,
-        )
 
         token_url = "https://www.commcarehq.org/oauth/token/"
         httpx_mock.add_response(
@@ -197,10 +193,6 @@ class TestTokenRefresh:
 
     @pytest.mark.asyncio
     async def test_refresh_failure_raises(self, httpx_mock):
-        from apps.users.services.token_refresh import (
-            TokenRefreshError,
-            refresh_oauth_token,
-        )
 
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_response(url=token_url, method="POST", status_code=400)

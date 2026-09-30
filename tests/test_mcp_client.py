@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import apps.agents.mcp_client as mod
+
 # --- MCP client tests ---
 
 
@@ -18,7 +20,6 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_get_mcp_tools_returns_tools(self):
         """get_mcp_tools creates a client and returns its tools."""
-        import apps.agents.mcp_client as mod
 
         mod.reset_circuit_breaker()
         mod.reset_tools_cache()
@@ -44,7 +45,6 @@ class TestMCPClient:
     async def test_get_mcp_tools_caches_static_tool_schemas(self):
         """get_mcp_tools caches the tool list (schemas are static) so a second
         call does NOT do another tools/list HTTP round trip (arch #253, 10#1)."""
-        import apps.agents.mcp_client as mod
 
         mod.reset_circuit_breaker()
         mod.reset_tools_cache()
@@ -76,7 +76,6 @@ class TestMCPClient:
     async def test_get_mcp_tools_sends_shared_secret_header(self):
         """The MCP client sends the shared secret in the connection headers so the
         server's SharedSecretMiddleware accepts the call (arch #253, 01#6)."""
-        import apps.agents.mcp_client as mod
 
         mod.reset_circuit_breaker()
         mod.reset_tools_cache()
@@ -102,7 +101,6 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_get_mcp_tools_omits_header_when_secret_unset(self):
         """No header is sent when the secret is unset; the server then rejects the call."""
-        import apps.agents.mcp_client as mod
 
         mod.reset_circuit_breaker()
         mod.reset_tools_cache()
@@ -128,7 +126,6 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_circuit_breaker_opens_after_failures(self):
         """Circuit breaker raises MCPServerUnavailable after threshold failures."""
-        import apps.agents.mcp_client as mod
 
         mod.reset_circuit_breaker()
 

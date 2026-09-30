@@ -12,6 +12,7 @@ import pytest
 
 from apps.common.errors import ExpectedStateError
 from apps.semantic.services import cube_client as cube_client_module
+from apps.semantic.services import query
 from apps.semantic.services.cube_client import CubeClient, CubeConnectionError, CubeQueryError
 
 
@@ -300,7 +301,6 @@ async def test_exhausted_transport_error_keeps_its_cause(monkeypatch):
 async def test_retry_exhaustion_is_reported_as_connection_not_validation(
     monkeypatch, failure, code
 ):
-    from apps.semantic.services import query
 
     monkeypatch.setattr(
         query,

@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pytest
+from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
 from apps.users.models import Tenant, TenantMembership
@@ -23,7 +24,6 @@ def api_client():
 
 @pytest.fixture
 def setup(transactional_db):
-    from django.contrib.auth import get_user_model
 
     User = get_user_model()
     user = User.objects.create_user(email="smoke@example.com", password="pass")

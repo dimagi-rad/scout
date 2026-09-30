@@ -1,13 +1,13 @@
 import pytest
 
-from apps.users.services.tenant_resolution import resolve_commcare_domains
+from apps.users.models import Tenant, TenantMembership
+from apps.users.services.tenant_resolution import CommCareAuthError, resolve_commcare_domains
 
 
 @pytest.mark.django_db(transaction=True)
 class TestResolveCommcareDomains:
     @pytest.mark.asyncio
     async def test_fetches_and_stores_domains(self, user, httpx_mock):
-        from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         httpx_mock.add_response(
             url="https://www.commcarehq.org/api/user_domains/v1/",
@@ -26,14 +26,10 @@ class TestResolveCommcareDomains:
         assert memberships[0].tenant.external_id == "dimagi"
         assert memberships[1].tenant.external_id == "test-project"
 
-        from apps.users.models import TenantMembership
-
         assert await TenantMembership.objects.filter(user=user).acount() == 2
 
     @pytest.mark.asyncio
     async def test_updates_existing_memberships(self, user, httpx_mock):
-        from apps.users.models import Tenant, TenantMembership
-        from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         tenant = await Tenant.objects.acreate(
             provider="commcare", external_id="dimagi", canonical_name="Old Name"
@@ -55,10 +51,6 @@ class TestResolveCommcareDomains:
 
     @pytest.mark.asyncio
     async def test_auth_error_raises(self, user, httpx_mock):
-        from apps.users.services.tenant_resolution import (
-            CommCareAuthError,
-            resolve_commcare_domains,
-        )
 
         httpx_mock.add_response(
             url="https://www.commcarehq.org/api/user_domains/v1/",

@@ -5,8 +5,10 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.utils import timezone
 
+from apps.users.adapters import decrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers import TenantDescriptor
+from apps.users.services.tenant_resolution import resolve_commcare_domains
 
 User = get_user_model()
 
@@ -87,7 +89,6 @@ class TestResolveCommcareDomains:
     async def test_creates_oauth_connection(self, user):
         """resolve_commcare_domains must create a single OAuth TenantConnection
         and link every membership it produces to it."""
-        from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         fake_domains = [
             {"domain_name": "domain-a", "project_name": "Domain A"},
@@ -118,7 +119,6 @@ class TestResolveCommcareDomains:
     @pytest.mark.asyncio
     async def test_idempotent_on_re_resolve(self, user):
         """Calling resolve twice does not create duplicate TenantConnections."""
-        from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         fake_domains = [{"domain_name": "domain-a", "project_name": "Domain A"}]
         with patch(
@@ -166,7 +166,6 @@ class TestTenantConnectionEndpoints:
 
     def test_api_key_stored_encrypted(self, client, db, user):
         """The raw DB value must not contain the plaintext credential."""
-        from apps.users.adapters import decrypt_credential
 
         client.force_login(user)
         plaintext = "user@example.com:supersecretkey"

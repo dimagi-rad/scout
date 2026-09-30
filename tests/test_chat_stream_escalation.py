@@ -15,7 +15,9 @@ surfaces.
 
 import json
 
+import httpx
 import pytest
+from anthropic import APIStatusError
 from langchain_core.messages import AIMessage
 
 from apps.agents.graph.base import ESCALATION_MESSAGE
@@ -165,8 +167,6 @@ async def test_generic_exception_emits_error_chunk():
 async def test_transient_overload_does_not_emit_error_chunk():
     """The transient-overload path is auto-retried by the frontend and must NOT
     emit a hard error chunk (which would surface a dead-end error state)."""
-    import httpx
-    from anthropic import APIStatusError
 
     body = {
         "type": "error",

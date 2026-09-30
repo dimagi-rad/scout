@@ -109,7 +109,6 @@ def api_connection(user, tenant):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finish", ["deadline", "cancellation"])
 async def test_oauth_refresh_holds_network_slot_until_cancelled_request_stops(monkeypatch, finish):
-    from apps.users.services import access_verification_service
 
     claim = SimpleNamespace(
         request=SimpleNamespace(token_snapshot=(1, "refresh", 1)),
@@ -315,7 +314,6 @@ async def test_complete_ocs_listing_does_not_verify_requested_other_team_history
 async def test_complete_listing_does_not_verify_membership_rebound_before_publication(
     user, tenant, api_connection, monkeypatch
 ):
-    from apps.users.services import access_verification_service
 
     connection, membership = api_connection
     replacement = await TenantConnection.objects.acreate(
@@ -411,7 +409,6 @@ async def test_pre_refresh_waiter_consumes_rebased_attempt_receipt(
     rotate_before_waiter,
     expected_calls,
 ):
-    from apps.users.services import access_verification_service
 
     app = await SocialApp.objects.acreate(
         provider="commcare", name="CommCare", client_id="client", secret="secret"
@@ -524,7 +521,6 @@ async def test_rotation_during_provider_call_cannot_publish_stale_success(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_denial_during_refresh_rebase_releases_lease(user, tenant, httpx_mock, monkeypatch):
-    from apps.users.services import access_verification_service
 
     app = await SocialApp.objects.acreate(
         provider="commcare", name="CommCare", client_id="client", secret="secret"
@@ -581,7 +577,6 @@ async def test_denial_during_refresh_rebase_releases_lease(user, tenant, httpx_m
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_token_rotation_before_refresh_load_releases_lease(user, tenant, monkeypatch):
-    from apps.users.services import access_verification_service
 
     app = await SocialApp.objects.acreate(
         provider="commcare", name="CommCare", client_id="client", secret="secret"
@@ -852,7 +847,6 @@ async def test_cancellation_during_initial_claim_drains_and_releases_lease(
 async def test_cancellation_during_waiter_takeover_does_not_create_late_claim(
     user, tenant, api_connection, monkeypatch
 ):
-    from apps.users.services import access_verification_service
 
     connection, _membership = api_connection
     await VerificationControl.objects.acreate(

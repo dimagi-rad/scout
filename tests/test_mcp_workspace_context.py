@@ -1,17 +1,24 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from django.conf import settings
+from django.contrib.auth import get_user_model
 
-from apps.workspaces.models import SchemaState, Workspace, WorkspaceTenant, WorkspaceViewSchema
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    SchemaState,
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
+from mcp_server.context import load_workspace_context
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_load_workspace_context_single_tenant_delegates_to_tenant_context():
-    from django.contrib.auth import get_user_model
-
-    from apps.users.models import Tenant
-    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     User = get_user_model()
     user = await User.objects.acreate_user(email="ctx@example.com", password="pass")
@@ -24,7 +31,6 @@ async def test_load_workspace_context_single_tenant_delegates_to_tenant_context(
 
     with patch("mcp_server.context.load_tenant_context", new_callable=AsyncMock) as mock_ltc:
         mock_ltc.return_value = MagicMock(schema_name="ctx_domain")
-        from mcp_server.context import load_workspace_context
 
         result = await load_workspace_context(str(ws.id))
 
@@ -37,11 +43,6 @@ async def test_load_workspace_context_single_tenant_delegates_to_tenant_context(
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_load_workspace_context_multi_tenant_uses_view_schema():
-    from django.conf import settings
-    from django.contrib.auth import get_user_model
-
-    from apps.users.models import Tenant
-    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     User = get_user_model()
     user = await User.objects.acreate_user(email="ctx2@example.com", password="pass")
@@ -64,7 +65,6 @@ async def test_load_workspace_context_multi_tenant_uses_view_schema():
     with patch.object(settings, "MANAGED_DATABASE_URL", "postgresql://test/db"):
         with patch("mcp_server.context._parse_db_url") as mock_parse:
             mock_parse.return_value = {"host": "localhost", "dbname": "db"}
-            from mcp_server.context import load_workspace_context
 
             ctx = await load_workspace_context(str(ws.id))
 
@@ -75,10 +75,6 @@ async def test_load_workspace_context_multi_tenant_uses_view_schema():
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_load_workspace_context_multi_tenant_raises_if_no_active_view_schema():
-    from django.contrib.auth import get_user_model
-
-    from apps.users.models import Tenant
-    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     User = get_user_model()
     user = await User.objects.acreate_user(email="ctx3@example.com", password="pass")
@@ -92,8 +88,6 @@ async def test_load_workspace_context_multi_tenant_raises_if_no_active_view_sche
     await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
-
-    from mcp_server.context import load_workspace_context
 
     with pytest.raises(ValueError, match="No active view schema"):
         await load_workspace_context(str(ws.id))

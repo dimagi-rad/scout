@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 from django.utils import timezone
 
+from apps.users.models import Tenant
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.models import (
     Workspace,
@@ -97,7 +98,6 @@ class TestPendingInviteEmail:
 
 class TestDescribeWorkspaceSources:
     def _ws_for(self, provider, name):
-        from apps.users.models import Tenant
 
         ws = Workspace.objects.create(name=name)
         tenant = Tenant.objects.create(

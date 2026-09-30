@@ -2,6 +2,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.workspaces.models import (
@@ -11,11 +12,11 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceViewSchema,
 )
+from apps.workspaces.tasks import expire_inactive_schemas
 
 
 @pytest.fixture
 def workspace_with_view_schema(transactional_db):
-    from django.contrib.auth import get_user_model
 
     User = get_user_model()
     user = User.objects.create_user(email="ttl@example.com", password="pass")
@@ -34,7 +35,6 @@ def workspace_with_view_schema(transactional_db):
 async def test_expire_inactive_schemas_also_expires_stale_view_schemas(
     workspace_with_view_schema,
 ):
-    from apps.workspaces.tasks import expire_inactive_schemas
 
     _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = timezone.now() - timedelta(hours=25)
@@ -54,7 +54,6 @@ async def test_expire_inactive_schemas_also_expires_stale_view_schemas(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_recently_accessed_view_schema_not_expired(workspace_with_view_schema):
-    from apps.workspaces.tasks import expire_inactive_schemas
 
     _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = timezone.now() - timedelta(hours=1)
@@ -69,7 +68,6 @@ async def test_recently_accessed_view_schema_not_expired(workspace_with_view_sch
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_view_schema_with_null_last_accessed_not_expired(workspace_with_view_schema):
-    from apps.workspaces.tasks import expire_inactive_schemas
 
     _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = None
