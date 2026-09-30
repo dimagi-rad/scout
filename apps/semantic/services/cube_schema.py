@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 # are pruned at promote time so rebuilds don't accumulate rows forever.
 KEEP_INACTIVE_CUBE_SCHEMAS = 5
 
-# The validator compiles on a single worker thread, times each request from
-# enqueue, and on a 60s timeout restarts the worker and fails everything pending.
-# On 2026-09-29 ~20 workspace reloads validated at once, interleaved there, and
-# all timed out (SCOUT-DJANGO-3Q/3R/3V). Even two large compiles can interleave
-# past 60s, so one at a time; session advisory locks enforce it across processes.
+# The validator compiles one request at a time on a single worker thread, so time
+# a request spends queued there still counts against VALIDATE_BUDGET_SECONDS. On
+# 2026-09-29 ~20 workspace reloads validated at once and all timed out
+# (SCOUT-DJANGO-3Q/3R/3V). Queue here instead, where a build can fail over; session
+# advisory locks enforce one at a time across processes.
 VALIDATOR_CONCURRENCY = 1
 VALIDATOR_LOCK_CLASS = 0x53435656
 # The wait occupies a worker thread, and a build that gives up keeps serving its
