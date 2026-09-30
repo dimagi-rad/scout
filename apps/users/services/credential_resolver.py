@@ -203,7 +203,7 @@ async def aconnection_status(conn) -> str:
     failed = await TenantConnection.objects.filter(
         pk=conn.pk, oauth_refresh_failure_fingerprint=credential_fingerprint(token_obj)
     ).aexists()
-    return token_health(token_obj, conn.provider, refresh_failed=failed)
+    return token_health(token_obj, conn.provider, scope_key=conn.scope_key, refresh_failed=failed)
 
 
 def _make_token_refresher(

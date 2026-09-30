@@ -284,7 +284,8 @@ def providers_view(request):
             if ocs_scope_unusable(provider, account_scope(social_token.account)):
                 _record_status(seen_statuses, provider, "needs_team")
                 continue
-            token_url = get_token_url(provider, account_scope(social_token.account))
+            scope_key = account_scope(social_token.account)
+            token_url = get_token_url(provider, scope_key)
             can_refresh = bool(token_url and social_token.token_secret and social_token.app)
             refresh_failed = False
             if can_refresh and token_needs_refresh(social_token.expires_at):
@@ -304,7 +305,9 @@ def providers_view(request):
             _record_status(
                 seen_statuses,
                 provider,
-                token_health(social_token, provider, refresh_failed=refresh_failed),
+                token_health(
+                    social_token, provider, scope_key=scope_key, refresh_failed=refresh_failed
+                ),
             )
         token_status = {
             provider: next(
