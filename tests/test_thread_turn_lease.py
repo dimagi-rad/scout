@@ -42,6 +42,7 @@ from apps.workspaces.services.reconciliation import (
 )
 from apps.workspaces.tasks import (
     RESUME_BUSY_MAX_ATTEMPTS,
+    RESUME_LOST_LEASE_SUMMARY,
     RESUME_THREAD_BUSY_SUMMARY,
     resume_thread_after_materialization,
 )
@@ -62,11 +63,6 @@ async def _lease_row(thread_id):
         .values("turn_lease_token", "turn_lease_expires_at")
         .aget()
     )
-
-
-def _fail_unawaited(coro):
-    coro.close()
-    raise RuntimeError("db down")
 
 
 async def _expire(thread_id):
@@ -163,11 +159,25 @@ class TestLease:
         thread = await _thread("lease-release-retry")
         lease = await atry_acquire_turn_lease(thread.id)
 
+        failing_update = MagicMock(aupdate=AsyncMock(side_effect=RuntimeError("db down")))
         with (
-            patch.object(turn_lease.asyncio, "shield", side_effect=_fail_unawaited),
+            patch.object(turn_lease.Thread.objects, "filter", return_value=failing_update),
             pytest.raises(RuntimeError),
         ):
             await lease.release()
+        await lease.release()
+
+        assert (await _lease_row(thread.id))["turn_lease_token"] is None
+
+    async def test_a_release_cancelled_mid_update_still_frees_the_thread(self):
+        thread = await _thread("lease-release-cancelled")
+        lease = await atry_acquire_turn_lease(thread.id)
+
+        releasing = asyncio.create_task(lease.release())
+        await asyncio.sleep(0)
+        releasing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await releasing
         await lease.release()
 
         assert (await _lease_row(thread.id))["turn_lease_token"] is None
@@ -480,6 +490,22 @@ class TestSyntheticFailureMessage:
         agent.aupdate_state.assert_awaited_once()
         assert (await _lease_row(tj.thread_id))["turn_lease_token"] is None
 
+    async def test_a_hung_write_under_a_held_lease_is_time_bounded(self):
+        tj = await ThreadJob.objects.select_related("thread__workspace", "thread__user").aget(
+            id=(await _resumable_job("synthetic-hung", 880015)).id
+        )
+
+        async def hang(*_args, **_kwargs):
+            await asyncio.sleep(30)
+
+        reconciliation = "apps.workspaces.services.reconciliation"
+        with (
+            patch(f"{reconciliation}.build_agent_for_resume", side_effect=hang),
+            patch(f"{reconciliation}.SYNTHETIC_MESSAGE_TIMEOUT_SECONDS", 0.1),
+        ):
+            async with asyncio.timeout(5):
+                await persist_synthetic_failure_message(tj, "failed", holds_turn_lease=True)
+
 
 def test_lease_outlives_several_missed_heartbeats():
     assert (
@@ -534,6 +560,32 @@ class TestResumeDeadline:
         persist.assert_awaited_once()
         assert persist.await_args.kwargs == {"holds_turn_lease": True}
         assert (await _lease_row(tj.thread_id))["turn_lease_token"] is None
+
+    async def test_a_resume_that_loses_the_thread_mid_run_fails_its_job_without_writing(self):
+        tj = await _resumable_job("resume-lost", 880014)
+
+        async def lose_the_thread_then_stall(*_args, **_kwargs):
+            await _expire(tj.thread_id)
+            await atry_acquire_turn_lease(tj.thread_id)
+            await asyncio.sleep(5)
+
+        agent = MagicMock(ainvoke=AsyncMock(side_effect=lose_the_thread_then_stall))
+        persist = AsyncMock()
+        with (
+            patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05),
+            patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+            patch("apps.workspaces.tasks._persist_synthetic_failure_message", persist),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await asyncio.create_task(
+                resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+            )
+
+        await tj.arefresh_from_db()
+        assert tj.state == ThreadJob.State.FAILED
+        assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
+        assert tj.error_summary == RESUME_LOST_LEASE_SUMMARY
+        persist.assert_not_awaited()
 
 
 @pytest.fixture

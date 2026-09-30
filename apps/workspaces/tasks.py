@@ -24,7 +24,7 @@ from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
-from apps.chat.turn_lease import atry_acquire_turn_lease
+from apps.chat.turn_lease import TurnLease, atry_acquire_turn_lease
 from apps.common.capacity import CapacityExhausted, classify_capacity_error
 from apps.common.error_codes import ErrorCode, code_of
 from apps.semantic.services.cube_schema import (
@@ -3166,6 +3166,12 @@ RESUME_THREAD_BUSY_SUMMARY = (
 )
 
 
+RESUME_LOST_LEASE_SUMMARY = (
+    "The data load finished, but another response took over the conversation before "
+    "the follow-up was posted. Please re-ask your question."
+)
+
+
 def _resume_lock(thread_job_id: str) -> str:
     return f"resume-thread-busy-{thread_job_id}"
 
@@ -3208,10 +3214,29 @@ async def resume_thread_after_materialization(
         except TimeoutError:
             if not deadline.expired():
                 raise
-            return await _fail_resume_past_deadline(tj)
+            return await _fail_resume_past_deadline(tj, lease)
+        except asyncio.CancelledError:
+            # The heartbeat cancels a run that lost the thread; settle the job now
+            # rather than leave it RUNNING for the stale sweep to misreport.
+            if lease.lost:
+                await _fail_resume_lost_lease(tj)
+            raise
 
 
-async def _fail_resume_past_deadline(tj: ThreadJob) -> dict:
+async def _fail_resume_lost_lease(tj: ThreadJob) -> None:
+    logger.error("resume: ThreadJob %s lost its thread's turn lease; marking FAILED", tj.id)
+    # No synthetic chat message: another run owns the thread now.
+    await ThreadJob.objects.filter(
+        id=tj.id, state__in=[ThreadJob.State.RUNNING, ThreadJob.State.PENDING]
+    ).aupdate(
+        state=ThreadJob.State.FAILED,
+        completed_at=timezone.now(),
+        failure_phase=ThreadJob.FailurePhase.RESUME,
+        error_summary=RESUME_LOST_LEASE_SUMMARY,
+    )
+
+
+async def _fail_resume_past_deadline(tj: ThreadJob, lease: TurnLease) -> dict:
     logger.error("resume: ThreadJob %s overran its deadline; marking FAILED", tj.id)
     updated = await ThreadJob.objects.filter(
         id=tj.id, state__in=[ThreadJob.State.RUNNING, ThreadJob.State.PENDING]
@@ -3221,7 +3246,9 @@ async def _fail_resume_past_deadline(tj: ThreadJob) -> dict:
         failure_phase=ThreadJob.FailurePhase.RESUME,
         error_summary="The agent took too long to respond after materialization. Please retry.",
     )
-    if updated:
+    # The write is time-bounded inside persist_synthetic_failure_message, and a
+    # lease lost meanwhile cancels this task before it can write.
+    if updated and not lease.lost:
         await _persist_synthetic_failure_message(tj, RESUME_TIMEOUT_MESSAGE, holds_turn_lease=True)
     return {"status": "resume_deadline"}
 
