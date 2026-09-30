@@ -7,6 +7,7 @@ with string values, so a divergence between builders shows up as a row here.
 import environ
 import pytest
 import yaml
+from django.core.exceptions import ImproperlyConfigured
 from django.db.utils import ConnectionHandler
 from psycopg.conninfo import conninfo_to_dict
 
@@ -50,7 +51,10 @@ def _django(url, tmp_path):
     # settings.DATABASES["default"] (env.db) as psycopg receives it, which is also
     # what data_operation._connection_params passes to psycopg.connect.
     wrapper = ConnectionHandler({"default": environ.Env.db_url_config(url)})["default"]
-    params = wrapper.get_connection_params()
+    try:
+        params = wrapper.get_connection_params()
+    except ImproperlyConfigured:
+        return "ImproperlyConfigured"
     return {key: str(value) for key, value in params.items() if key in _LIBPQ_KEYS and value}
 
 
@@ -64,6 +68,9 @@ QUERY_OPTIONS = (
     "&application_name=scout-x&options=-c%20statement_timeout%3D5000"
 )
 MINIMAL = "postgresql://localhost/scout"
+NO_DBNAME = "postgresql://u:p@db.example:5432/"
+# An unencoded "+" stays literal on every path (it is not form-encoding for a space).
+RAW_PLUS = "postgresql://u:p+q@db.example:5432/scout"
 
 _ENCODED_IDENTITY = {
     "host": "db.example",
@@ -115,14 +122,28 @@ EXPECTED = {
         "libpq": {"host": "localhost", "dbname": "scout"},
         "django": {"host": "localhost", "dbname": "scout"},
     },
+    NO_DBNAME: {
+        # Divergence: MCP connects to "scout", while dbt and the raw-URL paths leave
+        # libpq to fall back to the user name, and Django refuses to start.
+        "mcp": {**_UP, "port": "5432", "dbname": "scout", "sslmode": "prefer"},
+        "dbt": {**_UP, "port": "5432", "dbname": ""},
+        "libpq": {"host": "db.example", "port": "5432", "user": "u", "password": "p"},
+        "django": "ImproperlyConfigured",
+    },
+    RAW_PLUS: {
+        "mcp": {**_UP, "port": "5432", "password": "p+q", "sslmode": "prefer"},
+        "dbt": {**_UP, "port": "5432", "password": "p+q"},
+        "libpq": {**_UP, "port": "5432", "password": "p+q"},
+        "django": {**_UP, "port": "5432", "password": "p+q"},
+    },
 }
 
 
 @pytest.mark.parametrize("builder", sorted(BUILDERS))
 @pytest.mark.parametrize(
     "url",
-    [ENCODED, SSLMODE_NO_PORT, QUERY_OPTIONS, MINIMAL],
-    ids=["encoded", "sslmode-no-port", "query-options", "minimal"],
+    [ENCODED, SSLMODE_NO_PORT, QUERY_OPTIONS, MINIMAL, NO_DBNAME, RAW_PLUS],
+    ids=["encoded", "sslmode-no-port", "query-options", "minimal", "no-dbname", "raw-plus"],
 )
 def test_builder_output(url, builder, tmp_path):
     assert BUILDERS[builder](url, tmp_path) == EXPECTED[url][builder]
