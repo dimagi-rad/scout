@@ -118,7 +118,11 @@ def test_ocs_topic_dataset_can_be_committed_and_bound_to_dashboard(workspace, us
         committed = commit_canvas(canvas, user)
         assert committed["blocked"] is False
         assert committed["cube_schema"] == {"ok": True, "content_hash": cube_schema.content_hash}
-        build_schema.assert_called_once_with(workspace, model=model)
+        build_schema.assert_called_once_with(
+            workspace,
+            model=model,
+            slot_wait_seconds=canvas_commit_module.INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS,
+        )
 
         dataset = model.datasets.get(name="message_topics")
         assert dataset.primary_key == "message_id"

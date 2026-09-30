@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from asgiref.sync import async_to_sync
 from django.conf import settings
-from django.db import close_old_connections, transaction
+from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
+from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.catalog import ensure_semantic_model
 from apps.semantic.services.cube import DROPPED_JOIN_CODES, cube_schema_yaml, generate_cube_schema
-from apps.semantic.services.cube_client import CubeClient
+from apps.semantic.services.cube_client import CubeClient, CubeServiceUnavailable
 from mcp_server.context import QueryContext, load_workspace_context
 
 logger = logging.getLogger(__name__)
@@ -23,9 +26,100 @@ logger = logging.getLogger(__name__)
 # are pruned at promote time so rebuilds don't accumulate rows forever.
 KEEP_INACTIVE_CUBE_SCHEMAS = 5
 
+# The validator compiles on a single worker thread, times each request from
+# enqueue, and on a 60s timeout restarts the worker and fails everything pending.
+# On 2026-09-29 ~20 workspace reloads validated at once, interleaved there, and
+# all timed out (SCOUT-DJANGO-3Q/3R/3V). Even two large compiles can interleave
+# past 60s, so one at a time; session advisory locks enforce it across processes.
+VALIDATOR_CONCURRENCY = 1
+VALIDATOR_LOCK_CLASS = 0x53435656
+# The wait occupies a worker thread, and a build that gives up keeps serving its
+# last good schema and is retried on the next rebuild, so failing over beats
+# queueing a whole burst.
+VALIDATOR_SLOT_WAIT_SECONDS = 300.0
+# A canvas commit builds on its request thread: this wait, VALIDATE_BUDGET_SECONDS
+# (70s) and the 30s warm-up must stay under the API proxy's 120s read timeout
+# (frontend/nginx.prod-kamal.conf), or the user gets a 504 for a commit that landed.
+# The 110s total is not headroom: commit_canvas's diagnostics and writes come first.
+INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 10.0
+VALIDATOR_SLOT_POLL_SECONDS = 1.0
+
 
 class CubeSchemaBuildError(RuntimeError):
     """Raised when generated Cube schema content cannot be promoted."""
+
+
+class CubeValidatorUnavailableError(CubeSchemaBuildError, ExpectedStateError):
+    """Validation could not run, so the build fails and the last good schema serves (#622).
+
+    Expected for the reasons on ``CubeServiceUnavailable``; the failure is
+    recorded on ``model.metadata["last_build"]`` for the resume task to disclose.
+    """
+
+
+class CubeValidatorBusyError(CubeValidatorUnavailableError):
+    """No validator slot freed up in time, so validation never ran."""
+
+
+class _ValidatorSlot:
+    """One of ``VALIDATOR_CONCURRENCY`` slots shared by every worker process.
+
+    Normally taken just before validation and released as soon as it returns,
+    so promotion and the Cube warm-up never hold it. A refresh with an active
+    schema must validate inside its transaction (so a failure rolls the catalog
+    refresh back, #622) but must not wait there under row locks. So it only
+    tries for the slot there; under contention it waits outside and holds the
+    slot across the redone refresh and generation too.
+    """
+
+    def __init__(self, slot: int) -> None:
+        self._slot: int | None = slot
+
+    def release(self) -> None:
+        if self._slot is None:
+            return
+        slot, self._slot = self._slot, None
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [VALIDATOR_LOCK_CLASS, slot])
+                released = cursor.fetchone()[0]
+        except Exception as exc:
+            # A session lock outlives the transaction; closing the session frees it.
+            logger.warning("Could not release Cube validator slot %s: %s", slot, exc)
+            # Closing inside atomic() would break the rest of the promotion; the
+            # build's final close_old_connections() drops the session and the lock.
+            if not connection.in_atomic_block:
+                connection.close()
+            return
+        if not released:
+            # The session was replaced mid-build, dropping the slot early.
+            logger.warning("Cube validator slot %s was already released", slot)
+
+
+@contextmanager
+def _validator_slot(wait_seconds: float):
+    deadline = time.monotonic() + wait_seconds
+    while (slot := _try_acquire_validator_slot()) is None:
+        if time.monotonic() >= deadline:
+            raise CubeValidatorBusyError(
+                "Cube schema validation could not start: every validator slot stayed busy "
+                f"for {wait_seconds:.0f}s."
+            )
+        time.sleep(VALIDATOR_SLOT_POLL_SECONDS)
+    held = _ValidatorSlot(slot)
+    try:
+        yield held
+    finally:
+        held.release()
+
+
+def _try_acquire_validator_slot() -> int | None:
+    with connection.cursor() as cursor:
+        for slot in range(VALIDATOR_CONCURRENCY):
+            cursor.execute("SELECT pg_try_advisory_lock(%s, %s)", [VALIDATOR_LOCK_CLASS, slot])
+            if cursor.fetchone()[0]:
+                return slot
+    return None
 
 
 def get_active_cube_schema(workspace, *, model: SemanticModel) -> CubeSchema:
@@ -44,7 +138,12 @@ def get_active_cube_schema(workspace, *, model: SemanticModel) -> CubeSchema:
     return active
 
 
-def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = None) -> CubeSchema:
+def build_and_promote_cube_schema(
+    workspace,
+    *,
+    model: SemanticModel | None = None,
+    slot_wait_seconds: float = VALIDATOR_SLOT_WAIT_SECONDS,
+) -> CubeSchema:
     """Generate Cube YAML, validate it, and promote it if valid.
 
     A failed build must not take down a workspace that already has an ACTIVE
@@ -57,9 +156,11 @@ def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = No
     try:
         close_old_connections()
         if model is None:
-            return _build_and_promote_refreshed_model(workspace)
+            return _build_and_promote_refreshed_model(workspace, slot_wait_seconds)
         try:
-            return _build_validate_and_promote(workspace, model)
+            return _build_validate_and_promote(
+                workspace, model, slot_wait_seconds=slot_wait_seconds
+            )
         except Exception as exc:
             _record_build_failure(workspace, model, exc)
             raise
@@ -108,7 +209,7 @@ def record_cube_schema_build_deferred(workspace, reason: str) -> None:
         logger.exception("Failed to record deferred Cube promotion for workspace %s", workspace.id)
 
 
-def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
+def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> CubeSchema:
     """Refresh physical datasets and promote them atomically when possible.
 
     Materialization rebuilds the physical semantic catalog from newly loaded
@@ -129,15 +230,22 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
     if not has_active:
         model = ensure_semantic_model(workspace)
         try:
-            return _build_validate_and_promote(workspace, model)
+            return _build_validate_and_promote(
+                workspace, model, slot_wait_seconds=slot_wait_seconds
+            )
         except Exception as exc:
             _record_build_failure(workspace, model, exc)
             raise
 
     try:
-        with transaction.atomic():
-            model = ensure_semantic_model(workspace)
-            return _build_validate_and_promote(workspace, model)
+        try:
+            return _refresh_validate_and_promote(workspace, slot_wait_seconds=0)
+        except CubeValidatorBusyError:
+            # Validation runs inside the refresh transaction, where waiting would hold
+            # its row locks. Only under contention, wait outside it and redo the
+            # refresh while holding the slot.
+            with _validator_slot(slot_wait_seconds) as slot:
+                return _refresh_validate_and_promote(workspace, slot=slot)
     except Exception as exc:
         # The atomic block rolled back the attempted catalog refresh, so record
         # the failure on the last-known-good model rather than the rolled-back
@@ -148,7 +256,26 @@ def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
         raise
 
 
-def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
+def _refresh_validate_and_promote(
+    workspace,
+    *,
+    slot: _ValidatorSlot | None = None,
+    slot_wait_seconds: float = VALIDATOR_SLOT_WAIT_SECONDS,
+) -> CubeSchema:
+    with transaction.atomic():
+        model = ensure_semantic_model(workspace)
+        return _build_validate_and_promote(
+            workspace, model, slot=slot, slot_wait_seconds=slot_wait_seconds
+        )
+
+
+def _build_validate_and_promote(
+    workspace,
+    model: SemanticModel,
+    *,
+    slot: _ValidatorSlot | None = None,
+    slot_wait_seconds: float = VALIDATOR_SLOT_WAIT_SECONDS,
+) -> CubeSchema:
     try:
         schema = generate_cube_schema(model)
         content = cube_schema_yaml(schema)
@@ -158,7 +285,13 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
         raise CubeSchemaBuildError(f"Could not generate Cube schema: {exc}") from exc
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
-    validation = async_to_sync(CubeClient().validate_schema)(content)
+    with nullcontext(slot) if slot is not None else _validator_slot(slot_wait_seconds) as held:
+        try:
+            validation = async_to_sync(CubeClient().validate_schema)(content)
+        except CubeServiceUnavailable as exc:
+            raise CubeValidatorUnavailableError(str(exc)) from exc
+        finally:
+            held.release()
     validation_diagnostics = _diagnostics_from_validation(validation)
     diagnostics = [
         *(model.metadata or {}).get("catalog_diagnostics", []),
@@ -237,6 +370,11 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
                     cube_schema,
                     ctx,
                 )
+            )
+        except CubeServiceUnavailable as exc:
+            # Cube still serves the new schema: it compiles on the first query instead.
+            logger.warning(
+                "Cube schema warm-up did not complete for workspace %s: %s", workspace.id, exc
             )
         except Exception:
             logger.exception(
