@@ -7,6 +7,7 @@ import {
 } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { StaleDataBanner } from "./StaleDataBanner"
+import { clearStaleBannerDismissal } from "./staleData"
 import { freshness, freshSource as source } from "./testFixtures"
 
 interface FixtureArgs {
@@ -34,11 +35,7 @@ const meta = {
     const getFreshness = workspaceApi.getFreshness
     useAppStore.setState({ domains: [{ id: "story-ws", role: args.role } as WorkspaceListItem] })
     workspaceApi.getFreshness = async () => freshness(args.sources)
-    try {
-      sessionStorage.removeItem("scout:stale-banner-dismissed:story-ws")
-    } catch {
-      // Storybook may run without storage; the story still renders.
-    }
+    clearStaleBannerDismissal("story-ws")
     return () => {
       workspaceApi.getFreshness = getFreshness
       useAppStore.setState(previous)

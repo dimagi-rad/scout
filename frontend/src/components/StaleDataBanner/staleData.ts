@@ -71,6 +71,14 @@ export function isStaleBannerDismissed(workspaceId: string): boolean {
   }
 }
 
+export function clearStaleBannerDismissal(workspaceId: string): void {
+  try {
+    sessionStorage.removeItem(dismissKey(workspaceId))
+  } catch {
+    // Storage may be unavailable; there is then no stored dismissal to clear.
+  }
+}
+
 export function dismissStaleBanner(workspaceId: string): void {
   try {
     sessionStorage.setItem(dismissKey(workspaceId), "1")

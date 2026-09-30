@@ -12,6 +12,7 @@ import {
 } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { READ_ONLY_REFRESH_NOTE, StaleDataBanner } from "./StaleDataBanner"
+import { dismissStaleBanner } from "./staleData"
 import { freshness, freshSource } from "./testFixtures"
 
 const WS = "ws-1"
@@ -195,7 +196,7 @@ describe("StaleDataBanner", () => {
   })
 
   it("does not carry a dismiss over to another workspace", async () => {
-    sessionStorage.setItem("scout:stale-banner-dismissed:other-ws", "1")
+    dismissStaleBanner("other-ws")
     mockDetail([source(72)])
     renderBanner()
 
