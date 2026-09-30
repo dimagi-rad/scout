@@ -20,7 +20,7 @@ class CommCareServer:
     label: str
     base_url: str
     # The allauth provider id whose sign-in lands on this server.
-    oauth_provider_id: str
+    provider_id: str
 
     @property
     def host(self) -> str:
@@ -68,13 +68,13 @@ def commcare_base_url(key: str | None) -> str:
     return get_commcare_server(key).base_url
 
 
-def server_for_oauth_provider(provider_id: str) -> str:
+def server_for_provider(provider_id: str) -> str:
     """The server key an allauth CommCare identity signed in to.
 
     Aliases configured for the www app (``commcare_prod``) predate EU support and
     stay on www.
     """
     for server in COMMCARE_SERVERS.values():
-        if server.key and provider_id == server.oauth_provider_id:
+        if server.key and provider_id == server.provider_id:
             return server.key
     return DEFAULT_SERVER
