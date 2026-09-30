@@ -13,9 +13,10 @@ from __future__ import annotations
 from typing import Any
 
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
 
+from apps.semantic.canvas.service import allowed_custom_dataset_tables
 from apps.semantic.models import (
     CustomDataset,
     SemanticCanvasChange,
@@ -25,6 +26,7 @@ from apps.semantic.models import (
     SemanticModelRevision,
     SemanticRelationship,
 )
+from apps.semantic.services.custom_datasets import CustomDatasetError, compile_custom_dataset_sql
 
 DATASET = "dataset"
 FIELD = "field"
@@ -249,26 +251,34 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
             raise RevisionUndoError("NOT_FOUND", "No such data model revision in this workspace.")
         if SemanticModelRevision.objects.filter(reverts=revision).exists():
             raise RevisionUndoError("ALREADY_UNDONE", "This revision has already been undone.")
-        model = SemanticModel.objects.get(workspace=workspace)
+        model = _lock_model(workspace)
         entries = list(revision.changes or [])
         restoring = {
             entry["object_uuid"]
             for entry in entries
             if entry["object_type"] == DATASET and entry.get("after") is None
         }
+        removing = {entry["object_uuid"] for entry in entries if entry.get("before") is None}
         conflicts = [
             conflict
             for entry in entries
-            if (conflict := _undo_conflict(workspace, model, entry, restoring)) is not None
+            if (conflict := _undo_conflict(workspace, model, entry, restoring, removing))
+            is not None
         ]
         if conflicts:
             raise RevisionUndoError(
                 "CONFLICT",
-                "Part of this revision was changed afterwards, so undoing it would overwrite "
-                "a later change. Undo the later revision first, or edit the objects directly.",
+                "Undoing this revision would overwrite or break a later change. Undo the later "
+                "revision first, or edit the objects directly.",
                 conflicts,
             )
-        undo_entries = [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
+        try:
+            with transaction.atomic():
+                undo_entries = [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
+        except IntegrityError as exc:
+            raise RevisionUndoError(
+                "CONFLICT", "The restored objects collide with the current data model."
+            ) from exc
         removed = [entry["object_uuid"] for entry in undo_entries if entry["after"] is None]
         # A settled canvas row over a now-missing object would read as a conflict.
         SemanticCanvasChange.objects.filter(
@@ -315,7 +325,20 @@ def _conflict(entry: dict[str, Any], message: str) -> dict[str, Any]:
     }
 
 
-def _undo_conflict(workspace, model, entry: dict[str, Any], restoring: set[str]):
+def _lock_model(workspace) -> SemanticModel:
+    # Same no-wait lock a custom-dataset commit takes, so an undo never races a
+    # catalog refresh that re-syncs the custom datasets it adds or removes.
+    try:
+        return SemanticModel.objects.select_for_update(nowait=True).get(workspace=workspace)
+    except OperationalError as exc:
+        if getattr(exc.__cause__, "sqlstate", None) == "55P03":
+            raise RevisionUndoError(
+                "CATALOG_BUSY", "The data model is being refreshed. Try the undo again shortly."
+            ) from exc
+        raise
+
+
+def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[str]):
     object_type = entry["object_type"]
     before, after = entry.get("before"), entry.get("after")
     current = _current(entry)
@@ -329,12 +352,61 @@ def _undo_conflict(workspace, model, entry: dict[str, Any], restoring: set[str])
         now = snapshot_object(object_type, current, deep=True)
         if _authored(object_type, now) != _authored(object_type, after):
             return _conflict(entry, "It was edited afterwards, so removing it would lose that.")
+        if object_type == FIELD and (user := _field_user(model, after, removing)):
+            return _conflict(entry, f"{user} uses it, so removing it would break that.")
         return None
     now = snapshot_object(object_type, current)
-    for key, (_old, new) in _changed_values(before, after).items():
+    changed = _changed_values(before, after)
+    for key, (_old, new) in changed.items():
         if key != CURATED_KEY and _read(now, key) != new:
             return _conflict(entry, f"Its {key.removeprefix('metadata.')} changed afterwards.")
+    if "name" in changed:
+        return _rename_conflict(workspace, model, entry, before, after, removing)
     return None
+
+
+def _rename_conflict(workspace, model, entry, before, after, removing: set[str]):
+    old_name = before["name"]
+    if entry["object_type"] == FIELD:
+        taken = SemanticField.objects.filter(dataset_id=after["dataset_id"], name=old_name)
+        if user := _field_user(model, after, removing):
+            return _conflict(entry, f"{user} uses its current name, so renaming would break it.")
+    elif entry["object_type"] == RELATIONSHIP:
+        taken = SemanticRelationship.objects.filter(workspace=workspace, name=old_name)
+    else:
+        return None
+    if taken.exclude(id=entry["object_uuid"]).exists():
+        return _conflict(entry, f"Another {entry['object_type']} is now named '{old_name}'.")
+    return None
+
+
+def _field_user(model, field_snapshot: dict[str, Any], removing: set[str]) -> str:
+    """Name a field or join that references this field by ``{name}`` or ``{dataset.name}``."""
+    dataset, name = field_snapshot["dataset_name"], field_snapshot["name"]
+    qualified = f"{{{dataset}.{name}}}"
+    local = f"{{{name}}}"
+    fields = (
+        SemanticField.objects.filter(dataset__semantic_model=model)
+        .exclude(id__in=[*removing, field_snapshot["id"]])
+        .select_related("dataset")
+    )
+    for field in fields:
+        metadata = field.metadata or {}
+        text = " ".join(
+            [
+                field.expression or "",
+                str(metadata.get("cube_sql") or ""),
+                *(str(item.get("sql", "")) for item in metadata.get("filters") or []),
+            ]
+        )
+        if qualified in text or (field.dataset.name == dataset and local in text):
+            return f"Field {field.dataset.name}.{field.name}"
+    joins = SemanticRelationship.objects.filter(
+        workspace_id=model.workspace_id, join_expression__contains=qualified
+    ).exclude(id__in=removing)
+    if relationship := joins.first():
+        return f"Relationship {relationship.name}"
+    return ""
 
 
 def _restore_conflict(workspace, model, entry, before, restoring: set[str]):
@@ -346,11 +418,18 @@ def _restore_conflict(workspace, model, entry, before, restoring: set[str]):
         )
         if taken:
             return _conflict(entry, f"Another dataset is now named '{name}'.")
+        if before.get("custom_dataset"):
+            try:
+                _compiled_custom_sql(model, before["custom_dataset"])
+            except CustomDatasetError as exc:
+                return _conflict(entry, f"Its SQL no longer works on the current data: {exc}")
         for relationship in before.get("relationships", []):
             if problem := _relationship_restore_problem(workspace, relationship, restoring):
                 return _conflict(entry, problem)
         return None
     if object_type == FIELD:
+        if before["dataset_id"] in restoring:
+            return None
         if not model.datasets.filter(id=before["dataset_id"]).exists():
             return _conflict(entry, "Its dataset no longer exists.")
         if SemanticField.objects.filter(
@@ -515,12 +594,15 @@ def _recreate(workspace, model, object_type: str, snapshot: dict[str, Any]):
             created_by_id=creator_id,
             **{column: custom_snapshot[column] for column in CUSTOM_DATASET_COLUMNS},
         )
+    metadata = dict(snapshot.get("metadata") or {})
+    if custom_snapshot:
+        metadata["cube_sql"] = _compiled_custom_sql(model, custom_snapshot)
     dataset = SemanticDataset.objects.create(
         id=snapshot["id"],
         semantic_model=model,
         workspace=workspace,
         custom_dataset=custom,
-        metadata=snapshot.get("metadata") or {},
+        metadata=metadata,
         **{column: snapshot[column] for column in DATASET_COLUMNS},
     )
     for field in snapshot.get("fields") or []:
@@ -528,6 +610,14 @@ def _recreate(workspace, model, object_type: str, snapshot: dict[str, Any]):
     for relationship in snapshot.get("relationships") or []:
         _create_relationship(workspace, relationship)
     return dataset
+
+
+def _compiled_custom_sql(model, custom_snapshot: dict[str, Any]) -> str:
+    """Recompile against today's tables; the snapshot's SQL may predate a refresh."""
+    return compile_custom_dataset_sql(
+        custom_snapshot["definition_sql"],
+        allowed_tables=allowed_custom_dataset_tables(model),
+    )
 
 
 def _create_field(snapshot: dict[str, Any]) -> SemanticField:

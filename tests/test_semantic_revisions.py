@@ -268,6 +268,54 @@ def test_undo_of_a_create_ignores_catalog_refresh_drift(
     assert not semantic_model.datasets.filter(name="visit_stats").exists()
 
 
+def _measure_op(name, **extra):
+    return {
+        "op": "create",
+        "object_type": "field",
+        "value": {"dataset": "raw_visits", "name": name, "field_type": "measure", **extra},
+    }
+
+
+def test_undo_refuses_to_remove_a_field_another_field_uses(canvas, semantic_model, workspace, user):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    first = SemanticModelRevision.objects.get()
+    _commit(
+        canvas,
+        user,
+        [
+            _measure_op(
+                "avg_amount",
+                measure_type="number",
+                cube_sql="{total_amount}::numeric / NULLIF({total_amount}, 0)",
+            )
+        ],
+    )
+
+    with pytest.raises(RevisionUndoError) as exc_info:
+        undo_revision(workspace, first.id, user)
+
+    assert exc_info.value.code == "CONFLICT"
+    assert "raw_visits.avg_amount" in exc_info.value.conflicts[0]["message"]
+    assert (
+        semantic_model.datasets.get(name="raw_visits").fields.filter(name="total_amount").exists()
+    )
+
+
+def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(
+    canvas, semantic_model, workspace, user, custom_sql
+):
+    _create_visit_stats(canvas, user)
+    _commit(canvas, user, [{"op": "delete_object", "object": "dataset/visit_stats"}])
+    deleted = SemanticModelRevision.objects.order_by("-created_at").first()
+    SemanticDataset.objects.filter(name="raw_visits").update(is_visible=False)
+
+    with pytest.raises(RevisionUndoError) as exc_info:
+        undo_revision(workspace, deleted.id, user)
+
+    assert "SQL no longer works" in exc_info.value.conflicts[0]["message"]
+    assert not SemanticDataset.objects.filter(name="visit_stats").exists()
+
+
 def test_undo_twice_is_refused(canvas, semantic_model, workspace, user):
     _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
     revision = SemanticModelRevision.objects.get()
