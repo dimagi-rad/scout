@@ -26,9 +26,10 @@ from apps.chat.helpers import (
     async_login_required,
     repair_dangling_tool_calls,
 )
-from apps.chat.models import Thread, ThreadJob
+from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
+from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import classify_capacity_error
 from apps.common.http import parse_json_object
 from apps.workspaces.access import access_denied_body, role_satisfies
@@ -118,6 +119,11 @@ def _foreign_thread_response(thread: Thread, user, workspace) -> JsonResponse:
 
 
 MAX_MESSAGE_LENGTH = 10_000
+
+TURN_LEASE_WAIT_SECONDS = 2
+THREAD_BUSY_MESSAGE = (
+    "A response is still being generated for this conversation. Please retry in a moment."
+)
 
 
 def _last_message_text(message) -> tuple[str | None, JsonResponse | None]:
@@ -211,26 +217,6 @@ async def chat_view(request):
     if existing_thread is not None and _is_foreign_thread(existing_thread, user, workspace):
         return _foreign_thread_response(existing_thread, user, workspace)
 
-    # A RUNNING resume job means a resume ainvoke is writing this thread's checkpoint;
-    # a concurrent live turn is a second unsynchronized writer (no CAS), so reject it.
-    resume_in_flight = (
-        existing_thread is not None
-        and await ThreadJob.objects.filter(
-            thread=existing_thread,
-            state=ThreadJob.State.RUNNING,
-        ).aexists()
-    )
-    if resume_in_flight:
-        return JsonResponse(
-            {
-                "error": (
-                    "A background response is still being generated for this "
-                    "conversation. Please retry in a moment."
-                )
-            },
-            status=409,
-        )
-
     # The Thread row is the only authorization for this checkpointer key, so a
     # failed upsert must propagate rather than fall through to the agent.
     try:
@@ -238,6 +224,32 @@ async def chat_view(request):
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
 
+    # A brief wait covers Stop-then-resend: the stopped turn releases the lease
+    # only after persisting its partial reply.
+    lease = await aacquire_turn_lease(thread_id, wait_seconds=TURN_LEASE_WAIT_SECONDS)
+    if lease is None:
+        return JsonResponse({"error": THREAD_BUSY_MESSAGE}, status=409)
+    try:
+        response = await _start_turn(
+            lease,
+            user=user,
+            workspace=workspace,
+            access=access,
+            thread_id=thread_id,
+            user_content=user_content,
+        )
+    except BaseException:
+        await lease.release()
+        raise
+    if not isinstance(response, StreamingHttpResponse):
+        await lease.release()
+    return response
+
+
+async def _start_turn(
+    lease: TurnLease, *, user, workspace, access, thread_id: str, user_content: str
+):
+    """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
@@ -328,9 +340,10 @@ async def chat_view(request):
     )
 
     async def _traced_stream():
-        with trace_ctx:
-            async for chunk in langgraph_to_ui_stream(agent, input_state, config):
-                yield chunk
+        async with lease.held():
+            with trace_ctx:
+                async for chunk in langgraph_to_ui_stream(agent, input_state, config):
+                    yield chunk
 
     response = StreamingHttpResponse(
         _traced_stream(),

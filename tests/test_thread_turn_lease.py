@@ -6,22 +6,27 @@ them from overlapping.
 """
 
 import asyncio
+import contextlib
+import json
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.test import AsyncClient
 from django.utils import timezone
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat import turn_lease
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.turn_lease import aacquire_turn_lease, atry_acquire_turn_lease
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     TenantSchema,
     Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
     WorkspaceTenant,
 )
 from apps.workspaces.tasks import (
@@ -30,6 +35,7 @@ from apps.workspaces.tasks import (
     _persist_synthetic_failure_message,
     resume_thread_after_materialization,
 )
+from tests.tenant_access import ausable_connection
 
 User = get_user_model()
 
@@ -114,6 +120,108 @@ class TestLease:
         await releaser
 
         assert lease is not None
+
+
+async def _chat_member(slug: str):
+    user = await User.objects.acreate_user(email=f"{slug}@b.c", password="x")
+    ws = await Workspace.objects.acreate(name=f"W-{slug}", created_by=user)
+    tenant = await Tenant.objects.acreate(
+        external_id=f"t-{slug}", provider="commcare", canonical_name="Tenant"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.READ)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    client = AsyncClient()
+    await client.alogin(email=f"{slug}@b.c", password="x")
+    return ws, thread, client
+
+
+async def _post_chat(client, ws, thread):
+    return await client.post(
+        "/api/chat/",
+        data=json.dumps(
+            {
+                "messages": [{"role": "user", "content": "follow-up"}],
+                "workspaceId": str(ws.id),
+                "threadId": str(thread.id),
+            }
+        ),
+        content_type="application/json",
+    )
+
+
+@contextlib.contextmanager
+def _agent_layer(stream=None, build_agent=None):
+    with (
+        patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock, return_value=[]),
+        patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock),
+        patch("apps.chat.views.build_agent_graph", build_agent or AsyncMock()),
+        patch(
+            "apps.chat.views.repair_dangling_tool_calls", new_callable=AsyncMock, return_value=[]
+        ),
+        patch("apps.chat.views.langgraph_to_ui_stream", side_effect=stream or _one_chunk),
+        patch("apps.chat.views.TURN_LEASE_WAIT_SECONDS", 0),
+    ):
+        yield
+
+
+async def _one_chunk(*_args, **_kwargs):
+    yield "data: {}\n\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+class TestChatTurn:
+    async def test_a_turn_is_refused_while_another_run_holds_the_thread(self):
+        ws, thread, client = await _chat_member("chat-busy")
+        await atry_acquire_turn_lease(thread.id)
+        build_agent = AsyncMock()
+
+        with _agent_layer(build_agent=build_agent):
+            resp = await _post_chat(client, ws, thread)
+
+        assert resp.status_code == 409
+        assert b"still being generated" in resp.content
+        build_agent.assert_not_awaited()
+
+    async def test_the_stream_holds_the_thread_until_it_finishes(self):
+        ws, thread, client = await _chat_member("chat-holds")
+        seen_during_stream = []
+
+        async def fake_stream(*_args, **_kwargs):
+            seen_during_stream.append(await atry_acquire_turn_lease(thread.id))
+            yield "data: {}\n\n"
+
+        with _agent_layer(fake_stream):
+            resp = await _post_chat(client, ws, thread)
+            assert resp.status_code == 200
+            _ = [chunk async for chunk in resp.streaming_content]
+
+        assert seen_during_stream == [None]
+        assert (await _lease_row(thread.id))["turn_lease_token"] is None
+
+    async def test_a_turn_that_fails_to_start_releases_the_thread(self):
+        ws, thread, client = await _chat_member("chat-fail")
+        build_agent = AsyncMock(side_effect=RuntimeError("no agent"))
+
+        with _agent_layer(build_agent=build_agent):
+            resp = await _post_chat(client, ws, thread)
+
+        assert resp.status_code == 500
+        assert (await _lease_row(thread.id))["turn_lease_token"] is None
+
+    async def test_a_lapsed_lease_does_not_block_the_user(self):
+        ws, thread, client = await _chat_member("chat-stale")
+        await atry_acquire_turn_lease(thread.id)
+        await _expire(thread.id)
+
+        with _agent_layer():
+            resp = await _post_chat(client, ws, thread)
+            assert resp.status_code == 200
+            _ = [chunk async for chunk in resp.streaming_content]
 
 
 async def _resumable_job(slug: str, pj_id: int) -> ThreadJob:
