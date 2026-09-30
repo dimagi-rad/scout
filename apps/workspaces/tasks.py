@@ -28,6 +28,7 @@ from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.chat.turn_lease import atry_acquire_turn_lease
 from apps.common.error_codes import ErrorCode, code_of
 from apps.semantic.services.cube_schema import (
     CubeSchemaBuildError,
@@ -3456,7 +3457,9 @@ def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
         return contextlib.nullcontext()
 
 
-async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
+async def _persist_synthetic_failure_message(
+    thread_job, text: str, *, holds_turn_lease: bool = False
+) -> None:
     """Append a plain-text AIMessage to the LangGraph checkpointer for
     ``thread_job.thread`` so the chat UI shows a user-visible explanation when
     the agent never produced one.
@@ -3469,9 +3472,21 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
 
     Failures here are logged but never re-raised — the caller has already
     decided this is a terminal failure and a synthetic message is a UX nicety,
-    not a correctness invariant.
+    not a correctness invariant. For the same reason it is skipped, not
+    waited for, while another run holds the thread's turn lease: the ThreadJob's
+    error card still reports the failure.
     """
+    lease = None
     try:
+        if not holds_turn_lease:
+            lease = await atry_acquire_turn_lease(thread_job.thread_id)
+            if lease is None:
+                logger.info(
+                    "resume: thread %s busy; skipped synthetic failure message for tj=%s",
+                    thread_job.thread_id,
+                    thread_job.id,
+                )
+                return
         agent = await _build_agent_for_resume(
             thread_job.thread.workspace,
             thread_job.thread.user,
@@ -3488,6 +3503,9 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
             thread_job.id,
             exc_info=True,
         )
+    finally:
+        if lease is not None:
+            await lease.release()
 
 
 TENANT_NOT_RUN = "not_run"
@@ -3744,11 +3762,32 @@ async def _aggregate_materialization_state(
     return status, summary
 
 
+# A live turn holds the thread for its whole stream, usually under a minute.
+# The bound (~17 min) only trips on a thread that stays busy or a lost lease.
+RESUME_BUSY_RETRY_BASE_SECONDS = 5
+RESUME_BUSY_RETRY_MAX_SECONDS = 60
+RESUME_BUSY_MAX_ATTEMPTS = 20
+RESUME_THREAD_BUSY_SUMMARY = (
+    "The data load finished, but the conversation stayed busy, so the follow-up "
+    "response could not be posted. Please re-ask your question."
+)
+
+
+def _resume_lock(thread_job_id: str) -> str:
+    return f"resume-thread-busy-{thread_job_id}"
+
+
 @app.task(pass_context=True)
-async def resume_thread_after_materialization(context, thread_job_id: str) -> dict:
+async def resume_thread_after_materialization(
+    context, thread_job_id: str, busy_attempt: int = 0
+) -> dict:
     """Inject a system-framed message into the LangGraph conversation and
     re-invoke the agent so it can respond to the original request with the
     now-loaded data.
+
+    Runs only while holding the thread's turn lease, so it never writes the
+    checkpoint while a live chat turn is streaming on the same thread; a busy
+    thread re-queues it with backoff (arch review R08).
     """
     try:
         tj = await ThreadJob.objects.select_related("thread__workspace", "thread__user").aget(
@@ -3762,6 +3801,52 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         # Already resumed (idempotent retry); cancellation still gets one resume.
         return {"status": "already_terminal", "state": tj.state}
 
+    lease = await atry_acquire_turn_lease(tj.thread_id)
+    if lease is None:
+        return await _defer_resume_while_thread_busy(tj, busy_attempt)
+    async with lease.held():
+        return await _resume_with_turn_lease(tj, thread_job_id)
+
+
+async def _defer_resume_while_thread_busy(tj: ThreadJob, busy_attempt: int) -> dict:
+    if busy_attempt >= RESUME_BUSY_MAX_ATTEMPTS:
+        # No synthetic chat message: writing one now would race the live turn too.
+        gave_up = await ThreadJob.objects.filter(
+            id=tj.id, state__in=[ThreadJob.State.PENDING, ThreadJob.State.CANCELLED]
+        ).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+            failure_phase=ThreadJob.FailurePhase.RESUME,
+            error_summary=RESUME_THREAD_BUSY_SUMMARY,
+        )
+        logger.warning(
+            "resume: thread %s stayed busy through %d attempts; ThreadJob %s %s",
+            tj.thread_id,
+            busy_attempt,
+            tj.id,
+            "marked FAILED" if gave_up else "already settled",
+        )
+        return {"status": "thread_busy_gave_up"}
+    delay = min(RESUME_BUSY_RETRY_BASE_SECONDS * (2**busy_attempt), RESUME_BUSY_RETRY_MAX_SECONDS)
+    # The running job holds no queueing lock once doing, so the re-queue can take
+    # it; a resume the reconciler queued meanwhile already covers this one.
+    try:
+        await resume_thread_after_materialization.configure(
+            schedule_in={"seconds": delay}, queueing_lock=_resume_lock(str(tj.id))
+        ).defer_async(thread_job_id=str(tj.id), busy_attempt=busy_attempt + 1)
+    except AlreadyEnqueued:
+        return {"status": "thread_busy_already_queued"}
+    logger.info(
+        "resume: thread %s busy with another turn; ThreadJob %s retries in %ss (attempt %d)",
+        tj.thread_id,
+        tj.id,
+        delay,
+        busy_attempt + 1,
+    )
+    return {"status": "thread_busy_deferred", "retry_in_seconds": delay}
+
+
+async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
     # Excludes RUNNING: aupdate() counts rows MATCHED not changed, so including
     # RUNNING would let a concurrent invocation re-claim a running job and double
     # agent.ainvoke(). CANCELLED is included so the agent can still follow up.
@@ -4087,7 +4172,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             message="ainvoke_timeout",
             data={"thread_job_id": str(tj.id), "elapsed_s": elapsed},
         )
-        await _persist_synthetic_failure_message(tj, RESUME_TIMEOUT_MESSAGE)
+        await _persist_synthetic_failure_message(tj, RESUME_TIMEOUT_MESSAGE, holds_turn_lease=True)
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
@@ -4106,7 +4191,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             message="ainvoke_exception",
             data={"thread_job_id": str(tj.id), "elapsed_s": elapsed},
         )
-        await _persist_synthetic_failure_message(tj, RESUME_EXCEPTION_MESSAGE)
+        await _persist_synthetic_failure_message(
+            tj, RESUME_EXCEPTION_MESSAGE, holds_turn_lease=True
+        )
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
