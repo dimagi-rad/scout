@@ -52,6 +52,7 @@ class TurnLease:
         self.renewed_at = renewed_at
         self.lost = False
         self._released = False
+        self._releasing: asyncio.Future | None = None
 
     async def renew(self) -> bool:
         requested_at = time.monotonic()
@@ -66,12 +67,19 @@ class TurnLease:
         """Clear the lease if this holder still has it; retried on the next call if it fails."""
         if self._released:
             return
-        # Shielded: the stream releases from a cancelled task on client disconnect.
-        await asyncio.shield(
-            Thread.objects.filter(id=self.thread_id, turn_lease_token=self.token).aupdate(
-                turn_lease_token=None, turn_lease_expires_at=None
+        # Shielded because the stream releases from a cancelled task on client
+        # disconnect; the task is kept so a cancelled caller doesn't orphan it and a
+        # retry awaits the same UPDATE. A failed one is dropped so a retry reissues it.
+        previous = self._releasing
+        if previous is None or (
+            previous.done() and (previous.cancelled() or previous.exception() is not None)
+        ):
+            self._releasing = asyncio.ensure_future(
+                Thread.objects.filter(id=self.thread_id, turn_lease_token=self.token).aupdate(
+                    turn_lease_token=None, turn_lease_expires_at=None
+                )
             )
-        )
+        await asyncio.shield(self._releasing)
         self._released = True
 
     def release_sync(self) -> None:
