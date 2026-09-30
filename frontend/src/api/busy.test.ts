@@ -54,13 +54,14 @@ describe("busy answers", () => {
     expect(busyRetryDelayMs(2, 3, noJitter)).toBe(2000)
     expect(busyRetryDelayMs(null, 1, noJitter)).toBe(1000)
     expect(busyRetryDelayMs(null, 3, noJitter)).toBe(4000)
-    expect(busyRetryDelayMs("3600", 1, noJitter)).toBe(30_000)
+    expect(busyRetryDelayMs(null, 10, noJitter)).toBe(30_000)
   })
 
   it("spreads clients out without ever retrying before the server asked", () => {
     expect(busyRetryDelayMs("5", 1, () => 0)).toBeCloseTo(5000)
     expect(busyRetryDelayMs("5", 1, () => 1)).toBeCloseTo(7000)
     expect(busyRetryDelayMs("0", 1, () => 0)).toBe(500)
+    expect(busyRetryDelayMs("60", 1, () => 0)).toBe(60_000)
   })
 })
 
@@ -115,12 +116,24 @@ describe("fetchWithBusyRetry", () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it("treats any non-busy answer as the server being back", async () => {
+  it("keeps holding off after a failure that proves nothing about capacity", async () => {
     const tracker = createBusyTracker()
     tracker.gaveUp()
-    const notFound = new Response(JSON.stringify({ error: "Not found" }), { status: 404 })
-    await fetchWithBusyRetry(vi.fn().mockResolvedValue(notFound), { autoRetry: true, tracker })
+    const failed = new Response(JSON.stringify({ error: "Server error" }), { status: 500 })
+    await fetchWithBusyRetry(vi.fn().mockResolvedValue(failed), { autoRetry: true, tracker })
+    expect(tracker.getSnapshot().stillBusy).toBe(true)
+    expect(tracker.isHoldingOff()).toBe(true)
+  })
+
+  it("dismissing the notice hides it without re-arming retries", async () => {
+    const tracker = createBusyTracker()
+    tracker.gaveUp()
+    tracker.dismiss()
     expect(tracker.getSnapshot().stillBusy).toBe(false)
+
+    const send = vi.fn().mockResolvedValue(busyResponse("1"))
+    await fetchWithBusyRetry(send, { autoRetry: true, tracker })
+    expect(send).toHaveBeenCalledTimes(1)
   })
 
   it("stops backing off when the caller aborts", async () => {

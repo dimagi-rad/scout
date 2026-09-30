@@ -96,7 +96,7 @@ export class ApiError extends Error {
 }
 
 export const api = {
-  get: <T>(url: string) => request<T>(url),
+  get: <T>(url: string, signal?: AbortSignal) => request<T>(url, { signal }),
   post: <T>(url: string, body?: unknown) =>
     request<T>(url, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   put: <T>(url: string, body?: unknown) =>

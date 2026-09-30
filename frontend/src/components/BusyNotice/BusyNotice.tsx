@@ -58,7 +58,7 @@ export function BusyNotice({
                   type="button"
                   size="sm"
                   variant="ghost"
-                  onClick={tracker.recovered}
+                  onClick={tracker.dismiss}
                   data-testid="busy-notice-dismiss"
                 >
                   Dismiss

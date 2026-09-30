@@ -52,8 +52,8 @@ export function busyRetryDelayMs(
   const seconds = typeof retryAfter === "number" ? retryAfter : Number.parseFloat(retryAfter ?? "")
   const base = Number.isFinite(seconds) && seconds >= 0
     ? seconds * 1000
-    : BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)
-  return Math.min(Math.max(base, MIN_DELAY_MS) * (1 + random() * 0.4), MAX_DELAY_MS)
+    : Math.min(BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1), MAX_DELAY_MS)
+  return Math.max(base, MIN_DELAY_MS) * (1 + random() * 0.4)
 }
 
 type Listener = () => void
@@ -61,12 +61,15 @@ type Listener = () => void
 export function createBusyTracker() {
   const retrying = new Set<symbol>()
   const listeners = new Set<Listener>()
-  let stillBusy = false
+  // Holding off is the retry gate; the notice is only its visible half, so
+  // dismissing the notice must not re-arm retries against a full server.
+  let holdingOff = false
+  let noticeShown = false
   let snapshot: BusySnapshot = { retrying: 0, stillBusy: false }
 
   function publish() {
-    if (snapshot.retrying === retrying.size && snapshot.stillBusy === stillBusy) return
-    snapshot = { retrying: retrying.size, stillBusy }
+    if (snapshot.retrying === retrying.size && snapshot.stillBusy === noticeShown) return
+    snapshot = { retrying: retrying.size, stillBusy: noticeShown }
     listeners.forEach((listener) => listener())
   }
 
@@ -78,6 +81,7 @@ export function createBusyTracker() {
       }
     },
     getSnapshot: () => snapshot,
+    isHoldingOff: () => holdingOff,
     startRetry(token: symbol) {
       retrying.add(token)
       publish()
@@ -87,11 +91,17 @@ export function createBusyTracker() {
       publish()
     },
     gaveUp() {
-      stillBusy = true
+      holdingOff = true
+      noticeShown = true
       publish()
     },
     recovered() {
-      stillBusy = false
+      holdingOff = false
+      noticeShown = false
+      publish()
+    },
+    dismiss() {
+      noticeShown = false
       publish()
     },
   }
@@ -134,8 +144,8 @@ export async function isBusyResponse(res: Response): Promise<boolean> {
  * the answer is "busy" (only when `autoRetry` is set). Returns the last response
  * either way, so the caller's normal error handling sees a busy failure.
  *
- * Once a read has given up, later reads fail at once until any non-busy answer
- * arrives: overlapping polls must not multiply load on a server that is full.
+ * Once a read has given up, later reads fail at once until one succeeds:
+ * overlapping polls must not multiply load on a server that is full.
  */
 export async function fetchWithBusyRetry(
   send: () => Promise<Response>,
@@ -146,12 +156,13 @@ export async function fetchWithBusyRetry(
   }: { autoRetry: boolean; signal?: AbortSignal | null; tracker?: BusyTracker },
 ): Promise<Response> {
   const token = Symbol("busy-request")
-  const maxRetries = autoRetry && !tracker.getSnapshot().stillBusy ? BUSY_MAX_AUTO_RETRIES : 0
+  const maxRetries = autoRetry && !tracker.isHoldingOff() ? BUSY_MAX_AUTO_RETRIES : 0
   try {
     for (let retries = 0; ; retries += 1) {
       const res = await send()
       if (!(await isBusyResponse(res))) {
-        tracker.recovered()
+        // Only a real answer proves capacity is back; a 5xx or a 401 says nothing.
+        if (res.ok) tracker.recovered()
         return res
       }
       if (retries >= maxRetries) {
