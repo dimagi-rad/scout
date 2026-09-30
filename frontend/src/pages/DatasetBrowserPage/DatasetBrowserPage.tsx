@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 import type { SemanticDataset, SemanticField } from "@/store/datasetSlice"
+import { DataModelHistory } from "./DataModelHistory"
 import { isCustomDataset, isCustomField } from "./datasetMeta"
 import { filterDatasets } from "./datasetSearch"
 
@@ -158,17 +159,20 @@ export function DatasetBrowserPage() {
               </p>
             )}
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={refresh}
-            disabled={refreshing}
-            aria-label="Refresh datasets"
-            data-testid="refresh-datasets-btn"
-          >
-            <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
-          </Button>
+          <div className="flex items-center">
+            <DataModelHistory workspaceId={activeDomainId} onChanged={refresh} />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={refresh}
+              disabled={refreshing}
+              aria-label="Refresh datasets"
+              data-testid="refresh-datasets-btn"
+            >
+              <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
+            </Button>
+          </div>
         </div>
 
         <div className="border-b p-3">
@@ -273,6 +277,12 @@ export function DatasetBrowserPage() {
                 >
                   <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
                 </Button>
+                <DataModelHistory
+                  workspaceId={activeDomainId}
+                  onChanged={refresh}
+                  testIdPrefix="mobile-data-model-history"
+                  className="h-11 w-full border sm:w-11"
+                />
               </div>
             </div>
           </div>
