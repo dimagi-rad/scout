@@ -4,15 +4,18 @@ Tests for the tenant-based MCP server tools (list_tables, describe_table, get_me
 Tests verify the full chain from tool handler through to query execution.
 """
 
+import asyncio
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ObjectDoesNotExist
 from django.test import override_settings
 
 from apps.chat.models import Thread, ThreadJob
+from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import WorkspaceAccess
 from apps.workspaces.models import (
@@ -25,11 +28,24 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from mcp_server.context import QueryContext, load_tenant_context
+from mcp_server.context import QueryContext, _parse_db_url, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
-from mcp_server.server import cancel_materialization, get_schema_status
+from mcp_server.pipeline_registry import PipelineConfig
+from mcp_server.server import (
+    cancel_materialization,
+    describe_table,
+    get_materialization_status,
+    get_metadata,
+    get_schema_status,
+    list_datasets,
+    list_pipelines,
+    list_tables,
+    list_workspaces,
+    semantic_catalog,
+    teardown_schema,
+)
 from mcp_server.services.pool import close_all_pools
-from mcp_server.services.query import execute_query
+from mcp_server.services.query import _execute_async_parameterized, execute_query
 from tests.managed_query_fixture import managed_query_context
 from tests.tenant_access import ausable_connection
 
@@ -110,7 +126,6 @@ class TestExecuteAsyncParameterized:
 
     @pytest.mark.asyncio
     async def test_sets_search_path_and_executes_with_params(self, tenant_context):
-        from mcp_server.services.query import _execute_async_parameterized
 
         mock_cursor = AsyncMock()
         mock_cursor.description = [("table_name",), ("table_type",)]
@@ -150,7 +165,6 @@ class TestExecuteAsyncParameterized:
 
     @pytest.mark.asyncio
     async def test_returns_empty_rows_when_no_data(self, tenant_context):
-        from mcp_server.services.query import _execute_async_parameterized
 
         mock_cursor = AsyncMock()
         mock_cursor.description = [("table_name",), ("table_type",)]
@@ -195,7 +209,6 @@ def _fake_sync_to_async(fn):
 @pytest.mark.django_db(transaction=True)
 class TestListTablesTool:
     async def test_success_returns_enriched_tables(self, tenant_id, tenant_context):
-        from mcp_server.server import list_tables
 
         mock_ts = MagicMock()
         mock_run = MagicMock()
@@ -234,7 +247,6 @@ class TestListTablesTool:
         assert result["data"]["note"] is None
 
     async def test_empty_tables_when_no_completed_run(self, tenant_id, tenant_context):
-        from mcp_server.server import list_tables
 
         mock_ts = MagicMock()
         mock_tenant = MagicMock()
@@ -261,7 +273,6 @@ class TestListTablesTool:
         assert "run_materialization" in result["data"]["note"]
 
     async def test_invalid_tenant_returns_validation_error(self):
-        from mcp_server.server import list_tables
 
         with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
             mock_ctx.side_effect = ValueError("No active schema for tenant 'bad'")
@@ -272,7 +283,6 @@ class TestListTablesTool:
         assert result["error"]["code"] == VALIDATION_ERROR
 
     async def test_returns_empty_when_no_tenant_schema(self, tenant_id, tenant_context):
-        from mcp_server.server import list_tables
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
@@ -297,7 +307,6 @@ class TestListTablesTool:
 @pytest.mark.django_db(transaction=True)
 class TestWorkspaceAndDatasetDiscoveryTools:
     async def test_list_workspaces_returns_accessible_workspaces(self, workspace, user):
-        from mcp_server.server import list_workspaces
 
         result = await list_workspaces(
             user_id=str(user.id),
@@ -317,7 +326,6 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         assert item["tenants"][0]["canonical_name"] == "Test Domain"
 
     async def test_list_workspaces_requires_user_id(self):
-        from mcp_server.server import list_workspaces
 
         result = await list_workspaces()
 
@@ -325,8 +333,6 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         assert result["error"]["code"] == VALIDATION_ERROR
 
     async def test_list_datasets_pages_across_accessible_workspaces(self, workspace, user):
-        from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
-        from mcp_server.server import list_datasets
 
         model = await SemanticModel.objects.acreate(
             workspace=workspace,
@@ -374,7 +380,6 @@ class TestWorkspaceAndDatasetDiscoveryTools:
     async def test_list_datasets_filters_inaccessible_requested_workspaces(
         self, workspace, user, other_user, tenant
     ):
-        from mcp_server.server import list_datasets
 
         other_workspace = await Workspace.objects.acreate(
             name="Other workspace",
@@ -401,7 +406,6 @@ class TestWorkspaceAndDatasetDiscoveryTools:
     async def test_semantic_catalog_rejects_inaccessible_workspace(
         self, workspace, user, other_user, tenant
     ):
-        from mcp_server.server import semantic_catalog
 
         other_workspace = await Workspace.objects.acreate(
             name="Other workspace",
@@ -433,7 +437,6 @@ PATCH_PIPELINE_DESCRIBE_TABLE = "mcp_server.server.pipeline_describe_table"
 @pytest.mark.django_db(transaction=True)
 class TestDescribeTableTool:
     async def test_success_returns_enriched_columns(self, tenant_id, tenant_context):
-        from mcp_server.server import describe_table
 
         mock_ts = MagicMock()
         mock_ts.tenant_membership = MagicMock()
@@ -482,7 +485,6 @@ class TestDescribeTableTool:
         assert "properties" in [c["name"] for c in result["data"]["columns"]]
 
     async def test_table_not_found(self, tenant_id, tenant_context):
-        from mcp_server.server import describe_table
 
         mock_ts = MagicMock()
         mock_ts.tenant_membership = MagicMock()
@@ -509,7 +511,6 @@ class TestDescribeTableTool:
         assert result["error"]["code"] == NOT_FOUND
 
     async def test_invalid_tenant_returns_validation_error(self):
-        from mcp_server.server import describe_table
 
         with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
             mock_ctx.side_effect = ValueError("No active schema")
@@ -529,7 +530,6 @@ PATCH_PIPELINE_GET_METADATA = "mcp_server.server.pipeline_get_metadata"
 @pytest.mark.django_db(transaction=True)
 class TestGetMetadataTool:
     async def test_returns_tables_and_relationships(self, tenant_id, tenant_context):
-        from mcp_server.server import get_metadata
 
         mock_ts = MagicMock()
         mock_ts.tenant_membership = MagicMock()
@@ -584,7 +584,6 @@ class TestGetMetadataTool:
         assert len(result["data"]["relationships"]) == 1
 
     async def test_returns_empty_when_no_active_schema(self, tenant_id, tenant_context):
-        from mcp_server.server import get_metadata
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
@@ -601,7 +600,6 @@ class TestGetMetadataTool:
         assert result["data"]["relationships"] == []
 
     async def test_invalid_tenant_returns_validation_error(self):
-        from mcp_server.server import get_metadata
 
         with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
             mock_ctx.side_effect = ValueError("No active schema")
@@ -685,7 +683,6 @@ class TestParseDbUrl:
     """Test the URL parser that builds connection params."""
 
     def test_full_url(self):
-        from mcp_server.context import _parse_db_url
 
         params = _parse_db_url("postgresql://myuser:mypass@dbhost:5433/mydb", "tenant_schema")
 
@@ -697,7 +694,6 @@ class TestParseDbUrl:
         assert "search_path=tenant_schema,public" in params["options"]
 
     def test_defaults_for_missing_fields(self):
-        from mcp_server.context import _parse_db_url
 
         params = _parse_db_url("postgresql://localhost/scout", "my_schema")
 
@@ -709,7 +705,6 @@ class TestParseDbUrl:
         assert params["sslmode"] == "prefer"
 
     def test_preserves_explicit_sslmode(self):
-        from mcp_server.context import _parse_db_url
 
         params = _parse_db_url("postgresql://localhost/scout?sslmode=require", "my_schema")
 
@@ -717,7 +712,6 @@ class TestParseDbUrl:
 
     def test_bare_dbname_fallback(self):
         """In dev, MANAGED_DATABASE_URL may be just a database name."""
-        from mcp_server.context import _parse_db_url
 
         params = _parse_db_url("scout", "my_schema")
 
@@ -740,7 +734,6 @@ class TestGetSchemaStatusTool:
     """Test the get_schema_status MCP tool."""
 
     async def test_requires_workspace_id(self):
-        from mcp_server.server import get_schema_status
 
         result = await get_schema_status()
 
@@ -754,7 +747,6 @@ class TestGetSchemaStatusTool:
         # envelope for a phantom workspace invited the agent to materialize
         # against a workspace that doesn't exist. Surface a NOT_FOUND error so
         # the agent stops instead of looping on a non-existent target.
-        from mcp_server.server import get_schema_status
 
         result = await get_schema_status(workspace_id="00000000-0000-0000-0000-000000000000")
 
@@ -766,7 +758,6 @@ class TestGetSchemaStatusTool:
         # An existing workspace with no tenants/schema is genuinely
         # unprovisioned — that path must still report not_provisioned so the
         # agent can offer to materialize.
-        from mcp_server.server import get_schema_status
 
         User = get_user_model()
         user = await User.objects.acreate_user(email="noschema@b.c", password="x")
@@ -822,7 +813,6 @@ class TestTeardownSchemaTool:
     """Test the teardown_schema MCP tool."""
 
     async def test_requires_confirm_true(self):
-        from mcp_server.server import teardown_schema
 
         result = await teardown_schema(confirm=False, workspace_id="ws-123")
 
@@ -831,7 +821,6 @@ class TestTeardownSchemaTool:
         assert "confirm=True" in result["error"]["message"]
 
     async def test_default_confirm_is_false(self):
-        from mcp_server.server import teardown_schema
 
         result = await teardown_schema(workspace_id="ws-123")
 
@@ -839,7 +828,6 @@ class TestTeardownSchemaTool:
         assert result["error"]["code"] == VALIDATION_ERROR
 
     async def test_requires_workspace_id(self):
-        from mcp_server.server import teardown_schema
 
         result = await teardown_schema(confirm=True)
 
@@ -848,7 +836,6 @@ class TestTeardownSchemaTool:
 
     @pytest.mark.django_db
     async def test_not_found_when_no_workspace(self):
-        from mcp_server.server import teardown_schema
 
         result = await teardown_schema(
             confirm=True, workspace_id="00000000-0000-0000-0000-000000000000"
@@ -861,10 +848,6 @@ class TestTeardownSchemaTool:
 @pytest.mark.django_db(transaction=True)
 class TestListPipelines:
     def test_returns_available_pipelines(self):
-        import asyncio
-        from unittest.mock import patch
-
-        from mcp_server.pipeline_registry import PipelineConfig
 
         fake_pipelines = [
             PipelineConfig(
@@ -876,7 +859,6 @@ class TestListPipelines:
         ]
         with patch("mcp_server.server.get_registry") as mock_reg:
             mock_reg.return_value.list.return_value = fake_pipelines
-            from mcp_server.server import list_pipelines
 
             result = asyncio.run(list_pipelines())
 
@@ -889,9 +871,6 @@ class TestListPipelines:
 @pytest.mark.django_db(transaction=True)
 class TestGetMaterializationStatus:
     def test_returns_run_status(self):
-        import asyncio
-        import uuid
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         run_id = str(uuid.uuid4())
         mock_run = MagicMock()
@@ -920,7 +899,6 @@ class TestGetMaterializationStatus:
             ),
         ):
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
-            from mcp_server.server import get_materialization_status
 
             result = asyncio.run(get_materialization_status(run_id=run_id, workspace_id="ws-1"))
 
@@ -931,18 +909,12 @@ class TestGetMaterializationStatus:
         assert result["data"]["tenant_id"] == "dimagi"
 
     def test_unknown_run_returns_not_found(self):
-        import asyncio
-        import uuid
-        from unittest.mock import AsyncMock, patch
-
-        from django.core.exceptions import ObjectDoesNotExist
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:
             mock_cls.DoesNotExist = ObjectDoesNotExist
             mock_cls.objects.select_related.return_value.aget = AsyncMock(
                 side_effect=ObjectDoesNotExist
             )
-            from mcp_server.server import get_materialization_status
 
             result = asyncio.run(get_materialization_status(run_id=str(uuid.uuid4())))
 
@@ -953,9 +925,6 @@ class TestGetMaterializationStatus:
 @pytest.mark.django_db(transaction=True)
 class TestCancelMaterialization:
     def test_cancel_in_progress_run(self):
-        import asyncio
-        import uuid
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         run_id = str(uuid.uuid4())
         mock_run = MagicMock()
@@ -994,7 +963,6 @@ class TestCancelMaterialization:
             mock_cls.RunState.TRANSFORMING = "transforming"
             mock_cls.RunState.FAILED = "failed"
             mock_cls.RunState.CANCELLED = "cancelled"
-            from mcp_server.server import cancel_materialization
 
             result = asyncio.run(
                 cancel_materialization(
@@ -1016,9 +984,6 @@ class TestCancelMaterialization:
         mock_run.asave.assert_awaited_once_with(update_fields=["state", "completed_at", "result"])
 
     def test_cancel_completed_run_returns_error(self):
-        import asyncio
-        import uuid
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         run_id = str(uuid.uuid4())
         mock_run = MagicMock()
@@ -1050,7 +1015,6 @@ class TestCancelMaterialization:
             mock_cls.RunState.LOADING = "loading"
             mock_cls.RunState.TRANSFORMING = "transforming"
             mock_cls.RunState.FAILED = "failed"
-            from mcp_server.server import cancel_materialization
 
             result = asyncio.run(
                 cancel_materialization(
@@ -1068,7 +1032,6 @@ async def test_cancel_materialization_aborts_job_and_flips_threadjob():
     also abort the procrastinate job and flip the owning chat ThreadJob, so the
     load actually unwinds and the chat spinner clears (matching the HTTP cancel
     path). Before the fix it left the job running and the ThreadJob active."""
-    from mcp_server.server import cancel_materialization
 
     User = get_user_model()
     user = await User.objects.acreate_user(email="mcpcancel@b.c", password="x")
@@ -1141,7 +1104,6 @@ class TestExecuteAsyncIntegration:
 
     @pytest.mark.asyncio
     async def test_returns_rows(self):
-        from mcp_server.services.query import _execute_async_parameterized
 
         result = await _execute_async_parameterized(
             self._ctx(), "SELECT name, value FROM items ORDER BY value", (), 30
@@ -1154,7 +1116,6 @@ class TestExecuteAsyncIntegration:
     @pytest.mark.asyncio
     async def test_statement_timeout_does_not_use_server_side_param(self):
         """Regression: SET statement_timeout TO $1 raises SyntaxError in psycopg3."""
-        from mcp_server.services.query import _execute_async_parameterized
 
         # Would raise psycopg.errors.SyntaxError before the fix
         result = await _execute_async_parameterized(self._ctx(), "SELECT 1 AS n", (), 30)
@@ -1162,7 +1123,6 @@ class TestExecuteAsyncIntegration:
 
     @pytest.mark.asyncio
     async def test_empty_result(self):
-        from mcp_server.services.query import _execute_async_parameterized
 
         result = await _execute_async_parameterized(
             self._ctx(), "SELECT name FROM items WHERE value > 9999", (), 30
@@ -1174,7 +1134,6 @@ class TestExecuteAsyncIntegration:
 
     @pytest.mark.asyncio
     async def test_parameterized_filters_rows(self):
-        from mcp_server.services.query import _execute_async_parameterized
 
         result = await _execute_async_parameterized(
             self._ctx(),
@@ -1203,7 +1162,6 @@ class TestExecuteAsyncIntegration:
     @pytest.mark.asyncio
     async def test_search_path_is_applied(self):
         """Unqualified table name resolves because search_path is set to the schema."""
-        from mcp_server.services.query import _execute_async_parameterized
 
         # No schema qualifier — relies on SET search_path TO working correctly
         result = await _execute_async_parameterized(

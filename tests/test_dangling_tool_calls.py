@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from apps.agents.graph.base import build_agent_graph
 from apps.chat.helpers import repair_dangling_tool_calls
 
 
@@ -157,7 +158,6 @@ class TestAgentNodeGuard:
     async def test_agent_node_injects_synthetic_tool_result(self, workspace, user):
         """agent_node injects a synthetic ToolMessage after an orphan AIMessage
         before calling the LLM."""
-        from apps.agents.graph.base import build_agent_graph
 
         captured: list = []
 

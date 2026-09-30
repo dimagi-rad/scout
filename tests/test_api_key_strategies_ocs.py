@@ -1,10 +1,10 @@
 import pytest
 
 from apps.users.services.api_key_providers import CredentialVerificationError
+from apps.users.services.api_key_providers.ocs import OCSStrategy
 
 
 def test_form_fields_api_key_and_optional_team_name():
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     assert OCSStrategy.provider_id == "ocs"
     fields = {f["key"]: f for f in OCSStrategy.form_fields}
@@ -16,14 +16,12 @@ def test_form_fields_api_key_and_optional_team_name():
 
 
 def test_pack_credential_returns_raw_key():
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     assert OCSStrategy.pack_credential({"api_key": "ocs_xxx"}) == "ocs_xxx"
 
 
 @pytest.mark.asyncio
 async def test_verify_and_discover_single_page(httpx_mock, settings):
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
@@ -46,7 +44,6 @@ async def test_verify_and_discover_single_page(httpx_mock, settings):
 
 @pytest.mark.asyncio
 async def test_verify_and_discover_paginates(httpx_mock, settings):
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
@@ -68,7 +65,6 @@ async def test_verify_and_discover_paginates(httpx_mock, settings):
 
 @pytest.mark.asyncio
 async def test_verify_and_discover_unauthorized(httpx_mock, settings):
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
@@ -83,7 +79,6 @@ async def test_verify_and_discover_unauthorized(httpx_mock, settings):
 @pytest.mark.asyncio
 async def test_verify_and_discover_empty_list_raises(httpx_mock, settings):
     """A valid key with no experiments cannot be used as a connection."""
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
@@ -98,7 +93,6 @@ async def test_verify_and_discover_empty_list_raises(httpx_mock, settings):
 
 @pytest.mark.asyncio
 async def test_verify_for_tenant_passes_when_experiment_present(httpx_mock, settings):
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
@@ -111,7 +105,6 @@ async def test_verify_for_tenant_passes_when_experiment_present(httpx_mock, sett
 
 @pytest.mark.asyncio
 async def test_verify_for_tenant_fails_when_experiment_missing(httpx_mock, settings):
-    from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(

@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from apps.transformations.models import TransformationScope
+from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     generate_system_assets,
     slugify_model_name,
     upsert_system_assets,
 )
+from apps.users.models import Tenant
 from apps.workspaces.models import TenantMetadata
 from mcp_server.event_time import event_time_sql
 
 
 @pytest.fixture
 def tenant(db):
-    from apps.users.models import Tenant
 
     return Tenant.objects.create(external_id="test-domain", provider="commcare")
 
@@ -761,7 +761,6 @@ class TestUpsertSystemAssets:
         """When a case type disappears from metadata, its system asset is deleted
         rather than left behind as a stale table presented as fresh (issue #241,
         04#5: upsert_system_assets never deleted orphaned assets)."""
-        from apps.transformations.models import TransformationAsset
 
         first = upsert_system_assets(tenant, tenant_metadata)
         before = TransformationAsset.objects.filter(
@@ -787,7 +786,6 @@ class TestUpsertSystemAssets:
     def test_orphan_delete_only_touches_system_scope(self, tenant, tenant_metadata):
         """A user's tenant-scoped asset is never deleted by the system-asset
         orphan sweep, even though it shares the tenant."""
-        from apps.transformations.models import TransformationAsset
 
         upsert_system_assets(tenant, tenant_metadata)
         user_asset = TransformationAsset.objects.create(

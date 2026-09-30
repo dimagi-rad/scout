@@ -17,7 +17,7 @@ STATE_ORDER = {"conflict": 0, "new": 1, "edited": 2, "deleted": 3, "unchanged": 
 
 
 def canvas_projection(canvas: SemanticCanvas) -> dict[str, Any]:
-    from apps.semantic.canvas.diagnostics import compute_diagnostics
+    from apps.semantic.canvas.diagnostics import compute_diagnostics  # noqa: PLC0415 — cycle
 
     changes = list(canvas.changes.all())
     diagnostics = compute_diagnostics(canvas, changes)

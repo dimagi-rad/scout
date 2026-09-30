@@ -375,7 +375,8 @@ def _make_tool_runtime():
     back to a plain non-serializable object if the internal signature shifts.
     """
     try:
-        from langgraph.prebuilt.tool_node import ToolRuntime
+        # Import drift must fall back to _Opaque below, so keep this inside the try.
+        from langgraph.prebuilt.tool_node import ToolRuntime  # noqa: PLC0415
 
         return ToolRuntime(
             state={},

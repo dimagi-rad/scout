@@ -7,10 +7,18 @@ import pytest
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
+from apps.users.services.credential_resolver import (
+    CredentialResolutionError,
+    _aresolve_oauth_credential,
+)
 from apps.users.services.token_refresh import (
+    PersistedTokenSnapshot,
     TokenRefreshError,
     TokenRefreshRejected,
+    TokenRefreshResult,
+    TokenRefreshStatus,
     TokenRefreshUnavailable,
+    refresh_oauth_token_sync,
 )
 
 
@@ -18,7 +26,6 @@ from apps.users.services.token_refresh import (
 class TestCredentialResolverTokenRefresh:
     @pytest.mark.asyncio
     async def test_expired_token_is_refreshed(self):
-        from apps.users.services.credential_resolver import _aresolve_oauth_credential
 
         mock_token = MagicMock()
         mock_token.token = "old-expired-token"
@@ -45,7 +52,6 @@ class TestCredentialResolverTokenRefresh:
 
     @pytest.mark.asyncio
     async def test_valid_token_not_refreshed(self):
-        from apps.users.services.credential_resolver import _aresolve_oauth_credential
 
         mock_token = MagicMock()
         mock_token.token = "still-valid-token"
@@ -76,10 +82,6 @@ class TestCredentialResolverTokenRefresh:
     async def test_refresh_failure_fails_closed(self, error_type, code):
         """arch #252 (14#4): a refresh failure at/near expiry must fail closed
         with actionable reconnect guidance, not fall back to a stale token."""
-        from apps.users.services.credential_resolver import (
-            CredentialResolutionError,
-            _aresolve_oauth_credential,
-        )
 
         mock_token = MagicMock()
         mock_token.token = "known-stale-token"
@@ -102,10 +104,6 @@ class TestCredentialResolverTokenRefresh:
     async def test_near_expiry_with_no_refresh_capability_fails_closed(self):
         """No refresh token / no token URL and the token is near expiry: fail
         closed rather than provisioning a doomed run (arch #252, 14#4)."""
-        from apps.users.services.credential_resolver import (
-            CredentialResolutionError,
-            _aresolve_oauth_credential,
-        )
 
         mock_token = MagicMock()
         mock_token.token = "near-expiry"
@@ -123,7 +121,6 @@ class TestCredentialResolverTokenRefresh:
     async def test_valid_oauth_credential_carries_refresh_callable(self):
         """A refreshable OAuth credential exposes a ``refresh`` callable so
         loaders can renew the token mid-run (arch #252, finding 14#3)."""
-        from apps.users.services.credential_resolver import _aresolve_oauth_credential
 
         mock_token = MagicMock()
         mock_token.token = "valid"
@@ -148,12 +145,6 @@ class TestSyncTokenRefresh:
         mocker.patch("apps.users.services.token_refresh._persist_refresh_failure")
 
     def test_refresh_oauth_token_sync_updates_and_persists(self):
-        from apps.users.services.token_refresh import (
-            PersistedTokenSnapshot,
-            TokenRefreshResult,
-            TokenRefreshStatus,
-            refresh_oauth_token_sync,
-        )
 
         social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token_secret = "old-refresh"
@@ -201,10 +192,6 @@ class TestSyncTokenRefresh:
         mock_post.assert_called_once()
 
     def test_refresh_oauth_token_sync_raises_on_http_error(self):
-        from apps.users.services.token_refresh import (
-            TokenRefreshError,
-            refresh_oauth_token_sync,
-        )
 
         social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         response = MagicMock()

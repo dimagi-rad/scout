@@ -5,16 +5,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mcp_server.services.metadata import _live_tables_in_schema
+from mcp_server.context import QueryContext
+from mcp_server.pipeline_registry import (
+    PipelineConfig,
+    RelationshipConfig,
+    SourceConfig,
+    TransformConfig,
+)
+from mcp_server.services.metadata import (
+    _live_tables_in_schema,
+    pipeline_describe_table,
+    pipeline_get_metadata,
+    pipeline_list_tables,
+)
 
 
 def _make_pipeline_config(sources=None, dbt_models=None, relationships=None):
     """Build a minimal PipelineConfig for testing."""
-    from mcp_server.pipeline_registry import (
-        PipelineConfig,
-        RelationshipConfig,
-        SourceConfig,
-    )
 
     return PipelineConfig(
         name="commcare_sync",
@@ -28,7 +35,6 @@ def _make_pipeline_config(sources=None, dbt_models=None, relationships=None):
 
 def _set_dbt_models(config, models):
     """Attach a TransformConfig with the given model list."""
-    from mcp_server.pipeline_registry import TransformConfig
 
     object.__setattr__(
         config, "transforms", TransformConfig(dbt_project="transforms/commcare", models=models)
@@ -39,7 +45,6 @@ def _set_dbt_models(config, models):
 class TestPipelineListTables:
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_completed_run(self):
-        from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         pipeline_config = _make_pipeline_config(sources=[("cases", "CommCare cases")])
@@ -54,7 +59,6 @@ class TestPipelineListTables:
 
     @pytest.mark.asyncio
     async def test_returns_table_entries_from_completed_run(self):
-        from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         mock_ts.schema_name = "t_test"
@@ -97,7 +101,6 @@ class TestPipelineListTables:
 
     @pytest.mark.asyncio
     async def test_includes_dbt_models_with_null_materialized_row_count(self):
-        from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         mock_ts.schema_name = "t_test"
@@ -132,7 +135,6 @@ class TestPipelineListTables:
     @pytest.mark.asyncio
     async def test_excludes_failed_and_skipped_sources(self):
         """A PARTIAL run must only surface sources whose state == 'completed'."""
-        from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         mock_ts.schema_name = "t_test"
@@ -179,7 +181,6 @@ class TestPipelineListTables:
         """COMPLETED run, but the physical table is gone — exclude it.
         This is the "ghost catalog after teardown" defect.
         """
-        from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         mock_ts.schema_name = "t_test"
@@ -210,7 +211,6 @@ class TestPipelineListTables:
     @pytest.mark.asyncio
     async def test_partial_run_surfaces_committed_sources(self):
         """A PARTIAL run is queryable for its committed sources."""
-        from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         mock_ts.schema_name = "t_test"
@@ -252,7 +252,6 @@ class TestPipelineListTables:
         The table is only partially populated; surfacing it would let the
         agent query incomplete data and produce wrong answers.
         """
-        from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         mock_ts.schema_name = "t_test"
@@ -302,7 +301,6 @@ class TestPipelineListTables:
 
 class TestPipelineDescribeTable:
     def _make_ctx(self, schema_name="test_schema"):
-        from mcp_server.context import QueryContext
 
         return QueryContext(
             tenant_id="test-domain",
@@ -314,7 +312,6 @@ class TestPipelineDescribeTable:
 
     @pytest.mark.asyncio
     async def test_returns_none_when_table_not_found(self):
-        from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config()
@@ -329,7 +326,6 @@ class TestPipelineDescribeTable:
 
     @pytest.mark.asyncio
     async def test_returns_column_structure(self):
-        from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config(sources=[("cases", "CommCare case records")])
@@ -365,7 +361,6 @@ class TestPipelineDescribeTable:
     async def test_no_pipeline_config_yields_no_pipeline_description(self):
         """#155: a ws_* view schema has no pipeline to attribute, so the table gets
         no description rather than commcare_sync's."""
-        from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
 
@@ -386,7 +381,6 @@ class TestPipelineDescribeTable:
 
     @pytest.mark.asyncio
     async def test_annotates_properties_column_with_case_types(self):
-        from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config(sources=[("cases", "Cases")])
@@ -420,7 +414,6 @@ class TestPipelineDescribeTable:
 
     @pytest.mark.asyncio
     async def test_annotates_form_data_column_with_form_names(self):
-        from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config(sources=[("forms", "Forms")])
@@ -454,7 +447,6 @@ class TestPipelineDescribeTable:
 
     @pytest.mark.asyncio
     async def test_graceful_when_tenant_metadata_is_none(self):
-        from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config(sources=[("cases", "Cases")])
@@ -477,7 +469,6 @@ class TestPipelineDescribeTable:
 
 class TestPipelineGetMetadata:
     def _make_ctx(self, schema_name="test_schema"):
-        from mcp_server.context import QueryContext
 
         return QueryContext(
             tenant_id="test-domain",
@@ -489,7 +480,6 @@ class TestPipelineGetMetadata:
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_completed_run(self):
-        from mcp_server.services.metadata import pipeline_get_metadata
 
         ctx = self._make_ctx()
         mock_ts = MagicMock()
@@ -505,7 +495,6 @@ class TestPipelineGetMetadata:
 
     @pytest.mark.asyncio
     async def test_includes_relationships_from_pipeline_config(self):
-        from mcp_server.services.metadata import pipeline_get_metadata
 
         ctx = self._make_ctx()
         mock_ts = MagicMock()

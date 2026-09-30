@@ -5,7 +5,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from apps.agents.graph.base import _fetch_semantic_model_context
+from apps.agents.graph.base import (
+    INJECTED_TOOL_PARAMS,
+    MCP_TOOL_NAMES,
+    _build_system_prompt,
+    _build_tools,
+    _fetch_semantic_model_context,
+    _llm_tool_schemas,
+)
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 
 
@@ -13,12 +20,10 @@ class TestMcpToolNames:
     """Verify MCP_TOOL_NAMES contains all tools that need workspace_id injection."""
 
     def test_get_schema_status_in_mcp_tool_names(self):
-        from apps.agents.graph.base import MCP_TOOL_NAMES
 
         assert "get_schema_status" in MCP_TOOL_NAMES
 
     def test_existing_tools_still_present(self):
-        from apps.agents.graph.base import MCP_TOOL_NAMES
 
         assert "list_tables" in MCP_TOOL_NAMES
         assert "describe_table" in MCP_TOOL_NAMES
@@ -43,14 +48,12 @@ class TestTeardownSchemaUnbound:
     """
 
     def test_teardown_schema_not_in_mcp_tool_names(self):
-        from apps.agents.graph.base import MCP_TOOL_NAMES
 
         assert "teardown_schema" not in MCP_TOOL_NAMES
 
     def test_teardown_schema_filtered_from_agent_tools(self):
         """``_build_tools`` must drop the MCP ``teardown_schema`` tool even though
         the MCP server still advertises it (operator/HTTP callers keep it)."""
-        from apps.agents.graph.base import _build_tools
 
         def _fake_mcp_tool(name):
             t = MagicMock()
@@ -81,7 +84,6 @@ class TestTeardownSchemaUnbound:
         assert "get_metadata" in tool_names
 
     def test_parent_graph_exposes_artifact_manager_not_primitives(self):
-        from apps.agents.graph.base import _build_tools
 
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
         tools = _build_tools(workspace, None, [], write_capable=True)
@@ -95,7 +97,6 @@ class TestTeardownSchemaUnbound:
         assert "get_artifact_semantic_queries" not in tool_names
 
     def test_artifact_manager_tool_call_id_hidden_from_llm_schema(self):
-        from apps.agents.graph.base import INJECTED_TOOL_PARAMS, _build_tools, _llm_tool_schemas
 
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
         schemas = _llm_tool_schemas(
@@ -129,7 +130,6 @@ class TestHeadlessMode:
         return t
 
     def test_build_tools_headless_swaps_in_blocking_materialization(self):
-        from apps.agents.graph.base import _build_tools
 
         mcp_tools = [
             self._fake_mcp_tool("semantic_query"),
@@ -147,7 +147,6 @@ class TestHeadlessMode:
         assert callable(getattr(rm[0], "coroutine", None))  # async StructuredTool
 
     def test_build_tools_interactive_keeps_mcp_materialization(self):
-        from apps.agents.graph.base import _build_tools
 
         mcp_rm = self._fake_mcp_tool("run_materialization")
         mcp_tools = [self._fake_mcp_tool("semantic_query"), mcp_rm]
@@ -160,7 +159,6 @@ class TestHeadlessMode:
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
     async def test_headless_no_data_prompt_is_blocking_not_resume(self, workspace):
-        from apps.agents.graph.base import _fetch_semantic_model_context
 
         interactive = await _fetch_semantic_model_context(
             workspace, interactive=True, write_capable=True
@@ -204,7 +202,6 @@ class TestSystemPrompt:
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
     async def test_data_availability_section_present(self, workspace, user, tenant):
-        from apps.agents.graph.base import _build_system_prompt
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
         prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))
@@ -224,7 +221,6 @@ class TestSystemPrompt:
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
     async def test_data_availability_covers_not_provisioned_case(self, workspace, user):
-        from apps.agents.graph.base import _build_system_prompt
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
         prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))

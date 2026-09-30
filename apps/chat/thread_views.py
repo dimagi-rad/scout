@@ -103,7 +103,6 @@ async def _list_threads(user, *, workspace_id):
     ``error_response`` is a ready-to-return 403 ``JsonResponse`` (generic, or the
     lost-upstream-access variant) when access is denied; ``None`` on success.
     """
-    from apps.workspaces.workspace_resolver import aresolve_workspace
 
     workspace, err = await aresolve_workspace(user, workspace_id)
     if err is not None:

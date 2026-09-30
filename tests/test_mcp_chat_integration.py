@@ -17,16 +17,21 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
 from langchain_core.messages import ToolMessage
+from langgraph.checkpoint.memory import MemorySaver
 
+from apps.agents.graph.base import _build_tools
+from apps.chat.models import Thread
 from apps.chat.stream import (
     TOOL_OUTPUT_MAX_CHARS,
     _sse,
     _tool_content_to_str,
     langgraph_to_ui_stream,
 )
+from apps.workspaces.models import Workspace
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -47,7 +52,6 @@ def auth_async_client(async_client, user):
     to avoid async transaction isolation issues.
     """
     # Disconnect update_last_login signal to avoid cross-transaction save
-    from django.contrib.auth.models import update_last_login
 
     user_logged_in.disconnect(update_last_login)
     try:
@@ -60,7 +64,6 @@ def auth_async_client(async_client, user):
 @pytest.fixture
 def workspace_from_membership(tenant_membership):
     """Return the Workspace auto-created for the tenant_membership."""
-    from apps.workspaces.models import Workspace
 
     return Workspace.objects.get(
         is_auto_created=True,
@@ -254,7 +257,6 @@ class TestChatEndpointValidation:
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
-            from langgraph.checkpoint.memory import MemorySaver
 
             mock_cp.return_value = MemorySaver()
 
@@ -322,7 +324,6 @@ class TestMCPToolLoading:
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = [mock_tool]
-            from langgraph.checkpoint.memory import MemorySaver
 
             mock_cp.return_value = MemorySaver()
 
@@ -362,7 +363,6 @@ class TestAgentGraphAssembly:
 
     def test_mcp_tools_included_in_tool_list(self, user, workspace):
         """MCP tools should be included alongside local tools."""
-        from apps.agents.graph.base import _build_tools
 
         mock_mcp_tool = MagicMock()
         mock_mcp_tool.name = "semantic_query"
@@ -380,7 +380,6 @@ class TestAgentGraphAssembly:
 
     def test_empty_mcp_tools_only_local(self, user, workspace):
         """With empty MCP tools, only local tools should be present."""
-        from apps.agents.graph.base import _build_tools
 
         tools = _build_tools(workspace, user, [], write_capable=True)
         tool_names = [t.name for t in tools]
@@ -397,7 +396,6 @@ class TestAgentGraphAssembly:
     def test_raw_sql_and_table_tools_exposed(self, user, workspace):
         """Raw SQL and table inspection are the agent's fallback for questions the
         semantic model cannot express (issue #406), so they must reach the LLM."""
-        from apps.agents.graph.base import _build_tools
 
         mcp_tools = []
         for name in ["semantic_query", "query", "list_tables", "describe_table", "get_metadata"]:
@@ -793,7 +791,6 @@ class TestEndToEndStreaming:
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
-            from langgraph.checkpoint.memory import MemorySaver
 
             mock_cp.return_value = MemorySaver()
 
@@ -835,7 +832,6 @@ class TestEndToEndStreaming:
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
-            from langgraph.checkpoint.memory import MemorySaver
 
             mock_cp.return_value = MemorySaver()
 
@@ -889,7 +885,6 @@ class TestEndToEndStreaming:
         self, auth_async_client, tenant_membership, workspace_from_membership
     ):
         """A Thread record should be created when chatting."""
-        from apps.chat.models import Thread
 
         thread_id = str(uuid.uuid4())
 
@@ -899,7 +894,6 @@ class TestEndToEndStreaming:
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
-            from langgraph.checkpoint.memory import MemorySaver
 
             mock_cp.return_value = MemorySaver()
 
@@ -942,7 +936,6 @@ class TestEndToEndStreaming:
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
-            from langgraph.checkpoint.memory import MemorySaver
 
             mock_cp.return_value = MemorySaver()
             mock_build.side_effect = RuntimeError("Agent build failed")
@@ -970,7 +963,6 @@ class TestEndToEndStreaming:
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
-            from langgraph.checkpoint.memory import MemorySaver
 
             mock_cp.return_value = MemorySaver()
 

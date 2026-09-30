@@ -2,6 +2,7 @@
 
 from rest_framework import serializers
 
+from apps.common.utils import creator_display_name
 from apps.knowledge.models import AgentLearning, KnowledgeEntry
 
 
@@ -27,7 +28,6 @@ class KnowledgeEntrySerializer(serializers.ModelSerializer):
         return "entry"
 
     def get_created_by_name(self, obj):
-        from apps.common.utils import creator_display_name
 
         return creator_display_name(obj.created_by)
 

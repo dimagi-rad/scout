@@ -1,7 +1,9 @@
+import os
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import psycopg
 import pytest
 from django.utils import timezone
 
@@ -13,11 +15,21 @@ from apps.workspaces.models import MaterializationRun, TenantSchema
 from mcp_server.loaders.commcare_base import CommCareBaseLoader
 from mcp_server.loaders.connect_base import ConnectBaseLoader
 from mcp_server.loaders.ocs_base import OCSBaseLoader
+from mcp_server.pipeline_registry import MetadataDiscoveryConfig, PipelineConfig, SourceConfig
 from mcp_server.services.materializer import (
     _MAX_ERROR_CHARS,
+    MaterializationCancelled,
     _connect_visit_total,
     _load_prior_resume_cursors,
+    _load_source,
+    _make_cursor_callback,
     _summarize_error,
+    _write_cases,
+    _write_connect_completed_works,
+    _write_connect_payments,
+    _write_connect_visits,
+    _write_forms,
+    run_pipeline,
 )
 
 
@@ -54,8 +66,6 @@ class TestRunPipeline:
         return run
 
     def test_returns_completed_result(self):
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -107,8 +117,6 @@ class TestRunPipeline:
     def test_progress_updater_called_full_sequence(self):
         """Progress updater must be called for each phase transition with a
         well-formed dict, in step order."""
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -172,11 +180,6 @@ class TestRunPipeline:
     def test_progress_updater_cancellation_rolls_back(self):
         """When the updater raises ``MaterializationCancelled`` mid-load, the
         psycopg transaction is rolled back and the exception propagates."""
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import (
-            MaterializationCancelled,
-            run_pipeline,
-        )
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -235,11 +238,6 @@ class TestRunPipeline:
         running (no progress checkpoint there), the DISCOVERING→LOADING
         transition must use a conditional UPDATE so it does not silently
         overwrite the cancel and let the run continue."""
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import (
-            MaterializationCancelled,
-            run_pipeline,
-        )
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -281,12 +279,6 @@ class TestRunPipeline:
         not stuck in DISCOVERING. Pre-PR an outer handler did this; it was
         removed, leaving the row non-terminal so downstream aggregation treated
         it as "partial" and expire_inactive_schemas never cleaned it up."""
-        from mcp_server.pipeline_registry import (
-            MetadataDiscoveryConfig,
-            PipelineConfig,
-            SourceConfig,
-        )
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -341,11 +333,6 @@ class TestRunPipeline:
         """A cancel that lands between LOAD commit and the TRANSFORM phase
         must not be overwritten by the LOADING→TRANSFORMING transition;
         transform must be skipped."""
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import (
-            MaterializationCancelled,
-            run_pipeline,
-        )
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -395,8 +382,6 @@ class TestRunPipeline:
 
     def test_no_metadata_discovery_skips_discover_phase(self):
         """Pipeline without metadata_discovery should not create TenantMetadata."""
-        from mcp_server.pipeline_registry import PipelineConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="bare_sync",
@@ -430,8 +415,6 @@ class TestRunPipeline:
 
     @pytest.mark.parametrize("provider", ["commcare", "commcare_connect"])
     def test_missing_visible_metadata_warns_when_skipping_assets(self, provider, caplog):
-        from mcp_server.pipeline_registry import PipelineConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="bare_sync", description="", version="1.0", provider=provider, sources=[]
@@ -466,8 +449,6 @@ class TestRunPipeline:
     def test_staging_migration_guard_stops_before_load_and_records_failure(
         self, provider, error_type
     ):
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name=f"{provider}_sync",
@@ -511,8 +492,6 @@ class TestRunPipeline:
 
     def test_transform_failure_does_not_mark_run_failed(self):
         """A DBT transform failure should NOT change state to FAILED."""
-        from mcp_server.pipeline_registry import PipelineConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -559,8 +538,6 @@ class TestRunPipeline:
     def test_dbt_test_failure_reported_on_its_own_key(self):
         """Failing dbt tests must not land on ``transform_error`` (#391) — that key
         means the tables are stale or missing, which is not what happened here."""
-        from mcp_server.pipeline_registry import PipelineConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -609,15 +586,12 @@ class TestRunPipeline:
         assert "stg_cases" in result["transform_test_failures"]
 
     def test_unknown_source_raises(self):
-        from mcp_server.services.materializer import _load_source
 
         conn = MagicMock()
         with pytest.raises(ValueError, match="Unknown source"):
             _load_source("nonexistent", MagicMock(), {}, "schema", conn)
 
     def test_failed_load_marks_run_failed(self):
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -661,8 +635,6 @@ class TestRunPipeline:
         """Per-source atomicity: when a later source fails, earlier sources
         stay committed and the run is marked PARTIAL (not FAILED).
         """
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_connect",
@@ -731,8 +703,6 @@ class TestRunPipeline:
         2. Call sync_column_notes once per workspace linked to the tenant.
         Regression guard: catches guard/variable typos and missing calls.
         """
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_connect",
@@ -797,8 +767,6 @@ class TestRunPipeline:
         """If the very first source fails, no source has committed, so the
         run is marked FAILED (not PARTIAL).
         """
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_connect",
@@ -842,8 +810,6 @@ class TestRunPipeline:
 
     def test_failed_source_records_error_and_attempts(self):
         """Failed-source dict must include short error + attempts (default 1)."""
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -889,8 +855,6 @@ class TestRunPipeline:
 
     def test_source_state_never_loaded_string(self):
         """The 'loaded' state was the phantom-rows lie; verify it is gone."""
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -938,8 +902,6 @@ class TestRunPipeline:
         recorded as 'completed' — that ordering is what makes the 'loaded
         but rolled back' bug impossible.
         """
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="commcare_sync",
@@ -1027,8 +989,6 @@ class TestResumableMaterialization:
         completed_works_side_effect=None,
     ):
         """Run a Connect pipeline with mocked loaders. Returns the run mock."""
-        from mcp_server.pipeline_registry import PipelineConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
             name="connect_sync",
@@ -1092,7 +1052,6 @@ class TestResumableMaterialization:
         resumable source whose state was in_progress/failed, the next run
         passes that id as ``start_last_id`` to the loader.
         """
-        from mcp_server.pipeline_registry import SourceConfig
 
         prior = MagicMock()
         prior.state = "partial"  # must match RunState.PARTIAL set in _setup_run_mock
@@ -1126,7 +1085,6 @@ class TestResumableMaterialization:
         would append duplicates. It must reload in full even if its pipeline
         entry forgets ``resumable: false`` (the SourceConfig default is True).
         """
-        from mcp_server.pipeline_registry import SourceConfig
 
         prior = MagicMock()
         prior.state = "failed"
@@ -1155,7 +1113,6 @@ class TestResumableMaterialization:
         """Non-resumable sources (e.g. users) MUST do a clean full reload
         regardless of any cursor_state present on a prior run.
         """
-        from mcp_server.pipeline_registry import SourceConfig
 
         prior = MagicMock()
         prior.state = "partial"  # must match RunState.PARTIAL set in _setup_run_mock
@@ -1188,7 +1145,6 @@ class TestResumableMaterialization:
         """Each per-page commit must update cursor_state.last_id to the
         max id of the page just committed (and rows count too).
         """
-        from mcp_server.services.materializer import _make_cursor_callback
 
         run = MagicMock()
         run.id = "run-1"
@@ -1214,7 +1170,6 @@ class TestResumableMaterialization:
 
     def test_resume_does_not_drop_table_when_start_cursor_present(self):
         """The resumable writer skips DROP and uses CREATE IF NOT EXISTS."""
-        from mcp_server.services.materializer import _write_connect_visits
 
         conn = MagicMock()
         cur = MagicMock()
@@ -1232,7 +1187,6 @@ class TestResumableMaterialization:
 
     def test_no_prior_cursor_means_clean_start(self):
         """First-ever run (no PARTIAL/FAILED history) behaves like pre-#187."""
-        from mcp_server.pipeline_registry import SourceConfig
 
         visits_loader_cls = MagicMock()
         visits_loader_cls.return_value.load_pages.return_value = iter([])
@@ -1261,7 +1215,6 @@ class TestResumableMaterialization:
         and return Run A's stale cursor, causing duplicate-key errors or silent
         row duplication depending on whether the table has a PK.
         """
-        from mcp_server.pipeline_registry import SourceConfig
 
         # The most-recent prior run (Run B) is COMPLETED — its state must
         # invalidate the older PARTIAL cursor from Run A.
@@ -1296,8 +1249,6 @@ class TestResumableMaterialization:
         """A resumable source that fails mid-load must preserve its cursor
         watermark in MaterializationRun.result so the next run can resume.
         """
-        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-        from mcp_server.services.materializer import run_pipeline
 
         pipeline_cfg_sources = [SourceConfig(name="visits", resumable=True)]
 
@@ -1357,11 +1308,6 @@ class TestWriteCases:
 
     def test_inserts_cases(self, django_db_setup, db):
         """_write_cases should insert rows into the named schema."""
-        import os
-
-        import psycopg
-
-        from mcp_server.services.materializer import _write_cases
 
         db_url = os.environ.get("MANAGED_DATABASE_URL") or os.environ.get("DATABASE_URL")
         if not db_url:
@@ -1408,11 +1354,6 @@ class TestWriteCases:
 @pytest.mark.django_db
 class TestWriteForms:
     def test_inserts_forms(self, django_db_setup, db):
-        import os
-
-        import psycopg
-
-        from mcp_server.services.materializer import _write_forms
 
         db_url = os.environ.get("MANAGED_DATABASE_URL") or os.environ.get("DATABASE_URL")
         if not db_url:
@@ -1461,7 +1402,6 @@ class TestConnectPageReplayIdempotency:
     """
 
     def _get_db_url(self):
-        import os
 
         return os.environ.get("MANAGED_DATABASE_URL") or os.environ.get("DATABASE_URL")
 
@@ -1478,9 +1418,6 @@ class TestConnectPageReplayIdempotency:
         source is non-resumable a re-run does a full DROP/CREATE/INSERT — so the
         row count stays stable instead of duplicating.
         """
-        import psycopg
-
-        from mcp_server.services.materializer import _write_connect_payments
 
         db_url = self._get_db_url()
         if not db_url:
@@ -1559,9 +1496,6 @@ class TestConnectPageReplayIdempotency:
         production failure on tenant 765). They must insert via the surrogate
         identity PK, and a non-resumable re-run reloads without duplication.
         """
-        import psycopg
-
-        from mcp_server.services.materializer import _write_connect_completed_works
 
         db_url = self._get_db_url()
         if not db_url:
@@ -1628,9 +1562,6 @@ class TestConnectPageReplayIdempotency:
         """Verify raw_visits remains safe: visit_id PK + ON CONFLICT DO UPDATE
         means a page replay updates existing rows rather than duplicating them.
         """
-        import psycopg
-
-        from mcp_server.services.materializer import _write_connect_visits
 
         db_url = self._get_db_url()
         if not db_url:

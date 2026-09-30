@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
-from mcp_server.pipeline_registry import PipelineRegistry
+from mcp_server.pipeline_registry import PipelineRegistry, SourceConfig
 
 
 class TestPipelineRegistry:
@@ -123,7 +123,6 @@ relationships:
         assert "nameless.yml" in registry.load_errors
 
     def test_source_config_physical_table_name_defaults_to_raw_prefix(self):
-        from mcp_server.pipeline_registry import SourceConfig
 
         s = SourceConfig(name="cases")
         assert s.physical_table_name == "raw_cases"
@@ -146,7 +145,6 @@ class TestNoPipelineErrorMessage:
         assert "deploy" in msg.lower()
 
     def test_source_config_physical_table_name_explicit_override(self):
-        from mcp_server.pipeline_registry import SourceConfig
 
         s = SourceConfig(name="cases", table_name="my_cases")
         assert s.physical_table_name == "my_cases"
@@ -177,7 +175,6 @@ class TestNoPipelineErrorMessage:
     def test_source_config_resumable_defaults_to_true(self):
         """Issue #187: ``resumable`` defaults to True so most append-mostly
         sources opt in automatically; non-resumable ones set it false."""
-        from mcp_server.pipeline_registry import SourceConfig
 
         assert SourceConfig(name="visits").resumable is True
         assert SourceConfig(name="users", resumable=False).resumable is False

@@ -11,8 +11,10 @@ import psycopg
 import psycopg.errors
 import pytest
 
+from mcp_server import envelope
 from mcp_server.context import QueryContext
 from mcp_server.envelope import (
+    AUTH_TOKEN_EXPIRED,
     CONNECTION_ERROR,
     INTERNAL_ERROR,
     NOT_FOUND,
@@ -20,8 +22,10 @@ from mcp_server.envelope import (
     VALIDATION_ERROR,
     Timer,
     error_response,
+    scrub_extra_fields,
     success_response,
 )
+from mcp_server.loaders.commcare_cases import CommCareAuthError, CommCareCaseLoader
 from mcp_server.services.query import execute_query
 
 # --- Fixtures ---
@@ -322,8 +326,6 @@ class TestAuditLogScrubbing:
     removed, arch #253 / 01#0); the hook stays for future sensitive fields."""
 
     def test_scrub_removes_listed_keys(self):
-        from mcp_server import envelope
-        from mcp_server.envelope import scrub_extra_fields
 
         with patch.object(envelope, "_SCRUB_KEYS", frozenset({"secret"})):
             scrubbed = scrub_extra_fields({"sql": "SELECT 1", "secret": "x"})
@@ -331,7 +333,6 @@ class TestAuditLogScrubbing:
         assert scrubbed["sql"] == "SELECT 1"
 
     def test_scrub_noop_when_nothing_to_scrub(self):
-        from mcp_server.envelope import scrub_extra_fields
 
         extra = {"measures": ["visits.count"]}
         assert scrub_extra_fields(extra) == {"measures": ["visits.count"]}
@@ -341,14 +342,12 @@ class TestAuthTokenExpiredCode:
     """Test AUTH_TOKEN_EXPIRED error code exists."""
 
     def test_code_defined(self):
-        from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
         assert AUTH_TOKEN_EXPIRED == "AUTH_TOKEN_EXPIRED"
 
 
 class TestCommCareCaseLoaderAuth:
     def test_uses_bearer_header_for_oauth(self, requests_mock):
-        from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 
         requests_mock.get(
             "https://www.commcarehq.org/a/test-domain/api/case/v2/",
@@ -362,7 +361,6 @@ class TestCommCareCaseLoaderAuth:
         assert requests_mock.last_request.headers["Authorization"] == "Bearer mytoken"
 
     def test_uses_apikey_header_for_api_key(self, requests_mock):
-        from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 
         requests_mock.get(
             "https://www.commcarehq.org/a/test-domain/api/case/v2/",
@@ -378,7 +376,6 @@ class TestCommCareCaseLoaderAuth:
         )
 
     def test_raises_auth_error_on_401(self, requests_mock):
-        from mcp_server.loaders.commcare_cases import CommCareAuthError, CommCareCaseLoader
 
         requests_mock.get(
             "https://www.commcarehq.org/a/test-domain/api/case/v2/",

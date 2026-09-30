@@ -1,15 +1,16 @@
 from unittest.mock import MagicMock, patch
+from urllib.parse import quote
 
 import pytest
+import yaml
 from dbt.cli.flags import Flags
 from dbt.cli.main import cli
 
-from mcp_server.services.dbt_runner import run_dbt, run_dbt_test
+from mcp_server.services.dbt_runner import _dbt_lock, generate_profiles_yml, run_dbt, run_dbt_test
 
 
 class TestGenerateProfilesYml:
     def test_generates_valid_yaml(self, tmp_path):
-        from mcp_server.services.dbt_runner import generate_profiles_yml
 
         path = tmp_path / "profiles.yml"
         generate_profiles_yml(
@@ -19,7 +20,6 @@ class TestGenerateProfilesYml:
         )
 
         assert path.exists()
-        import yaml
 
         content = yaml.safe_load(path.read_text())
         profile = content["data_explorer"]["outputs"]["tenant_schema"]
@@ -29,7 +29,6 @@ class TestGenerateProfilesYml:
         assert profile["type"] == "postgres"
 
     def test_parses_url_components(self, tmp_path):
-        from mcp_server.services.dbt_runner import generate_profiles_yml
 
         path = tmp_path / "profiles.yml"
         generate_profiles_yml(
@@ -37,8 +36,6 @@ class TestGenerateProfilesYml:
             schema_name="test_schema",
             db_url="postgresql://myuser:mypassword@db.host.com:5433/analytics",
         )
-
-        import yaml
 
         content = yaml.safe_load(path.read_text())
         profile = content["data_explorer"]["outputs"]["tenant_schema"]
@@ -50,17 +47,12 @@ class TestGenerateProfilesYml:
     def test_percent_encoded_password_is_decoded(self, tmp_path):
         """resolve-database-url.sh URL-encodes the RDS password; the profile must
         decode it so dbt authenticates like psycopg/Django do (SCOUT-DJANGO-1T)."""
-        from urllib.parse import quote
-
-        from mcp_server.services.dbt_runner import generate_profiles_yml
 
         raw_password = "p(a<s>s?[word"
         db_url = f"postgresql://plat%40form:{quote(raw_password, safe='')}@h:5432/db"
 
         path = tmp_path / "profiles.yml"
         generate_profiles_yml(output_path=path, schema_name="s", db_url=db_url)
-
-        import yaml
 
         profile = yaml.safe_load(path.read_text())["data_explorer"]["outputs"]["tenant_schema"]
         assert profile["password"] == raw_password
@@ -73,7 +65,6 @@ class TestGenerateProfilesYml:
         does ``FROM raw_cases`` fails silently. The search_path must NOT include
         ``public`` — restricting it to the single schema also blocks unqualified
         cross-tenant reads."""
-        from mcp_server.services.dbt_runner import generate_profiles_yml
 
         path = tmp_path / "profiles.yml"
         generate_profiles_yml(
@@ -81,8 +72,6 @@ class TestGenerateProfilesYml:
             schema_name="dimagi",
             db_url="postgresql://svc:pass@localhost:5432/managed_db",
         )
-
-        import yaml
 
         profile = yaml.safe_load(path.read_text())["data_explorer"]["outputs"]["tenant_schema"]
         assert profile["search_path"] == "dimagi"
@@ -92,7 +81,6 @@ class TestGenerateProfilesYml:
         dbt does NOT run user-authored SQL as the full managed-DB superuser
         (issue #241, 04#3 SECURITY). When a confinement role is passed, dbt issues
         SET ROLE to it on every new connection."""
-        from mcp_server.services.dbt_runner import generate_profiles_yml
 
         path = tmp_path / "profiles.yml"
         generate_profiles_yml(
@@ -102,15 +90,12 @@ class TestGenerateProfilesYml:
             confinement_role="dimagi_dbt",
         )
 
-        import yaml
-
         profile = yaml.safe_load(path.read_text())["data_explorer"]["outputs"]["tenant_schema"]
         assert profile["role"] == "dimagi_dbt"
 
     def test_no_role_key_when_confinement_role_absent(self, tmp_path):
         """Backwards-compatible: when no confinement role is supplied the profile
         omits ``role`` entirely (dbt connects as the configured user)."""
-        from mcp_server.services.dbt_runner import generate_profiles_yml
 
         path = tmp_path / "profiles.yml"
         generate_profiles_yml(
@@ -119,15 +104,12 @@ class TestGenerateProfilesYml:
             db_url="postgresql://svc:pass@localhost:5432/managed_db",
         )
 
-        import yaml
-
         profile = yaml.safe_load(path.read_text())["data_explorer"]["outputs"]["tenant_schema"]
         assert "role" not in profile
 
 
 class TestRunDbt:
     def test_returns_success_result(self, tmp_path):
-        from mcp_server.services.dbt_runner import run_dbt
 
         node_cases = MagicMock()
         node_cases.name = "stg_cases"
@@ -155,7 +137,6 @@ class TestRunDbt:
         assert result["models"]["stg_forms"] == "success"
 
     def test_returns_failure_when_dbt_fails(self, tmp_path):
-        from mcp_server.services.dbt_runner import run_dbt
 
         mock_result = MagicMock()
         mock_result.success = False
@@ -178,7 +159,6 @@ class TestRunDbt:
     def test_surfaces_node_error_when_no_exception(self, tmp_path):
         """Node-level model failures (success=False, exception=None) must surface
         the per-node message, not the opaque 'dbt run failed' (SCOUT-DJANGO-1T)."""
-        from mcp_server.services.dbt_runner import run_dbt
 
         node = MagicMock()
         node.name = "stg_visits"
@@ -205,7 +185,6 @@ class TestRunDbt:
         assert 'column "user_id" does not exist' in result["error"]
 
     def test_passes_correct_cli_args(self, tmp_path):
-        from mcp_server.services.dbt_runner import run_dbt
 
         mock_result = MagicMock()
         mock_result.success = True
@@ -231,7 +210,6 @@ class TestRunDbt:
 
     def test_lock_is_acquired(self, tmp_path):
         """Verify the threading lock is acquired during a dbt run."""
-        from mcp_server.services.dbt_runner import _dbt_lock, run_dbt
 
         mock_result = MagicMock()
         mock_result.success = True

@@ -95,8 +95,8 @@ def _extract_artifact_references(value: Any) -> dict[str, str]:
 
 
 async def _load_thread_ui_messages(thread_id: str) -> list[dict[str, Any]]:
-    from apps.chat.checkpointer import ensure_checkpointer
-    from apps.chat.message_converter import langchain_messages_to_ui
+    from apps.chat.checkpointer import ensure_checkpointer  # noqa: PLC0415 — cycle
+    from apps.chat.message_converter import langchain_messages_to_ui  # noqa: PLC0415 — cycle
 
     checkpointer = await ensure_checkpointer()
     checkpoint_tuple = await checkpointer.aget_tuple(

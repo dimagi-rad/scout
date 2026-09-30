@@ -12,7 +12,15 @@ from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 from django.db import IntegrityError
 
-from apps.users.models import TenantConnection, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.providers.commcare.provider import (
+    CommCareAccount,
+    CommCareProvider,
+    provider_classes,
+)
+from apps.users.providers.commcare.views import (
+    CommCareOAuth2Adapter,
+)
 from apps.users.providers.ocs.provider import OCSProvider
 
 User = get_user_model()
@@ -541,13 +549,6 @@ class TestCustomCommCareProvider:
 
     def test_commcare_provider_imports(self):
         """Test that CommCare provider classes can be imported."""
-        from apps.users.providers.commcare.provider import (
-            CommCareProvider,
-            provider_classes,
-        )
-        from apps.users.providers.commcare.views import (
-            CommCareOAuth2Adapter,
-        )
 
         assert CommCareProvider.id == "commcare"
         assert CommCareProvider.name == "CommCare"
@@ -556,7 +557,6 @@ class TestCustomCommCareProvider:
 
     def test_commcare_provider_extract_uid(self, site):
         """Test CommCare provider can extract user ID from OAuth response."""
-        from apps.users.providers.commcare.provider import CommCareProvider
 
         # Create a mock SocialApp for the provider
         app = SocialApp.objects.create(
@@ -574,7 +574,6 @@ class TestCustomCommCareProvider:
 
     def test_commcare_provider_extract_common_fields(self, site):
         """Test CommCare provider can extract common user fields."""
-        from apps.users.providers.commcare.provider import CommCareProvider
 
         # Create a mock SocialApp for the provider
         app = SocialApp.objects.create(
@@ -602,7 +601,6 @@ class TestCustomCommCareProvider:
 
     def test_commcare_provider_default_scope(self, site):
         """Test CommCare provider has correct default scope."""
-        from apps.users.providers.commcare.provider import CommCareProvider
 
         # Create a mock SocialApp for the provider
         app = SocialApp.objects.create(
@@ -619,7 +617,6 @@ class TestCustomCommCareProvider:
 
     def test_commcare_oauth2_adapter_endpoints(self):
         """Test CommCare adapter has correct OAuth endpoint URLs."""
-        from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 
         assert "commcarehq.org" in CommCareOAuth2Adapter.access_token_url
         assert "commcarehq.org" in CommCareOAuth2Adapter.authorize_url
@@ -630,7 +627,6 @@ class TestCustomCommCareProvider:
 
     def test_commcare_account_to_str(self):
         """Test CommCare account string representation."""
-        from apps.users.providers.commcare.provider import CommCareAccount
 
         mock_account = Mock()
         mock_account.extra_data = {"username": "testuser"}
@@ -640,7 +636,6 @@ class TestCustomCommCareProvider:
 
     def test_commcare_account_no_avatar(self):
         """Test CommCare account has no avatar URL."""
-        from apps.users.providers.commcare.provider import CommCareAccount
 
         mock_account = Mock()
         mock_account.extra_data = {}
@@ -821,7 +816,6 @@ class TestLoginOnboardingComplete:
         assert resp.json()["onboarding_complete"] is False
 
     def test_login_includes_onboarding_complete_true_when_connections_exist(self, client, db):
-        from apps.users.models import Tenant
 
         user = User.objects.create_user(email="u2@example.com", password="pass")
         tenant = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
@@ -851,7 +845,6 @@ class TestMeOnboardingComplete:
         assert resp.json()["onboarding_complete"] is False
 
     def test_true_with_membership_and_credential(self, client, db):
-        from apps.users.models import Tenant
 
         user = User.objects.create_user(email="u2@example.com", password="pass")
         tenant = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
