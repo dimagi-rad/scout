@@ -122,6 +122,15 @@ def _slug_or_digest(
         return fit_identifier("unnamed", unique_key=identity, always_hash=True)
 
 
+_FORM_XMLNS = re.compile(r"\nFROM raw_forms\nWHERE xmlns = '((?:[^']|'')*)'\Z")
+
+
+def _form_xmlns(sql: str) -> str | None:
+    """The xmlns a generated form model reads, or ``None`` for any other SQL."""
+    match = _FORM_XMLNS.search(sql)
+    return match.group(1).replace("''", "'") if match else None
+
+
 def _question_path(question: dict) -> str:
     """The question's XForm ``value`` path, or ``""`` when it is not a usable string."""
     value = question.get("value")
@@ -444,8 +453,9 @@ def _generate_form_asset(
     tenant,
     form_xmlns: str,
     form_def: dict,
-    model_name: str,
     fallbacks: _NameFallbacks | None = None,
+    *,
+    model_name: str,
 ) -> TransformationAsset:
     """Generate a staging asset for a single form."""
     questions = form_def.get("questions", [])
@@ -569,7 +579,9 @@ def generate_system_assets(
 
     for xmlns, form_def in form_definitions.items():
         parent_model = form_model_names[xmlns]
-        assets.append(_generate_form_asset(tenant, xmlns, form_def, parent_model, fallbacks))
+        assets.append(
+            _generate_form_asset(tenant, xmlns, form_def, fallbacks, model_name=parent_model)
+        )
 
         repeat_groups: dict[str, list[dict]] = {}
         for q in form_def.get("questions", []):
@@ -664,6 +676,21 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
             updated += 1
 
     current_names = {a.name for a in assets}
+    # Form renames are accepted without a migration (#470), unlike case types, so
+    # leave a searchable record of which old names SQL or knowledge may still use.
+    form_names = _form_model_names(metadata.get("form_definitions", {}))
+    renamed_forms = sorted(
+        (asset.name, form_names[xmlns])
+        for asset in existing_assets
+        if asset.name not in current_names
+        and (xmlns := _form_xmlns(asset.sql_content)) in form_names
+    )
+    if renamed_forms:
+        logger.warning(
+            "Renamed form staging models for tenant %s (old -> new): %s",
+            tenant.external_id,
+            ", ".join(f"{old} -> {new}" for old, new in renamed_forms),
+        )
     deleted, _ = (
         TransformationAsset.objects.filter(tenant=tenant, scope=TransformationScope.SYSTEM)
         .exclude(name__in=current_names)

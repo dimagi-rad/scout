@@ -118,7 +118,7 @@ def test_every_generated_identifier_fits_postgres_worst_case(tenant):
 
 
 @pytest.mark.django_db
-def test_upsert_replaces_legacy_counter_names_and_keeps_repeat_consumers():
+def test_upsert_replaces_legacy_counter_names_and_keeps_repeat_consumers(caplog):
     tenant = Tenant.objects.create(provider="commcare", external_id="synthetic-legacy-forms")
     forms = {
         f"urn:synthetic:reg:{i}": _form("Registration", f"App {i}", repeat="/data/items")
@@ -162,3 +162,5 @@ def test_upsert_replaces_legacy_counter_names_and_keeps_repeat_consumers():
     # the renamed parent.
     for name, new_parent in legacy_repeats.items():
         assert f"ref('{new_parent}')" in stored[name]
+    for new, old in renames.items():
+        assert f"{old} -> {new}" in caplog.text
