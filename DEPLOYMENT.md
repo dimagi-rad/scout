@@ -312,8 +312,8 @@ image installs them with `npm ci`, so deploys don't re-resolve from the registry
 To change them, edit `cube_config/package.json` and regenerate the lockfile
 inside the base image so the npm version matches (`docker run --rm -v
 "$PWD/cube_config:/w" -w /tmp cubejs/cube:<tag> sh -c 'mkdir p && cp /w/package.json p/
-&& cd p && npm install --package-lock-only --omit=dev && cp package-lock.json /w/'`).
-Then re-check the pinned patch hashes (see `cube_config/README.md`).
+&& cd p && npm install --package-lock-only && cp package-lock.json /w/'`).
+Bumping the `cubejs/cube` base image tag additionally requires re-auditing the pinned patch hashes (see `cube_config/README.md`).
 
 Tests are not a gate — staging is for trying work in progress. The workflow is
 `workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.
