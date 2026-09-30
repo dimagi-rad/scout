@@ -94,6 +94,7 @@ async def test_volatile_schema_not_in_stable_prefix(monkeypatch):
             "apps.agents.graph.base._fetch_semantic_model_context",
             new=AsyncMock(return_value=schema_block),
         ),
+        patch("apps.agents.graph.base.aworkspace_source_freshness", AsyncMock(return_value=[])),
     ):
         MockRetriever.return_value = MagicMock(retrieve=AsyncMock(return_value=""))
 

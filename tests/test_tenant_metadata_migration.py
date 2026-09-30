@@ -45,11 +45,18 @@ def _historical_metadata_model(target):
 
 def _membership(tenant, suffix, *, archived=False):
     user = User.objects.create_user(email=f"m{suffix}@example.com", password="x")
-    return TenantMembership.all_objects.create(
-        user=user,
-        tenant=tenant,
-        archived_at=timezone.now() if archived else None,
+    # bulk_create skips the post_save signal that auto-creates a workspace: its
+    # WorkspaceTenant is the current model, which this rewound schema predates.
+    (membership,) = TenantMembership.all_objects.bulk_create(
+        [
+            TenantMembership(
+                user=user,
+                tenant=tenant,
+                archived_at=timezone.now() if archived else None,
+            )
+        ]
     )
+    return membership
 
 
 @pytest.fixture

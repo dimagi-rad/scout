@@ -127,6 +127,7 @@ from apps.workspaces.services.schema_manager import (
     ViewSchemaRetired,
     aview_schema_buildable,
 )
+from apps.workspaces.services.source_freshness import REQUESTER_CODES, arecord_load_outcomes
 from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app
 from mcp_server.loaders.connect_base import ConnectExportError
@@ -713,6 +714,21 @@ async def _workspace_tenant_ids(workspace_id) -> list:
     ]
 
 
+async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
+    """A load refused before it started still left some sources unrefreshed (#715).
+
+    Only a source the requester's own sign-in or membership failed for is
+    recorded. A role denial, a source skipped for another one, or an
+    inconclusive check says nothing about the source, so its record stands.
+    """
+    failed = [
+        entry for entry in denial.get("tenants") or [] if entry.get("error_code") in REQUESTER_CODES
+    ]
+    if failed:
+        await arecord_load_outcomes(workspace_id, failed, user_id, partial=True)
+    return denial
+
+
 def serialized_workspace_materialization(function):
     """Capture load intent, then take W and the sorted tenant locks T*.
 
@@ -733,7 +749,7 @@ def serialized_workspace_materialization(function):
     ):
         denial = await _materialization_write_denial(workspace_id, user_id)
         if denial is not None:
-            return denial
+            return await _recorded_denial(workspace_id, user_id, denial)
         intent = parse_load_intent(load_intent)
         if intent is None:
             tenant_ids = await _workspace_tenant_ids(workspace_id)
@@ -741,12 +757,12 @@ def serialized_workspace_materialization(function):
         async with workspace_data_lock(workspace_id):
             denial = await _materialization_write_denial(workspace_id, user_id)
             if denial is not None:
-                return denial
+                return await _recorded_denial(workspace_id, user_id, denial)
             tenant_ids = await _workspace_tenant_ids(workspace_id)
             async with tenant_data_lock(tenant_ids):
                 denial = await _materialization_write_denial(workspace_id, user_id)
                 if denial is not None:
-                    return denial
+                    return await _recorded_denial(workspace_id, user_id, denial)
                 return await function(
                     workspace_id,
                     user_id,
@@ -893,6 +909,7 @@ async def materialize_workspace_core(
 
     if not memberships:
         logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
+        await arecord_load_outcomes(workspace.id, unreachable_results, user_id)
         return _no_reachable_tenants_result(unreachable_results)
 
     registry = get_registry()
@@ -1265,6 +1282,9 @@ async def materialize_workspace_core(
         "cube_schema": cube_schema_outcome,
         "guidance": _credential_guidance(_summary_failures(guidance_sources)),
         "denied_mid_run": denied_mid_run,
+        "source_freshness": await arecord_load_outcomes(
+            workspace.id, all_results, user_id, partial=only_unserved
+        ),
     }
 
 
@@ -1315,7 +1335,7 @@ async def materialize_workspace_blocking(
     """
     denial = await _materialization_write_denial(workspace_id, user_id)
     if denial is not None:
-        return denial
+        return await _recorded_denial(workspace_id, user_id, denial)
     await _await_in_progress_materializations(workspace_id)
     return await materialize_workspace_core(workspace_id, user_id, job_id)
 
