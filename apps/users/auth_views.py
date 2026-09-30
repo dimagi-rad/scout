@@ -289,7 +289,7 @@ def providers_view(request):
     apps = SocialApp.objects.filter(sites=current_site).order_by("provider")
 
     connected_providers = set()
-    token_status = {}  # provider -> "connected" | "unavailable" | "expired" | "needs_team"
+    token_status = {}  # provider -> "connected" | "expired" | "unavailable" | "needs_team"
     if request.user.is_authenticated:
         connected_providers = set(
             SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
@@ -301,7 +301,7 @@ def providers_view(request):
         # has one token per team (#156), and the old per-provider assignment was
         # last-row-wins, so a healthy team could be reported as expired purely on
         # queryset order. Reduced below to "connected while at least one works",
-        # then "unavailable" (unknown, not dead) ahead of "expired";
+        # then "expired" (the only status naming a user action) ahead of "unavailable";
         # the per-team detail lives on /api/auth/connections/.
         bindings = {
             (conn.provider, conn.scope_key): conn.social_account_id
@@ -351,7 +351,7 @@ def providers_view(request):
             )
         token_status = {
             provider: next(
-                (s for s in ("connected", "unavailable", "expired", "needs_team") if s in statuses),
+                (s for s in ("connected", "expired", "unavailable", "needs_team") if s in statuses),
                 "expired",
             )
             for provider, statuses in seen_statuses.items()

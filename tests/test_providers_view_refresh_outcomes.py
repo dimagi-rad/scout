@@ -124,3 +124,49 @@ class TestProvidersViewRefreshOutcomes:
         )
 
         assert _commcare_status(user) == "connected"
+
+
+@pytest.fixture
+def two_ocs_teams(user, site):
+    app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+    app.sites.add(site)
+    for team in ("acme", "globex"):
+        account = SocialAccount.objects.create(user=user, provider="ocs", uid=f"1#{team}")
+        SocialToken.objects.create(
+            account=account,
+            app=app,
+            token=team,
+            token_secret="refresh",
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+
+
+def _ocs_status(user, outcomes: dict[str, Exception | None]) -> str:
+    async def refresh(social_token, *args, **kwargs):
+        error = outcomes[social_token.token]
+        if error is not None:
+            raise error
+
+    client = Client()
+    client.force_login(user)
+    with mock.patch.object(auth_views, "refresh_oauth_token", refresh):
+        providers = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
+    return providers["ocs"]["status"]
+
+
+@pytest.mark.django_db(transaction=True)
+class TestProvidersViewAcrossIdentities:
+    def test_dead_identity_outranks_unavailable_one(self, user, two_ocs_teams):
+        outcomes = {"acme": TokenRefreshRejected("dead"), "globex": TokenRefreshUnavailable("blip")}
+
+        assert _ocs_status(user, outcomes) == "expired"
+
+    def test_unavailable_identity_outranks_nothing_known(self, user, two_ocs_teams):
+        outcomes = {"acme": TokenRefreshUnavailable("blip"), "globex": TokenRefreshUnavailable("x")}
+
+        assert _ocs_status(user, outcomes) == "unavailable"
+
+    def test_working_identity_keeps_provider_connected(self, user, two_ocs_teams):
+        outcomes = {"acme": TokenRefreshUnavailable("blip"), "globex": None}
+
+        assert _ocs_status(user, outcomes) == "connected"

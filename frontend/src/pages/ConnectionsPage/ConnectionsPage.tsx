@@ -61,7 +61,7 @@ const PROVIDER_STATUS_COPY: Partial<
   unavailable: {
     label: "Connected, but we couldn't check right now. Try again later.",
     action: null,
-    warn: false,
+    warn: true,
   },
   expired: { label: "Connection expired", action: "Reconnect", warn: true },
   needs_team: { label: "No team selected", action: "Connect a team", warn: true },
@@ -272,7 +272,7 @@ export function ConnectionsPage() {
                     </p>
                   </div>
                   <div className="flex shrink-0 gap-2">
-                    {provider.status === "connected" &&
+                    {(provider.status === "connected" || provider.status === "unavailable") &&
                       provider.supports_multiple_scopes && (
                         <Button
                           variant="outline"
