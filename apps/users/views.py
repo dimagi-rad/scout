@@ -14,7 +14,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from apps.common.commcare_servers import DEFAULT_SERVER
+from apps.common.commcare_servers import DEFAULT_SERVER, get_commcare_server
 from apps.common.http import parse_json_object, string_field
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
@@ -100,8 +100,14 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
 # Django doesn't yet expose async-native transaction support, so this is the
 # sanctioned bridge for transactional ORM writes from async views.
 @sync_to_async
-def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slug, team_name):
-    """Create one API-key connection and link every chatbot it discovered to it."""
+def _persist_api_key_connection(
+    user, provider, descriptors, encrypted, team_slug, team_name, server=DEFAULT_SERVER
+):
+    """Create one API-key connection and link every chatbot it discovered to it.
+
+    A key belongs to one server, which is both its connection's scope (what access
+    verification asks) and its tenants' server (what the loaders ask).
+    """
     rows = []
     with transaction.atomic():
         conn = TenantConnection.objects.create(
@@ -109,11 +115,13 @@ def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slu
             provider=provider,
             credential_type=TenantConnection.API_KEY,
             encrypted_credential=encrypted,
+            scope_key=server,
+            scope_label=get_commcare_server(server).label if server else "",
         )
         for desc in descriptors:
             tenant, _ = Tenant.objects.get_or_create(
                 provider=provider,
-                server=DEFAULT_SERVER,
+                server=server,
                 external_id=desc.external_id,
                 defaults={"canonical_name": desc.canonical_name},
             )
@@ -317,6 +325,7 @@ async def tenant_credential_list_view(request):
         )
 
     try:
+        server = strategy.server_for(fields)
         descriptors = await strategy.verify_and_discover(fields)
     except CredentialVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
@@ -344,7 +353,7 @@ async def tenant_credential_list_view(request):
 
     try:
         memberships_payload = await _persist_api_key_connection(
-            user, provider, descriptors, encrypted, team_slug, team_name
+            user, provider, descriptors, encrypted, team_slug, team_name, server
         )
     except Exception as e:
         logger.exception("Failed to persist connection for provider %s", provider)
@@ -426,7 +435,10 @@ async def connection_detail_view(request, connection_id):
             {"error": "Connection has no linked data sources to verify against"}, status=400
         )
     try:
-        await strategy.verify_for_tenant(fields, external_id=sample.tenant.external_id)
+        # The server is fixed at creation; a rotated key is checked against the same one.
+        await strategy.verify_for_tenant(
+            {**fields, "server": sample.tenant.server}, external_id=sample.tenant.external_id
+        )
     except CredentialVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
