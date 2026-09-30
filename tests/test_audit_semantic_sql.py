@@ -78,6 +78,21 @@ def test_audit_lists_only_stored_sql_that_fails_validation(model):
     )
     SemanticField.objects.create(
         dataset=visits,
+        name="stale_ratio",
+        field_type="measure",
+        measure_type="number",
+        metadata={"cube_sql": "{missing_count}::numeric / NULLIF({count}, 0)"},
+    )
+    SemanticField.objects.create(
+        dataset=visits,
+        name="hidden_stale_ratio",
+        field_type="measure",
+        measure_type="number",
+        is_visible=False,
+        metadata={"cube_sql": "{missing_count}::numeric / NULLIF({count}, 0)"},
+    )
+    SemanticField.objects.create(
+        dataset=visits,
         name="broken_text",
         field_type="dimension",
         metadata={"cube_sql": "'unterminated"},
@@ -110,6 +125,7 @@ def test_audit_lists_only_stored_sql_that_fails_validation(model):
         ("dimension", "visits.broken_text", "metadata.cube_sql"),
         ("measure", "visits.escalating", "metadata.cube_sql"),
         ("measure_filter", "visits.escalating", "metadata.filters[1].sql"),
+        ("measure", "visits.stale_ratio", "metadata.cube_sql"),
         ("relationship", "bad_join", "join_expression"),
     ]
     escalating = findings[2]
@@ -124,4 +140,4 @@ def test_audit_lists_only_stored_sql_that_fails_validation(model):
 
     text = StringIO()
     call_command("audit_semantic_sql", "--workspace-id", str(model.workspace_id), stdout=text)
-    assert "Summary: 5 stored SQL fragment(s) fail validation." in text.getvalue()
+    assert "Summary: 6 stored SQL fragment(s) fail validation." in text.getvalue()

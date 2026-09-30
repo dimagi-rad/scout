@@ -8,10 +8,20 @@ from django.core.management.base import BaseCommand
 from django.db.models import Prefetch
 from sqlglot.errors import TokenError
 
-from apps.semantic.models import SemanticDataset, SemanticField, SemanticRelationship
-from apps.semantic.services.custom_datasets import CustomDatasetError, custom_dataset_dependencies
+from apps.semantic.models import (
+    SemanticDataset,
+    SemanticField,
+    SemanticModel,
+    SemanticRelationship,
+)
+from apps.semantic.services.cube import (
+    cube_member_references,
+    publishable_datasets,
+    published_member_references,
+)
+from apps.semantic.services.cube_sql import embed_cube_sql
+from apps.semantic.services.custom_datasets import custom_dataset_dependencies
 from apps.semantic.services.field_sql import (
-    SemanticSQLValidationError,
     compile_dimension_sql,
     compile_join_sql,
     compile_measure_filter_sql,
@@ -57,60 +67,76 @@ class Command(BaseCommand):
 
 
 def audit_semantic_sql(*, workspace_ids=None) -> list[dict]:
-    findings: list[dict] = []
-    datasets = SemanticDataset.objects.prefetch_related(
-        Prefetch("fields", queryset=SemanticField.objects.order_by("name"))
-    ).order_by("workspace_id", "name")
-    relationships = SemanticRelationship.objects.select_related(
-        "from_dataset", "to_dataset"
-    ).order_by("workspace_id", "name")
+    models = SemanticModel.objects.order_by("workspace_id")
     if workspace_ids:
-        datasets = datasets.filter(workspace_id__in=workspace_ids)
-        relationships = relationships.filter(workspace_id__in=workspace_ids)
+        models = models.filter(workspace_id__in=workspace_ids)
+    findings: list[dict] = []
+    for model in models:
+        findings.extend(_audit_model(model))
+    return findings
 
-    def check(kind, owner, name, path, visible, validate):
+
+def _audit_model(model: SemanticModel) -> list[dict]:
+    findings: list[dict] = []
+    datasets = list(
+        model.datasets.prefetch_related(
+            Prefetch("fields", queryset=SemanticField.objects.order_by("name"))
+        ).order_by("name")
+    )
+    published = {dataset.id for dataset in publishable_datasets(datasets)}
+    references = published_member_references([d for d in datasets if d.id in published])
+
+    def check(kind, object_id, name, path, visible, validate):
+        # A malformed stored fragment must be reported, not abort the whole audit.
         try:
             validate()
-        # A malformed stored fragment must be reported, not abort the whole audit.
-        except (SemanticSQLValidationError, CustomDatasetError, TokenError, ValueError) as exc:
+        except (TokenError, ValueError) as exc:
             findings.append(
                 {
                     "kind": kind,
-                    "workspace_id": str(owner["workspace_id"]),
+                    "workspace_id": str(model.workspace_id),
                     "object": name,
-                    "object_id": str(owner["id"]),
+                    "object_id": str(object_id),
                     "path": path,
                     "visible": visible,
                     "error": str(exc),
                 }
             )
 
+    def published_sql(compile_sql, member_references, *, visible):
+        # Unpublished members never reach embedding, so only their SQL itself is checked.
+        def validate():
+            sql = compile_sql()
+            if visible:
+                embed_cube_sql(sql, references=member_references)
+
+        return validate
+
     for dataset in datasets:
         metadata = dataset.metadata or {}
-        dataset_owner = {"workspace_id": dataset.workspace_id, "id": dataset.id}
         if dataset.source_kind == SemanticDataset.SourceKind.CUSTOM:
-            for key in ("cube_sql", "sql"):
-                if source := metadata.get(key):
-                    check(
-                        "custom_dataset",
-                        dataset_owner,
-                        dataset.name,
-                        f"metadata.{key}",
-                        dataset.is_visible,
-                        partial(custom_dataset_dependencies, source),
-                    )
+            key = "cube_sql" if metadata.get("cube_sql") else "sql"
+            if source := metadata.get(key):
+                check(
+                    "custom_dataset",
+                    dataset.id,
+                    dataset.name,
+                    f"metadata.{key}",
+                    dataset.is_visible,
+                    partial(custom_dataset_dependencies, source),
+                )
         columns = dataset_column_names(dataset)
+        member_references = cube_member_references(references, dataset)
         for field in dataset.fields.all():
             field_metadata = field.metadata or {}
-            owner = {"workspace_id": dataset.workspace_id, "id": field.id}
             name = f"{dataset.name}.{field.name}"
-            visible = dataset.is_visible and field.is_visible
+            visible = dataset.id in published and field.is_visible
             cube_sql = field_metadata.get("cube_sql")
             if field.field_type != SemanticField.FieldType.MEASURE:
                 if cube_sql:
                     check(
                         "dimension",
-                        owner,
+                        field.id,
                         name,
                         "metadata.cube_sql",
                         visible,
@@ -120,11 +146,15 @@ def audit_semantic_sql(*, workspace_ids=None) -> list[dict]:
             if isinstance(cube_sql, str) and cube_sql.strip():
                 check(
                     "measure",
-                    owner,
+                    field.id,
                     name,
                     "metadata.cube_sql",
                     visible,
-                    partial(compile_measure_sql, cube_sql, columns=columns),
+                    published_sql(
+                        partial(compile_measure_sql, cube_sql, columns=columns),
+                        member_references,
+                        visible=visible,
+                    ),
                 )
             filters = field_metadata.get("filters")
             for index, item in enumerate(filters if isinstance(filters, list) else []):
@@ -132,20 +162,26 @@ def audit_semantic_sql(*, workspace_ids=None) -> list[dict]:
                 if isinstance(sql, str) and sql.strip():
                     check(
                         "measure_filter",
-                        owner,
+                        field.id,
                         name,
                         f"metadata.filters[{index}].sql",
                         visible,
-                        partial(compile_measure_filter_sql, sql, columns=columns),
+                        published_sql(
+                            partial(compile_measure_filter_sql, sql, columns=columns),
+                            member_references,
+                            visible=visible,
+                        ),
                     )
 
-    for relationship in relationships:
+    relationships = SemanticRelationship.objects.filter(workspace_id=model.workspace_id)
+    for relationship in relationships.order_by("name"):
+        visible = {relationship.from_dataset_id, relationship.to_dataset_id} <= published
         check(
             "relationship",
-            {"workspace_id": relationship.workspace_id, "id": relationship.id},
+            relationship.id,
             relationship.name,
             "join_expression",
-            relationship.from_dataset.is_visible and relationship.to_dataset.is_visible,
+            visible,
             partial(compile_join_sql, relationship.join_expression),
         )
     return findings
