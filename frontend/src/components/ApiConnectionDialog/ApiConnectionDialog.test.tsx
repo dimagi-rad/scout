@@ -77,6 +77,20 @@ describe("ApiConnectionDialog", () => {
 
     const server = (await screen.findByTestId("api-connection-field-server")) as HTMLSelectElement
     expect(server.value).toBe("")
+    fireEvent.change(screen.getByTestId("api-connection-field-domain"), { target: { value: "dom" } })
+    fireEvent.change(screen.getByTestId("api-connection-field-username"), {
+      target: { value: "u@example.com" },
+    })
+    fireEvent.change(screen.getByTestId("api-connection-field-api_key"), { target: { value: "k" } })
+    fireEvent.click(screen.getByTestId("api-connection-submit"))
+
+    // The default the user saw is what is submitted, not left to the backend.
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith("/api/auth/connections/", {
+        provider: "commcare",
+        fields: { server: "", domain: "dom", username: "u@example.com", api_key: "k" },
+      }),
+    )
   })
 
   it("does not offer to change the server when rotating a key", async () => {
