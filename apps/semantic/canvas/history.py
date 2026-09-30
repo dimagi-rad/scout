@@ -36,6 +36,12 @@ from apps.semantic.models import (
     SemanticModelRevision,
     SemanticRelationship,
 )
+from apps.semantic.services.cube import (
+    cube_member_references,
+    publishable_datasets,
+    published_member_references,
+)
+from apps.semantic.services.cube_sql import CubeSQLReferenceError, embed_cube_sql
 from apps.semantic.services.custom_datasets import CustomDatasetError, compile_custom_dataset_sql
 
 logger = logging.getLogger(__name__)
@@ -374,7 +380,7 @@ def _apply_undo(workspace, model, entries) -> list[dict[str, Any]] | None:
     try:
         with transaction.atomic():
             undone = [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
-            if problems := _restored_field_problems(entries):
+            if problems := _restored_field_problems(model, entries):
                 raise _InvalidRestore(problems)
             return undone
     except IntegrityError:
@@ -382,7 +388,7 @@ def _apply_undo(workspace, model, entries) -> list[dict[str, Any]] | None:
         return None
 
 
-def _restored_field_problems(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _restored_field_problems(model, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Validate authored fields this undo wrote back, in their saved state.
 
     Catalog-generated fields are the refresh's to keep valid, as on the canvas.
@@ -397,6 +403,8 @@ def _restored_field_problems(entries: list[dict[str, Any]]) -> list[dict[str, An
         elif entry["object_type"] == DATASET and entry.get("after") is None:
             restored.update(field["id"] for field in before.get("fields") or [])
     problems = []
+    published: dict[Any, Any] | None = None
+    references: set[str] = set()
     for field in SemanticField.objects.filter(id__in=restored).select_related("dataset"):
         metadata = field.metadata or {}
         authored = metadata.get("source") == CANVAS_SOURCE or any(
@@ -404,15 +412,42 @@ def _restored_field_problems(entries: list[dict[str, Any]]) -> list[dict[str, An
         )
         if not authored:
             continue
+        messages = [diagnostic["message"] for diagnostic in saved_field_diagnostics(field)]
+        if not messages and field.field_type == SemanticField.FieldType.MEASURE:
+            if published is None:
+                datasets = publishable_datasets(list(model.datasets.prefetch_related("fields")))
+                published = {dataset.id: dataset for dataset in datasets}
+                references = published_member_references(datasets)
+            if (dataset := published.get(field.dataset_id)) is not None and (
+                missing := _missing_reference(field, cube_member_references(references, dataset))
+            ):
+                messages = [f"It references {missing}, which no longer exists."]
         problems.extend(
             {
                 "object": f"field/{field.dataset.name}.{field.name}",
                 "object_uuid": str(field.id),
-                "message": diagnostic["message"],
+                "message": message,
             }
-            for diagnostic in saved_field_diagnostics(field)
+            for message in messages
         )
     return problems
+
+
+def _missing_reference(field: SemanticField, references: set[str]) -> str:
+    """A ``{member}`` the Cube build could not resolve; unlike a join's, it fails the build."""
+    metadata = field.metadata or {}
+    sources = [
+        metadata.get("cube_sql"),
+        *(item.get("sql") for item in metadata.get("filters") or [] if isinstance(item, dict)),
+    ]
+    for sql in sources:
+        if not (isinstance(sql, str) and sql.strip()):
+            continue
+        try:
+            embed_cube_sql(sql, references=references)
+        except CubeSQLReferenceError as exc:
+            return exc.reference[:200]
+    return ""
 
 
 def changes_definition(before: dict[str, Any], after: dict[str, Any]) -> bool:
