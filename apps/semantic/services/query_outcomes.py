@@ -2,9 +2,8 @@
 
 import asyncio
 import logging
-from types import SimpleNamespace
 
-from apps.artifacts.services.query_state import artifact_query_surface
+from apps.semantic.services.query_readiness import query_surface_readiness
 from mcp_server.envelope import error_response
 
 logger = logging.getLogger(__name__)
@@ -20,7 +19,8 @@ class QueryReadiness:
     """One lazy inspection of a batch's required members, never a global cache."""
 
     def __init__(self, workspace, queries):
-        self.subject = SimpleNamespace(workspace=workspace, semantic_queries=queries, id=None)
+        self.workspace = workspace
+        self.queries = queries
         self._surface = None
         self._inspected = False
         self._lock = asyncio.Lock()
@@ -29,11 +29,12 @@ class QueryReadiness:
         async with self._lock:
             if not self._inspected:
                 try:
-                    self._surface = await artifact_query_surface(self.subject)
+                    readiness = await query_surface_readiness(self.workspace, self.queries)
+                    self._surface = readiness.surface
                 except Exception:
                     logger.warning(
                         "Unable to inspect query readiness for workspace %s",
-                        self.subject.workspace.id,
+                        self.workspace.id,
                         exc_info=True,
                     )
                 self._inspected = True
@@ -41,10 +42,10 @@ class QueryReadiness:
 
 
 async def query_readiness_error(workspace, query, code, message, *, category, readiness=None):
-    """Reuse artifact-page dependency/readiness decisions for a query not yet saved.
+    """Classify a failed query by the readiness verdict saved artifacts also use.
 
-    The subject has no persisted artifact or recovery history. The existing
-    service only reads catalog/publication state; it never loads provider data.
+    An unsaved query has no recovery history; readiness reads only catalog and
+    publication state and never loads provider data.
     """
     surface = await (readiness or QueryReadiness(workspace, [query])).surface()
     if surface is None:

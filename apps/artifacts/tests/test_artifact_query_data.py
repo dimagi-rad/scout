@@ -17,6 +17,7 @@ from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.artifacts.views import _artifact_query_cache_key
 from apps.semantic.services.query import CAPACITY_EXHAUSTED_CATEGORY
 from apps.semantic.services.query_outcomes import query_error, query_readiness_error
+from apps.semantic.services.query_readiness import QuerySurfaceReadiness
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from tests.tenant_access import usable_connection
@@ -169,13 +170,15 @@ async def test_inspector_shares_one_readiness_inspection_across_query_failures(
     with (
         patch("apps.artifacts.views.run_semantic_query", side_effect=execute) as run,
         patch(
-            "apps.semantic.services.query_outcomes.artifact_query_surface",
+            "apps.semantic.services.query_outcomes.query_surface_readiness",
             new=AsyncMock(
-                return_value={
-                    "queryable": False,
-                    "status": "needs_semantic_rebuild",
-                    "recovery_action": "semantic_rebuild",
-                }
+                return_value=QuerySurfaceReadiness(
+                    {
+                        "queryable": False,
+                        "status": "needs_semantic_rebuild",
+                        "recovery_action": "semantic_rebuild",
+                    }
+                )
             ),
         ) as inspect,
     ):
@@ -185,7 +188,7 @@ async def test_inspector_shares_one_readiness_inspection_across_query_failures(
     assert response.status_code == 200
     assert run.await_count == 9
     inspect.assert_awaited_once()
-    assert inspect.await_args.args[0].semantic_queries == [{"measures": ["visits.count"]}] * 9
+    assert inspect.await_args.args[1] == [{"measures": ["visits.count"]}] * 9
     assert len(response.json()["queries"]) == 9
     assert all(
         result["error"] == "Serving model unavailable" for result in response.json()["queries"]
