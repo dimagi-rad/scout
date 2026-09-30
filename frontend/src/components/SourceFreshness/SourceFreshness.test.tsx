@@ -1,34 +1,27 @@
 import { render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { workspaceApi, type WorkspaceDetail } from "@/api/workspaces"
+import { workspaceApi } from "@/api/workspaces"
+import { freshness, freshSource } from "@/components/StaleDataBanner/testFixtures"
 import { SourceFreshness } from "./SourceFreshness"
-
-function detail(sources: WorkspaceDetail["sources"]): WorkspaceDetail {
-  return { id: "ws-1", sources } as WorkspaceDetail
-}
 
 afterEach(() => vi.restoreAllMocks())
 
 describe("SourceFreshness", () => {
   it("shows a data-as-of line per source", async () => {
-    const hourAgo = new Date(Date.now() - 3600_000).toISOString()
-    vi.spyOn(workspaceApi, "getDetail").mockResolvedValue(
-      detail([
-        { tenant_id: "t1", tenant_name: "Alpha", provider: "commcare", last_synced_at: hourAgo },
-        { tenant_id: "t2", tenant_name: "Beta", provider: "commcare", last_synced_at: null },
-      ]),
+    vi.spyOn(workspaceApi, "getFreshness").mockResolvedValue(
+      freshness([freshSource("Alpha", 1), freshSource("Beta", null)]),
     )
     render(<SourceFreshness workspaceId="ws-1" />)
 
-    expect(await screen.findByTestId("source-freshness-t1")).toHaveTextContent(
+    expect(await screen.findByTestId("source-freshness-Alpha")).toHaveTextContent(
       "Alpha: data as of 1 hour ago",
     )
-    expect(screen.getByTestId("source-freshness-t2")).toHaveTextContent("Beta: not loaded yet")
+    expect(screen.getByTestId("source-freshness-Beta")).toHaveTextContent("Beta: not loaded yet")
   })
 
   it("renders nothing when the request fails", async () => {
-    const spy = vi.spyOn(workspaceApi, "getDetail").mockRejectedValue(new Error("boom"))
+    const spy = vi.spyOn(workspaceApi, "getFreshness").mockRejectedValue(new Error("boom"))
     render(<SourceFreshness workspaceId="ws-1" />)
 
     await vi.waitFor(() => expect(spy).toHaveBeenCalled())

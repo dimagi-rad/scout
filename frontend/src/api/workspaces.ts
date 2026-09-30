@@ -47,13 +47,6 @@ export interface WorkspaceListItem {
   created_at: string
 }
 
-export interface WorkspaceSourceFreshness {
-  tenant_id: string
-  tenant_name: string
-  provider: string
-  last_synced_at: string | null
-}
-
 // GET /api/workspaces/<id>/freshness/ — one source's serving data age and latest load.
 export interface SourceFreshnessDetail {
   tenant_id: string
@@ -89,7 +82,6 @@ export interface WorkspaceDetail {
   missing_tenants?: MissingTenant[]
   schema_status: SchemaStatus
   in_progress?: boolean
-  sources?: WorkspaceSourceFreshness[]
   tenant_count: number
   member_count: number
   last_synced_at: string | null

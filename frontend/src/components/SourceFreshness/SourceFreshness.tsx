@@ -10,10 +10,11 @@ interface Props {
 
 /**
  * One "Data as of" line per source, so a stale source is not hidden by a fresh one.
+ * Reads the serving snapshot's age, the same figure the stale-data banner judges by.
  * Mount with `key={workspaceId}` (see useRefetchOnLoadEnd).
  */
 export function SourceFreshness({ workspaceId, loading = false }: Props) {
-  const sources = useRefetchOnLoadEnd(workspaceApi.getDetail, workspaceId, loading)?.sources ?? []
+  const sources = useRefetchOnLoadEnd(workspaceApi.getFreshness, workspaceId, loading)?.sources ?? []
 
   if (sources.length === 0) return null
 
@@ -24,9 +25,9 @@ export function SourceFreshness({ workspaceId, loading = false }: Props) {
     >
       {sources.map((source) => (
         <li key={source.tenant_id} data-testid={`source-freshness-${source.tenant_id}`}>
-          {source.tenant_name}:{" "}
-          {source.last_synced_at
-            ? `data as of ${formatRelativeTime(source.last_synced_at)}`
+          {source.name}:{" "}
+          {source.last_fetched_at
+            ? `data as of ${formatRelativeTime(source.last_fetched_at)}`
             : "not loaded yet"}
         </li>
       ))}
