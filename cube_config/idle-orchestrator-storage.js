@@ -74,6 +74,11 @@ class IdleOrchestratorStorage {
   }
 
   set(orchestratorId, orchestratorApi) {
+    const pendingRelease = this.retiring.get(orchestratorApi);
+    if (pendingRelease !== undefined) {
+      this.cancel(pendingRelease);
+      this.retiring.delete(orchestratorApi);
+    }
     const previous = this.entries.get(orchestratorId);
     if (previous && previous.api !== orchestratorApi) {
       this.retire(orchestratorId, previous);

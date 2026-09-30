@@ -147,6 +147,21 @@ test('replacing an orchestrator retires the old one once', async () => {
   assert.deepEqual([old.released, fresh.released], [1, 0]);
 });
 
+test('re-registering a retiring orchestrator cancels its release', async () => {
+  const c = clock();
+  const s = storage(c);
+  const a = api('a');
+  s.set('a', a);
+  c.advance(1000);
+  assert.equal(s.has('a'), false);
+  s.set('a', a);
+  c.advance(100);
+  c.runDue();
+  await settle();
+  assert.equal(a.released, 0);
+  assert.equal(s.get('a'), a);
+});
+
 test('releaseConnections releases live and retiring orchestrators exactly once', async () => {
   const c = clock();
   const s = storage(c);
