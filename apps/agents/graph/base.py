@@ -1436,8 +1436,9 @@ field, and how to undo it, e.g. "Created dataset visit_stats (undo it from Data
 model history on the Datasets page)". To undo on request, have
 `canvas_manager` undo that revision id.
 Deletions are the exception. Deleting a dataset, or a field a saved artifact
-uses, needs the user's explicit confirmation of that specific deletion first;
-the commit is refused until then. Ask, naming what will be deleted and the
+uses (including by undoing the revision that created it), needs the user's
+explicit confirmation of that specific deletion first; the commit or undo is
+refused until then. Ask, naming what will be deleted and the
 artifacts that use it. Only after the user says yes, tell `canvas_manager`
 which objects they confirmed. A chart request or a general "go ahead" is not
 confirmation of a deletion.

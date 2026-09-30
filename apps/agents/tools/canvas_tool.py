@@ -12,6 +12,7 @@ loop's token churn stays out of the parent's context.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -34,7 +35,12 @@ from apps.semantic.canvas import (
     resolve_thread_canvas,
     undo_revision,
 )
-from apps.semantic.models import SemanticCanvasChange, SemanticDataset, SemanticField
+from apps.semantic.models import (
+    SemanticCanvasChange,
+    SemanticDataset,
+    SemanticField,
+    SemanticModelRevision,
+)
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.sample_rows import sample_dataset_rows
 from apps.workspaces.access import aworkspace_read_allowed, workspace_write_allowed
@@ -75,41 +81,65 @@ def destructive_deletions(canvas) -> list[dict[str, Any]]:
             ],
         )
     )
-    if not deletes:
-        return []
-    artifacts = [
-        (artifact.title, json.dumps([artifact.semantic_queries, artifact.semantic_query_manifest]))
-        for artifact in Artifact.objects.filter(workspace=canvas.workspace, is_deleted=False).only(
-            "title", "semantic_queries", "semantic_query_manifest"
-        )
-    ]
-    deletions = []
+    targets = []
     for change in deletes:
         if change.object_type == SemanticCanvasChange.ObjectType.DATASET:
             dataset = SemanticDataset.objects.filter(id=change.object_uuid).first()
-            if dataset is None:
-                continue
-            label = f"dataset/{dataset.name}"
-            member = re.compile(rf"(?<![\w.]){re.escape(dataset.name)}\.\w")
+            if dataset is not None:
+                targets.append((dataset.name, None))
         else:
             field = (
                 SemanticField.objects.filter(id=change.object_uuid)
                 .select_related("dataset")
                 .first()
             )
-            if field is None:
-                continue
-            label = f"field/{field.dataset.name}.{field.name}"
+            if field is not None:
+                targets.append((field.dataset.name, field.name))
+    return _deletions_needing_confirmation(canvas.workspace, targets)
+
+
+def undo_deletions(workspace, revision_id) -> list[dict[str, Any]]:
+    """What undoing a revision would delete, under the same rule as a commit."""
+    revision = SemanticModelRevision.objects.filter(id=revision_id, workspace=workspace).first()
+    targets = []
+    for entry in (revision.changes or []) if revision else []:
+        after = entry.get("after")
+        if entry.get("before") is not None or not after:
+            continue
+        if entry["object_type"] == "dataset":
+            targets.append((after["name"], None))
+        elif entry["object_type"] == "field":
+            targets.append((after["dataset_name"], after["name"]))
+    return _deletions_needing_confirmation(workspace, targets)
+
+
+def _deletions_needing_confirmation(workspace, targets) -> list[dict[str, Any]]:
+    """``targets`` are ``(dataset, field-or-None)``; any dataset qualifies, a field only when used."""
+    if not targets:
+        return []
+    artifacts = [
+        (artifact.title, json.dumps([artifact.semantic_queries, artifact.semantic_query_manifest]))
+        for artifact in Artifact.objects.filter(workspace=workspace, is_deleted=False).only(
+            "title", "semantic_queries", "semantic_query_manifest"
+        )
+    ]
+    deletions = []
+    for dataset_name, field_name in targets:
+        if field_name is None:
+            label = f"dataset/{dataset_name}"
+            member = re.compile(rf"(?<![\w.]){re.escape(dataset_name)}\.\w")
+        else:
+            label = f"field/{dataset_name}.{field_name}"
             member = re.compile(
-                rf"(?<![\w.]){re.escape(field.dataset.name)}\.{re.escape(field.name)}(?!\w)"
+                rf"(?<![\w.]){re.escape(dataset_name)}\.{re.escape(field_name)}(?!\w)"
             )
         used_by = list(dict.fromkeys(title for title, text in artifacts if member.search(text)))
-        if change.object_type == SemanticCanvasChange.ObjectType.DATASET or used_by:
+        if field_name is None or used_by:
             deletions.append({"object": label, "used_by_artifacts": used_by[:10]})
     return deletions
 
 
-def _confirmation_required(deletions: list[dict[str, Any]]) -> dict[str, Any]:
+def _confirmation_required(deletions: list[dict[str, Any]], *, retry: str) -> dict[str, Any]:
     diagnostics = []
     for deletion in deletions:
         used_by = deletion["used_by_artifacts"]
@@ -124,7 +154,7 @@ def _confirmation_required(deletions: list[dict[str, Any]]) -> dict[str, Any]:
                 "message": (
                     f"Deleting {deletion['object']} needs the user's explicit confirmation."
                     f"{usage} Nothing was saved. Ask the user; only after they confirm, "
-                    "commit again with this object in confirmed_deletions."
+                    f"{retry} again with this object in confirmed_deletions."
                 ),
             }
         )
@@ -270,7 +300,7 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
                 if deletion["object"] not in confirmed
             ]
             if unconfirmed:
-                return _confirmation_required(unconfirmed)
+                return _confirmation_required(unconfirmed, retry="commit")
             return commit_canvas(canvas, user)
 
         return await sync_to_async(_commit, thread_sensitive=True)()
@@ -292,25 +322,40 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
         return await sync_to_async(_history, thread_sensitive=True)()
 
     @tool
-    async def canvas_undo(revision_id: str) -> dict[str, Any]:
+    async def canvas_undo(
+        revision_id: str, confirmed_deletions: list[str] | None = None
+    ) -> dict[str, Any]:
         """Undo one saved data model revision, restoring what it changed.
 
         Refused without writing anything if a later change touched the same
         objects; undo the later revision first. The undo is itself a revision.
+        Undoing a create deletes the object, so the same CONFIRMATION_REQUIRED
+        rule as canvas_commit applies, with the same confirmed_deletions.
         """
 
         def _undo() -> dict[str, Any]:
+            close_old_connections()
             if not can_write_canvas(workspace, user):
                 return {"errors": [FORBIDDEN_ERROR]}
             try:
                 revision_uuid = uuid.UUID(str(revision_id))
             except ValueError:
                 return {"errors": [{"code": "NOT_FOUND", "message": "Unknown revision id."}]}
-            thread_id = (
-                Thread.objects.filter(id=conversation_id, workspace=workspace)
-                .values_list("id", flat=True)
-                .first()
-            )
+            confirmed = set(confirmed_deletions or [])
+            unconfirmed = [
+                deletion
+                for deletion in undo_deletions(workspace, revision_uuid)
+                if deletion["object"] not in confirmed
+            ]
+            if unconfirmed:
+                return _confirmation_required(unconfirmed, retry="undo")
+            thread_id = None
+            with contextlib.suppress(ValueError):
+                thread_id = (
+                    Thread.objects.filter(id=uuid.UUID(str(conversation_id)), workspace=workspace)
+                    .values_list("id", flat=True)
+                    .first()
+                )
             try:
                 return undo_revision(workspace, revision_uuid, user, thread_id=thread_id)
             except RevisionUndoError as exc:

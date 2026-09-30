@@ -120,6 +120,20 @@ def test_canvas_manager_summary_falls_back_to_tool_diagnostics():
     assert summary["diagnostics"][0]["code"] == "UNKNOWN_COLUMN"
 
 
+def test_canvas_manager_summary_reports_a_refused_undo():
+    undo_result = {"errors": [{"code": "CONFLICT", "message": "changed afterwards"}]}
+    messages = [
+        ToolMessage(content=json.dumps(undo_result), tool_call_id="toolu_UNDO", name="canvas_undo"),
+        AIMessage(content='{"status": "done", "message": "Undone."}'),
+    ]
+
+    summary = _summarize_result(messages)
+
+    assert summary["status"] == "error"
+    assert summary["diagnostics"][0]["code"] == "CONFLICT"
+    assert summary["revisions"] == []
+
+
 @pytest.mark.asyncio
 async def test_forwarder_buffers_local_tool_start_until_tool_message_id():
     queue: asyncio.Queue = asyncio.Queue()

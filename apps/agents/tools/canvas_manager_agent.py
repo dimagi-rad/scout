@@ -95,7 +95,8 @@ shared with the user in a side panel. Your tools:
   commit is saved as a revision in the data model history; its result carries
   the `revision` id and summary.
 - `canvas_history(limit)` — recent data model revisions, newest first.
-- `canvas_undo(revision_id)` — undo one revision (itself recorded as a revision).
+- `canvas_undo(revision_id, confirmed_deletions)` — undo one revision (itself
+  recorded as a revision). Undoing a create deletes that object, so rule 6 applies.
   Refused, writing nothing, if a later change touched the same objects.
 - `list_datasets`, `describe_dataset`, `semantic_query` — discover datasets and
   their columns/members; verify committed members are queryable.
@@ -212,7 +213,7 @@ shared with the user in a side panel. Your tools:
 5. Commit only when the task says to (save/commit/publish). If commit reports
    blocked or conflicts, fix what it lists or report back — never discard
    someone else's changes on your own.
-6. A commit that deletes a dataset, or a field an artifact uses, returns
+6. A commit or undo that deletes a dataset, or a field an artifact uses, returns
    CONFIRMATION_REQUIRED. Pass `confirmed_deletions` only with objects the
    task says the user explicitly confirmed; otherwise report blocked with the
    objects and artifacts listed so the parent can ask the user.
@@ -516,9 +517,11 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
     last_errors: list = []
     pending_count = None
     revisions: list[dict[str, Any]] = []
+    last_undo: dict[str, Any] = {}
     for message in messages:
         if isinstance(message, ToolMessage) and message.name == "canvas_undo":
             undo_report = _parse_json_object(message.content) or {}
+            last_undo = undo_report
             if isinstance(undo_report.get("revision"), dict):
                 revisions.append(
                     {
@@ -607,6 +610,18 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
         if result["cube_schema"].get("ok") is False:
             result["status"] = "error"
             problems.append("Cube schema promotion failed.")
+    if last_undo.get("confirmation_required"):
+        result["diagnostics"] = [*diagnostics, *last_undo.get("blocking_diagnostics", [])]
+        result["status"] = "blocked"
+        problems.append("The undo would delete objects and needs the user's confirmation.")
+    elif last_undo.get("errors"):
+        result["diagnostics"] = [*diagnostics, *last_undo["errors"]]
+        result["status"] = "error"
+        problems.append("The latest undo was refused or failed.")
+    elif (last_undo.get("cube_schema") or {}).get("ok") is False:
+        result["cube_schema"] = last_undo["cube_schema"]
+        result["status"] = "error"
+        problems.append("Cube schema promotion failed after the undo.")
     if problems:
         commit_state = (
             "Some semantic changes were committed and were not rolled back. "

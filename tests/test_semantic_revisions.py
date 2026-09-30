@@ -472,6 +472,21 @@ async def test_agent_delete_of_a_dataset_an_artifact_uses_waits_for_confirmation
     assert not await SemanticDataset.objects.filter(name="visit_stats").aexists()
     assert confirmed["revision"]["summary"] == "Deleted dataset visit_stats"
 
+    # Undoing the delete re-creates it; undoing that re-creation is a delete again.
+    restored = await tools["canvas_undo"].ainvoke({"revision_id": confirmed["revision"]["id"]})
+    asked_again = await tools["canvas_undo"].ainvoke({"revision_id": restored["revision"]["id"]})
+
+    assert asked_again["confirmation_required"][0]["object"] == "dataset/visit_stats"
+    assert await SemanticDataset.objects.filter(name="visit_stats").aexists()
+
+    await tools["canvas_undo"].ainvoke(
+        {
+            "revision_id": restored["revision"]["id"],
+            "confirmed_deletions": ["dataset/visit_stats"],
+        }
+    )
+    assert not await SemanticDataset.objects.filter(name="visit_stats").aexists()
+
 
 @pytest.mark.django_db
 def test_deleting_a_field_no_artifact_uses_needs_no_confirmation(canvas, semantic_model, user):
