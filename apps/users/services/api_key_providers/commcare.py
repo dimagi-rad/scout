@@ -37,7 +37,9 @@ def _page(payload) -> tuple[list, str | None]:
     if not isinstance(payload, dict) or not isinstance(payload.get("objects"), list):
         raise CredentialVerificationError(_UNEXPECTED)
     meta = payload.get("meta") or {}
-    next_url = meta.get("next") if isinstance(meta, dict) else None
+    if not isinstance(meta, dict):
+        raise CredentialVerificationError(_UNEXPECTED)
+    next_url = meta.get("next")
     if next_url is not None and not isinstance(next_url, str):
         raise CredentialVerificationError(_UNEXPECTED)
     return payload["objects"], next_url
