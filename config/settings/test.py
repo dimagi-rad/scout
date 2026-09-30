@@ -62,4 +62,4 @@ UPSTREAM_ACCESS_FRESHNESS_ENFORCED = True
 
 # DATABASES above ignores a .env DATABASE_URL, which the checkpointer still reads;
 # tests that need a real saver build it from the test database themselves.
-SILENCED_SYSTEM_CHECKS = ["chat.E001"]
+SILENCED_SYSTEM_CHECKS = ["chat.E001", "chat.E002"]

@@ -32,6 +32,7 @@ def check_checkpointer_shares_default_database(app_configs, **kwargs):
     local development. ``config.settings.test`` silences it: with a ``.env``
     DATABASE_URL it diverges on purpose, and its tests build the saver themselves.
     """
+    # Emits chat.E001/chat.E002, or chat.W001/chat.W002 under DEBUG.
     level, prefix = (Warning, "W") if settings.DEBUG else (Error, "E")
     try:
         matches = same_database(settings.DATABASES.get("default", {}), get_database_url())

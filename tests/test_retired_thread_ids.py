@@ -369,16 +369,26 @@ def test_same_database(django_db, conninfo, expected):
 
 
 @pytest.fixture
-def unsilenced_checks(settings):
-    settings.SILENCED_SYSTEM_CHECKS = []
+def error_level_checks(settings):
+    # Pinned so these tests keep exercising the error level if test settings change.
     settings.DEBUG = False
     return settings
 
 
+@pytest.mark.parametrize(
+    "url",
+    ["postgresql://x@elsewhere:5432/not_scout", "pgsql://scout:pw@localhost/scout"],
+)
+def test_checkpointer_check_never_blocks_commands_under_test_settings(monkeypatch, url):
+    monkeypatch.setattr("apps.chat.checks.get_database_url", lambda: url)
+
+    assert not [e for e in run_checks() if e.is_serious() and not e.is_silenced()]
+
+
 def test_checkpointer_on_the_default_database_passes_the_system_check(
-    unsilenced_checks, monkeypatch
+    error_level_checks, monkeypatch
 ):
-    default = unsilenced_checks.DATABASES["default"]
+    default = error_level_checks.DATABASES["default"]
     url = build_pg_url(
         host=str(default.get("HOST") or ""),
         port=default.get("PORT") or 5432,
@@ -392,7 +402,7 @@ def test_checkpointer_on_the_default_database_passes_the_system_check(
 
 
 def test_unparseable_checkpointer_url_is_a_check_error_without_the_password(
-    unsilenced_checks, monkeypatch
+    error_level_checks, monkeypatch
 ):
     monkeypatch.setattr(
         "apps.chat.checks.get_database_url", lambda: "pgsql://scout:hunter2@db.internal/scout"
@@ -404,7 +414,7 @@ def test_unparseable_checkpointer_url_is_a_check_error_without_the_password(
     assert "hunter2" not in str(errors[0])
 
 
-def test_checkpointer_on_another_database_fails_the_system_check(unsilenced_checks, monkeypatch):
+def test_checkpointer_on_another_database_fails_the_system_check(error_level_checks, monkeypatch):
     monkeypatch.setattr(
         "apps.chat.checks.get_database_url", lambda: "postgresql://x@elsewhere:5432/not_scout"
     )
@@ -412,8 +422,8 @@ def test_checkpointer_on_another_database_fails_the_system_check(unsilenced_chec
     assert "chat.E001" in {e.id for e in run_checks()}
 
 
-def test_checkpointer_database_mismatch_only_warns_under_debug(unsilenced_checks, monkeypatch):
-    unsilenced_checks.DEBUG = True
+def test_checkpointer_database_mismatch_only_warns_under_debug(error_level_checks, monkeypatch):
+    error_level_checks.DEBUG = True
     monkeypatch.setattr(
         "apps.chat.checks.get_database_url", lambda: "postgresql://x@elsewhere:5432/not_scout"
     )
