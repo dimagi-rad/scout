@@ -10,7 +10,14 @@ import yaml
 
 from apps.semantic.models import SemanticField, SemanticModel, SemanticRelationship
 from apps.semantic.services.cube_sql import CubeSQLReferenceError, embed_cube_sql
-from apps.semantic.services.field_sql import compile_dimension_sql, dataset_column_names
+from apps.semantic.services.field_sql import (
+    JoinSQLValidationError,
+    compile_dimension_sql,
+    compile_join_sql,
+    compile_measure_filter_sql,
+    compile_measure_sql,
+    dataset_column_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +33,7 @@ class DroppedJoin(StrEnum):
     MISSING_PRIMARY_KEY = "relationship_missing_primary_key"
     HIDDEN_REFERENCE = "relationship_hidden_reference"
     STALE_REFERENCE = "relationship_stale_reference"
+    INVALID_SQL = "relationship_invalid_sql"
 
 
 DROPPED_JOIN_CODES = frozenset(DroppedJoin)
@@ -102,7 +110,12 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             )
             continue
         try:
-            join_sql = embed_cube_sql(relationship.join_expression, references=join_references)
+            join_sql = embed_cube_sql(
+                compile_join_sql(relationship.join_expression), references=join_references
+            )
+        except JoinSQLValidationError as exc:
+            unpublished(relationship, DroppedJoin.INVALID_SQL, str(exc)[:300])
+            continue
         except CubeSQLReferenceError as exc:
             # A join only adds a path between cubes, so dropping one changes no
             # metric; failing here would take every cube in the workspace down.
@@ -232,7 +245,7 @@ def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, An
     metadata = field.metadata or {}
     cube_sql = metadata.get("cube_sql")
     if isinstance(cube_sql, str) and cube_sql.strip():
-        payload["sql"] = embed_cube_sql(cube_sql.strip(), references=references)
+        payload["sql"] = embed_cube_sql(compile_measure_sql(cube_sql), references=references)
     elif measure_type != SemanticField.MeasureType.COUNT:
         payload["sql"] = _cube_sql(field.expression)
     filters = _cube_measure_filters(metadata.get("filters"), references=references)
@@ -253,7 +266,9 @@ def _cube_measure_filters(value: Any, *, references: set[str]) -> list[dict[str,
             continue
         sql = item.get("sql")
         if isinstance(sql, str) and sql.strip():
-            filters.append({"sql": embed_cube_sql(sql.strip(), references=references)})
+            filters.append(
+                {"sql": embed_cube_sql(compile_measure_filter_sql(sql), references=references)}
+            )
     return filters
 
 

@@ -326,7 +326,7 @@ def test_created_measure_supports_calculated_cube_sql(canvas, semantic_model, mo
     assert measure == {
         "name": "amount_per_visit",
         "type": "number",
-        "sql": "{count}::numeric / NULLIF({count}, 0)",
+        "sql": "CAST({count} AS DECIMAL) / NULLIF({count}, 0)",
         "format": "currency_2",
         "currency": "USD",
     }
@@ -753,7 +753,7 @@ def test_created_ratio_measure_can_reference_filtered_measure(
     assert measures["approval_rate"] == {
         "name": "approval_rate",
         "type": "number",
-        "sql": "{approved_visit_count}::numeric / NULLIF({count}, 0)",
+        "sql": "CAST({approved_visit_count} AS DECIMAL) / NULLIF({count}, 0)",
         "format": "percent_1",
     }
 

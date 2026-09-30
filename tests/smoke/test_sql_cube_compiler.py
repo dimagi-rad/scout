@@ -13,6 +13,7 @@ import subprocess
 import pytest
 
 from apps.semantic.services.cube_sql import embed_cube_sql
+from apps.semantic.services.field_sql import compile_measure_filter_sql, compile_measure_sql
 
 _COMPILE = r"""
 const {readFileSync} = require('node:fs');
@@ -63,9 +64,12 @@ def test_custom_sql_literals_are_unchanged_by_cube_compilation():
         input=json.dumps(
             {
                 "sources": [embed_cube_sql(source) for source in cases],
-                "filter": embed_cube_sql("""{CUBE}."topic" ~ '[0-9]{2}'""", references={"CUBE"}),
+                "filter": embed_cube_sql(
+                    compile_measure_filter_sql("""{CUBE}."topic" ~ '[0-9]{2}'"""),
+                    references={"CUBE"},
+                ),
                 "ratio": embed_cube_sql(
-                    "{CUBE.filtered}::numeric / NULLIF({count}, 0)",
+                    compile_measure_sql("{CUBE.filtered}::numeric / NULLIF({count}, 0)"),
                     references={"CUBE.filtered", "count"},
                 ),
             }

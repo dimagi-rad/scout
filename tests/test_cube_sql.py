@@ -115,13 +115,10 @@ def test_schema_embeds_custom_sql_physical_columns_measures_filters_and_joins(wo
     dimensions = {field["name"]: field for field in cubes["raw_visits"]["dimensions"]}
     assert dimensions["topic"]["sql"] == r'{CUBE}."topic\u007bcount\u007d"'
     ratio = next(field for field in cubes["raw_visits"]["measures"] if field["name"] == "ratio")
-    assert ratio["sql"] == "{CUBE.count}::numeric / NULLIF({raw_visits.count}, 0)"
-    assert ratio["filters"][0]["sql"] == (
-        r"""{CUBE}."topic" = '\u007bcount\u007d' /* \u007bunknown\u007d */"""
-    )
-    assert cubes["raw_visits"]["joins"][0]["sql"] == (
-        r"{raw_visits.topic} = {topics.topic} /* \u007bunknown\u007d */"
-    )
+    assert ratio["sql"] == "CAST({CUBE.count} AS DECIMAL) / NULLIF({raw_visits.count}, 0)"
+    # Published SQL is re-rendered from the validated AST, so comments are dropped.
+    assert ratio["filters"][0]["sql"] == r"""{CUBE}."topic" = '\u007bcount\u007d'"""
+    assert cubes["raw_visits"]["joins"][0]["sql"] == "{raw_visits.topic} = {topics.topic}"
     custom.fields.update(is_visible=False)
     cubes = {cube["name"]: cube for cube in generate_cube_schema(model)["cubes"]}
     assert "joins" not in cubes["raw_visits"]
