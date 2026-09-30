@@ -17,6 +17,7 @@ fingerprint so it groups into a single alertable issue instead of a flood.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from enum import StrEnum
 
@@ -26,7 +27,6 @@ from django.core.cache import cache
 from django.db import OperationalError as DjangoOperationalError
 from django.db import connection
 from django.http import JsonResponse
-from psycopg_pool import PoolTimeout
 
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import ExpectedStateError
@@ -87,8 +87,6 @@ def _classify_one(exc: BaseException) -> CapacityExhausted | None:
     resource = getattr(exc, "capacity_resource", None)
     if resource:
         return CapacityExhausted(CapacityResource(resource), str(exc))
-    if isinstance(exc, PoolTimeout):
-        return CapacityExhausted(CapacityResource.CHECKPOINTER_POOL, str(exc))
     if isinstance(exc, DjangoOperationalError | psycopg.OperationalError):
         sqlstate = getattr(exc, "sqlstate", None)
         if sqlstate == TOO_MANY_CONNECTIONS_SQLSTATE or is_capacity_message(str(exc)):
@@ -99,8 +97,9 @@ def _classify_one(exc: BaseException) -> CapacityExhausted | None:
 def classify_capacity_error(exc: BaseException) -> CapacityExhausted | None:
     """Return a ``CapacityExhausted`` if ``exc`` or anything it wraps is one.
 
-    Django wraps the psycopg error, and callers re-raise with ``from``, so the
-    whole cause/context chain is walked.
+    Only ``__cause__`` is followed (Django's wrapping and explicit ``raise ...
+    from``). A bug raised while *handling* a capacity error has it as
+    ``__context__`` and must stay a bug, as in ``config.sentry.before_send``.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -109,9 +108,7 @@ def classify_capacity_error(exc: BaseException) -> CapacityExhausted | None:
         found = _classify_one(current)
         if found is not None:
             return found
-        current = current.__cause__ or (
-            None if current.__suppress_context__ else current.__context__
-        )
+        current = current.__cause__
     return None
 
 
@@ -128,6 +125,7 @@ def busy_response() -> JsonResponse:
 # Fallback only for when the shared cache itself is unreachable; per process, so a
 # cache outage can at worst multiply the alert by the worker count, never flood.
 _local_alert_deadlines: dict[str, float] = {}
+_local_alert_lock = threading.Lock()
 
 
 def _claim_alert_window(resource: str) -> bool:
@@ -138,10 +136,11 @@ def _claim_alert_window(resource: str) -> bool:
             "Capacity alert cache unavailable; using a per-process window", exc_info=True
         )
         now = time.monotonic()
-        if _local_alert_deadlines.get(resource, 0.0) > now:
-            return False
-        _local_alert_deadlines[resource] = now + ALERT_WINDOW_SECONDS
-        return True
+        with _local_alert_lock:
+            if _local_alert_deadlines.get(resource, 0.0) > now:
+                return False
+            _local_alert_deadlines[resource] = now + ALERT_WINDOW_SECONDS
+            return True
 
 
 def _connection_usage() -> dict | None:
@@ -160,18 +159,24 @@ def _connection_usage() -> dict | None:
             )
             active, maximum = cursor.fetchone()
     except Exception:
+        logger.debug("Could not read connection usage for the capacity alert", exc_info=True)
         return None
     return {"pg_stat_activity_count": active, "max_connections": maximum}
 
 
-def report_capacity_exhausted(resource: CapacityResource | str, detail: str = "") -> None:
+def report_capacity_exhausted(
+    resource: CapacityResource | str,
+    detail: str = "",
+    *,
+    exc_info: BaseException | None = None,
+) -> None:
     """Log every occurrence; escalate to Sentry at most once per window per resource.
 
     Sync: it reads the cache and, when the database still answers, one row of
     connection stats. Async callers bridge it with ``sync_to_async``.
     """
     resource = CapacityResource(resource)
-    logger.warning("Connection capacity exhausted: %s: %s", resource, detail)
+    logger.warning("Connection capacity exhausted: %s: %s", resource, detail, exc_info=exc_info)
     if not _claim_alert_window(resource):
         return
 

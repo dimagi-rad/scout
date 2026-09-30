@@ -898,7 +898,7 @@ class ArtifactQueryDataView(View):
             except Exception as exc:
                 capacity = classify_capacity_error(exc)
                 if capacity is not None:
-                    return {"name": name, "capacity_exhausted": capacity.resource, "error": "busy"}
+                    return {"name": name, "capacity_exhausted": capacity.resource}
                 logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
                 return {
                     "name": name,
@@ -907,7 +907,7 @@ class ArtifactQueryDataView(View):
                 }
 
             if is_capacity_exhausted(result):
-                return {"name": name, "capacity_exhausted": CapacityResource.CUBE, "error": "busy"}
+                return {"name": name, "capacity_exhausted": CapacityResource.CUBE}
             if not result.get("success", True) or result.get("error"):
                 error_info = result.get("error", {})
                 msg = (
