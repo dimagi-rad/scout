@@ -20,8 +20,16 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.load_activity import REBUILD_VIEW_TASK_NAME
-from apps.workspaces.tasks import materialize_workspace, rebuild_workspace_view_schema
+from apps.workspaces.services.load_activity import (
+    _STATUS_TASK_NAMES,
+    REBUILD_VIEW_TASK_NAME,
+    workspace_schema_statuses,
+)
+from apps.workspaces.tasks import (
+    _VIEW_BUILD_TASK_NAMES,
+    materialize_workspace,
+    rebuild_workspace_view_schema,
+)
 from mcp_server.server import get_schema_status
 from tests.tenant_access import grant_tenant_access
 from tests.test_chat_first_load import queued_jobs  # noqa: F401 (registers the fixture)
@@ -115,8 +123,23 @@ def test_a_queued_view_rebuild_is_provisioning(
     assert _statuses(user, workspace) == ("provisioning", "provisioning")
 
 
-def test_rebuild_task_name_matches_the_task():
+def test_status_build_tasks_match_the_view_build_tasks():
+    """load_activity cannot import tasks, so its copy of the names must be pinned."""
     assert rebuild_workspace_view_schema.name == REBUILD_VIEW_TASK_NAME
+    assert set(_STATUS_TASK_NAMES) == set(_VIEW_BUILD_TASK_NAMES)
+
+
+@pytest.mark.django_db
+def test_bulk_status_keeps_each_workspace_s_load_to_itself(user, workspace, tenant):
+    other = Workspace.objects.create(name="Other", created_by=user)
+    other_tenant = Tenant.objects.create(provider="commcare", external_id="other-domain")
+    WorkspaceTenant.objects.create(workspace=other, tenant=other_tenant)
+    _running_load(other_tenant)
+
+    assert workspace_schema_statuses([workspace.id, other.id]) == {
+        workspace.id: "not_loaded",
+        other.id: "provisioning",
+    }
 
 
 @pytest.mark.django_db
