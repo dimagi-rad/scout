@@ -488,3 +488,4 @@ async def test_exhaustion_reports_a_later_connect_failure_over_an_earlier_503(
     _patched_async_client(monkeypatch, handler)
     with pytest.raises(cube_client_module.CubeServiceUnavailable, match="ConnectTimeout"):
         await _schema_operation("validate")
+    assert len(calls) == 3

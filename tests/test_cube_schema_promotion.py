@@ -1,7 +1,6 @@
 """A failed rebuild must never demote the schema Cube is serving."""
 
 import logging
-import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -402,25 +401,28 @@ def _record_slot_attempts(monkeypatch):
 def test_refresh_under_contention_waits_outside_its_transaction_then_redoes_it(
     workspace, refreshed_model, cube_http, raw_holder, monkeypatch
 ):
-    monkeypatch.setattr(cube_schema, "VALIDATOR_SLOT_POLL_SECONDS", 0.05)
-    attempts = _record_slot_attempts(monkeypatch)
+    monkeypatch.setattr(cube_schema, "VALIDATOR_SLOT_POLL_SECONDS", 0)
     raw_holder.execute("SELECT pg_advisory_lock(%s, 0)", [cube_schema.VALIDATOR_LOCK_CLASS])
-    release = threading.Timer(
-        0.5,
-        raw_holder.execute,
-        ["SELECT pg_advisory_unlock(%s, 0)", [cube_schema.VALIDATOR_LOCK_CLASS]],
+    attempts = []
+    real_try = cube_schema._try_acquire_validator_slot
+
+    def try_then_free_on_the_second_outside_poll():
+        attempts.append(connection.in_atomic_block)
+        if len(attempts) == 3:
+            raw_holder.execute(
+                "SELECT pg_advisory_unlock(%s, 0)", [cube_schema.VALIDATOR_LOCK_CLASS]
+            )
+        return real_try()
+
+    monkeypatch.setattr(
+        cube_schema, "_try_acquire_validator_slot", try_then_free_on_the_second_outside_poll
     )
-    release.start()
-    try:
-        promoted = build_and_promote_cube_schema(workspace, slot_wait_seconds=10)
-    finally:
-        release.join()
+
+    promoted = build_and_promote_cube_schema(workspace, slot_wait_seconds=10)
 
     assert promoted.status == CubeSchema.Status.ACTIVE
     # One optimistic try inside the refresh transaction, then every wait outside it.
-    assert attempts[0] is True
-    assert len(attempts) > 2
-    assert not any(attempts[1:])
+    assert attempts == [True, False, False]
     assert refreshed_model.refreshes == [True, True]
 
 
