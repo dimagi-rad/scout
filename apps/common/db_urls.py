@@ -34,7 +34,7 @@ def pg_connection_identity(url: str) -> dict[str, Any]:
     Other query options (``options``, ``connect_timeout``, ``application_name``)
     are dropped: callers of this set their own per-connection options. Host and
     port default to ``localhost:5432`` rather than libpq's Unix-socket default.
-    A multi-host URL is rejected. ``sslrootcert``/``sslcert``/``sslkey`` are
+    A URL listing several ports is rejected. ``sslrootcert``/``sslcert``/``sslkey`` are
     dropped too, so a ``verify-*`` sslmode needs its files at libpq's default paths.
     """
     parsed = parse_pg_url(url)
@@ -57,14 +57,14 @@ def pg_connection_identity(url: str) -> dict[str, Any]:
 def build_pg_url(*, host: str, port: int | str, dbname: str, user: str, password: str = "") -> str:
     """A ``postgresql://`` URL with percent-encoded credentials and database name.
 
-    ``host`` may be a Unix-socket directory or an IPv6 literal, as Django's
-    ``DATABASES["default"]["HOST"]`` allows.
+    ``host`` is a bare name, a Unix-socket directory or an unbracketed IPv6
+    literal, the forms Django's ``DATABASES["default"]["HOST"]`` holds.
     """
     credentials = quote(user, safe="")
     if password:
         credentials += f":{quote(password, safe='')}"
     if host.startswith("/"):
         host = quote(host, safe="")
-    elif ":" in host:
+    elif ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"postgresql://{credentials}@{host}:{port}/{quote(dbname, safe='')}"

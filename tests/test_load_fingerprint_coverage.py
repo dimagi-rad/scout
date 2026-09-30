@@ -40,7 +40,9 @@ _FIRST_PARTY = ("apps", "config", "mcp_server")
 # output of a load. The walk does not descend into them: anything reached only
 # through one of these is used only by it.
 _NOT_LOAD_SHAPING = {
-    "apps/common/db_urls.py": "Parses the connection URL dbt uses; decides where, not what.",
+    "apps/common/db_urls.py": (
+        "Parses dbt's connection URL; search_path and role come from the schema, not the URL."
+    ),
     "apps/common/error_codes.py": "Failure codes; decide how a failure is reported.",
     "apps/common/errors.py": "Exception types; decide how a failure is reported.",
     "apps/knowledge/services/__init__.py": "Re-exports KnowledgeRetriever for the agent.",
