@@ -27,6 +27,7 @@ from apps.common.errors import (
 from apps.common.http import string_field
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
+from apps.users.services.oauth_scope import account_scope
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -69,7 +70,7 @@ from apps.workspaces.services.invite_notifications import (
     send_pending_invite_email,
 )
 from apps.workspaces.services.load_activity import workspace_schema_statuses
-from apps.workspaces.services.load_progress import last_synced_by_tenant, workspace_ids_in_progress
+from apps.workspaces.services.load_progress import workspace_ids_in_progress
 from apps.workspaces.services.member_coverage import (
     MembersLackTenant,
     add_tenant_covered_by_members,
@@ -152,17 +153,19 @@ async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple]
     provider refused to renew it. A token that cannot be renewed and that admission
     counts as expired sets ``needs_sign_in`` even while it is still used.
     """
-    token_url = get_token_url(provider)
     now = timezone.now()
     pairs, failed, needs_sign_in = [], False, False
     for token in await aiter_social_tokens(user, provider):
+        # Per identity: a user's www and EU CommCare grants refresh at different servers.
+        scope_key = account_scope(token.account)
+        token_url = get_token_url(provider, scope_key)
         stored = (token.account, token.token) if _usable_as_is(token, now) else None
         can_refresh = bool(token_url and token.token_secret and token.app)
         if not can_refresh or not token_needs_refresh(token.expires_at):
             if stored:
                 pairs.append(stored)
             # Still used while it lists anything, but admission will refuse it anyway.
-            if not stored or oauth_token_counts_as_expired(token, provider):
+            if not stored or oauth_token_counts_as_expired(token, provider, scope_key):
                 needs_sign_in = True
             continue
         if asyncio.get_running_loop().time() >= deadline:
@@ -479,6 +482,7 @@ def _workspace_delete_refusal(user, workspace, *, last_source=False) -> Response
     # Deleting destroys every member's content, so without coverage it is a
     # remediation only for a workspace nobody else is in.
     missing = {t.tenant_id for t in missing_tenants_for_member(user, workspace)}
+    # authz-exempt: counts the OTHER members; the requester was already admitted.
     if missing and workspace.memberships.exclude(user=user).exists():
         return Response(
             {
@@ -502,6 +506,7 @@ def _workspace_delete_refusal(user, workspace, *, last_source=False) -> Response
         if str(tid) not in missing
     ]
     for tid in tenant_ids:
+        # authz-exempt: lists the user's OTHER workspaces; this one was already admitted.
         other_workspaces = Workspace.objects.filter(
             workspace_tenants__tenant_id=tid,
             memberships__user=user,
@@ -697,18 +702,6 @@ class WorkspaceDetailView(APIView):
             .first()
         )
         last_synced_at = last_run_at.isoformat() if last_run_at else None
-        source_synced = last_synced_by_tenant(t.id for t in tenants)
-        sources = [
-            {
-                "tenant_id": str(t.id),
-                "tenant_name": t.canonical_name,
-                "provider": t.provider,
-                "last_synced_at": (
-                    source_synced[t.id].isoformat() if t.id in source_synced else None
-                ),
-            }
-            for t in tenants
-        ]
 
         return Response(
             {
@@ -722,7 +715,6 @@ class WorkspaceDetailView(APIView):
                 "missing_tenants": missing_tenants_payload(missing),
                 "schema_status": schema_status,
                 "in_progress": bool(workspace_ids_in_progress([workspace.id])),
-                "sources": sources,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
                 "created_at": workspace.created_at.isoformat(),

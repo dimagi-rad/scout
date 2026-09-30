@@ -48,11 +48,25 @@ export interface WorkspaceListItem {
   created_at: string
 }
 
-export interface WorkspaceSourceFreshness {
+// GET /api/workspaces/<id>/freshness/ — one source's serving data age and latest load.
+export interface SourceFreshnessDetail {
   tenant_id: string
-  tenant_name: string
+  name: string
   provider: string
-  last_synced_at: string | null
+  provider_label: string
+  // True when this source's data is part of what the workspace currently queries.
+  serving: boolean
+  last_fetched_at: string | null
+  // Skipped over this viewer's own expired sign-in: a refresh cannot fix it.
+  reconnect: boolean
+}
+
+export interface WorkspaceFreshness {
+  // Absent from a server that predates the setting.
+  stale_data_banner_hours?: number
+  // A load covering the workspace is queued or running, whoever started it.
+  in_progress: boolean
+  sources: SourceFreshnessDetail[]
 }
 
 export interface WorkspaceDetail {
@@ -67,7 +81,6 @@ export interface WorkspaceDetail {
   missing_tenants?: MissingTenant[]
   schema_status: SchemaStatus
   in_progress?: boolean
-  sources?: WorkspaceSourceFreshness[]
   tenant_count: number
   member_count: number
   last_synced_at: string | null
@@ -186,6 +199,9 @@ export const workspaceApi = {
 
   getDetail: (workspaceId: string) =>
     api.get<WorkspaceDetail>(`/api/workspaces/${workspaceId}/`),
+
+  getFreshness: (workspaceId: string) =>
+    api.get<WorkspaceFreshness>(`/api/workspaces/${workspaceId}/freshness/`),
 
   retryAccessVerification: (workspaceId: string) =>
     api.post<{ has_access: true }>(`/api/workspaces/${workspaceId}/access/verify/`, {}),

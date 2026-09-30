@@ -103,7 +103,6 @@ urlpatterns = [
         "api/workspaces/<uuid:workspace_id>/",
         include(workspace_urlpatterns),
     ),
-    path("api/transformations/", include("apps.transformations.urls")),
     # workspace_id comes from the request body, not the URL
     path("api/chat/", chat_view, name="chat"),
     path("api/auth/", include("apps.users.auth_urls")),

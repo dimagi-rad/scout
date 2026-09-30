@@ -23,9 +23,9 @@ from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from apps.common.commcare_servers import COMMCARE_SERVERS
 from apps.users import signals
 from apps.users.models import Tenant, TenantConnection, TenantMembership
-from apps.users.services.tenant_resolution import COMMCARE_DOMAIN_API
 from apps.users.services.token_refresh import INTERACTIVE_DB_DEADLINE, get_token_url
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.api import workspace_views
@@ -52,6 +52,8 @@ from tests.tenant_access import grant_tenant_access, ocs_team_connection
 User = get_user_model()
 
 REFRESH = "apps.workspaces.api.workspace_views._arefresh_target_for_workspace"
+
+COMMCARE_DOMAIN_API = COMMCARE_SERVERS[""].user_domains_url
 
 
 def _tenant(external_id, name, provider="commcare"):

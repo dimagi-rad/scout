@@ -52,6 +52,39 @@ async def aunserved_tenant_ids(workspace_id) -> set:
     return tenant_ids - served
 
 
+def active_runs_for_workspaces(workspace_ids):
+    """Unevaluated: the active runs on any tenant of these workspaces, owned or not.
+
+    Tenants are shared, so a sibling's run counts here; ``owned_run_q`` narrows to the
+    workspace's own. The join also lets a caller read the workspace id per run; with
+    several ids a run on a tenant shared by two of them yields one row per
+    (run, workspace), so collapse to a set rather than counting rows.
+    """
+    return MaterializationRun.objects.filter(
+        tenant_schema__tenant__workspace_tenants__workspace_id__in=[
+            str(workspace_id) for workspace_id in workspace_ids
+        ],
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    )
+
+
+def owned_run_q(workspace) -> Q:
+    """Runs this workspace started, as opposed to a sibling's load of a shared tenant."""
+    workspace_job_ids = ThreadJob.objects.filter(
+        thread__workspace_id=workspace.id, job_type=ThreadJob.JobType.MATERIALIZATION
+    ).values("procrastinate_job_id")
+    # A load candidate carries load_workspace_id only until promotion, which is
+    # after its run finishes; finished runs are found through the job id instead.
+    return (
+        Q(tenant_schema__load_workspace_id=workspace.id)
+        | Q(
+            tenant_schema__refresh_workspace_id=workspace.id,
+            tenant_schema__state=SchemaState.PROVISIONING,
+        )
+        | Q(procrastinate_job_id__in=workspace_job_ids)
+    )
+
+
 def _pending_loads(workspace_ids, task_names=(MATERIALIZE_TASK_NAME,)):
     """The run, recovery and queued-job querysets that each mean a load is under way.
 
@@ -59,10 +92,7 @@ def _pending_loads(workspace_ids, task_names=(MATERIALIZE_TASK_NAME,)):
     queued job of one of *task_names* is read from the queue itself.
     """
     ids = [str(workspace_id) for workspace_id in workspace_ids]
-    runs = MaterializationRun.objects.filter(
-        tenant_schema__tenant__workspace_tenants__workspace_id__in=ids,
-        state__in=list(MaterializationRun.ACTIVE_STATES),
-    )
+    runs = active_runs_for_workspaces(ids)
     recoveries = WorkspaceDataRecovery.objects.filter(
         workspace_id__in=ids, state__in=list(WorkspaceDataRecovery.ACTIVE_STATES)
     )

@@ -867,12 +867,12 @@ def test_build_view_schema_missing_active_schema_marks_row_failed(workspace, ten
     multi-tenant materialization), the build must mark the row FAILED with a
     reason rather than raising before the row exists and parking it."""
     # tenant has no ACTIVE TenantSchema at all → early validation failure.
-    with pytest.raises(ValueError, match="no active schema"):
+    with pytest.raises(ValueError, match="No active data schema"):
         SchemaManager().build_view_schema(workspace)
 
     vs = WorkspaceViewSchema.objects.get(workspace=workspace)
     assert vs.state == SchemaState.FAILED
-    assert "no active schema" in vs.last_error
+    assert "No active data schema" in vs.last_error
     WorkspaceViewSchema.objects.filter(workspace=workspace).delete()
 
 

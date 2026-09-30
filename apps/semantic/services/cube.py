@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from enum import StrEnum
 from typing import Any
 
@@ -10,7 +11,14 @@ import yaml
 
 from apps.semantic.models import SemanticField, SemanticModel, SemanticRelationship
 from apps.semantic.services.cube_sql import CubeSQLReferenceError, embed_cube_sql
-from apps.semantic.services.field_sql import compile_dimension_sql, dataset_column_names
+from apps.semantic.services.field_sql import (
+    JoinSQLValidationError,
+    compile_dimension_sql,
+    compile_join_sql,
+    compile_measure_filter_sql,
+    compile_measure_sql,
+    dataset_column_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,34 +34,23 @@ class DroppedJoin(StrEnum):
     MISSING_PRIMARY_KEY = "relationship_missing_primary_key"
     HIDDEN_REFERENCE = "relationship_hidden_reference"
     STALE_REFERENCE = "relationship_stale_reference"
+    INVALID_SQL = "relationship_invalid_sql"
 
 
 DROPPED_JOIN_CODES = frozenset(DroppedJoin)
+_JINJA_DELIMITERS = re.compile(r"\{%|%\}|\{\{|\}\}|\{#|#\}")
 
 
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     """Return a Cube-compatible schema document derived from a semantic model."""
     all_datasets = list(model.datasets.prefetch_related("fields"))
-    datasets = [
-        dataset
-        for dataset in all_datasets
-        if dataset.is_visible
-        and (
-            dataset.source_kind != dataset.SourceKind.CUSTOM
-            or dataset.metadata.get("cube_sql")
-            or dataset.metadata.get("sql")
-        )
-    ]
+    datasets = publishable_datasets(all_datasets)
     visible_ids = {dataset.id for dataset in datasets}
+    datasets_by_id = {dataset.id: dataset for dataset in all_datasets}
     known_references = {dataset.name for dataset in all_datasets} | {
         f"{dataset.name}.{field.name}" for dataset in all_datasets for field in dataset.fields.all()
     }
-    references = {dataset.name for dataset in datasets} | {
-        f"{dataset.name}.{field.name}"
-        for dataset in datasets
-        for field in dataset.fields.all()
-        if field.is_visible
-    }
+    references = published_member_references(datasets)
     relationships = SemanticRelationship.objects.filter(workspace=model.workspace).select_related(
         "from_dataset",
         "to_dataset",
@@ -102,7 +99,20 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             )
             continue
         try:
-            join_sql = embed_cube_sql(relationship.join_expression, references=join_references)
+            join_sql = embed_cube_sql(
+                compile_join_sql(
+                    relationship.join_expression,
+                    columns=dataset_column_names(datasets_by_id[relationship.from_dataset_id]),
+                ),
+                references=join_references,
+            )
+        except JoinSQLValidationError as exc:
+            unpublished(
+                relationship,
+                DroppedJoin.INVALID_SQL,
+                f"its join SQL is not publishable: {str(exc)[:300].rstrip('.')}",
+            )
+            continue
         except CubeSQLReferenceError as exc:
             # A join only adds a path between cubes, so dropping one changes no
             # metric; failing here would take every cube in the workspace down.
@@ -126,17 +136,18 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     cubes = []
     for dataset in datasets:
         fields = [field for field in dataset.fields.all() if field.is_visible]
+        columns = dataset_column_names(dataset)
         dimensions = [
-            _cube_dimension(field, is_primary_key=_is_primary_key_field(dataset, field))
+            _cube_dimension(
+                field, columns=columns, is_primary_key=_is_primary_key_field(dataset, field)
+            )
             for field in fields
             if field.field_type
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
-        measure_references = (
-            references | {f.name for f in fields} | {f"CUBE.{f.name}" for f in fields} | {"CUBE"}
-        )
+        measure_references = cube_member_references(references, dataset)
         measures = [
-            _cube_measure(field, references=measure_references)
+            _cube_measure(field, references=measure_references, columns=columns)
             for field in fields
             if field.field_type == SemanticField.FieldType.MEASURE
         ]
@@ -176,13 +187,64 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     }
 
 
+def publishable_datasets(all_datasets) -> list:
+    """Datasets that become cubes: visible, and custom ones only once they have SQL."""
+    return [
+        dataset
+        for dataset in all_datasets
+        if dataset.is_visible
+        and (
+            dataset.source_kind != dataset.SourceKind.CUSTOM
+            or dataset.metadata.get("cube_sql")
+            or dataset.metadata.get("sql")
+        )
+    ]
+
+
+def published_member_references(datasets) -> set[str]:
+    """Cube and member names other SQL may reference as {name} or {cube.member}."""
+    return {dataset.name for dataset in datasets} | {
+        f"{dataset.name}.{field.name}"
+        for dataset in datasets
+        for field in dataset.fields.all()
+        if field.is_visible
+    }
+
+
+def cube_member_references(references: set[str], dataset) -> set[str]:
+    """References a measure or filter of ``dataset`` may use, including its own members."""
+    fields = [field for field in dataset.fields.all() if field.is_visible]
+    return references | {f.name for f in fields} | {f"CUBE.{f.name}" for f in fields} | {"CUBE"}
+
+
 def cube_schema_yaml(schema: dict[str, Any]) -> str:
     """Serialize a generated schema's cubes; model info and diagnostics stay out of Cube."""
-    return yaml.safe_dump(
-        {"cubes": schema["cubes"]},
+    content = yaml.safe_dump(
+        {"cubes": _literal_text_properties(schema["cubes"])},
         sort_keys=False,
         allow_unicode=False,
     )
+    # Cube renders any model file containing these as a Jinja template.
+    if _JINJA_DELIMITERS.search(content):
+        raise ValueError("Generated Cube schema contains template delimiters.")
+    return content
+
+
+def _literal_text_properties(value: Any, key: str = "") -> Any:
+    """Escape every non-SQL string so Cube reads it as literal text.
+
+    Cube renders a YAML model file as a Jinja template when it contains template
+    delimiters, then compiles each string property as a Python f-string. Free text
+    such as descriptions and formats must survive both passes unchanged; ``sql``
+    values were already escaped with their trusted references by the generator.
+    """
+    if isinstance(value, dict):
+        return {k: _literal_text_properties(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_literal_text_properties(item, key) for item in value]
+    if isinstance(value, str) and key != "sql":
+        return embed_cube_sql(value)
+    return value
 
 
 def _publication_scoped_sql(source_sql: str) -> str:
@@ -202,11 +264,13 @@ def _is_primary_key_field(dataset, field: SemanticField) -> bool:
     )
 
 
-def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> dict[str, Any]:
+def _cube_dimension(
+    field: SemanticField, *, columns: set[str], is_primary_key: bool = False
+) -> dict[str, Any]:
     cube_sql = (field.metadata or {}).get("cube_sql")
     payload = {
         "name": field.name,
-        "sql": compile_dimension_sql(cube_sql, columns=dataset_column_names(field.dataset))
+        "sql": compile_dimension_sql(cube_sql, columns=columns)
         if cube_sql
         else _cube_sql(field.expression),
         "type": "time"
@@ -223,7 +287,9 @@ def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> di
     return payload
 
 
-def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, Any]:
+def _cube_measure(
+    field: SemanticField, *, references: set[str], columns: set[str]
+) -> dict[str, Any]:
     measure_type = field.measure_type or SemanticField.MeasureType.NUMBER
     payload = {
         "name": field.name,
@@ -232,10 +298,12 @@ def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, An
     metadata = field.metadata or {}
     cube_sql = metadata.get("cube_sql")
     if isinstance(cube_sql, str) and cube_sql.strip():
-        payload["sql"] = embed_cube_sql(cube_sql.strip(), references=references)
+        payload["sql"] = embed_cube_sql(
+            compile_measure_sql(cube_sql, columns=columns), references=references
+        )
     elif measure_type != SemanticField.MeasureType.COUNT:
         payload["sql"] = _cube_sql(field.expression)
-    filters = _cube_measure_filters(metadata.get("filters"), references=references)
+    filters = _cube_measure_filters(metadata.get("filters"), references=references, columns=columns)
     if filters:
         payload["filters"] = filters
     if field.description:
@@ -244,7 +312,9 @@ def _cube_measure(field: SemanticField, *, references: set[str]) -> dict[str, An
     return payload
 
 
-def _cube_measure_filters(value: Any, *, references: set[str]) -> list[dict[str, str]]:
+def _cube_measure_filters(
+    value: Any, *, references: set[str], columns: set[str]
+) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
     filters: list[dict[str, str]] = []
@@ -253,7 +323,13 @@ def _cube_measure_filters(value: Any, *, references: set[str]) -> list[dict[str,
             continue
         sql = item.get("sql")
         if isinstance(sql, str) and sql.strip():
-            filters.append({"sql": embed_cube_sql(sql.strip(), references=references)})
+            filters.append(
+                {
+                    "sql": embed_cube_sql(
+                        compile_measure_filter_sql(sql, columns=columns), references=references
+                    )
+                }
+            )
     return filters
 
 

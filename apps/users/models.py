@@ -10,6 +10,8 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 
+from apps.common.commcare_servers import DEFAULT_SERVER
+
 
 class UserManager(BaseUserManager):
     """Custom manager for User model with email as the unique identifier."""
@@ -111,7 +113,12 @@ PROVIDER_DISPLAY_TEMPLATES: dict[str, str] = {
 
 
 class Tenant(models.Model):
-    """Canonical tenant identity record, created only after provider verification."""
+    """Canonical tenant identity record, created only after provider verification.
+
+    Identity is ``(provider, server, external_id)``: CommCare HQ's www and EU
+    deployments each own their domain namespace, so the same slug on both is two
+    tenants, never one (#719).
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
@@ -119,16 +126,32 @@ class Tenant(models.Model):
         max_length=255,
         help_text="Provider-assigned identifier (CommCare domain name or Connect org ID).",
     )
+    server = models.CharField(
+        max_length=20,
+        blank=True,
+        default=DEFAULT_SERVER,
+        db_default=DEFAULT_SERVER,
+        help_text=(
+            "Which deployment of the provider hosts this tenant (CommCare HQ: "
+            '"" = www, "eu" = EU). Empty for single-deployment providers.'
+        ),
+    )
     canonical_name = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = [["provider", "external_id"]]
         ordering = ["canonical_name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "server", "external_id"],
+                name="unique_tenant_provider_server_external_id",
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.provider}:{self.external_id} ({self.canonical_name})"
+        server = f"@{self.server}" if self.server else ""
+        return f"{self.provider}{server}:{self.external_id} ({self.canonical_name})"
 
     def save(self, *args, **kwargs):
         # Names come straight from provider APIs; one that is missing or too long
@@ -161,14 +184,14 @@ class TenantConnection(models.Model):
     """A single credential a user added: one OAuth login or one API key.
 
     A connection is a credential plus the *scope* that credential authorises.
-    ``scope_key`` is the provider-native scope identifier — the OCS team slug —
-    and is ``""`` for providers whose tokens are account-wide (CommCare HQ,
-    CommCare Connect). It exists because an OCS token can only ever read one
-    team, so covering N teams needs N credentials, and the row has to say which
-    one it speaks for (#156). It also replaces the old
-    ``unique(user, provider)`` OAuth guarantee with the narrower
-    ``unique(user, provider, scope_key)``: re-authorising a team you already
-    hold updates that team's connection instead of creating a second one.
+    ``scope_key`` is the provider-native scope identifier — the OCS team slug, or
+    the CommCare HQ server key (``""`` for www, ``"eu"`` for EU, #719) — and is
+    ``""`` for CommCare Connect, whose tokens are account-wide on one server. It
+    exists because an OCS token can only ever read one team, so covering N teams
+    needs N credentials, and the row has to say which one it speaks for (#156).
+    It also replaces the old ``unique(user, provider)`` OAuth guarantee with the
+    narrower ``unique(user, provider, scope_key)``: re-authorising a team you
+    already hold updates that team's connection instead of creating a second one.
 
     ``social_account`` pins an OAuth connection to the allauth identity holding
     its token, so credential resolution reads *this* connection's token rather
@@ -204,9 +227,10 @@ class TenantConnection(models.Model):
         default="",
         db_default="",
         help_text=(
-            "Provider-native scope this credential authorises (OCS team slug). "
-            'Empty for providers whose tokens are account-wide. Never NULL — "" is '
-            "a real value the uniqueness constraint must collapse on."
+            "Provider-native scope this credential authorises (OCS team slug; "
+            'CommCare HQ server key, "" = www). Empty for providers whose tokens are '
+            'account-wide. Never NULL — "" is a real value the uniqueness constraint '
+            "must collapse on."
         ),
     )
     scope_label = models.CharField(

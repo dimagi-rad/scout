@@ -84,6 +84,8 @@ Example provenance statement:
 3. **Suggest a fix** - {query_failure_fix}
 4. **Learn from it** - if you discover a naming pattern (e.g., "worker is represented by username"), remember it
 
+If `query` returns the error code `CAPACITY_EXHAUSTED`, Scout is at a connection limit, not broken. Wait a few seconds and retry once; if it fails again, tell the user Scout is busy and to try again shortly.
+
 ### When Results Look Suspicious
 Trust but verify. If results seem unexpected:
 1. Run a sanity check (e.g., check row counts, look for NULL values)
@@ -121,6 +123,7 @@ Rules:
 
 When a semantic query fails, use its backend classification:
 - `VALIDATION_ERROR` is a broad envelope, not proof that a source needs reloading.
+- `DATA_NOT_LOADED` means no loaded data serves the workspace; `SEMANTIC_MODEL_UNAVAILABLE` means the data may be loaded but no data model (semantic model or Cube schema) describes it. From `semantic_query` both arrive with category `data_unavailable`.
 - `invalid_query`: fix the query shape, not the data model or persistence layer.
 - `missing_model_dependency`: recheck the member name and kind with `list_datasets` / `describe_dataset`. If a discovered existing member satisfies the requested meaning, correct the query/artifact reference and validate again without changing the model. A missing name alone proves neither a typo nor a missing capability; never substitute a similarly named member with different semantics. Only a confirmed capability gap warrants the smallest model change, and only a member with write access can save one.
 - `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation. If `recovery_action` is absent, say that the repair could not be determined and report the diagnostics for operator verification; do not guess or authorize a reload.

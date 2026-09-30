@@ -19,6 +19,9 @@ from rest_framework.test import APIClient
 
 from apps.knowledge.models import KnowledgeEntry
 from apps.knowledge.utils import render_frontmatter
+from apps.users.models import Tenant
+from apps.workspaces.models import WorkspaceTenant
+from tests.tenant_access import grant_tenant_access
 
 
 @pytest.fixture
@@ -182,3 +185,33 @@ def test_import_rejects_decompression_bomb(auth_client, workspace):
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
     # Nothing was imported.
     assert KnowledgeEntry.objects.filter(workspace=workspace).count() == 0
+
+
+# ── export filename ──────────────────────────────────────────────────────────
+
+
+def _export_filename(auth_client, workspace):
+    resp = _export(auth_client, workspace)
+    assert resp.status_code == status.HTTP_200_OK
+    return resp["Content-Disposition"]
+
+
+@pytest.mark.django_db
+def test_export_names_a_single_source_workspace_after_its_source(auth_client, workspace):
+    assert _export_filename(auth_client, workspace) == (
+        'attachment; filename="knowledge-test-domain.zip"'
+    )
+
+
+@pytest.mark.django_db
+def test_export_does_not_name_a_multi_source_workspace_after_one_source(
+    auth_client, workspace, user
+):
+    """Naming it after the first source (#249 00#7) mislabels the other sources' knowledge."""
+    other = Tenant.objects.create(provider="commcare", external_id="another-domain")
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=other)
+    grant_tenant_access(user, other)
+
+    assert _export_filename(auth_client, workspace) == (
+        f'attachment; filename="knowledge-{workspace.id}.zip"'
+    )

@@ -10,12 +10,16 @@ not pay another TLS handshake.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from apps.common.capacity import CapacityResource, classify_capacity_error
 from mcp_server.services import pool as pool_mod
 
 
@@ -54,7 +58,7 @@ async def test_get_pool_reuses_pool_for_same_base_db():
     proving connections are reused, not reopened per schema."""
     fake_pool = _fake_pool()
 
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=fake_pool) as PoolCls:
+    with patch.object(pool_mod, "ManagedPool", return_value=fake_pool) as PoolCls:
         p1 = await pool_mod.get_pool(_base_params("t_alpha"))
         p2 = await pool_mod.get_pool(_base_params("t_beta"))
 
@@ -70,7 +74,7 @@ async def test_get_pool_separate_pools_for_different_dbs():
     fake_a = _fake_pool()
     fake_b = _fake_pool()
 
-    with patch.object(pool_mod, "AsyncConnectionPool", side_effect=[fake_a, fake_b]) as PoolCls:
+    with patch.object(pool_mod, "ManagedPool", side_effect=[fake_a, fake_b]) as PoolCls:
         a = _base_params("t_a")
         b = _base_params("t_b")
         b["dbname"] = "other_db"
@@ -86,7 +90,7 @@ async def test_base_conninfo_excludes_per_schema_options():
     """The conninfo passed to the pool carries the base DB identity but not the
     per-schema search_path options."""
     fake_pool = _fake_pool()
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=fake_pool) as PoolCls:
+    with patch.object(pool_mod, "ManagedPool", return_value=fake_pool) as PoolCls:
         await pool_mod.get_pool(_base_params("t_x"))
 
     conninfo = PoolCls.call_args.kwargs["conninfo"]
@@ -106,7 +110,7 @@ async def test_failed_close_does_not_strand_the_pool_in_the_cache():
     dying = _fake_pool()
     dying.close = AsyncMock(side_effect=RuntimeError("boom"))
 
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=dying):
+    with patch.object(pool_mod, "ManagedPool", return_value=dying):
         await pool_mod.get_pool(_base_params("t_alpha"))
 
     await pool_mod.close_all_pools()
@@ -114,7 +118,7 @@ async def test_failed_close_does_not_strand_the_pool_in_the_cache():
     assert pool_mod._pools == {}
 
     revived = _fake_pool()
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=revived) as PoolCls:
+    with patch.object(pool_mod, "ManagedPool", return_value=revived) as PoolCls:
         assert await pool_mod.get_pool(_base_params("t_alpha")) is revived
     assert PoolCls.call_count == 1
 
@@ -123,13 +127,13 @@ async def test_failed_close_does_not_strand_the_pool_in_the_cache():
 async def test_get_pool_replaces_a_pool_that_reports_itself_closed():
     """A cached-but-closed pool is rebuilt rather than handed out."""
     stale = _fake_pool()
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=stale):
+    with patch.object(pool_mod, "ManagedPool", return_value=stale):
         await pool_mod.get_pool(_base_params("t_alpha"))
 
     stale.closed = True
 
     fresh = _fake_pool()
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=fresh) as PoolCls:
+    with patch.object(pool_mod, "ManagedPool", return_value=fresh) as PoolCls:
         assert await pool_mod.get_pool(_base_params("t_alpha")) is fresh
     assert PoolCls.call_count == 1
     stale.close.assert_awaited_once()
@@ -146,7 +150,7 @@ async def test_close_all_pools_propagates_a_real_cancellation():
 
     pool = _fake_pool()
     pool.close = AsyncMock(side_effect=slow_close)
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=pool):
+    with patch.object(pool_mod, "ManagedPool", return_value=pool):
         await pool_mod.get_pool(_base_params("t_alpha"))
 
     task = asyncio.create_task(pool_mod.close_all_pools())
@@ -163,7 +167,7 @@ async def test_a_pool_whose_workers_were_cancelled_still_closes_quietly():
     so ``pool.close()`` raises CancelledError that is not ours to propagate."""
     pool = _fake_pool()
     pool.close = AsyncMock(side_effect=asyncio.CancelledError())
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=pool):
+    with patch.object(pool_mod, "ManagedPool", return_value=pool):
         await pool_mod.get_pool(_base_params("t_alpha"))
 
     await pool_mod.close_all_pools()
@@ -183,7 +187,7 @@ async def test_close_all_pools_closes_every_pool_even_when_one_raises():
     bad.close = AsyncMock(side_effect=RuntimeError("boom"))
     good = _fake_pool()
 
-    with patch.object(pool_mod, "AsyncConnectionPool", side_effect=[bad, good]):
+    with patch.object(pool_mod, "ManagedPool", side_effect=[bad, good]):
         first = _base_params("t_a")
         second = _base_params("t_b")
         second["dbname"] = "other_db"
@@ -201,7 +205,7 @@ def test_concurrent_sweeps_finalise_a_dead_loops_pool_once(monkeypatch):
     """Two threads sweeping at once used to drive the same generator twice and
     raise "aclose(): asynchronous generator is already running" out of get_pool."""
     loop = asyncio.new_event_loop()
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=_fake_pool()):
+    with patch.object(pool_mod, "ManagedPool", return_value=_fake_pool()):
         loop.run_until_complete(pool_mod.get_pool(_base_params("t_alpha")))
     loop.close()
 
@@ -249,7 +253,7 @@ async def test_a_failure_registering_the_shutdown_hook_releases_the_slot(monkeyp
         yield
 
     with (
-        patch.object(pool_mod, "AsyncConnectionPool", return_value=orphan),
+        patch.object(pool_mod, "ManagedPool", return_value=orphan),
         patch.object(pool_mod, "_close_on_loop_shutdown", refuses_first_iteration),
         pytest.raises(RuntimeError, match="shutting down"),
     ):
@@ -257,7 +261,7 @@ async def test_a_failure_registering_the_shutdown_hook_releases_the_slot(monkeyp
     orphan.close.assert_awaited_once()
 
     fresh = _fake_pool()
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=fresh):
+    with patch.object(pool_mod, "ManagedPool", return_value=fresh):
         assert await pool_mod.get_pool(_base_params("t_alpha")) is fresh
 
 
@@ -284,7 +288,7 @@ async def test_a_failing_cleanup_never_masks_why_the_open_failed():
     broken.close = AsyncMock(side_effect=RuntimeError("close failed too"))
 
     with (
-        patch.object(pool_mod, "AsyncConnectionPool", return_value=broken),
+        patch.object(pool_mod, "ManagedPool", return_value=broken),
         pytest.raises(pool_mod.PoolTimeout, match="server unreachable"),
     ):
         await pool_mod.get_pool(_base_params("t_alpha"))
@@ -326,7 +330,7 @@ async def test_close_all_pools_waits_for_an_open_in_flight_on_its_loop():
         await finish_open.wait()
 
     slow.open = AsyncMock(side_effect=slow_open)
-    with patch.object(pool_mod, "AsyncConnectionPool", return_value=slow):
+    with patch.object(pool_mod, "ManagedPool", return_value=slow):
         opener = asyncio.create_task(pool_mod.get_pool(_base_params("t_alpha")))
         await opening.wait()
         closer = asyncio.create_task(pool_mod.close_all_pools())
@@ -339,3 +343,81 @@ async def test_close_all_pools_waits_for_an_open_in_flight_on_its_loop():
 
     slow.close.assert_awaited()
     assert pool_mod._pools == {}
+
+
+@pytest.mark.asyncio
+async def test_checkout_timeout_on_a_full_pool_is_tagged_as_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    timeout = PoolTimeout("couldn't get a connection after 30.00 sec")
+    with (
+        patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 3}),
+        pytest.raises(pool_mod.ManagedPoolExhausted) as raised,
+    ):
+        await pool.getconn()
+
+    assert classify_capacity_error(raised.value).resource == CapacityResource.DATABASE
+
+
+@pytest.mark.asyncio
+async def test_checkout_timeout_after_a_slot_refusal_is_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
+    timeout = PoolTimeout("couldn't get a connection after 30.00 sec")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=refusal),
+        patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 2}),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 2}),
+        pytest.raises(pool_mod.ManagedPoolExhausted),
+    ):
+        await pool.getconn()
+
+
+@pytest.mark.asyncio
+async def test_checkout_timeout_on_an_unreachable_database_is_not_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    down = psycopg.OperationalError("connection refused")
+    timeout = PoolTimeout("couldn't get a connection after 30.00 sec")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=down),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(AsyncConnectionPool, "getconn", side_effect=timeout),
+        patch.object(pool, "get_stats", return_value={"pool_size": 1}),
+        pytest.raises(PoolTimeout) as raised,
+    ):
+        await pool.getconn()
+
+    assert not isinstance(raised.value, pool_mod.ManagedPoolExhausted)
+    assert classify_capacity_error(raised.value) is None
+
+
+def test_pool_internals_the_capacity_tag_relies_on_still_exist():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+
+    assert "pool_size" in pool.get_stats()
+    assert inspect.iscoroutinefunction(AsyncConnectionPool._connect)
+    assert "timeout" in inspect.signature(AsyncConnectionPool._connect).parameters
+
+
+@pytest.mark.asyncio
+async def test_a_later_successful_connect_clears_a_stale_slot_refusal():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=refusal),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with patch.object(AsyncConnectionPool, "_connect", new=AsyncMock(return_value=MagicMock())):
+        await pool._connect()
+
+    assert pool._last_connect_error is None

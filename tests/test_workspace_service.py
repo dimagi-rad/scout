@@ -377,7 +377,7 @@ def test_adding_a_source_when_nothing_is_served_queues_no_rebuild(
     assert materialize.called is with_actor
     vs.refresh_from_db()
     assert vs.state == SchemaState.FAILED
-    assert "has no active schema for any tenant" in vs.last_error
+    assert "No active data schema for any tenant" in vs.last_error
     assert vs.tenant_coverage == {
         "included_tenants": [],
         "excluded_tenants": [_entry(tenant), _entry(tenant2)],
@@ -402,7 +402,7 @@ def test_removing_a_source_when_nothing_is_served_creates_the_failed_row(
     vs = WorkspaceViewSchema.objects.get(workspace=workspace)
     assert vs.state == SchemaState.FAILED
     assert vs.schema_name.startswith("ws_")
-    assert "has no active schema for any tenant" in vs.last_error
+    assert "No active data schema for any tenant" in vs.last_error
     assert vs.tenant_coverage == {
         "included_tenants": [],
         "excluded_tenants": [_entry(tenant), _entry(tenant2)],
@@ -508,7 +508,7 @@ def test_removing_a_source_when_nothing_is_served_queues_no_rebuild(
     mock_rebuild.assert_not_called()
     vs.refresh_from_db()
     assert vs.state == SchemaState.FAILED
-    assert "has no active schema for any tenant" in vs.last_error
+    assert "No active data schema for any tenant" in vs.last_error
     assert vs.tenant_coverage == {
         "included_tenants": [],
         "excluded_tenants": [_entry(tenant), _entry(tenant2)],

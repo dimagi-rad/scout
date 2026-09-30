@@ -160,7 +160,7 @@ async def test_partial_publication_missing_source_dispatches_materialization(
             state=SchemaState.TEARDOWN
         )
         await teardown_schema.func(str(setup.schemas[1].id))
-        with pytest.raises(ValueError, match="no active schema"):
+        with pytest.raises(ValueError, match="No active data schema"):
             await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
 
     with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query:
@@ -330,7 +330,7 @@ async def test_older_ready_surface_cannot_hide_current_explicit_missing_view(
     defer = AsyncMock(return_value=SimpleNamespace(id=1704))
     with (
         patch(
-            "apps.artifacts.services.query_state.workspace_query_surface",
+            "apps.semantic.services.query_readiness.workspace_query_surface",
             new=AsyncMock(return_value=full_surface),
         ),
         patch("apps.artifacts.views.recover_workspace_data.defer_async", new=defer),

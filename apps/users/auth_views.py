@@ -13,6 +13,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
+from apps.common.commcare_servers import server_for_provider
 from apps.common.http import parse_json_object, string_field
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
@@ -28,6 +29,7 @@ from apps.users.services.oauth_scope import (
     is_active_identity,
     ocs_scope_unusable,
     provider_accounts,
+    scope_account_ids,
 )
 from apps.users.services.onboarding_cache import ME_ONBOARDING_TTL, me_onboarding_cache_key
 from apps.users.services.tenant_resolution import (
@@ -204,7 +206,8 @@ def disconnect_provider_view(request, provider_id):
 
     Provider-wide by design: for a scoped provider this signs the user out of
     *all* their teams. Removing a single team is
-    ``DELETE /api/auth/connections/<id>/``.
+    ``DELETE /api/auth/connections/<id>/``. Each CommCare HQ server is its own
+    provider, so disconnecting one leaves the other signed in.
     """
     # Data providers may use configured allauth IDs such as commcare_prod.
     provider = canonical_provider(provider_id)
@@ -231,6 +234,29 @@ def disconnect_provider_view(request, provider_id):
     tokens = tokens | SocialToken.objects.filter(
         account__user=request.user, account__provider__in=configured_ids
     )
+    oauth_conns = TenantConnection.objects.filter(
+        user=request.user,
+        provider=provider,
+        credential_type=TenantConnection.OAUTH,
+    )
+    if provider == "commcare":
+        # Each HQ server is its own sign-in: disconnecting EU must leave www connected.
+        # www may be configured under an alias id (hq_production) that only the
+        # union above finds, so www keeps it and drops the other servers' identities.
+        server = server_for_provider(provider_id)
+        if server:
+            tokens = SocialToken.objects.filter(
+                account_id__in=scope_account_ids(request.user.pk, provider, server)
+            )
+        else:
+            tokens = tokens.exclude(
+                account_id__in=[
+                    account.pk
+                    for account in provider_accounts(request.user.pk, provider)
+                    if account_scope(account)
+                ]
+            )
+        oauth_conns = oauth_conns.filter(scope_key=server)
     if not tokens.exists():
         return JsonResponse({"error": "No active connection to disconnect"}, status=404)
 
@@ -238,11 +264,6 @@ def disconnect_provider_view(request, provider_id):
 
     # Remove the provider's OAuth connection and archive the chatbots it served
     # (their conversations/data are retained and restored if reconnected).
-    oauth_conns = TenantConnection.objects.filter(
-        user=request.user,
-        provider=provider,
-        credential_type=TenantConnection.OAUTH,
-    )
     TenantMembership.objects.filter(connection__in=oauth_conns).update(
         archived_at=timezone.now(), connection=None
     )
@@ -295,7 +316,8 @@ def providers_view(request):
             if ocs_scope_unusable(provider, account_scope(social_token.account)):
                 _record_status(seen_statuses, provider, "needs_team")
                 continue
-            token_url = get_token_url(provider)
+            scope_key = account_scope(social_token.account)
+            token_url = get_token_url(provider, scope_key)
             can_refresh = bool(token_url and social_token.token_secret and social_token.app)
             refresh_failed = False
             if can_refresh and token_needs_refresh(social_token.expires_at):
@@ -315,7 +337,9 @@ def providers_view(request):
             _record_status(
                 seen_statuses,
                 provider,
-                token_health(social_token, provider, refresh_failed=refresh_failed),
+                token_health(
+                    social_token, provider, scope_key=scope_key, refresh_failed=refresh_failed
+                ),
             )
         token_status = {
             provider: next(

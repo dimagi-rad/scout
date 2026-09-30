@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react"
-import { BASE_PATH } from "@/config"
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { oauthConnectUrl, type OAuthProvider } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
@@ -8,7 +7,14 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
-type Step = "choose" | "api-key"
+// Shown before providers load (or if they fail); the same connect flow as once loaded.
+const WWW_COMMCARE_FALLBACK: OAuthProvider = {
+  id: "commcare",
+  name: "CommCare HQ",
+  login_url: "/accounts/commcare/login/",
+}
+
+type Step ="choose" | "api-key"
 
 interface MembershipResult {
   membership_id: string
@@ -16,8 +22,25 @@ interface MembershipResult {
   tenant_name: string
 }
 
+interface ServerOption {
+  value: string
+  label: string
+}
+
+interface ApiKeyProviderSchema {
+  id: string
+  fields: { key: string; options?: ServerOption[] }[]
+}
+
 export function OnboardingWizard() {
   const [step, setStep] = useState<Step>("choose")
+  const [server, setServer] = useState("")
+  const [serverOptions, setServerOptions] = useState<ServerOption[]>([])
+  const [serverOptionsState, setServerOptionsState] = useState<
+    "idle" | "loading" | "loaded" | "failed"
+  >("idle")
+  const [serverAttempt, setServerAttempt] = useState(0)
+  const serverOptionsLoaded = useRef(false)
   const [domain, setDomain] = useState("")
   const [username, setUsername] = useState("")
   const [apiKey, setApiKey] = useState("")
@@ -28,6 +51,9 @@ export function OnboardingWizard() {
   // An OCS-only user lands here too, e.g. once their team-less memberships are
   // archived (#379), so the wizard must offer OCS or they have no way forward.
   const [ocs, setOcs] = useState<OAuthProvider | null>(null)
+  // Listed only once its OAuth app is configured on this deployment (#719).
+  const [commcareEu, setCommcareEu] = useState<OAuthProvider | null>(null)
+  const [commcare, setCommcare] = useState<OAuthProvider | null>(null)
   const [providersState, setProvidersState] = useState<"loading" | "loaded" | "failed">(
     "loading",
   )
@@ -37,10 +63,14 @@ export function OnboardingWizard() {
     try {
       const data = await api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
       setOcs(data.providers.find((p) => p.id === "ocs") ?? null)
+      setCommcareEu(data.providers.find((p) => p.id === "commcare_eu") ?? null)
+      setCommcare(data.providers.find((p) => p.id === "commcare") ?? null)
       setProvidersState("loaded")
     } catch (err) {
       console.error("Failed to load sign-in options", err)
       setOcs(null)
+      setCommcareEu(null)
+      setCommcare(null)
       setProvidersState("failed")
     }
   }, [])
@@ -48,6 +78,37 @@ export function OnboardingWizard() {
   useEffect(() => {
     void loadProviders()
   }, [loadProviders])
+
+  // The server list comes from the API-key schema so it cannot drift from the backend.
+  const loadServerOptions = useCallback(async (isCurrent: () => boolean) => {
+    setServerOptionsState("loading")
+    try {
+      const schemas = await api.get<ApiKeyProviderSchema[]>("/api/auth/api-key-providers/")
+      if (!isCurrent()) return
+      const commcare = schemas.find((s) => s.id === "commcare")
+      const options = commcare?.fields.find((f) => f.key === "server")?.options ?? []
+      setServerOptions(options)
+      // Submit what the user sees: the shown default is the first option.
+      if (options.length) setServer(options[0].value)
+      setServerOptionsState("loaded")
+      serverOptionsLoaded.current = true
+    } catch (err) {
+      if (!isCurrent()) return
+      console.error("Failed to load CommCare HQ servers", err)
+      setServerOptionsState("failed")
+    }
+  }, [])
+
+  // Fetched once per wizard; a failure is shown with a retry rather than silently
+  // leaving the key to be checked on www.
+  useEffect(() => {
+    if (step !== "api-key" || serverOptionsLoaded.current) return
+    let current = true
+    void loadServerOptions(() => current)
+    return () => {
+      current = false
+    }
+  }, [step, serverAttempt, loadServerOptions])
 
   async function handleApiKeySubmit(e: FormEvent) {
     e.preventDefault()
@@ -57,6 +118,7 @@ export function OnboardingWizard() {
       await api.post<{ memberships: MembershipResult[] }>("/api/auth/connections/", {
         provider: "commcare",
         fields: {
+          server,
           domain,
           username,
           api_key: apiKey,
@@ -84,6 +146,40 @@ export function OnboardingWizard() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleApiKeySubmit} className="space-y-4">
+              {serverOptionsState === "failed" && (
+                <div className="space-y-1" data-testid="onboarding-server-error">
+                  <p className="text-sm text-destructive">
+                    Couldn&apos;t load the CommCare HQ servers, so the key will be checked on
+                    Global (www.commcarehq.org).
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setServerAttempt((n) => n + 1)}
+                  >
+                    Try again
+                  </Button>
+                </div>
+              )}
+              {serverOptions.length > 1 && (
+                <div className="space-y-2">
+                  <Label htmlFor="server">CommCare HQ server</Label>
+                  <select
+                    id="server"
+                    data-testid="onboarding-server"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={server}
+                    onChange={(e) => setServer(e.target.value)}
+                  >
+                    {serverOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label htmlFor="domain">CommCare Domain</Label>
                 <Input
@@ -128,7 +224,12 @@ export function OnboardingWizard() {
                 >
                   Back
                 </Button>
-                <Button type="submit" className="flex-1" disabled={loading}>
+                <Button
+                  type="submit"
+                  className="flex-1"
+                  // Submitting before the server list arrives would check the key on www.
+                  disabled={loading || serverOptionsState === "loading"}
+                >
                   {loading ? "Connecting..." : "Connect"}
                 </Button>
               </div>
@@ -154,14 +255,30 @@ export function OnboardingWizard() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <Button
-            className="w-full"
-            variant="outline"
-            data-testid="onboarding-oauth"
-            asChild
-          >
-            <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>Connect with OAuth</a>
-          </Button>
+          {/* Until providers load, the www link is the historical default; once they
+              have, it is offered only if this deployment configured it. */}
+          {(commcare || providersState !== "loaded") && (
+            <Button
+              className="w-full"
+              variant="outline"
+              data-testid="onboarding-oauth"
+              asChild
+            >
+              <a href={oauthConnectUrl(commcare ?? WWW_COMMCARE_FALLBACK, "/")}>
+                {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
+              </a>
+            </Button>
+          )}
+          {commcareEu && (
+            <Button
+              className="w-full"
+              variant="outline"
+              data-testid="onboarding-oauth-commcare-eu"
+              asChild
+            >
+              <a href={oauthConnectUrl(commcareEu, "/")}>Connect with {commcareEu.name}</a>
+            </Button>
+          )}
           <Button
             className="w-full"
             data-testid="onboarding-api-key-option"

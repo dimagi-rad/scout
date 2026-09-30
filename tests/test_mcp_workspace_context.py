@@ -36,7 +36,7 @@ async def test_load_workspace_context_single_tenant_delegates_to_tenant_context(
 
     # provider is threaded through so a cross-provider duplicate external_id
     # resolves unambiguously (arch #235).
-    mock_ltc.assert_called_once_with("ctx-domain", "commcare")
+    mock_ltc.assert_called_once_with("ctx-domain", "commcare", "")
     assert result.schema_name == "ctx_domain"
 
 
@@ -89,5 +89,5 @@ async def test_load_workspace_context_multi_tenant_raises_if_no_active_view_sche
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
 
-    with pytest.raises(ValueError, match="No active view schema"):
+    with pytest.raises(ValueError, match="No active data schema for workspace"):
         await load_workspace_context(str(ws.id))

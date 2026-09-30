@@ -80,6 +80,7 @@ INSTALLED_APPS = [
     "allauth.socialaccount.providers.google",
     "allauth.socialaccount.providers.github",
     "apps.users.providers.commcare",
+    "apps.users.providers.commcare_eu",
     "apps.users.providers.commcare_connect",
     "apps.users.providers.ocs",
     "apps.users",
@@ -246,6 +247,10 @@ SOCIALACCOUNT_PROVIDERS = {
         "OAUTH_PKCE_ENABLED": True,
         "VERIFIED_EMAIL": True,
     },
+    "commcare_eu": {
+        "OAUTH_PKCE_ENABLED": True,
+        "VERIFIED_EMAIL": True,
+    },
     "ocs": {
         "OAUTH_PKCE_ENABLED": True,
         "VERIFIED_EMAIL": True,
@@ -253,6 +258,8 @@ SOCIALACCOUNT_PROVIDERS = {
 }
 
 # OAuth email-domain restriction: provider id -> allowed domains (lowercase, exact).
+# A provider without its own entry inherits its canonical provider's, so CommCare
+# HQ (EU) is held to the "commcare" list unless given one.
 # Absent/empty list = unrestricted; a non-empty list rejects out-of-list domains
 # AND rejects no-email logins (a missing email can't satisfy a configured
 # restriction — arch #258, finding 07#2). Unrestricted providers (e.g. the
@@ -301,6 +308,8 @@ WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = env.bool(
     "WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT", default=False
 )
 
+# The chat offers a manual refresh once the oldest serving source is this old (#173).
+STALE_DATA_BANNER_HOURS = env.int("STALE_DATA_BANNER_HOURS", default=24)
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-5-5")

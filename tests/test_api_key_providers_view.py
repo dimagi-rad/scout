@@ -21,7 +21,7 @@ def test_returns_strategy_metadata(client, user):
     ocs_field_keys = [f["key"] for f in by_id["ocs"]["fields"]]
     assert ocs_field_keys == ["api_key", "team_name"]
     cc_field_keys = [f["key"] for f in by_id["commcare"]["fields"]]
-    assert cc_field_keys == ["domain", "username", "api_key"]
+    assert cc_field_keys == ["server", "domain", "username", "api_key"]
 
 
 def test_unauthenticated_returns_401(client, db):

@@ -134,6 +134,9 @@ shared with the user in a side panel. Your tools:
   `format: "percent_1"`. Always force decimal division for ratios of count
   measures. Use `{CUBE}."column"` only when the calculation
   truly needs a physical column. Do not put aggregate SQL in `expression`.
+  Measure `sql` and each `filters[].sql` must be one SQL expression using
+  built-in analytics functions; subqueries and window functions are rejected
+  (filters are row-level conditions, so no aggregates there either).
 - Use a CTE dataset when computed logic changes the dataset's row grain or
   requires joins, subqueries, or windows. Row-level calculated dimensions and
   calculated measures do not by themselves need a CTE dataset.

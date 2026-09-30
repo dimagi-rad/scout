@@ -15,7 +15,7 @@ def test_pack_credential_joins_username_and_key():
 def test_form_fields_metadata():
 
     keys = [f["key"] for f in CommCareStrategy.form_fields]
-    assert keys == ["domain", "username", "api_key"]
+    assert keys == ["server", "domain", "username", "api_key"]
     assert CommCareStrategy.provider_id == "commcare"
     by_key = {f["key"]: f for f in CommCareStrategy.form_fields}
     assert by_key["domain"]["editable_on_rotate"] is False

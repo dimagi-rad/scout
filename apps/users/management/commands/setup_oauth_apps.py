@@ -2,7 +2,7 @@
 
 Reads ``{PREFIX}_OAUTH_CLIENT_ID`` / ``{PREFIX}_OAUTH_CLIENT_SECRET`` for each
 provider and upserts the corresponding allauth SocialApp rows. Production uses
-COMMCARE_OAUTH_*, CONNECT_OAUTH_*, OCS_OAUTH_*, GOOGLE_OAUTH_*, GITHUB_OAUTH_*.
+COMMCARE_OAUTH_*, COMMCARE_EU_OAUTH_* (once registered), CONNECT_OAUTH_*, OCS_OAUTH_*, GOOGLE_OAUTH_*, GITHUB_OAUTH_*.
 Staging substitutes STAGING_CONNECT_OAUTH_* for Connect because Connect staging
 has its own OAuth application database.
 
@@ -22,6 +22,9 @@ from django.core.management.base import BaseCommand
 # ``_OAUTH`` (that produced the double ``_OAUTH_`` bug for Google/GitHub).
 PROVIDERS = [
     ("commcare", "CommCare HQ", "COMMCARE"),
+    # EU HQ is a separate deployment with its own OAuth app (#719); it stays hidden
+    # until both COMMCARE_EU_OAUTH_* values are set.
+    ("commcare_eu", "CommCare HQ (EU)", "COMMCARE_EU"),
     ("commcare_connect", "CommCare Connect", "CONNECT"),
     ("ocs", "Open Chat Studio", "OCS"),
     ("google", "Google", "GOOGLE"),

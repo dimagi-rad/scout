@@ -37,7 +37,10 @@ from apps.semantic.models import (
 )
 from apps.semantic.services.field_sql import (
     DimensionSQLValidationError,
+    MeasureSQLValidationError,
     compile_dimension_sql,
+    compile_measure_filter_sql,
+    compile_measure_sql,
     dataset_column_names,
 )
 
@@ -381,8 +384,19 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
             )
     cube_sql = fields.get("cube_sql")
     columns = dataset_column_names(dataset)
+    if field_type == "measure":
+        out.extend(_measure_filter_diagnostics(change, fields.get("filters"), columns))
+    # Generation ignores non-string measure SQL and publishes the expression instead,
+    # so such a value counts as absent and the expression checks below still apply.
+    if field_type == "measure" and not (isinstance(cube_sql, str) and cube_sql.strip()):
+        cube_sql = None
     if cube_sql:
-        if field_type != "measure":
+        if field_type == "measure":
+            try:
+                compile_measure_sql(cube_sql, columns=columns)
+            except MeasureSQLValidationError as exc:
+                out.append(_diagnostic("INVALID_MEASURE_SQL", change, "cube_sql", str(exc)))
+        else:
             try:
                 compile_dimension_sql(cube_sql, columns=columns)
             except DimensionSQLValidationError as exc:
@@ -413,6 +427,22 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
                 "CTE dataset when the calculation changes row grain.",
             )
         )
+    return out
+
+
+def _measure_filter_diagnostics(change, filters: Any, columns: set[str]) -> list[dict]:
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(filters if isinstance(filters, list) else []):
+        # Same shape rule as generation, which skips anything else.
+        sql = item.get("sql") if isinstance(item, dict) else None
+        if not isinstance(sql, str) or not sql.strip():
+            continue
+        try:
+            compile_measure_filter_sql(sql, columns=columns)
+        except MeasureSQLValidationError as exc:
+            out.append(
+                _diagnostic("INVALID_MEASURE_FILTER", change, f"filters[{index}].sql", str(exc))
+            )
     return out
 
 

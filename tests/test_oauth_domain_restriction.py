@@ -1,5 +1,7 @@
 """Tests for OAuth email-domain restriction enforcement and configuration."""
 
+from types import SimpleNamespace
+
 import pytest
 from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.models import SocialAccount, SocialLogin
@@ -33,12 +35,16 @@ def _make_request():
     return request
 
 
-def _make_sociallogin(provider: str, email: str) -> SocialLogin:
-    """Build an in-memory SocialLogin for adapter testing (no DB writes)."""
+def _make_sociallogin(provider: str, email: str, *, adapter_id: str | None = None) -> SocialLogin:
+    """Build an in-memory SocialLogin for adapter testing (no DB writes).
+
+    ``adapter_id`` is the provider that signed in, which allauth sets on the login;
+    it defaults to ``provider``, an unaliased sign-in.
+    """
     user = User(email=email)
     account = SocialAccount(provider=provider, uid="test-uid")
-    sociallogin = SocialLogin(user=user, account=account)
-    return sociallogin
+    signed_in_with = SimpleNamespace(id=adapter_id or provider)
+    return SocialLogin(user=user, account=account, provider=signed_in_with)
 
 
 class TestPreSocialLoginEnforcement:
@@ -137,3 +143,24 @@ class TestPreSocialLoginEnforcement:
         sociallogin = _make_sociallogin("commcare", "alice@sub.dimagi.com")
         with pytest.raises(ImmediateHttpResponse):
             adapter.pre_social_login(request, sociallogin)
+
+
+class TestCanonicalProviderInheritance:
+    """A second CommCare HQ server must not be a way around the commcare list (#719)."""
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
+    def test_eu_inherits_the_commcare_restriction(self):
+        adapter = EncryptingSocialAccountAdapter()
+        with pytest.raises(ImmediateHttpResponse):
+            adapter.pre_social_login(
+                _make_request(), _make_sociallogin("commcare_eu", "x@evil.com")
+            )
+        login = _make_sociallogin("commcare_eu", "a@dimagi.com")
+        assert adapter.pre_social_login(_make_request(), login) is None
+
+    @override_settings(
+        SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"], "commcare_eu": []}
+    )
+    def test_an_explicit_eu_entry_wins(self):
+        login = _make_sociallogin("commcare_eu", "x@elsewhere.org")
+        assert EncryptingSocialAccountAdapter().pre_social_login(_make_request(), login) is None

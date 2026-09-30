@@ -30,9 +30,10 @@ This path connects a domain with a CommCare username and API key from the onboar
 ### 3. Connect your CommCare domain
 
 1. Click **Use an API Key**.
-2. Enter your CommCare **domain** (the slug from the URL, e.g. `my-project` from `www.commcarehq.org/a/my-project/`).
-3. Enter your CommCare **username** (your account email) and the **API key**.
-4. Click **Connect**.
+2. If your project space is on EU CommCare HQ (`eu.commcarehq.org`), pick **EU** as the **CommCare HQ server**. Otherwise leave it on Global (`www.commcarehq.org`).
+3. Enter your CommCare **domain** (the slug from the URL, e.g. `my-project` from `www.commcarehq.org/a/my-project/`).
+4. Enter your CommCare **username** (your account email) and the **API key**.
+5. Click **Connect**.
 
 Scout verifies the key against CommCare, stores it encrypted with `DB_CREDENTIAL_KEY`, and records a connection and a membership for the domain. A workspace for the domain is created automatically, with you as its manager.
 

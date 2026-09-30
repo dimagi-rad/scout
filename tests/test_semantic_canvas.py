@@ -326,7 +326,7 @@ def test_created_measure_supports_calculated_cube_sql(canvas, semantic_model, mo
     assert measure == {
         "name": "amount_per_visit",
         "type": "number",
-        "sql": "{count}::numeric / NULLIF({count}, 0)",
+        "sql": "CAST({count} AS DECIMAL) / NULLIF({count}, 0)",
         "format": "currency_2",
         "currency": "USD",
     }
@@ -720,7 +720,7 @@ def test_created_ratio_measure_can_reference_filtered_measure(
                     "name": "approved_visit_count",
                     "field_type": "measure",
                     "measure_type": "count",
-                    "filters": [{"sql": "{CUBE}.\"status\" = 'approved'"}],
+                    "filters": [{"sql": "{CUBE}.\"username\" = 'approved'"}],
                 },
             },
             {
@@ -748,12 +748,12 @@ def test_created_ratio_measure_can_reference_filtered_measure(
     )
     measures = {measure["name"]: measure for measure in cube["measures"]}
     assert measures["approved_visit_count"]["filters"] == [
-        {"sql": "{CUBE}.\"status\" = 'approved'"}
+        {"sql": "{CUBE}.\"username\" = 'approved'"}
     ]
     assert measures["approval_rate"] == {
         "name": "approval_rate",
         "type": "number",
-        "sql": "{approved_visit_count}::numeric / NULLIF({count}, 0)",
+        "sql": "CAST({approved_visit_count} AS DECIMAL) / NULLIF({count}, 0)",
         "format": "percent_1",
     }
 
@@ -1919,3 +1919,162 @@ def test_thread_canvas_api_rejects_foreign_thread(
     foreign = Thread.objects.create(workspace=workspace, user=read_user)
     response = client.get(f"/api/workspaces/{workspace.id}/threads/{foreign.id}/canvas/")
     assert response.status_code == 404
+
+
+_DENIED_MEASURE_SQL = "max(pg_advisory_lock(1))"
+
+
+def test_created_measure_rejects_denied_sql(canvas, semantic_model, user):
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "escalating",
+                    "field_type": "measure",
+                    "measure_type": "number",
+                    "sql": _DENIED_MEASURE_SQL,
+                },
+            }
+        ],
+        user,
+    )
+
+    assert result["can_commit"] is False
+    assert [d["code"] for d in result["diagnostics"]] == ["INVALID_MEASURE_SQL"]
+    report = commit_canvas(canvas, user)
+    assert report["blocked"] is True
+    assert not _visits(semantic_model).fields.filter(name="escalating").exists()
+
+
+@pytest.mark.parametrize("filter_key", ["filter", "filters"])
+def test_created_measure_rejects_denied_filter(canvas, semantic_model, user, filter_key):
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "escalating_count",
+                    "field_type": "measure",
+                    "measure_type": "count",
+                    filter_key: [{"sql": "pg_advisory_lock(1) IS NOT NULL"}],
+                },
+            }
+        ],
+        user,
+    )
+
+    assert result["can_commit"] is False
+    assert [d["code"] for d in result["diagnostics"]] == ["INVALID_MEASURE_FILTER"]
+    assert commit_canvas(canvas, user)["blocked"] is True
+    assert not _visits(semantic_model).fields.filter(name="escalating_count").exists()
+
+
+def test_edited_measure_sql_and_filters_are_validated(canvas, semantic_model, user):
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="total_amount",
+        field_type=SemanticField.FieldType.MEASURE,
+        measure_type=SemanticField.MeasureType.SUM,
+        expression="amount",
+        metadata={"source": "canvas"},
+    )
+
+    sql_edit = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.total_amount/cube_sql",
+                "value": _DENIED_MEASURE_SQL,
+            }
+        ],
+        user,
+    )
+    assert sql_edit["can_commit"] is False
+    assert [d["code"] for d in sql_edit["diagnostics"]] == ["INVALID_MEASURE_SQL"]
+
+    filter_edit = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.total_amount/filters",
+                "value": [{"sql": "pg_catalog.pg_advisory_lock(1) IS NOT NULL"}],
+            }
+        ],
+        user,
+    )
+    assert filter_edit["can_commit"] is False
+    assert "INVALID_MEASURE_FILTER" in [d["code"] for d in filter_edit["diagnostics"]]
+
+
+def test_edited_measure_accepts_ordinary_aggregate_sql(canvas, semantic_model, user):
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="paid_amount",
+        field_type=SemanticField.FieldType.MEASURE,
+        measure_type=SemanticField.MeasureType.NUMBER,
+        expression="",
+        metadata={"source": "canvas", "cube_sql": "sum({CUBE}.amount)"},
+    )
+
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.paid_amount/cube_sql",
+                "value": "coalesce(sum(CASE WHEN {CUBE}.amount > 0 THEN {CUBE}.amount END), 0)",
+            },
+            {
+                "op": "set",
+                "target": "field/raw_visits.paid_amount/filters",
+                "value": [{"sql": "{CUBE}.username IS NOT NULL"}],
+            },
+        ],
+        user,
+    )
+
+    assert "errors" not in result
+    assert result["can_commit"] is True
+
+
+def test_measure_diagnostics_follow_generation_for_unpublished_shapes(canvas, semantic_model, user):
+    # Written outside the canvas: generation skips both values, so diagnostics
+    # judge the measure by its expression, as generation publishes it.
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="legacy_total",
+        field_type=SemanticField.FieldType.MEASURE,
+        measure_type=SemanticField.MeasureType.SUM,
+        expression="",
+        metadata={
+            "source": "canvas",
+            "cube_sql": ["sum(amount)"],
+            "filters": ["pg_advisory_lock(1) IS NULL", {"sql": ""}],
+        },
+    )
+
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.legacy_total/measure_type",
+                "value": "avg",
+            },
+        ],
+        user,
+    )
+
+    codes = [d["code"] for d in result.get("diagnostics", [])]
+    assert "INVALID_MEASURE_SQL" not in codes
+    assert "INVALID_MEASURE_FILTER" not in codes
+    assert "MISSING_EXPRESSION" in codes

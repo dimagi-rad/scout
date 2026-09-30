@@ -13,6 +13,7 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.db import close_old_connections
 
 from apps.common.capacity import CapacityExhausted, CapacityResource, report_capacity_exhausted
+from apps.common.errors import validation_error_code
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
 from apps.semantic.services.cube_client import (
@@ -92,7 +93,7 @@ async def run_semantic_query(
         return await query_readiness_error(
             workspace,
             query_spec,
-            VALIDATION_ERROR,
+            exc.code,
             str(exc),
             category="data_unavailable",
             readiness=readiness,
@@ -105,7 +106,7 @@ async def run_semantic_query(
         return await query_readiness_error(
             workspace,
             query_spec,
-            VALIDATION_ERROR,
+            exc.code,
             str(exc),
             category="data_unavailable",
             readiness=readiness,
@@ -121,7 +122,7 @@ async def run_semantic_query(
         return await query_readiness_error(
             workspace,
             query_spec,
-            VALIDATION_ERROR,
+            validation_error_code(exc),
             str(exc),
             category="data_unavailable",
             readiness=readiness,

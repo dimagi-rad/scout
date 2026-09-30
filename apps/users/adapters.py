@@ -18,9 +18,29 @@ from allauth.socialaccount.providers import registry as providers_registry
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.contrib import messages
+from django.core.exceptions import (
+    ImproperlyConfigured,
+    MultipleObjectsReturned,
+    ObjectDoesNotExist,
+)
 from django.shortcuts import redirect
 
+from apps.common.commcare_servers import server_for_provider
+from apps.users.services.oauth_scope import canonical_provider
+
 logger = logging.getLogger(__name__)
+
+
+def _signed_in_provider_id(request, sociallogin) -> str | None:
+    """The allauth provider class id that performed this sign-in, if knowable."""
+    provider = getattr(sociallogin, "provider", None)
+    if provider is None:
+        try:
+            provider = sociallogin.account.get_provider(request)
+        except (ObjectDoesNotExist, MultipleObjectsReturned, ImproperlyConfigured):
+            # No single app names it (none, or one per server), so refuse.
+            return None
+    return getattr(provider, "id", None)
 
 
 class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
@@ -76,7 +96,9 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         Runs after a successful OAuth callback but before any User/SocialAccount
         is created or login session established. Configured by the
         SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS setting (provider id -> list of
-        allowed email domains). A provider with no entry (or an empty list) is
+        allowed email domains). A provider without an entry inherits its canonical
+        provider's, so a second CommCare HQ server (``commcare_eu``) cannot be a way
+        around the ``commcare`` restriction; one with neither (or an empty list) is
         unrestricted.
 
         For a provider WITH a non-empty allow-list, a login that returns no email
@@ -85,8 +107,10 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         leaves open (Connect, OCS) carry no allow-list, so their no-email logins
         are unaffected by this gate.
         """
+        self._reject_cross_server_commcare_login(request, sociallogin)
         provider = sociallogin.account.provider
-        allowed = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS.get(provider) or []
+        restrictions = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS
+        allowed = restrictions.get(provider, restrictions.get(canonical_provider(provider))) or []
         if not allowed:
             return
 
@@ -103,6 +127,31 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             "Sign-in with this account is not permitted. "
             f"Login using '{provider_name}' is restricted to {', '.join('@' + d for d in allowed_lower)} addresses.",
         )
+        raise ImmediateHttpResponse(redirect("account_login"))
+
+    def _reject_cross_server_commcare_login(self, request, sociallogin):
+        """Refuse a CommCare sign-in whose stored id names another HQ server (#719).
+
+        Scout reads a CommCare identity's server from its allauth provider id, but
+        the token came from the adapter's server. An app configured under an alias
+        that maps elsewhere (a ``commcare_eu*`` id on the www provider) would send
+        that token to the wrong HQ, so it fails here instead of at first use.
+        """
+        stored_id = sociallogin.account.provider
+        if canonical_provider(stored_id) != "commcare":
+            return
+        # allauth sets (and session-round-trips) the provider that signed in; a
+        # CommCare login whose provider can't be found cannot be placed on a server,
+        # so it fails closed.
+        adapter_id = _signed_in_provider_id(request, sociallogin)
+        if adapter_id and server_for_provider(adapter_id) == server_for_provider(stored_id):
+            return
+        logger.error(
+            "CommCare sign-in refused: provider id %s maps to a different HQ server than %s",
+            stored_id,
+            adapter_id,
+        )
+        messages.error(request, "This CommCare HQ sign-in is misconfigured. Contact support.")
         raise ImmediateHttpResponse(redirect("account_login"))
 
     def get_connect_redirect_url(self, request, socialaccount):

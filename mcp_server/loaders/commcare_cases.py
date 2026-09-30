@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
+from apps.common.commcare_servers import DEFAULT_SERVER
 from mcp_server.loaders.commcare_base import (  # noqa: F401
     CommCareAuthError,
     CommCareBaseLoader,
@@ -13,7 +14,6 @@ from mcp_server.loaders.commcare_base import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://www.commcarehq.org"
 _DEFAULT_PAGE_SIZE = 1000
 
 
@@ -29,8 +29,9 @@ class CommCareCaseLoader(CommCareBaseLoader):
         domain: str,
         credential: dict[str, str],
         page_size: int = _DEFAULT_PAGE_SIZE,
+        server: str = DEFAULT_SERVER,
     ) -> None:
-        super().__init__(domain=domain, credential=credential)
+        super().__init__(domain=domain, credential=credential, server=server)
         self.page_size = min(page_size, _DEFAULT_PAGE_SIZE)
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
@@ -41,7 +42,7 @@ class CommCareCaseLoader(CommCareBaseLoader):
         subsequent pages yield ``None``. (Case API v2 has no tastypie
         ``meta`` envelope — the total lives in ``matching_records``.)
         """
-        initial_url = f"{_BASE_URL}/a/{self.domain}/api/case/v2/"
+        initial_url = f"{self.base_url}/a/{self.domain}/api/case/v2/"
         url: str | None = initial_url
         params: dict = {"limit": self.page_size}
         total_loaded = 0

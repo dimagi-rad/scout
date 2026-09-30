@@ -112,7 +112,7 @@ async def test_oauth_refresh_holds_network_slot_until_cancelled_request_stops(mo
 
     claim = SimpleNamespace(
         request=SimpleNamespace(token_snapshot=(1, "refresh", 1)),
-        observation=SimpleNamespace(provider="commcare"),
+        observation=SimpleNamespace(provider="commcare", scope_key=""),
     )
     token = SimpleNamespace(
         token_secret="refresh",

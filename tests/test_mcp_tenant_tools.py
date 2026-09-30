@@ -15,6 +15,8 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.test import override_settings
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
+from apps.common.errors import DataNotLoaded
 from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import WorkspaceAccess
@@ -272,10 +274,20 @@ class TestListTablesTool:
         assert result["data"]["tables"] == []
         assert "run_materialization" in result["data"]["note"]
 
-    async def test_invalid_tenant_returns_validation_error(self):
+    async def test_unloaded_data_returns_data_not_loaded(self):
 
         with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
-            mock_ctx.side_effect = ValueError("No active schema for tenant 'bad'")
+            mock_ctx.side_effect = DataNotLoaded("No active data schema for tenant 'bad'.")
+
+            result = await list_tables(workspace_id="bad")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == ErrorCode.DATA_NOT_LOADED
+
+    async def test_other_context_errors_stay_validation_errors(self):
+
+        with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
+            mock_ctx.side_effect = ValueError("Workspace 'bad' has no tenants")
 
             result = await list_tables(workspace_id="bad")
 
@@ -510,14 +522,14 @@ class TestDescribeTableTool:
         assert result["success"] is False
         assert result["error"]["code"] == NOT_FOUND
 
-    async def test_invalid_tenant_returns_validation_error(self):
+    async def test_unloaded_data_returns_data_not_loaded(self):
 
         with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
-            mock_ctx.side_effect = ValueError("No active schema")
+            mock_ctx.side_effect = DataNotLoaded("No active data schema for tenant 'bad'.")
             result = await describe_table("cases", workspace_id="bad")
 
         assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
+        assert result["error"]["code"] == ErrorCode.DATA_NOT_LOADED
 
 
 # ---------------------------------------------------------------------------
@@ -599,14 +611,14 @@ class TestGetMetadataTool:
         assert result["data"]["tables"] == {}
         assert result["data"]["relationships"] == []
 
-    async def test_invalid_tenant_returns_validation_error(self):
+    async def test_unloaded_data_returns_data_not_loaded(self):
 
         with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
-            mock_ctx.side_effect = ValueError("No active schema")
+            mock_ctx.side_effect = DataNotLoaded("No active data schema for tenant 'bad'.")
             result = await get_metadata(workspace_id="bad")
 
         assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
+        assert result["error"]["code"] == ErrorCode.DATA_NOT_LOADED
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +648,7 @@ class TestLoadTenantContext:
         assert "search_path=dimagi" in ctx.connection_params["options"]
 
     async def test_raises_when_no_active_schema(self, tenant_membership):
-        with pytest.raises(ValueError, match="No active schema"):
+        with pytest.raises(ValueError, match="No active data schema"):
             await load_tenant_context("dimagi", "commcare")
 
     async def test_raises_when_no_managed_db_url(self, tenant_membership):
@@ -710,15 +722,11 @@ class TestParseDbUrl:
 
         assert params["sslmode"] == "require"
 
-    def test_bare_dbname_fallback(self):
-        """In dev, MANAGED_DATABASE_URL may be just a database name."""
+    def test_bare_dbname_is_rejected(self):
+        """libpq, which every other managed-DB connection uses, rejects a bare name."""
 
-        params = _parse_db_url("scout", "my_schema")
-
-        # urlparse("scout") gives path="scout", no host/port
-        assert params["host"] == "localhost"
-        assert params["port"] == 5432
-        assert params["dbname"] == "scout"
+        with pytest.raises(ValueError, match="Invalid Postgres connection URL"):
+            _parse_db_url("scout", "my_schema")
 
 
 # ---------------------------------------------------------------------------

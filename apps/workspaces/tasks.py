@@ -78,8 +78,9 @@ from apps.workspaces.services.data_operation import (
 )
 from apps.workspaces.services.data_recovery import recovery_query_surface
 from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE as _CREDENTIAL_GUIDANCE
-from apps.workspaces.services.failure_guidance import SourceFailure as _SourceFailure
+from apps.workspaces.services.failure_guidance import compose_failure_summary, credential_guidance
 from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
+from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.load_candidates import (
     Promotion,
     abandoned_workspace_candidates,
@@ -160,23 +161,6 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
-def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
-    """Return one guidance line per distinct problem, naming what it applies to.
-
-    Ordered by ``_CREDENTIAL_GUIDANCE`` rather than by encounter order so the
-    wording is stable regardless of which source failed first.
-    """
-    by_code: dict[str, list[str]] = {}
-    for failure in failures:
-        if failure.code in _CREDENTIAL_GUIDANCE:
-            by_code.setdefault(failure.code, []).append(failure.name)
-    return [
-        f"{', '.join(by_code[code])}: {guidance}"
-        for code, guidance in _CREDENTIAL_GUIDANCE.items()
-        if code in by_code
-    ]
-
-
 def _set_tenant_display_names(summaries: list[dict]) -> None:
     providers_by_name: dict[str, set[str]] = {}
     for entry in summaries:
@@ -198,79 +182,6 @@ def _unreachable_tenant_error(tenant) -> str:
         f"no live {tenant.provider} membership for the acting user on "
         f"'{tenant.external_id}', so this tenant was not attempted"
     )
-
-
-def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
-    """Compose a human-readable failure summary for ``ThreadJob.error_summary``.
-
-    Reads the per-source state map in ``run.result["sources"]`` (post-#198 shape).
-    Returns "" when there is nothing to summarize — callers fall back to a generic
-    message.
-    """
-    if not runs:
-        return ""
-
-    failed_sources: list[_SourceFailure] = []
-    completed_sources: list[tuple[str, int]] = []
-    skipped_sources: list[str] = []
-    cancelled_sources: list[str] = []
-
-    for run in runs:
-        result = run.result if isinstance(run.result, dict) else None
-        if not result:
-            continue
-        top_level_error = result.get("error")
-        if top_level_error:
-            failed_sources.append(
-                _SourceFailure(
-                    name="materialization",
-                    error=str(top_level_error),
-                    code=str(result.get("error_code") or ErrorCode.INTERNAL_ERROR),
-                )
-            )
-        for name, info in (result.get("sources") or {}).items():
-            if not isinstance(info, dict):
-                continue
-            state = info.get("state")
-            if state == "failed":
-                failed_sources.append(
-                    _SourceFailure(
-                        name=name,
-                        error=str(info.get("error") or "unknown error"),
-                        code=str(info.get("error_code") or ErrorCode.INTERNAL_ERROR),
-                    )
-                )
-            elif state == "completed":
-                completed_sources.append((name, int(info.get("rows") or 0)))
-            elif state == "skipped":
-                skipped_sources.append(name)
-            elif state == "cancelled":
-                cancelled_sources.append(name)
-
-    parts: list[str] = []
-    if failed_sources:
-        # Every failure carries its own message. Rendering only the first and
-        # listing the rest as bare names discarded the very string the loaders
-        # are asked to produce, and left a second failure indistinguishable
-        # from a skipped source (#388 review).
-        parts.append("; ".join(f"{f.name} failed: {f.error.rstrip('.')}" for f in failed_sources))
-    if completed_sources:
-        total_rows = sum(rows for _, rows in completed_sources)
-        names = ", ".join(n for n, _ in completed_sources)
-        parts.append(f"{names} ({total_rows:,} rows) loaded successfully")
-    if skipped_sources:
-        parts.append(f"remaining sources skipped: {', '.join(skipped_sources)}")
-    if cancelled_sources:
-        parts.append(f"cancelled: {', '.join(cancelled_sources)}")
-
-    if not parts:
-        # No per-source detail (failure before any source ran) — surface run state.
-        states = sorted({r.state for r in runs})
-        return f"Materialization {'/'.join(states)}."
-    summary = ". ".join(parts) + "."
-    for line in _credential_guidance(failed_sources):
-        summary += " " + line
-    return summary
 
 
 @app.task(pass_context=True)
@@ -570,7 +481,7 @@ def _no_reachable_tenants_result(
         "error": error,
         "tenants": tenant_results,
         "all_succeeded": False,
-        "guidance": _credential_guidance(_summary_failures(tenant_results)),
+        "guidance": credential_guidance(_summary_failures(tenant_results)),
     }
 
 
@@ -1280,7 +1191,7 @@ async def materialize_workspace_core(
         "all_succeeded": all_succeeded,
         "view_schema": view_schema_outcome,
         "cube_schema": cube_schema_outcome,
-        "guidance": _credential_guidance(_summary_failures(guidance_sources)),
+        "guidance": credential_guidance(_summary_failures(guidance_sources)),
         "denied_mid_run": denied_mid_run,
         "source_freshness": await arecord_load_outcomes(
             workspace.id, all_results, user_id, partial=only_unserved
@@ -1298,20 +1209,11 @@ async def _await_in_progress_materializations(
     the pipeline drops & recreates ``raw_*`` tables, so concurrent runs corrupt
     each other. Best-effort: on timeout, log and return so the caller proceeds.
     """
-    tenant_ids = [
-        wt.tenant_id async for wt in WorkspaceTenant.objects.filter(workspace_id=workspace_id)
-    ]
-    if not tenant_ids:
-        return
     # Poll cross-process MaterializationRun state (another worker owns the run,
     # so no in-process Event to await). Bounded to keep a ceiling on the wait.
     max_polls = max(1, int(max_wait_seconds / poll_interval))
     for _ in range(max_polls):
-        in_progress = await MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=tenant_ids,
-            state__in=list(MaterializationRun.ACTIVE_STATES),
-        ).aexists()
-        if not in_progress:
+        if not await active_runs_for_workspaces([workspace_id]).aexists():
             return
         await asyncio.sleep(poll_interval)
     logger.warning(
@@ -3513,7 +3415,7 @@ async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
             procrastinate_job_id=procrastinate_job_id,
         )
     ]
-    return _compose_failure_summary(runs)
+    return compose_failure_summary(runs)
 
 
 async def _build_agent_for_resume(workspace, user, conversation_id=None):
@@ -3899,8 +3801,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # Named per source *and* per tenant, because a run can carry a dead token on
     # one and revoked access on another — opposite advice, and the agent has to
     # tell them apart to relay either honestly.
-    guidance_lines = _credential_guidance(_summary_failures(summary))
-    credential_guidance = (
+    guidance_lines = credential_guidance(_summary_failures(summary))
+    guidance_text = (
         " Problems the user must act on, named by the source or data source each "
         f"applies to — relay these verbatim: {' '.join(guidance_lines)}"
         if guidance_lines
@@ -3970,7 +3872,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"Query layer error: {view_schema_error or semantic_error}. Per-tenant: {summary}"
         )
     elif view_schema_failed:
-        if credential_guidance or status != "completed":
+        if guidance_text or status != "completed":
             body = (
                 f"{SYSTEM_RESUME_MARKER} Materialization left incomplete refresh coverage, "
                 f"and the workspace query layer (view schema) is unavailable. There is "
@@ -3979,7 +3881,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 f"refresh failures below and address any reported account/access problems "
                 f"before retrying materialization. If the view still fails after all tenants "
                 f"refresh successfully, an administrator must investigate the build error."
-                f"{credential_guidance} Per-tenant: {summary}"
+                f"{guidance_text} Per-tenant: {summary}"
             )
         elif VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             # 07#9: FAILED from a cascade teardown, not a build defect — re-running
@@ -4016,7 +3918,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"{SYSTEM_RESUME_MARKER} {refresh_summary} Another included source is still "
             f"refreshing. Semantic promotion is deferred: {semantic_error}. "
             "Do not claim a fresh complete semantic snapshot or a build failure. "
-            f"Check current data availability before answering.{credential_guidance} "
+            f"Check current data availability before answering.{guidance_text} "
             f"Per-tenant: {summary}"
         )
     elif semantic_unavailable and status != "completed":
@@ -4027,7 +3929,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"Error: {semantic_error}. Do not query or claim that every tenant loaded. "
             f"Investigate the tenant refresh failures and the semantic build error before "
             f"retrying, addressing any reported account/access problems."
-            f"{credential_guidance} Per-tenant: {summary}"
+            f"{guidance_text} Per-tenant: {summary}"
         )
     elif semantic_unavailable:
         body = (
@@ -4038,7 +3940,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"re-run materialization — the data is already loaded and a re-run "
             f"would likely hit the same build error. Tell the user plainly that "
             f"the data loaded but the semantic layer failed to build, and quote "
-            f"the error.{credential_guidance} Per-tenant: {summary}"
+            f"the error.{guidance_text} Per-tenant: {summary}"
         )
     elif status == "no_runs":
         logger.warning(
@@ -4053,7 +3955,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"could not be reached by this user, have no pipeline configured, or "
             f"have no credentials set up. Tell the user what happened and name "
             f"every data source below that was not loaded."
-            f"{credential_guidance} Per-tenant: {summary}"
+            f"{guidance_text} Per-tenant: {summary}"
         )
     elif status == "partial":
         body = (
@@ -4066,7 +3968,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"published, so not queryable). A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
-            f"as if it were complete.{credential_guidance} Per-tenant: {summary}"
+            f"as if it were complete.{guidance_text} Per-tenant: {summary}"
         )
     elif status == "failed":
         body = (
@@ -4078,7 +3980,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"explicitly verify their provenance and last successful materialization "
             f"time. Suggest checking the workspace connection only when the actual "
             f"error points to authentication or authorization. Do NOT silently re-run "
-            f"materialization.{credential_guidance} Per-tenant: {summary}"
+            f"materialization.{guidance_text} Per-tenant: {summary}"
         )
     elif status == "cancelled":
         body = (
@@ -4258,7 +4160,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     if terminal == ThreadJob.State.FAILED:
         if missing_active_tenants:
             error_summary = missing_data_guidance
-        elif view_schema_failed and (credential_guidance or status != "completed"):
+        elif view_schema_failed and (guidance_text or status != "completed"):
             error_summary = (
                 "Some tenant data did not refresh successfully, and the workspace query "
                 "layer (view schema) "
@@ -4306,7 +4208,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 error_summary = "Materialization did not complete successfully."
             # Run summaries already carry source guidance; no-run tenants have
             # no run row and need their own account remediation added here.
-            uncovered_guidance = _credential_guidance(
+            uncovered_guidance = credential_guidance(
                 _summary_failures(t for t in summary if t.get("state") == TENANT_NOT_RUN)
             )
             if uncovered_guidance:

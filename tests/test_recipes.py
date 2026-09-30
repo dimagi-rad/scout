@@ -106,7 +106,7 @@ class TestRecipeModel:
         assert recipe.variables[0]["name"] == "year"
         assert recipe.created_by == user
         assert recipe.workspace == workspace
-        assert str(recipe) == f"Customer Report ({workspace.tenant_name})"
+        assert str(recipe) == f"Customer Report ({workspace.name})"
 
     def test_read_recipe(self, recipe):
         """Test reading an existing recipe."""

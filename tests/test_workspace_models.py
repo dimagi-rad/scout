@@ -21,11 +21,6 @@ def test_workspace_has_name_and_tenants(tenant, user):
 
 
 @pytest.mark.django_db
-def test_workspace_tenant_property_returns_first_tenant(workspace, tenant):
-    assert workspace.tenant == tenant
-
-
-@pytest.mark.django_db
 def test_workspace_membership_enforces_unique_user_per_workspace(workspace, user):
     with pytest.raises(IntegrityError):
         WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.READ)

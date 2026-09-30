@@ -20,7 +20,7 @@ from django.conf import settings
 from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
-from apps.common.errors import ExpectedStateError
+from apps.common.errors import DataNotLoaded
 from apps.common.identifiers import (
     dbt_role_name,
     readonly_role_name,
@@ -104,7 +104,7 @@ class ViewSchemaRetired(Exception):
 RETIRED_VIEW_STATES = (SchemaState.TEARDOWN, SchemaState.EXPIRED)
 
 
-class NoActiveTenantSchema(ExpectedStateError, ValueError):
+class NoActiveTenantSchema(DataNotLoaded):
     """No source of the workspace has an ACTIVE schema, so there is nothing to view.
 
     Expected (apps.common.errors): a source added before its first load, or whose
@@ -114,8 +114,9 @@ class NoActiveTenantSchema(ExpectedStateError, ValueError):
     """
 
     def __init__(self, workspace_id):
+        # Kept as the view row's last_error, which no code-keyed guidance reads.
         super().__init__(
-            f"Workspace {workspace_id} has no active schema for any tenant. "
+            f"No active data schema for any tenant of workspace '{workspace_id}'. "
             "Run a data refresh before building the view schema."
         )
 
@@ -316,7 +317,7 @@ class SchemaManager:
             ts = resurrectable
             created = False
         else:
-            schema_name = tenant_schema_name(tenant.provider, tenant.external_id)
+            schema_name = tenant_schema_name(tenant.provider, tenant.external_id, tenant.server)
             created = True
             try:
                 ts = TenantSchema.objects.create(
@@ -413,7 +414,7 @@ class SchemaManager:
         Procrastinate task (refresh_tenant_schema) to run the materialization.
         """
         schema_name = refresh_schema_name(
-            tenant.provider, tenant.external_id, token=uuid.uuid4().hex[:8]
+            tenant.provider, tenant.external_id, token=uuid.uuid4().hex[:8], server=tenant.server
         )
         return TenantSchema.objects.create(
             tenant=tenant,

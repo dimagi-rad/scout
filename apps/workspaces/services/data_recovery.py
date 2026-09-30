@@ -16,8 +16,8 @@ from apps.chat.models import ThreadJob
 from apps.workspaces.models import (
     MaterializationRun,
     WorkspaceDataRecovery,
-    WorkspaceTenant,
 )
+from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.query_state import workspace_query_surface
 
 
@@ -153,15 +153,7 @@ async def recovery_query_surface(recovery) -> dict[str, Any]:
 
 
 async def _active_materialization_run(workspace):
-    tenant_ids = WorkspaceTenant.objects.filter(workspace=workspace).values("tenant_id")
-    return await (
-        MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=tenant_ids,
-            state__in=list(MaterializationRun.ACTIVE_STATES),
-        )
-        .order_by("-started_at")
-        .afirst()
-    )
+    return await active_runs_for_workspaces([workspace.id]).order_by("-started_at").afirst()
 
 
 async def _serialize_recovery(recovery: WorkspaceDataRecovery) -> dict[str, Any]:

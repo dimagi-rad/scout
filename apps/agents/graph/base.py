@@ -60,13 +60,16 @@ from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_acti
 from apps.semantic.services.date_context import agent_date_context
 from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import (
-    MaterializationRun,
     SchemaState,
     WorkspaceDataRecovery,
     WorkspaceRole,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_schema_status
+from apps.workspaces.services.load_activity import (
+    active_runs_for_workspaces,
+    athread_awaits_load,
+    aworkspace_schema_status,
+)
 from apps.workspaces.services.query_state import serving_writer_in_flight, workspace_query_surface
 from apps.workspaces.services.source_freshness import (
     CREDENTIAL_CODES,
@@ -179,7 +182,16 @@ PROMPT_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 # search: substring-matching ``'"code": "NOT_FOUND"'`` only worked under
 # FastMCP's indent=2 and would silently break under compact separators (06#1).
 # Single source of truth shared with base_system.py's "When the Schema is Broken".
-ESCALATION_ERROR_CODES = frozenset({"NOT_FOUND", "VALIDATION_ERROR"})
+ESCALATION_ERROR_CODES = frozenset(
+    {
+        ErrorCode.NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        # semantic_query and the SQL tools reported these as VALIDATION_ERROR
+        # until #251, so they keep escalating as they did.
+        ErrorCode.DATA_NOT_LOADED,
+        ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
+    }
+)
 ESCALATION_TRIGGER_COUNT = 3
 ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
 
@@ -217,6 +229,24 @@ def _tool_message_error(content: Any) -> dict | None:
         return None
     error = envelope.get("error")
     return error if isinstance(error, dict) else None
+
+
+def _schema_escalation_message(messages: list, *, write_capable: bool, interactive: bool) -> str:
+    """The escalation text for the streak ``_should_escalate`` matched.
+
+    Only a streak whose every result is a missing data model gets the rebuild text:
+    a reload fixes anything else, and parallel results arrive in no fixed order.
+    """
+    codes = {_tool_message_error_code(m.content) for m in _escalation_streak(messages)}
+    if codes == {ErrorCode.SEMANTIC_MODEL_UNAVAILABLE}:
+        return (
+            SEMANTIC_ESCALATION_MESSAGE if write_capable else READ_ONLY_SEMANTIC_ESCALATION_MESSAGE
+        )
+    if not write_capable:
+        return READ_ONLY_ESCALATION_MESSAGE
+    if not interactive:
+        return HEADLESS_ESCALATION_MESSAGE
+    return ESCALATION_MESSAGE
 
 
 def _tool_message_error_code(content: Any) -> str | None:
@@ -273,6 +303,19 @@ READ_ONLY_ESCALATION_MESSAGE = (
     "workspace member with write access can do."
 )
 
+# A missing data model is fixed by rebuilding it, not by reloading the data.
+SEMANTIC_ESCALATION_MESSAGE = (
+    "I've encountered repeated errors — this workspace's data model (its semantic "
+    "datasets) isn't available, so its data can't be queried yet. The data model "
+    "needs to be rebuilt; that does not reload any data."
+)
+
+READ_ONLY_SEMANTIC_ESCALATION_MESSAGE = (
+    "I've encountered repeated errors — this workspace's data model (its semantic "
+    "datasets) isn't available, so its data can't be queried yet. A workspace member "
+    "with write access can rebuild the data model; that does not reload any data."
+)
+
 # Marks the escalation node's message so headless callers (recipe runs) can tell
 # an ended-on-escalation turn from a real answer without matching its prose.
 ESCALATION_METADATA_KEY = "scout_escalation"
@@ -290,11 +333,8 @@ MODEL_STOPPED_MESSAGES = {
 FIXED_MESSAGE_NODES = frozenset({"escalate", "model_stopped"})
 
 
-def _should_escalate(messages: list) -> bool:
-    """Detect a panic loop: last N trailing tool messages all returned an
-    escalation error code. A successful tool call in between resets the streak.
-    Matches the structured ``error.code`` (06#1), not a substring.
-    """
+def _escalation_streak(messages: list) -> list[ToolMessage]:
+    """The newest ESCALATION_TRIGGER_COUNT tool results of the turn, across rounds."""
     streak: list[ToolMessage] = []
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
@@ -305,7 +345,15 @@ def _should_escalate(messages: list) -> bool:
             continue
         else:
             break
+    return streak
 
+
+def _should_escalate(messages: list) -> bool:
+    """Detect a panic loop: last N trailing tool messages all returned an
+    escalation error code. A successful tool call in between resets the streak.
+    Matches the structured ``error.code`` (06#1), not a substring.
+    """
+    streak = _escalation_streak(messages)
     if len(streak) < ESCALATION_TRIGGER_COUNT:
         return False
 
@@ -372,10 +420,7 @@ async def _fetch_semantic_model_context(
 ) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
-    active_runs = MaterializationRun.objects.filter(
-        tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
-        state__in=list(MaterializationRun.ACTIVE_STATES),
-    )
+    active_runs = active_runs_for_workspaces([workspace.id])
     if await active_runs.aexists():
         tenant_count = await workspace.tenants.acount()
         serving_view = (
@@ -1074,12 +1119,10 @@ async def build_agent_graph(
         denial = _workspace_access_denial(state.get("messages", []))
         if denial is not None:
             message = denial
-        elif not write_capable:
-            message = READ_ONLY_ESCALATION_MESSAGE
-        elif not interactive:
-            message = HEADLESS_ESCALATION_MESSAGE
         else:
-            message = ESCALATION_MESSAGE
+            message = _schema_escalation_message(
+                state.get("messages", []), write_capable=write_capable, interactive=interactive
+            )
         reason = "workspace_access_denied" if denial is not None else "schema_errors"
         return {
             "messages": [
@@ -1473,6 +1516,8 @@ __all__ = [
     "FIXED_MESSAGE_NODES",
     "HEADLESS_ESCALATION_MESSAGE",
     "READ_ONLY_ESCALATION_MESSAGE",
+    "READ_ONLY_SEMANTIC_ESCALATION_MESSAGE",
+    "SEMANTIC_ESCALATION_MESSAGE",
     "_should_escalate",
     "build_agent_graph",
 ]

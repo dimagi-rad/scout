@@ -11,8 +11,10 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 from apps.semantic.services.cube_sql import embed_cube_sql
+from apps.semantic.services.field_sql import compile_measure_filter_sql, compile_measure_sql
 
 _COMPILE = r"""
 const {readFileSync} = require('node:fs');
@@ -63,9 +65,16 @@ def test_custom_sql_literals_are_unchanged_by_cube_compilation():
         input=json.dumps(
             {
                 "sources": [embed_cube_sql(source) for source in cases],
-                "filter": embed_cube_sql("""{CUBE}."topic" ~ '[0-9]{2}'""", references={"CUBE"}),
+                "filter": embed_cube_sql(
+                    compile_measure_filter_sql(
+                        """{CUBE}."topic" ~ '[0-9]{2}'""", columns={"topic"}
+                    ),
+                    references={"CUBE"},
+                ),
                 "ratio": embed_cube_sql(
-                    "{CUBE.filtered}::numeric / NULLIF({count}, 0)",
+                    compile_measure_sql(
+                        "{CUBE.filtered}::numeric / NULLIF({count}, 0)", columns={"topic"}
+                    ),
                     references={"CUBE.filtered", "count"},
                 ),
             }
@@ -80,3 +89,68 @@ def test_custom_sql_literals_are_unchanged_by_cube_compilation():
         assert source in query
         assert "'[0-9]{2}'" in query
         assert "NULLIF(count(*), 0)" in query
+
+
+_COMPILE_TEXT = r"""
+const {readFileSync} = require('node:fs');
+const {prepareCompiler} = require('@cubejs-backend/schema-compiler');
+const {NativeInstance} = require('@cubejs-backend/native');
+(async () => {
+  const content = readFileSync(0, 'utf8');
+  const compiler = prepareCompiler({dataSchemaFiles: async () => [
+    {fileName: 'schema.yaml', content}
+  ]}, {nativeInstance: new NativeInstance(), omitErrors: true});
+  await compiler.compiler.compile();
+  const errors = compiler.compiler.errorsReporter.getErrors();
+  if (errors.length) throw new Error(errors.map(e => e.message).join('\n'));
+  const cube = compiler.cubeEvaluator.cubeFromPath('fixture');
+  const texts = [cube.description, cube.dimensions.topic.description,
+    cube.measures.count.description];
+  process.stdout.write(JSON.stringify(texts), () => process.exit(0));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+
+
+@pytest.mark.smoke
+def test_free_text_is_literal_after_cube_compilation():
+    container = os.environ.get("SCOUT_CUBE_COMPILER_CONTAINER")
+    if not container:
+        pytest.skip("Set SCOUT_CUBE_COMPILER_CONTAINER to a running local Cube container.")
+    docker = shutil.which("docker")
+    assert docker, "The real Cube compiler smoke test requires Docker."
+    text = "Rows {{ 7 * 6 }} for {CUBE} {% if x %}y{% endif %} ${z} `q` \\ \"d\" 'e'\nnext"
+    # Mirrors cube_schema_yaml, which escapes every non-SQL string this way.
+    content = yaml.safe_dump(
+        {
+            "cubes": [
+                {
+                    "name": "fixture",
+                    "sql": "SELECT 1 AS topic",
+                    "description": embed_cube_sql(text),
+                    "dimensions": [
+                        {
+                            "name": "topic",
+                            "sql": "{CUBE}.topic",
+                            "type": "string",
+                            "description": embed_cube_sql(text),
+                        }
+                    ],
+                    "measures": [
+                        {"name": "count", "type": "count", "description": embed_cube_sql(text)}
+                    ],
+                }
+            ]
+        },
+        sort_keys=False,
+        allow_unicode=False,
+    )
+    result = subprocess.run(  # noqa: S603
+        [docker, "exec", "-i", container, "node", "-e", _COMPILE_TEXT],
+        input=content,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [text, text, text]

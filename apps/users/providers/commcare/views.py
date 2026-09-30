@@ -7,16 +7,24 @@ from allauth.socialaccount.providers.oauth2.views import (
     OAuth2LoginView,
 )
 
+from apps.common.commcare_servers import COMMCARE_SERVERS, DEFAULT_SERVER
+
+_WWW = COMMCARE_SERVERS[DEFAULT_SERVER]
+
 
 class CommCareOAuth2Adapter(OAuth2Adapter):
-    """OAuth2 adapter for CommCare HQ (production instance; not configurable for self-hosted)."""
+    """OAuth2 adapter for CommCare HQ's www server (not configurable for self-hosted).
+
+    Endpoints come from the server registry so sign-in, discovery and token
+    refresh can never disagree about which HQ a credential belongs to.
+    """
 
     provider_id = "commcare"
 
     # See: https://confluence.dimagi.com/display/commcarepublic/CommCare+HQ+APIs
-    access_token_url = "https://www.commcarehq.org/oauth/token/"  # noqa: S105 — OAuth endpoint URL, not a credential
-    authorize_url = "https://www.commcarehq.org/oauth/authorize/"
-    profile_url = "https://www.commcarehq.org/api/v0.5/identity/"
+    access_token_url = _WWW.token_url
+    authorize_url = _WWW.authorize_url
+    profile_url = _WWW.identity_url
 
     def complete_login(self, request, app, token, **kwargs):
         response = requests.get(

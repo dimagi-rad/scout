@@ -28,6 +28,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.access_freshness import CREDENTIAL_EXPIRED
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
+from apps.workspaces.services.failure_guidance import compose_failure_summary
 from apps.workspaces.services.schema_manager import NoActiveTenantSchema
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
@@ -194,7 +195,7 @@ def test_compose_failure_summary_surfaces_top_level_error(tenant):
         },
     )
 
-    summary = workspaces_tasks._compose_failure_summary([run])
+    summary = compose_failure_summary([run])
 
     assert "ConnectionError" in summary
     assert "host.docker.internal:8001" in summary
@@ -1787,7 +1788,7 @@ async def test_view_build_with_no_served_source_is_not_logged_as_an_error(
         )
 
     assert result["view_schema"]["ok"] is False
-    assert "no active schema" in result["view_schema"]["error"]
+    assert "No active data schema" in result["view_schema"]["error"]
     view_records = [r for r in caplog.records if "view schema" in r.getMessage()]
     assert view_records
     assert all(r.levelno < logging.ERROR for r in view_records)

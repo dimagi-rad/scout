@@ -365,7 +365,7 @@ class TestTenantCrossAccessAPI:
 def upstream_resolver(user):
     """One OAuth identity whose resolver call count shows when upstream was hit."""
     resolver = AsyncMock()
-    token = SimpleNamespace(account_id=987001, account=object())
+    token = SimpleNamespace(account_id=987001, account=SimpleNamespace(provider="commcare"))
     keys = [
         f"tenant_refresh:{user.id}:commcare:{token.account_id}",
         f"tenant_refresh_floor:{user.id}",
