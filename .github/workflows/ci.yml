@@ -62,11 +62,14 @@ jobs:
       - name: Check Python formatting
         run: uv run --extra dev ruff format --check .
 
-  # Non-blocking: reports the error count without gating merges (#160).
-  # Always exits 0: job-level continue-on-error still posts a failed check, which reads as a
-  # red PR. The count goes to the summary and a warning annotation instead.
+  # Non-blocking ratchet: reports the error count against a committed baseline
+  # and never fails the job (#160). Lower .github/pyright-baseline as errors are fixed.
   typecheck-python:
     runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -74,17 +77,21 @@ jobs:
 
       - name: Type-check Python (pyright, basic mode)
         run: |
-          set +e
-          uv run pyright | tee pyright.log
-          status=${PIPESTATUS[0]}
+          uv run pyright 2>&1 | tee pyright.log || true
+          baseline=$(cat .github/pyright-baseline)
           {
             echo "### Pyright"
             echo
-            tail -n 1 pyright.log
+            summary=$(grep -E '^[0-9]+ errors?,' pyright.log || true)
+            if [ -z "$summary" ]; then
+              echo "pyright did not produce a summary (see job log)"
+            else
+              count=${summary%% *}
+              echo "$summary"
+              echo
+              echo "Baseline: $baseline, delta: $((count - baseline))"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$status" -ne 0 ]; then
-            echo "::warning title=pyright::$(tail -n 1 pyright.log)"
-          fi
 
   lint-frontend:
     runs-on: ubuntu-latest

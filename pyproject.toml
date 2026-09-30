@@ -103,7 +103,7 @@ ignore = [
 
 [tool.pyright]
 include = ["apps", "config", "mcp_server"]
-exclude = ["**/migrations", "**/tests", "**/__pycache__", "frontend"]
+exclude = ["**/migrations", "**/tests", "**/__pycache__", "**/.*"]
 typeCheckingMode = "basic"
 venvPath = "."
 venv = ".venv"
