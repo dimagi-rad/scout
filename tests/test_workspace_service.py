@@ -410,6 +410,45 @@ def test_removing_a_source_when_nothing_is_served_creates_the_failed_row(
 
 
 @pytest.mark.django_db
+def test_removing_a_source_behind_a_provisioning_build_still_rebuilds(
+    workspace, tenant, tenant2, tenant_membership2, tenant3, tenant_membership3
+):
+    """A build in flight planned over the removed source and would publish it; only
+    a rebuild queued behind it corrects that, even though nothing is served now."""
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+    wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
+    TenantSchema.objects.create(tenant=tenant3, schema_name="live_three", state=SchemaState.ACTIVE)
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=SchemaState.PROVISIONING
+    )
+
+    with patch(
+        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+    ) as mock_rebuild:
+        remove_workspace_tenant(workspace, wt3)
+
+    mock_rebuild.assert_called_once_with(workspace_id=str(workspace.id))
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.PROVISIONING
+
+
+@pytest.mark.django_db
+def test_adding_a_source_behind_a_provisioning_build_still_rebuilds(
+    workspace, user, tenant2, tenant_membership2
+):
+    vs = WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_test", state=SchemaState.PROVISIONING
+    )
+
+    rebuild, materialize = _add_and_capture(workspace, tenant2, actor_id=user.id)
+
+    rebuild.assert_called_once_with(workspace_id=str(workspace.id))
+    materialize.assert_called_once()
+    vs.refresh_from_db()
+    assert vs.state == SchemaState.PROVISIONING
+
+
+@pytest.mark.django_db
 def test_a_single_source_workspace_gets_no_view_row(workspace):
     """One source is served from its own schema; a view row would be an orphan."""
     with transaction.atomic():

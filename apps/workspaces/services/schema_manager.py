@@ -149,8 +149,9 @@ def fail_view_schema_if_unbuildable(workspace) -> bool:
     dependent-rebuild fan-out only reaches workspaces with a row, and it is what
     rebuilds these views once any source loads. The row is locked before the
     check, as a build publishing ACTIVE holds that lock, so a build that just
-    succeeded is never overwritten with FAILED. A retired row keeps its lifecycle
-    state (see SchemaManager._save_build_failure).
+    succeeded is never overwritten with FAILED. A PROVISIONING row asks for a
+    rebuild, and a retired row keeps its lifecycle state (see
+    SchemaManager._save_build_failure).
     """
     # iterator() bypasses a prefetch cache, which would still hold a source the
     # caller just removed in this transaction.
@@ -161,6 +162,11 @@ def fail_view_schema_if_unbuildable(workspace) -> bool:
     if len(tenants) < 2:
         return True
     existing = WorkspaceViewSchema.objects.select_for_update().filter(workspace=workspace).first()
+    if existing is not None and existing.state == SchemaState.PROVISIONING:
+        # A build may be mid-flight over sources read before this change; it only
+        # holds the row lock to publish, so only a rebuild queued behind it
+        # corrects what it publishes.
+        return False
     if _served_sources([t.id for t in tenants]).exists():
         return False
     failure = {
