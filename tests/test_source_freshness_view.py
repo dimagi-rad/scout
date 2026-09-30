@@ -73,8 +73,6 @@ async def test_says_reconnect_when_the_viewers_own_sign_in_expired(user, workspa
     (source,) = (await _get(user, workspace)).json()["sources"]
 
     assert source["serving"] is True
-    assert source["last_load"] == "skipped"
-    assert source["not_refreshed"] is True
     assert source["reconnect"] is True
     assert source["provider_label"] == "CommCare HQ"
 
@@ -87,7 +85,6 @@ async def test_offers_refresh_when_another_members_sign_in_expired(user, workspa
 
     (source,) = (await _get(user, workspace)).json()["sources"]
 
-    assert source["not_refreshed"] is True
     assert source["reconnect"] is False
 
 

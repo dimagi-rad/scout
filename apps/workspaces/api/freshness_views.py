@@ -13,7 +13,7 @@ from apps.workspaces.workspace_resolver import aresolve_workspace
 async def source_freshness_view(request, workspace_id):
     """GET /api/workspaces/<workspace_id>/freshness/
 
-    Each source's data age and latest load outcome, whether a load covering the
+    Each source's data age and whether only a reconnect can refresh it, whether a load covering the
     workspace is queued or running, and the age past which the chat offers a refresh.
     """
     if request.method != "GET":
@@ -38,8 +38,6 @@ async def source_freshness_view(request, workspace_id):
                     "provider_label": provider_label(source["provider"]),
                     "serving": source["serving"],
                     "last_fetched_at": source["last_fetched_at"],
-                    "last_load": source["last_load"],
-                    "not_refreshed": source["not_refreshed"],
                     "reconnect": source.get("reconnect", False),
                 }
                 for source in sources
