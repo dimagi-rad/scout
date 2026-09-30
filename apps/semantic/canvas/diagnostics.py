@@ -187,14 +187,16 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
     columns = dataset_column_names(dataset)
     if field_type == "measure":
         out.extend(_measure_filter_diagnostics(change, fields.get("filters"), columns))
+    # Generation ignores non-string measure SQL and publishes the expression instead,
+    # so such a value counts as absent and the expression checks below still apply.
+    if field_type == "measure" and not (isinstance(cube_sql, str) and cube_sql.strip()):
+        cube_sql = None
     if cube_sql:
         if field_type == "measure":
-            # Generation publishes only string SQL, so only that is validated here.
-            if isinstance(cube_sql, str) and cube_sql.strip():
-                try:
-                    compile_measure_sql(cube_sql, columns=columns)
-                except MeasureSQLValidationError as exc:
-                    out.append(_diagnostic("INVALID_MEASURE_SQL", change, "cube_sql", str(exc)))
+            try:
+                compile_measure_sql(cube_sql, columns=columns)
+            except MeasureSQLValidationError as exc:
+                out.append(_diagnostic("INVALID_MEASURE_SQL", change, "cube_sql", str(exc)))
         else:
             try:
                 compile_dimension_sql(cube_sql, columns=columns)

@@ -2044,3 +2044,37 @@ def test_edited_measure_accepts_ordinary_aggregate_sql(canvas, semantic_model, u
 
     assert "errors" not in result
     assert result["can_commit"] is True
+
+
+def test_measure_diagnostics_follow_generation_for_unpublished_shapes(canvas, semantic_model, user):
+    # Written outside the canvas: generation skips both values, so diagnostics
+    # judge the measure by its expression, as generation publishes it.
+    SemanticField.objects.create(
+        dataset=_visits(semantic_model),
+        name="legacy_total",
+        field_type=SemanticField.FieldType.MEASURE,
+        measure_type=SemanticField.MeasureType.SUM,
+        expression="",
+        metadata={
+            "source": "canvas",
+            "cube_sql": ["sum(amount)"],
+            "filters": ["pg_advisory_lock(1) IS NULL", {"sql": ""}],
+        },
+    )
+
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.legacy_total/measure_type",
+                "value": "avg",
+            },
+        ],
+        user,
+    )
+
+    codes = [d["code"] for d in result.get("diagnostics", [])]
+    assert "INVALID_MEASURE_SQL" not in codes
+    assert "INVALID_MEASURE_FILTER" not in codes
+    assert "MISSING_EXPRESSION" in codes
