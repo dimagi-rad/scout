@@ -338,7 +338,7 @@ class SemanticCanvas(models.Model):
         related_name="semantic_canvases",
     )
     committed_at = models.DateTimeField(null=True, blank=True)
-    # {"dataset/<name>": user turn when the agent was told to ask}. A deletion
+    # {"<kind>:dataset/<name>": user turn when the agent was told to ask}. A deletion
     # is accepted only in a later user turn, so the agent cannot confirm itself.
     pending_confirmations = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

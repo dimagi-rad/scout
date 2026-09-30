@@ -965,7 +965,7 @@ async def test_a_confirmation_survives_a_commit_that_writes_nothing(
     assert retried["committed"][0]["change_type"] == "delete"
     assert not await SemanticDataset.objects.filter(name="visit_stats").aexists()
     canvas_row = await SemanticCanvas.objects.aget(thread_id=thread.id)
-    assert "dataset/visit_stats" not in canvas_row.pending_confirmations
+    assert "delete:dataset/visit_stats" not in canvas_row.pending_confirmations
 
 
 async def _stage_visit_stats_delete(workspace, user, thread):
@@ -1165,3 +1165,41 @@ def test_undoing_a_pure_rename_reports_no_redefinition(canvas, semantic_model, w
     impact = canvas_tool._undo_impact(workspace, rename.id)
 
     assert [item.get("change") for item in impact] == ["rename"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_yes_to_renaming_a_field_cannot_be_spent_on_deleting_it(
+    workspace, user, semantic_model
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tools = _tools(workspace, user, thread)
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [_measure_op("total_amount", measure_type="sum", expression="amount")]}
+    )
+    await tools["canvas_commit"].ainvoke({})
+    await Artifact.objects.acreate(
+        workspace=workspace,
+        title="Totals",
+        code="",
+        conversation_id=str(thread.id),
+        semantic_queries=[{"measures": ["raw_visits.total_amount"]}],
+    )
+    field = "field/raw_visits.total_amount"
+    await tools["canvas_apply"].ainvoke({"operations": [RENAME_TOTAL]})
+    assert (await tools["canvas_commit"].ainvoke({}))["confirmation_required"]
+    await tools["canvas_apply"].ainvoke(
+        {
+            "operations": [
+                {"op": "revert_object", "object": field},
+                {"op": "delete_object", "object": field},
+            ]
+        }
+    )
+
+    swapped = await _tools(workspace, user, thread, human_turn=2)["canvas_commit"].ainvoke(
+        {"confirmed_deletions": [field]}
+    )
+
+    assert swapped["confirmation_required"][0]["object"] == field
+    assert await SemanticField.objects.filter(name="total_amount").aexists()

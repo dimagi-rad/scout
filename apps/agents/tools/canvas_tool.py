@@ -250,23 +250,27 @@ def _gate_deletions(
     pending = dict(canvas.pending_confirmations or {})
     confirmed = set(confirmed_deletions or [])
 
-    def asked_recently(label: str) -> bool:
-        asked_at = pending.get(label)
+    def asked_recently(deletion: dict[str, Any]) -> bool:
+        asked_at = pending.get(_question_key(deletion))
         return (
             isinstance(asked_at, int)
             and human_turn is not None
             and human_turn - CONFIRMATION_WINDOW_TURNS <= asked_at <= human_turn
         )
 
-    def accepted(label: str) -> bool:
-        return label in confirmed and asked_recently(label) and pending[label] < human_turn
+    def accepted(deletion: dict[str, Any]) -> bool:
+        return (
+            deletion["object"] in confirmed
+            and asked_recently(deletion)
+            and pending[_question_key(deletion)] < human_turn
+        )
 
-    unconfirmed = [deletion for deletion in deletions if not accepted(deletion["object"])]
+    unconfirmed = [deletion for deletion in deletions if not accepted(deletion)]
     if unconfirmed:
         for deletion in deletions:
             # Re-stamping a live question would void the answer the user is about to give.
-            if human_turn is not None and not asked_recently(deletion["object"]):
-                pending[deletion["object"]] = human_turn
+            if human_turn is not None and not asked_recently(deletion):
+                pending[_question_key(deletion)] = human_turn
         canvas.pending_confirmations = pending
         canvas.save(update_fields=["pending_confirmations", "updated_at"])
         return _confirmation_required(unconfirmed, retry=retry)
@@ -276,12 +280,17 @@ def _gate_deletions(
 def _clear_confirmations(canvas, deletions) -> None:
     """Called only once the write happened, so a blocked retry keeps the user's yes."""
     pending = dict(canvas.pending_confirmations or {})
-    if not any(deletion["object"] in pending for deletion in deletions):
+    if not any(_question_key(deletion) in pending for deletion in deletions):
         return
     for deletion in deletions:
-        pending.pop(deletion["object"], None)
+        pending.pop(_question_key(deletion), None)
     canvas.pending_confirmations = pending
     canvas.save(update_fields=["pending_confirmations", "updated_at"])
+
+
+def _question_key(deletion: dict[str, Any]) -> str:
+    """Scope a question to its kind, so a yes to renaming cannot be spent on deleting."""
+    return f"{deletion.get('change', 'delete')}:{deletion['object']}"
 
 
 def _resolve_canvas_sync(workspace, user, conversation_id: str):
