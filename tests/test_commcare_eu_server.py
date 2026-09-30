@@ -13,9 +13,10 @@ from asgiref.sync import sync_to_async
 from django.db import IntegrityError
 from django.utils import timezone
 
-from apps.common.commcare_servers import UnknownCommCareServer
+from apps.common.commcare_servers import UnknownCommCareServer, server_for_provider
 from apps.common.identifiers import refresh_schema_name, tenant_schema_name
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 from apps.users.services.access_verification_providers import verify_provider
 from apps.users.services.access_verification_types import (
     CredentialObservation,
@@ -23,6 +24,7 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
 )
 from apps.users.services.credential_resolver import aresolve_credential
+from apps.users.services.oauth_scope import account_scope
 from apps.users.services.tenant_resolution import resolve_commcare_domains
 from apps.users.services.token_refresh import get_token_url
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
@@ -254,3 +256,26 @@ class TestAccessVerification:
     async def test_unknown_server_is_indeterminate(self):
         result = await verify_provider(_observation("mars"))
         assert result.outcome == VerificationOutcome.INDETERMINATE
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "server"),
+    [
+        ("commcare", ""),
+        ("commcare_prod", ""),
+        ("hq_production", ""),
+        ("commcare_eu", "eu"),
+        ("commcare_eu_prod", "eu"),
+    ],
+)
+def test_identity_server_follows_the_allauth_provider_id(provider_id, server):
+    assert server_for_provider(provider_id) == server
+    assert account_scope(SimpleNamespace(provider=provider_id, uid="u", extra_data={})) == (
+        server if provider_id.startswith("commcare") else ""
+    )
+
+
+def test_www_sign_in_endpoints_are_unchanged():
+    assert CommCareOAuth2Adapter.access_token_url == f"{WWW}/oauth/token/"
+    assert CommCareOAuth2Adapter.authorize_url == f"{WWW}/oauth/authorize/"
+    assert CommCareOAuth2Adapter.profile_url == f"{WWW}/api/v0.5/identity/"
