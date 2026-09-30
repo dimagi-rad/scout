@@ -29,7 +29,8 @@ function loadConfig(query = () => { throw new Error('Unexpected database access'
     require: (name) => {
       if (name === 'pg') {
         return { Pool: class {
-          constructor(options) { this.options = options; pools.push(options); }
+          constructor(options) { this.options = options; this.listeners = {}; pools.push(options); options.pool = this; }
+          on(event, listener) { this.listeners[event] = listener; }
           query(text, values) {
             if (text.includes('to_regrole')) {
               catalog.probes += 1;
@@ -332,6 +333,19 @@ test('readiness connections stay outside the tenant limit', async () => {
   const config = loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: '1' });
   await config.driverFactory(context()).createConnection();
   assert.ok(await config.driverFactory({}).createConnection());
+});
+
+test('an idle catalog connection error is logged instead of crashing Cube', async () => {
+  const pools = [];
+  const catalog = { roleExists: true, probes: 0, warnings: [] };
+  const config = loadConfig(async () => ({ rows: [{ data_revision: 'r' }] }), pools, {}, catalog);
+  await config.queryRewrite({}, context());
+  assert.equal(pools.length, 2);
+  for (const options of pools) {
+    options.pool.listeners.error(new Error('Connection terminated unexpectedly'));
+  }
+  assert.equal(catalog.warnings.length, 2);
+  assert.match(catalog.warnings[0], /Connection terminated unexpectedly/);
 });
 
 test('a failed role check falls back to the owner instead of failing the read', async () => {

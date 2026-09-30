@@ -124,7 +124,17 @@ const catalogPoolOptions = {
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
   query_timeout: CATALOG_QUERY_TIMEOUT_MS,
 };
-const ownerPool = new Pool({ ...catalogPoolOptions, max: CATALOG_POOL_MAX });
+// pg.Pool re-emits an idle client's error (e.g. RDS dropping an idle connection)
+// on the pool, and an EventEmitter with no 'error' listener throws, killing Cube.
+function catalogPoolWithErrorHandler(options) {
+  const pool = new Pool(options);
+  pool.on('error', (error) => {
+    console.warn(`Idle Cube catalog connection failed and was discarded: ${error.message}`);
+  });
+  return pool;
+}
+
+const ownerPool = catalogPoolWithErrorHandler({ ...catalogPoolOptions, max: CATALOG_POOL_MAX });
 let rolePool = null;
 let roleProbe = null;
 let nextRoleProbeAt = 0;
@@ -152,7 +162,7 @@ async function catalogPool() {
       .query(ROLE_READY_SQL, [CATALOG_ROLE])
       .then(({ rows }) => {
         if (rows[0]?.ready) {
-          rolePool ??= new Pool({
+          rolePool ??= catalogPoolWithErrorHandler({
             ...catalogPoolOptions,
             max: CATALOG_POOL_MAX,
             options: `-c role=${CATALOG_ROLE} -c default_transaction_read_only=on`,
