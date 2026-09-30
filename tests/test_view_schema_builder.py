@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from psycopg import sql as psycopg_sql
 
@@ -21,6 +23,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services.schema_manager import (
     SchemaManager,
     dbt_role_name,
+    get_managed_db_connection,
     readonly_role_name,
 )
 
@@ -32,7 +35,6 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def managed_db_connection():
-    from apps.workspaces.services.schema_manager import get_managed_db_connection
 
     conn = get_managed_db_connection()
     yield conn
@@ -42,7 +44,6 @@ def managed_db_connection():
 
 @pytest.fixture
 def two_tenant_workspace(db):
-    from django.contrib.auth import get_user_model
 
     User = get_user_model()
     user = User.objects.create_user(email="builder@example.com", password="pass")
@@ -124,8 +125,6 @@ def test_build_view_schema_no_union_all_no_tenant_column(
     two_tenant_workspace, managed_db_connection
 ):
     """Views are simple SELECT * aliases — no _tenant discriminator column."""
-    from apps.workspaces.models import TenantSchema
-    from apps.workspaces.services.schema_manager import SchemaManager
 
     ws, t1, t2 = two_tenant_workspace
 
@@ -182,8 +181,6 @@ def test_build_view_schema_uses_canonical_name_not_external_id(
     two_tenant_workspace, managed_db_connection
 ):
     """View names use slugified canonical_name, not external_id."""
-    from apps.workspaces.models import TenantSchema
-    from apps.workspaces.services.schema_manager import SchemaManager
 
     ws, t1, t2 = two_tenant_workspace
 
@@ -240,8 +237,6 @@ def test_build_view_schema_uses_canonical_name_not_external_id(
 
 def test_build_view_schema_three_tables_three_views(two_tenant_workspace, managed_db_connection):
     """A tenant with 3 tables produces exactly 3 namespaced views."""
-    from apps.workspaces.models import TenantSchema
-    from apps.workspaces.services.schema_manager import SchemaManager
 
     ws, t1, t2 = two_tenant_workspace
 
@@ -301,8 +296,6 @@ def test_build_view_schema_readonly_role_has_access(two_tenant_workspace, manage
     """Read-only role can read through the views but has NO direct access to the raw
     tenant schemas — views run with owner privileges, so granting the role tenant
     access is both unnecessary and cross-tenant over-exposure."""
-    from apps.workspaces.models import TenantSchema
-    from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
     ws, t1, t2 = two_tenant_workspace
 
@@ -378,11 +371,6 @@ def test_build_view_schema_readonly_role_has_access(two_tenant_workspace, manage
 @pytest.mark.django_db
 def test_build_view_schema_bulk_fetches_tenant_schemas(workspace, tenant):
     """TenantSchema resolution uses one query, not N queries."""
-    from django.db import connection
-    from django.test.utils import CaptureQueriesContext
-
-    from apps.workspaces.models import TenantSchema
-    from apps.workspaces.services.schema_manager import SchemaManager
 
     ts = TenantSchema.objects.create(
         tenant=tenant, schema_name="test_domain_bulk", state=SchemaState.ACTIVE
@@ -419,15 +407,12 @@ def test_build_view_schema_bulk_fetches_tenant_schemas(workspace, tenant):
 @pytest.mark.django_db
 def test_build_view_schema_returns_active_record(workspace, tenant):
     """build_view_schema must return a record with state=ACTIVE — it owns the full lifecycle."""
-    from apps.workspaces.services.schema_manager import SchemaManager
 
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = []
     mock_conn = MagicMock()
     mock_conn.closed = False
     mock_conn.cursor.return_value = mock_cursor
-
-    from apps.workspaces.models import TenantSchema
 
     ts = TenantSchema.objects.create(
         tenant=tenant, schema_name="test_domain_schema", state=SchemaState.ACTIVE

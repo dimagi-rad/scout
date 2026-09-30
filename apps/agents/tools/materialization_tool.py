@@ -62,7 +62,7 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         # Inline import breaks a verified cycle: graph.base -> this module ->
         # workspaces.tasks -> graph.base (tasks imports build_agent_graph for the
         # resume path). Module-level fails with a partially-initialized import.
-        from apps.workspaces.tasks import materialize_workspace_blocking
+        from apps.workspaces.tasks import materialize_workspace_blocking  # noqa: PLC0415 — cycle
 
         # Dedupe-aware: waits for any in-progress materialization on this
         # workspace's tenants rather than starting a parallel run.

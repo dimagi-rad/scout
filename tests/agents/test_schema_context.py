@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from apps.agents.graph import base as graph_base
 from apps.agents.graph.base import (
+    _build_system_prompt,
     _fetch_semantic_model_context,
 )
 from apps.semantic.models import SemanticModel
@@ -244,7 +245,6 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
 @pytest.mark.django_db
 async def test_build_system_prompt_no_schema_status_call():
     """The assembled system prompt must not instruct the agent to call get_schema_status."""
-    from apps.agents.graph.base import _build_system_prompt
 
     mock_workspace = MagicMock()
     mock_workspace.system_prompt = None
@@ -290,7 +290,6 @@ class _AsyncIter:
 async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
     """Multi-tenant workspace with no data: system prompt tells the agent upfront,
     NOT 'call list_tables to discover'."""
-    from apps.agents.graph.base import _build_system_prompt
 
     ws = MagicMock()
     ws.id = "22222222-2222-2222-2222-222222222222"

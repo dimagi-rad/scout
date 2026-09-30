@@ -23,10 +23,12 @@ import argparse
 import contextlib
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime
 
+import django
 import uvicorn
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -2081,7 +2083,6 @@ def _setup_django() -> None:
             "DJANGO_SETTINGS_MODULE environment variable is required. "
             "Set it to 'config.settings.development' or 'config.settings.production'."
         )
-    import django
 
     django.setup()
 
@@ -2143,9 +2144,8 @@ def _run_streamable_http(args: argparse.Namespace) -> None:
 
 def _run_with_reload(args: argparse.Namespace) -> None:
     """Run the server in a subprocess and restart it when files change."""
-    import subprocess
-
-    from watchfiles import watch
+    # Dev-only; watchfiles is transitive via uvicorn[standard], not a declared dependency.
+    from watchfiles import watch  # noqa: PLC0415
 
     watch_dirs = ["mcp_server", "apps"]
     cmd = [

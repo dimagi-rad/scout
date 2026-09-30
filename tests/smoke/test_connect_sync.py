@@ -24,6 +24,11 @@ import webbrowser
 
 import pytest
 import requests
+from allauth.socialaccount.models import SocialToken
+
+from apps.users.models import TenantConnection, TenantMembership
+from mcp_server.pipeline_registry import get_registry
+from mcp_server.services.materializer import run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +39,6 @@ OAUTH_POLL_INTERVAL = 3
 
 def _get_connect_token(user=None):
     """Find a SocialToken for commcare_connect, optionally filtered by user."""
-    from allauth.socialaccount.models import SocialToken
 
     qs = SocialToken.objects.filter(
         account__provider__startswith="commcare_connect",
@@ -46,7 +50,6 @@ def _get_connect_token(user=None):
 
 def _get_or_create_membership(user, opp_id):
     """Get or create a TenantMembership for a Connect opportunity."""
-    from apps.users.models import TenantConnection, TenantMembership
 
     tm, created = TenantMembership.objects.get_or_create(
         user=user,
@@ -155,8 +158,6 @@ class TestConnectSync:
     @pytest.mark.timeout(0)
     def test_full_pipeline(self, connect_opportunity_id, scout_base_url):
         """Run the full Connect sync pipeline for one opportunity."""
-        from mcp_server.pipeline_registry import get_registry
-        from mcp_server.services.materializer import run_pipeline
 
         opp_id = connect_opportunity_id
 

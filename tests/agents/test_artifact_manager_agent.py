@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -20,7 +21,6 @@ from apps.workspaces.access import tool_write_denied
 
 @pytest.mark.asyncio
 async def test_nested_local_tool_events_are_buffered_until_tool_message_id():
-    import asyncio
 
     queue: asyncio.Queue = asyncio.Queue()
     token = set_subagent_event_queue(queue)
@@ -639,7 +639,6 @@ async def test_artifact_manager_tool_preserves_data_preparation_handoff(
 
 @pytest.mark.asyncio
 async def test_nested_tool_output_is_truncated_with_marker():
-    import asyncio
 
     queue: asyncio.Queue = asyncio.Queue()
     token = set_subagent_event_queue(queue)
@@ -677,7 +676,6 @@ async def test_nested_tool_output_is_truncated_with_marker():
 
 @pytest.mark.asyncio
 async def test_nested_subagent_text_stream_is_persistable():
-    import asyncio
 
     queue: asyncio.Queue = asyncio.Queue()
     token = set_subagent_event_queue(queue)

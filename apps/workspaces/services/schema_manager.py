@@ -17,7 +17,7 @@ import uuid
 import psycopg
 import psycopg.sql
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from apps.common.errors import ExpectedStateError
@@ -290,7 +290,6 @@ class SchemaManager:
         2. Else resurrect the most-recent EXPIRED record in place, reusing its name.
         3. Else mint a new collision-safe name via ``tenant_schema_name``.
         """
-        from django.db import IntegrityError
 
         live = (
             TenantSchema.objects.filter(

@@ -6,6 +6,8 @@ import pytest
 
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.lineage import get_lineage_chain, get_terminal_assets
+from apps.users.models import Tenant
+from mcp_server.services.metadata import transformation_aware_list_tables
 
 # ---------------------------------------------------------------------------
 # get_terminal_assets
@@ -109,7 +111,6 @@ def test_multiple_independent_chains(tenant):
 @pytest.mark.django_db
 def test_assets_filtered_by_tenant_ids(tenant):
     """Assets from different tenants are filtered correctly."""
-    from apps.users.models import Tenant
 
     other_tenant = Tenant.objects.create(
         provider="commcare", external_id="other-domain", canonical_name="Other"
@@ -255,7 +256,6 @@ def test_lineage_cycle_guard(tenant):
 @pytest.mark.django_db(transaction=True)
 async def test_transformation_aware_no_assets_fallback(tenant):
     """No transformation assets → falls back to pipeline_list_tables."""
-    from mcp_server.services.metadata import transformation_aware_list_tables
 
     mock_tables = [
         {
@@ -284,7 +284,6 @@ async def test_transformation_aware_no_assets_fallback(tenant):
 @pytest.mark.django_db(transaction=True)
 async def test_transformation_aware_terminal_replaces_raw(tenant):
     """Terminal asset replacing a raw table: raw table excluded, terminal included."""
-    from mcp_server.services.metadata import transformation_aware_list_tables
 
     raw_asset = await TransformationAsset.objects.acreate(
         name="stg_case_patient",
@@ -343,7 +342,6 @@ async def test_transformation_aware_terminal_replaces_raw(tenant):
 @pytest.mark.django_db(transaction=True)
 async def test_transformation_aware_mixed(tenant):
     """Mix: some raw tables have no replacing asset → they appear alongside terminals."""
-    from mcp_server.services.metadata import transformation_aware_list_tables
 
     await TransformationAsset.objects.acreate(
         name="stg_form_reg",
@@ -391,7 +389,6 @@ async def test_transformation_aware_mixed(tenant):
 @pytest.mark.django_db(transaction=True)
 async def test_transformation_aware_no_duplicates(tenant):
     """Terminal asset whose name matches a pipeline table should not produce duplicates."""
-    from mcp_server.services.metadata import transformation_aware_list_tables
 
     await TransformationAsset.objects.acreate(
         name="stg_cases",

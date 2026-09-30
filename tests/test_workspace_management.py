@@ -1,5 +1,6 @@
 """Tests for workspace management API RBAC invariants (Task 3.1–3.3)."""
 
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -7,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 from django.utils import timezone
 
+from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api import workspace_views
 from apps.workspaces.api.workspace_views import Rediscovery, WorkspaceInviteDetailView
@@ -384,7 +386,6 @@ class TestMemberManagement:
         assert second_membership.role == WorkspaceRole.READ_WRITE
 
     def test_removing_member_deletes_their_threads(self, client, user, workspace, db):
-        from apps.chat.models import Thread
 
         writer = User.objects.create_user(email="wr@example.com", password="pass")
         writer_membership = WorkspaceMembership.objects.create(
@@ -947,7 +948,6 @@ class TestInviteDetail:
         assert invite.status == WorkspaceInviteStatus.PENDING
 
     def test_revoke_unknown_invite_returns_404(self, client, user, workspace):
-        import uuid
 
         client.force_login(user)
         resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{uuid.uuid4()}/")

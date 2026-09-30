@@ -1,5 +1,6 @@
 """Tests for the transformation REST API (Milestone 7)."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +11,8 @@ from apps.transformations.models import (
     TransformationRun,
     TransformationScope,
 )
+from apps.users.models import Tenant
+from apps.workspaces.models import TenantSchema, Workspace
 
 
 @pytest.fixture
@@ -173,7 +176,6 @@ def test_create_workspace_asset_read_role_forbidden(api_client, read_user, works
 @pytest.mark.django_db
 def test_create_tenant_asset_for_foreign_tenant_forbidden(api_client, user, tenant_membership):
     """User cannot create a tenant-scoped asset for a tenant they don't belong to."""
-    from apps.users.models import Tenant
 
     foreign_tenant = Tenant.objects.create(
         provider="commcare", external_id="foreign-domain", canonical_name="Foreign"
@@ -253,7 +255,6 @@ def test_update_workspace_asset_read_role_forbidden(api_client, read_user, works
 @pytest.mark.django_db
 def test_update_cannot_reassign_container(api_client, user, tenant, tenant_membership, workspace):
     """PATCH cannot change scope, tenant, or workspace (immutable after creation)."""
-    from apps.users.models import Tenant
 
     asset = TransformationAsset.objects.create(
         name="locked_asset",
@@ -368,7 +369,6 @@ def test_list_runs(api_client, user, tenant, tenant_membership):
 
 @pytest.mark.django_db
 def test_list_runs_tenant_filter(api_client, user, tenant, tenant_membership):
-    from apps.users.models import Tenant
 
     other_tenant = Tenant.objects.create(
         provider="commcare", external_id="other-domain", canonical_name="Other"
@@ -399,7 +399,6 @@ def test_trigger_run_uses_confined_dbt_path(api_client, user, tenant, tenant_mem
     real executor + profile generation run, and we assert the profile pins a
     low-privilege confinement role (04#3) and a schema-scoped search_path (04#4)
     — never the bare managed-DB superuser connection."""
-    from apps.workspaces.models import TenantSchema
 
     settings.MANAGED_DATABASE_URL = FAKE_MANAGED_DATABASE_URL
 
@@ -419,7 +418,6 @@ def test_trigger_run_uses_confined_dbt_path(api_client, user, tenant, tenant_mem
         captured["confinement_role"] = confinement_role
         # Write a minimal valid profiles.yml so dbt_project + run_dbt (mocked)
         # don't trip on a missing file.
-        from pathlib import Path
 
         Path(output_path).write_text("data_explorer:\n  outputs: {}\n")
 
@@ -459,7 +457,6 @@ def test_trigger_run_surfaces_dbt_failure_as_failed(
 ):
     """A dbt failure during a triggered run must surface as a FAILED run rather
     than a swallowed COMPLETED (issue #241, 04#4)."""
-    from apps.workspaces.models import TenantSchema
 
     settings.MANAGED_DATABASE_URL = FAKE_MANAGED_DATABASE_URL
 
@@ -497,7 +494,6 @@ def test_trigger_run_surfaces_dbt_failure_as_failed(
 @pytest.mark.django_db
 def test_trigger_foreign_tenant_forbidden(api_client, user, tenant_membership):
     """User cannot trigger a run for a tenant they don't belong to."""
-    from apps.users.models import Tenant
 
     foreign_tenant = Tenant.objects.create(
         provider="commcare", external_id="foreign-domain", canonical_name="Foreign"
@@ -521,7 +517,6 @@ def test_trigger_without_tenant_id(api_client, user, tenant_membership):
 @pytest.mark.django_db
 def test_trigger_foreign_workspace_forbidden(api_client, user, tenant, tenant_membership):
     """User cannot trigger a run with a workspace they don't belong to."""
-    from apps.workspaces.models import TenantSchema, Workspace
 
     TenantSchema.objects.create(tenant=tenant, schema_name="test_schema", state="active")
     foreign_ws = Workspace.objects.create(name="Foreign WS")
@@ -538,7 +533,6 @@ def test_trigger_foreign_workspace_forbidden(api_client, user, tenant, tenant_me
 @pytest.mark.django_db
 def test_trigger_workspace_read_role_forbidden(api_client, read_user, tenant, workspace):
     """User with read-only workspace role cannot trigger a run with that workspace."""
-    from apps.workspaces.models import TenantSchema
 
     # read_user already has a live TenantMembership for `tenant` (via the fixture),
     # so this exercises the role check, not the access gate.

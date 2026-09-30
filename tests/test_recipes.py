@@ -13,6 +13,7 @@ from django.test import AsyncClient
 from django.utils import timezone
 from langchain_core.messages import AIMessage
 
+from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.recipes import tasks as recipe_tasks
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner, VariableValidationError
@@ -643,7 +644,6 @@ class TestSaveAsRecipeTool:
     @patch("apps.recipes.services.runner.build_agent_graph")
     def test_save_as_recipe_tool_exists(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe tool can be created."""
-        from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 
@@ -655,7 +655,6 @@ class TestSaveAsRecipeTool:
     @pytest.mark.asyncio
     async def test_save_as_recipe_creates_recipe(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe tool creates a recipe."""
-        from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 
@@ -690,7 +689,6 @@ class TestSaveAsRecipeTool:
         self, mock_build_graph, workspace, user
     ):
         """Test saving recipe with prompt template and variables."""
-        from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 
@@ -715,7 +713,6 @@ class TestSaveAsRecipeTool:
     @pytest.mark.asyncio
     async def test_save_as_recipe_extracts_variables(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe can extract variables from steps."""
-        from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 

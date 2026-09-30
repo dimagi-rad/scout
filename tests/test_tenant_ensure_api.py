@@ -1,16 +1,16 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from django.test import Client
 
-from apps.users.models import TenantMembership
+from apps.users.models import Tenant, TenantMembership
 
 
 @pytest.mark.django_db
 class TestTenantEnsureAPI:
     def _create_connect_social_token(self, user):
         """Create the allauth SocialApp, SocialAccount, and SocialToken for commcare_connect."""
-        from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 
         app = SocialApp.objects.create(
             provider="commcare_connect",
@@ -27,8 +27,6 @@ class TestTenantEnsureAPI:
 
     def test_ensure_creates_connect_membership(self, user):
         self._create_connect_social_token(user)
-
-        from apps.users.models import Tenant
 
         tenant = Tenant.objects.create(
             provider="commcare_connect", external_id="532", canonical_name="Opportunity 532"
@@ -63,8 +61,6 @@ class TestTenantEnsureAPI:
     def test_ensure_returns_404_for_unauthorized_opportunity(self, user):
         self._create_connect_social_token(user)
 
-        from apps.users.models import Tenant
-
         # Return memberships that don't include tenant_id 999
         other_tenant = Tenant.objects.create(
             provider="commcare_connect", external_id="532", canonical_name="Opportunity 532"
@@ -87,8 +83,6 @@ class TestTenantEnsureAPI:
 
     def test_ensure_returns_existing_membership(self, user):
         self._create_connect_social_token(user)
-
-        from apps.users.models import Tenant
 
         existing_tenant = Tenant.objects.create(
             provider="commcare_connect", external_id="532", canonical_name="Existing Opp"

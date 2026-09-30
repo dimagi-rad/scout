@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
 from apps.users.adapters import encrypt_credential
-from apps.users.models import Tenant, TenantConnection, User
+from apps.users.models import Tenant, TenantConnection, TenantMembership, User
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -85,7 +85,6 @@ def old_active_schema(db, tenant):
 
 @pytest.fixture
 def tenant_membership_obj(db, user, tenant):
-    from apps.users.models import TenantMembership
 
     tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
     return tm
@@ -260,8 +259,6 @@ async def test_refresh_task_marks_schema_active_on_success(
         ),
         patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run) as pipeline,
     ):
-        from apps.workspaces.tasks import refresh_tenant_schema
-
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -368,8 +365,6 @@ async def test_refresh_task_schedules_old_schema_teardown(
             return_value=deferrer,
         ) as mock_configure,
     ):
-        from apps.workspaces.tasks import refresh_tenant_schema
-
         await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -392,8 +387,6 @@ async def test_refresh_task_marks_failed_on_schema_creation_error(
         "apps.workspaces.services.schema_manager.get_managed_db_connection",
         side_effect=RuntimeError("Managed DB unreachable"),
     ):
-        from apps.workspaces.tasks import refresh_tenant_schema
-
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -477,8 +470,6 @@ async def test_refresh_task_marks_failed_on_no_credential(
         patch("apps.workspaces.tasks.aresolve_credential", new=AsyncMock(return_value=None)),
         patch("apps.workspaces.services.schema_manager.SchemaManager.teardown"),
     ):
-        from apps.workspaces.tasks import refresh_tenant_schema
-
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -515,8 +506,6 @@ async def test_refresh_task_marks_failed_on_materialization_error(
         ),
         patch("apps.workspaces.services.schema_manager.SchemaManager.teardown"),
     ):
-        from apps.workspaces.tasks import refresh_tenant_schema
-
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -564,8 +553,6 @@ async def test_refresh_task_resolves_credential_in_async_context(
         ),
         patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
     ):
-        from apps.workspaces.tasks import refresh_tenant_schema
-
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),

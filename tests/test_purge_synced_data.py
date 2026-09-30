@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 from django.core.management import call_command
 
-from apps.users.models import TenantMembership, User
+from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -21,7 +21,6 @@ def user(db):
 
 @pytest.fixture
 def membership(user):
-    from apps.users.models import Tenant
 
     tenant = Tenant.objects.create(
         provider="commcare", external_id="test-domain", canonical_name="Test Domain"

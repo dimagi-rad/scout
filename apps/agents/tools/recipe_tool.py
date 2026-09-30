@@ -79,7 +79,7 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
         if not await aworkspace_write_allowed(user, workspace.id):
             return tool_write_denied()
 
-        from apps.recipes.models import Recipe  # avoid circular import
+        from apps.recipes.models import Recipe  # noqa: PLC0415 — avoid circular import
 
         if not name or not name.strip():
             return {

@@ -1,10 +1,10 @@
 import pytest
 
 from apps.users.services.api_key_providers import CredentialVerificationError
+from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
 
 def test_pack_credential_joins_username_and_key():
-    from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
     packed = CommCareStrategy.pack_credential(
         {"domain": "dimagi", "username": "user@d.org", "api_key": "secret"}
@@ -13,7 +13,6 @@ def test_pack_credential_joins_username_and_key():
 
 
 def test_form_fields_metadata():
-    from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
     keys = [f["key"] for f in CommCareStrategy.form_fields]
     assert keys == ["domain", "username", "api_key"]
@@ -26,7 +25,6 @@ def test_form_fields_metadata():
 
 @pytest.mark.asyncio
 async def test_verify_and_discover_happy_path(httpx_mock):
-    from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
     httpx_mock.add_response(
         method="GET",
@@ -44,7 +42,6 @@ async def test_verify_and_discover_happy_path(httpx_mock):
 
 @pytest.mark.asyncio
 async def test_verify_and_discover_unauthorized(httpx_mock):
-    from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
     httpx_mock.add_response(
         method="GET",
@@ -59,7 +56,6 @@ async def test_verify_and_discover_unauthorized(httpx_mock):
 
 @pytest.mark.asyncio
 async def test_verify_and_discover_domain_not_in_list(httpx_mock):
-    from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
     httpx_mock.add_response(
         method="GET",
@@ -75,7 +71,6 @@ async def test_verify_and_discover_domain_not_in_list(httpx_mock):
 
 @pytest.mark.asyncio
 async def test_verify_for_tenant_calls_verify_with_external_id(httpx_mock):
-    from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
     httpx_mock.add_response(
         method="GET",

@@ -1,6 +1,10 @@
+import unittest.mock as mock
 from unittest.mock import MagicMock
 
 import pytest
+
+from mcp_server.loaders.commcare_base import CommCareAuthError
+from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
 
 def _make_app_response():
@@ -43,7 +47,6 @@ def _make_app_response():
 class TestCommCareMetadataLoader:
     def _mock_session(self, responses):
         """Return a patch context that intercepts Session().get() calls."""
-        import unittest.mock as mock
 
         session = MagicMock()
         if isinstance(responses, list):
@@ -53,7 +56,6 @@ class TestCommCareMetadataLoader:
         return mock.patch("mcp_server.loaders.commcare_base.requests.Session", return_value=session)
 
     def test_loads_app_definitions(self):
-        from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -69,7 +71,6 @@ class TestCommCareMetadataLoader:
         assert result["app_definitions"][0]["name"] == "CHW App"
 
     def test_extracts_unique_case_types(self):
-        from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -87,7 +88,6 @@ class TestCommCareMetadataLoader:
         assert len(case_type_names) == len(set(case_type_names))
 
     def test_extracts_form_definitions(self):
-        from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -104,8 +104,6 @@ class TestCommCareMetadataLoader:
         assert form_defs["http://openrosa.org/formdesigner/form1"]["case_type"] == "patient"
 
     def test_raises_on_auth_failure(self):
-        from mcp_server.loaders.commcare_base import CommCareAuthError
-        from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
         mock_resp = MagicMock()
         mock_resp.status_code = 401
@@ -120,7 +118,6 @@ class TestCommCareMetadataLoader:
         top-level ``next`` field. A top-level ``next`` is intentionally
         included to ensure it is IGNORED.
         """
-        from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
         page1 = MagicMock()
         page1.status_code = 200
@@ -157,7 +154,6 @@ class TestCommCareMetadataLoader:
         resolve it against the base URL. The prior ``startswith("/")``
         shim passed these through unresolved and caused ``MissingSchema``.
         """
-        from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
         page1 = MagicMock()
         page1.status_code = 200

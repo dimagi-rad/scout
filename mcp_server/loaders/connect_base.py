@@ -115,7 +115,7 @@ class ConnectBaseLoader:
         self.opportunity_id = opportunity_id
         if base_url is None:
             try:
-                from django.conf import settings
+                from django.conf import settings  # noqa: PLC0415 — optional dep
 
                 base_url = getattr(settings, "CONNECT_API_URL", self.DEFAULT_BASE_URL)
             except ImportError:

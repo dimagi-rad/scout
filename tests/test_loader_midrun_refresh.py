@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from mcp_server.loaders.commcare_base import CommCareAuthError
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.connect_visits import ConnectVisitLoader
 from mcp_server.loaders.ocs_sessions import OCSSessionLoader
@@ -45,7 +46,6 @@ class TestCommCareMidRunRefresh:
         assert session.headers["Authorization"] == "Bearer fresh-token"
 
     def test_no_refresh_callable_still_raises_auth_error(self):
-        from mcp_server.loaders.commcare_base import CommCareAuthError
 
         credential = {"type": "api_key", "value": "u:k"}  # no refresh
         with patch("mcp_server.loaders.commcare_base.requests.Session") as sess_cls:

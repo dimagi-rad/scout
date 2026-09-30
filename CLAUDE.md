@@ -115,6 +115,7 @@ Optional:
 
 - **Python**: ruff (line-length=100, target py311, rules: E/F/I/UP/B/ASYNC/DJ/S/SIM/TRY/RUF/PTH). The formatter is excluded from `*.md` — ruff 0.16 formats Python blocks inside Markdown, and our docs are design records, not source.
 - **Imports**: Always at module level, never inside function bodies. Exceptions: optional dependencies guarded by `try/except ImportError`, and code that must run before `django.setup()`. When moving inline imports to module level, update any `mock.patch()` targets in tests to point at the consuming module (where the name is used), not the source module.
+  - Ruff `PLC0415` (import-outside-top-level) enforces this; a legitimate exception needs `# noqa: PLC0415` with a short reason.
 - **Frontend**: ESLint with typescript-eslint + react-hooks plugin
 - **No Prettier** configured for frontend
 

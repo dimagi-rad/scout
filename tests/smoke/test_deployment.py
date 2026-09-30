@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+from urllib.parse import urlparse
 
 import environ
 import pytest
@@ -77,8 +78,6 @@ class TestFrontendAssets:
         html = resp.text
         assert "<script" in html, "No <script> tags in index.html"
 
-        from urllib.parse import urlparse
-
         path = urlparse(frontend_url).path
         if path and path != "/":
             assert f'src="{path}' in html or f"src='{path}" in html or f'href="{path}' in html, (
@@ -94,8 +93,6 @@ class TestFrontendAssets:
 
         for js_url in js_urls:
             if js_url.startswith("/"):
-                from urllib.parse import urlparse
-
                 parsed = urlparse(frontend_url)
                 asset_url = f"{parsed.scheme}://{parsed.netloc}{js_url}"
             elif js_url.startswith("http"):
@@ -115,8 +112,6 @@ class TestFrontendAssets:
             pytest.skip("No separate CSS files (may be inlined)")
         for css_url in css_urls:
             if css_url.startswith("/"):
-                from urllib.parse import urlparse
-
                 parsed = urlparse(frontend_url)
                 asset_url = f"{parsed.scheme}://{parsed.netloc}{css_url}"
             else:
@@ -180,7 +175,6 @@ class TestAPIEndpoints:
         """OAuth provider login_url should include the sub-path prefix."""
         resp = session.get(f"{api_url}/api/auth/providers/", timeout=10)
         assert resp.status_code == 200
-        from urllib.parse import urlparse
 
         base_path = urlparse(api_url).path
         if not base_path or base_path == "/":

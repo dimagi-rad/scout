@@ -1169,9 +1169,13 @@ def _build_tools(
     if not interactive:
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
-    from apps.agents.tools.artifact_manager_agent import create_artifact_manager_tool
-    from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
-    from apps.agents.tools.canvas_tool import create_canvas_read_tool
+    from apps.agents.tools.artifact_manager_agent import (  # noqa: PLC0415 — cycle
+        create_artifact_manager_tool,
+    )
+    from apps.agents.tools.canvas_manager_agent import (  # noqa: PLC0415 — cycle
+        create_canvas_manager_tool,
+    )
+    from apps.agents.tools.canvas_tool import create_canvas_read_tool  # noqa: PLC0415 — cycle
 
     if write_capable:
         tools.append(create_save_learning_tool(workspace, user))

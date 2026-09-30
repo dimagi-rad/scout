@@ -1,10 +1,13 @@
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain_core.messages import AIMessage
+
+from apps.agents.graph.base import _make_injecting_tool_node
+from apps.agents.graph.state import AgentState
 
 
 def test_agent_state_has_workspace_id_field():
-    from apps.agents.graph.state import AgentState
 
     assert "workspace_id" in AgentState.__annotations__
 
@@ -13,9 +16,6 @@ def test_agent_state_has_workspace_id_field():
 @pytest.mark.django_db
 async def test_injecting_node_includes_workspace_id():
     """The injecting node must inject workspace_id into MCP tool calls."""
-    from langchain_core.messages import AIMessage
-
-    from apps.agents.graph.base import _make_injecting_tool_node
 
     state = {
         "messages": [

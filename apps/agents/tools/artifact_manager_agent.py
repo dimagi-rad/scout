@@ -627,7 +627,7 @@ async def _forward_nested_tool_start(
     pending_tool_starts: dict[str, dict[str, Any]],
     trace: _SubagentTraceRecorder,
 ) -> None:
-    from apps.chat.stream import _redact_tool_input
+    from apps.chat.stream import _redact_tool_input  # noqa: PLC0415 — cycle
 
     raw_input = event.get("data", {}).get("input")
     run_id = str(event.get("run_id") or "")
@@ -668,7 +668,10 @@ async def _forward_nested_tool_end(
     pending_tool_starts: dict[str, dict[str, Any]],
     trace: _SubagentTraceRecorder,
 ) -> None:
-    from apps.chat.stream import _tool_content_to_str, _truncate_tool_output
+    from apps.chat.stream import (  # noqa: PLC0415 — cycle
+        _tool_content_to_str,
+        _truncate_tool_output,
+    )
 
     tool_output = event.get("data", {}).get("output")
     if not tool_output:

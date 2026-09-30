@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.db.models import ProtectedError
 from rest_framework.test import APIClient
 
@@ -47,7 +48,6 @@ def test_add_tenant_to_workspace(api_client, user, workspace, tenant2, tenant_me
 
 
 def test_add_tenant_requires_manage_role(api_client, user, workspace, tenant, tenant2):
-    from django.contrib.auth import get_user_model
 
     other = get_user_model().objects.create_user(email="other@example.com", password="pass")
     WorkspaceMembership.objects.create(
