@@ -65,12 +65,27 @@ describe("OnboardingWizard", () => {
   })
 
   it("hides EU CommCare HQ sign-in when it is not configured", async () => {
-    vi.mocked(api.get).mockResolvedValue(providers(null))
+    vi.mocked(api.get).mockResolvedValue({
+      providers: [
+        { id: "commcare", name: "CommCare HQ", login_url: "/accounts/commcare/login/" },
+        ...providers(null).providers,
+      ],
+    })
     render(<OnboardingWizard />)
 
     await screen.findByTestId("onboarding-ocs")
     expect(screen.queryByTestId("onboarding-oauth-commcare-eu")).toBeNull()
-    expect(screen.getByTestId("onboarding-oauth").textContent).toBe("Connect with OAuth")
+    const www = screen.getByTestId("onboarding-oauth")
+    expect(www.textContent).toBe("Connect with OAuth")
+    expect(www.getAttribute("href")).toBe("/accounts/commcare/login/?process=connect&next=%2F")
+  })
+
+  it("drops the www sign-in on an OCS-only deployment", async () => {
+    vi.mocked(api.get).mockResolvedValue(providers(null))
+    render(<OnboardingWizard />)
+
+    await screen.findByTestId("onboarding-ocs")
+    expect(screen.queryByTestId("onboarding-oauth")).toBeNull()
   })
 
   it("sends an API key to the CommCare server the user picks", async () => {

@@ -42,8 +42,7 @@ export function OnboardingWizard() {
   const [ocs, setOcs] = useState<OAuthProvider | null>(null)
   // Listed only once its OAuth app is configured on this deployment (#719).
   const [commcareEu, setCommcareEu] = useState<OAuthProvider | null>(null)
-  // A deployment may configure only the EU app; the www link would then 404.
-  const [commcareWwwMissing, setCommcareWwwMissing] = useState(false)
+  const [commcare, setCommcare] = useState<OAuthProvider | null>(null)
   const [providersState, setProvidersState] = useState<"loading" | "loaded" | "failed">(
     "loading",
   )
@@ -54,16 +53,13 @@ export function OnboardingWizard() {
       const data = await api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
       setOcs(data.providers.find((p) => p.id === "ocs") ?? null)
       setCommcareEu(data.providers.find((p) => p.id === "commcare_eu") ?? null)
-      setCommcareWwwMissing(
-        data.providers.some((p) => p.id === "commcare_eu") &&
-          !data.providers.some((p) => p.id === "commcare"),
-      )
+      setCommcare(data.providers.find((p) => p.id === "commcare") ?? null)
       setProvidersState("loaded")
     } catch (err) {
       console.error("Failed to load sign-in options", err)
       setOcs(null)
       setCommcareEu(null)
-      setCommcareWwwMissing(false)
+      setCommcare(null)
       setProvidersState("failed")
     }
   }, [])
@@ -209,14 +205,22 @@ export function OnboardingWizard() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {!commcareWwwMissing && (
+          {/* Until providers load, the www link is the historical default; once they
+              have, it is offered only if this deployment configured it. */}
+          {(commcare || providersState !== "loaded") && (
             <Button
               className="w-full"
               variant="outline"
               data-testid="onboarding-oauth"
               asChild
             >
-              <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>
+              <a
+                href={
+                  commcare
+                    ? oauthConnectUrl(commcare, "/")
+                    : `${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`
+                }
+              >
                 {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
               </a>
             </Button>
