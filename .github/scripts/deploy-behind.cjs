@@ -34,7 +34,9 @@ async function assessDeployLag({ github, context, core, workflowId, jobName, now
     github, context, core, runs, jobName, consequence: 'the commit production runs is unknown',
   });
   if (live && live.head_sha === head) return { state: 'current', head, live };
-  // Only head's runs are trustworthy: whether it is behind, and by what, is unknown.
+  // Without a trustworthy run list a dispatched deploy of an older commit, or the
+  // live run, may be invisible. Stay silent (with a warning) rather than cry wolf;
+  // the next tick re-reads the list.
   if (!reliable) return { state: 'unknown', head };
 
   const headRuns = [...unsorted].sort((a, b) => b.run_number - a.run_number);

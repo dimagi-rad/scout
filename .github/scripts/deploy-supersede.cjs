@@ -7,7 +7,7 @@ const WAITING = new Set(['queued', 'pending', 'waiting', 'requested']);
 // reach past a burst of them; each lookup is one API call.
 const MAX_JOB_LOOKUPS = 50;
 // Runs created this long before main's head commit still count as "since head":
-// the commit date can trail the push by a little (clock skew, a slow merge).
+// the commit date can differ from the push by a little (clock skew, a slow merge).
 const RECENT_MARGIN_MS = 60 * 60 * 1000;
 
 const newestNumber = (runs) => runs.reduce((max, run) => Math.max(max, run.run_number), 0);
@@ -23,10 +23,10 @@ function mergeRuns(...lists) {
 
 // listWorkflowRuns intermittently answers with a weeks-old slice of runs (#769):
 // the page then lacks both head's run and the true live run. Cross-check the page
-// against head's own runs, and against runs created since head when head has none.
+// against head's own runs, and, when it could be stale, against the runs created
+// since its newest one: a differently filtered query that exposes any newer run.
 // A page that stays behind them after one retry is unreliable: callers then get
-// only head's runs, which is enough to tell "head is live or on its way" and
-// nothing else.
+// only the filtered runs, which tell "head is live or on its way" and little else.
 async function listMainRuns({ github, context, core, workflowId, branch, floor = 0 }) {
   const list = async (filters = {}) => {
     const { data } = await github.rest.actions.listWorkflowRuns({
@@ -38,24 +38,31 @@ async function listMainRuns({ github, context, core, workflowId, branch, floor =
   const headTime = Date.parse(branch.commit.commit.committer.date);
   let page = await list();
   let headRuns = await list({ head_sha: head });
+  let recent = [];
   let known = Math.max(floor, newestNumber(headRuns));
   const suspicious = newestNumber(page) < known
-    || (!headRuns.length && newestCreated(page) < headTime);
+    || (!headRuns.length && !(newestCreated(page) >= headTime));
   if (suspicious) {
-    const since = new Date(headTime - RECENT_MARGIN_MS).toISOString().replace(/\.\d+Z$/, 'Z');
-    const recent = await list({ created: `>=${since}` });
+    const sinceHead = Number.isFinite(headTime) ? headTime - RECENT_MARGIN_MS : Infinity;
+    const since = Math.min(newestCreated(page), sinceHead);
+    const created = new Date(since).toISOString().replace(/\.\d+Z$/, 'Z');
+    recent = await list({ created: `>=${created}` });
     known = Math.max(known, newestNumber(recent));
     headRuns = mergeRuns(headRuns, recent.filter((run) => run.head_sha === head));
-    page = await list();
+    // Run numbers only grow, so a stale retry must not replace a fresh first answer.
+    const retry = await list();
+    if (newestNumber(retry) > newestNumber(page)) page = retry;
   }
   const reliable = newestNumber(page) >= known;
   if (!reliable) {
     core.warning(
       `The deploy run list stayed stale after a retry (newest run #${newestNumber(page)}, `
-      + `expected at least #${known}); using only the runs of main's head ${head.slice(0, 12)}.`,
+      + `expected at least #${known}); deciding only from runs of main's head `
+      + `${head.slice(0, 12)} and runs created since the list's newest.`,
     );
   }
-  return { head, headRuns, reliable, runs: reliable ? mergeRuns(page, headRuns) : headRuns };
+  const runs = reliable ? mergeRuns(page, headRuns) : mergeRuns(headRuns, recent);
+  return { head, headRuns, reliable, runs };
 }
 
 async function contains({ github, context, sha }) {

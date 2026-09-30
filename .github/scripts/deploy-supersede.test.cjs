@@ -283,3 +283,21 @@ test('a page that tops out below our own run is stale', async () => {
   assert.equal(await skip(github, context, core), null);
   assert.match(core.out.warnings[0], /expected at least #100/);
 });
+
+test('a stale run list still guards with the runs created since its newest', async () => {
+  // Head's own run skipped its deploy, but run 20 for an earlier commit is live:
+  // only the created-since query shows it.
+  const core = fakeCore();
+  const runs = [
+    done(21, 121, sha('d'), '2026-09-29T03:00:00Z', { created_at: '2026-09-29T03:00:00Z' }),
+    done(20, 120, sha('c'), '2026-09-29T02:00:00Z', { created_at: '2026-09-29T02:00:00Z' }),
+    ownRun,
+  ];
+  const github = fakeGithub({
+    runs, pages: [staleSlice], head: sha('d'), compare: { [sha('c')]: 'ahead' }, deployed: { 21: 'skipped' },
+  });
+  const reason = await skip(github, context, core);
+  assert.equal(reason.run.id, 20);
+  assert.equal(reason.why, 'already deployed');
+  assert.match(core.out.warnings[0], /stayed stale/);
+});

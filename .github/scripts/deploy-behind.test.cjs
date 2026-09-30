@@ -319,3 +319,27 @@ test('a stale list is caught through runs created since head when head has none'
   assert.equal((await check(github, core)).state, 'unknown');
   assert.match(core.out.warnings[0], /expected at least #111/);
 });
+
+test('a stale retry does not replace a fresh first answer', async () => {
+  // Head has no run of its own (a [skip ci] push), so the fresh page looks
+  // suspicious and is re-read; the re-read hits the stale slice.
+  const runs = [run(10, 110, LIVE, 'completed', { created_at: minutesAgo(90) })];
+  const github = fakeGithub({ runs, pages: [runs, staleSlice], commitDate: minutesAgo(60) });
+  const core = fakeCore();
+  const lag = await check(github, core);
+  assert.equal(lag.state, 'behind');
+  assert.equal(lag.live.id, 10);
+  assert.ok(!core.out.warnings.some((w) => /stale/.test(w)), core.out.warnings);
+});
+
+test('a stale list is caught when head has no run and nothing ran since head', async () => {
+  // [skip ci] head, last deploy long before it: only the created-since-newest
+  // query can show the page is stale.
+  const runs = [run(10, 110, LIVE, 'completed', { created_at: minutesAgo(60 * 24) })];
+  const github = fakeGithub({ runs, pages: [staleSlice], commitDate: minutesAgo(60) });
+  const core = fakeCore();
+  const lag = await check(github, core);
+  assert.equal(lag.state, 'unknown');
+  assert.match(core.out.warnings[0], /newest run #87, expected at least #110/);
+  assert.deepEqual(names(github).filter((n) => !['branch', 'runs', 'jobs'].includes(n)), []);
+});
