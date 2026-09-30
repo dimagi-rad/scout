@@ -16,6 +16,7 @@ from django.db import connection as django_connection
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
+from apps.users import auth_views
 from apps.users.models import TenantConnection
 from apps.users.services import credential_resolver, token_refresh
 from apps.users.services.credential_resolver import CredentialResolutionError
@@ -846,7 +847,7 @@ def test_providers_view_bounds_its_refresh_wait(oauth_identity, user, client, mo
     """
     token, connection = oauth_identity
     token.app.sites.add(Site.objects.get(pk=settings.SITE_ID))
-    monkeypatch.setattr(token_refresh, "INTERACTIVE_DB_DEADLINE", FORWARDED_DEADLINE_SECONDS)
+    monkeypatch.setattr(auth_views, "INTERACTIVE_DB_DEADLINE", FORWARDED_DEADLINE_SECONDS)
     client.force_login(user)
 
     with _stubbed_provider() as calls, _user_row_locked(connection.user_id) as release:

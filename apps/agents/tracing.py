@@ -12,8 +12,6 @@ import contextlib
 import logging
 
 from django.conf import settings
-from langfuse import Langfuse, propagate_attributes
-from langfuse.langchain import CallbackHandler
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +41,10 @@ def get_langfuse_callback(
         return None
 
     try:
+        # Kept lazy so a broken langfuse install only disables tracing.
+        from langfuse import Langfuse  # noqa: PLC0415
+        from langfuse.langchain import CallbackHandler  # noqa: PLC0415
+
         Langfuse(secret_key=secret_key, public_key=public_key, host=host)
         return CallbackHandler()
     except Exception:
@@ -65,6 +67,8 @@ def langfuse_trace_context(
         return contextlib.nullcontext()
 
     try:
+        from langfuse import propagate_attributes  # noqa: PLC0415
+
         return propagate_attributes(
             session_id=session_id,
             user_id=user_id,

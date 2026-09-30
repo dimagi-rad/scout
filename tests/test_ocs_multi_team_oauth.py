@@ -791,7 +791,7 @@ def test_missing_social_app_reports_expired_without_refresh(user, client, site, 
     SocialToken.objects.create(
         account=account, token="old", token_secret="refresh", expires_at=timezone.now()
     )
-    refresh = mocker.patch("apps.users.services.token_refresh.refresh_oauth_token", AsyncMock())
+    refresh = mocker.patch("apps.users.auth_views.refresh_oauth_token", AsyncMock())
     client.force_login(user)
     response = client.get("/api/auth/providers/")
     assert response.status_code == 200
