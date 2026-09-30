@@ -13,6 +13,12 @@ from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
+from apps.common.capacity import (
+    BUSY_MESSAGE,
+    CapacityExhausted,
+    classify_capacity_error,
+    report_capacity_exhausted,
+)
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticModel
@@ -173,6 +179,17 @@ def build_and_promote_cube_schema(
         except Exception as exc:
             _record_build_failure(workspace, model, exc)
             raise
+    except Exception as exc:
+        capacity = classify_capacity_error(exc)
+        if capacity is None:
+            raise
+        report_capacity_exhausted(capacity.resource, str(exc), exc_info=exc)
+        # Keeps the rebuild owed: a stale "ok" last_build would read as ready and
+        # the chat-time self-heal would never retry. The refused session is dropped
+        # first so the write reconnects instead of reusing it.
+        close_old_connections()
+        record_cube_schema_build_deferred(workspace, BUSY_MESSAGE)
+        raise CapacityExhausted(capacity.resource, BUSY_MESSAGE) from exc
     finally:
         close_old_connections()
 
@@ -214,8 +231,13 @@ def record_cube_schema_build_deferred(workspace, reason: str) -> None:
         if previous_error:
             model.metadata["last_build"]["error"] = previous_error
         model.save(update_fields=["metadata", "updated_at"])
-    except Exception:
-        logger.exception("Failed to record deferred Cube promotion for workspace %s", workspace.id)
+    except Exception as exc:
+        # A refused write during a connection-limit incident must not raise a second,
+        # ungrouped ERROR beside the rate-limited capacity alert.
+        log = logger.warning if classify_capacity_error(exc) is not None else logger.exception
+        log(
+            "Failed to record deferred Cube promotion for workspace %s", workspace.id, exc_info=True
+        )
 
 
 def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> CubeSchema:
@@ -413,7 +435,13 @@ def _set_last_build(
 
 
 def _record_build_failure(workspace, model: SemanticModel, exc: Exception) -> None:
-    """Persist a build failure without breaking last-known-good reads."""
+    """Persist a build failure without breaking last-known-good reads.
+
+    A connection-limit refusal is transient: recording it would leave a failed
+    build and an error diagnostic on the model for a condition a retry clears.
+    """
+    if classify_capacity_error(exc) is not None:
+        return
     try:
         active = (
             CubeSchema.objects.filter(

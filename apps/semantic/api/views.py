@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.chat.checkpointer import thread_has_checkpoint
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
     apply_operations,
@@ -92,6 +93,9 @@ def _resolve_thread_canvas(request, workspace_id, thread_id, *, write: bool):
     ):
         return None, Response({"error": "Thread not found."}, status=status.HTTP_404_NOT_FOUND)
     if thread is None:
+        # A deleted thread's checkpoints outlive it (#265); a new row would adopt them.
+        if thread_has_checkpoint(thread_id):
+            return None, Response({"error": "Thread not found."}, status=status.HTTP_404_NOT_FOUND)
         # Frontend-generated thread UUIDs may reach the canvas before the
         # first chat message creates the Thread row; create the shell.
         thread = Thread.objects.create(id=thread_id, workspace=workspace, user=request.user)
