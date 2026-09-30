@@ -60,12 +60,11 @@ from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
-    TenantSchema,
     WorkspaceDataRecovery,
     WorkspaceRole,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_load_pending
+from apps.workspaces.services.load_activity import athread_awaits_load, aworkspace_schema_status
 from apps.workspaces.services.query_state import serving_writer_in_flight, workspace_query_surface
 from apps.workspaces.services.source_freshness import (
     CREDENTIAL_CODES,
@@ -395,23 +394,25 @@ async def _fetch_semantic_model_context(
     try:
         return await _semantic_catalog_context(workspace)
     except SemanticCatalogUnavailable:
-        load_state, multi = await _catalog_unavailable_load_state(workspace)
+        schema_status = await aworkspace_schema_status(workspace.id)
+        loaded = schema_status == "available"
+        multi = await workspace.tenants.acount() > 1
         unresolved, every = await _unresolved_pipeline_providers(workspace)
         # Waiting can't help either: no load finishes without a pipeline (G12).
         if every:
             guidance = _pipeline_unresolved_guidance(
-                unresolved, loaded=load_state == _LOADED, write_capable=write_capable
+                unresolved, loaded=loaded, write_capable=write_capable
             )
-        elif load_state != _LOADED and await aworkspace_load_pending(workspace.id):
+        elif schema_status == "provisioning":
             # Queued but not yet started, so no run above says so (#408).
             guidance = await _load_in_progress_guidance(interactive, write_capable, conversation_id)
-        elif load_state == _LOADED and write_capable and interactive:
+        elif loaded and write_capable and interactive:
             guidance = await _semantic_rebuild_guidance(
                 workspace, interactive, write_capable, conversation_id
             )
         else:
             guidance = _load_state_guidance(
-                load_state, interactive=interactive, write_capable=write_capable
+                loaded=loaded, interactive=interactive, write_capable=write_capable
             )
         if not every and unresolved:
             guidance = f"{guidance}\n\n{_partial_pipeline_note(unresolved)}"
@@ -428,29 +429,6 @@ async def _load_in_progress_guidance(
     if conversation_id and await athread_awaits_load(conversation_id):
         return _LOAD_STARTED_FOR_THIS_CHAT_GUIDANCE
     return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
-
-
-_NOT_LOADED, _LOADED = "not_loaded", "loaded"
-
-
-async def _catalog_unavailable_load_state(workspace) -> tuple[str, bool]:
-    """``(load state, multi-tenant)`` of a workspace whose semantic catalog is unavailable.
-
-    An in-flight load never reaches here: the caller answers it first from
-    ``MaterializationRun.ACTIVE_STATES``, the only written in-progress signal (#411).
-    """
-    tenant_count = await workspace.tenants.acount()
-    if tenant_count == 1:
-        tenant = await workspace.tenants.afirst()
-        loaded = await TenantSchema.objects.filter(
-            tenant=tenant, state=SchemaState.ACTIVE
-        ).aexists()
-        return (_LOADED if loaded else _NOT_LOADED), False
-    if tenant_count > 1:
-        vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
-        loaded = vs is not None and vs.state == SchemaState.ACTIVE
-        return (_LOADED if loaded else _NOT_LOADED), True
-    return _NOT_LOADED, False
 
 
 async def _semantic_rebuild_guidance(
@@ -478,8 +456,8 @@ async def _semantic_rebuild_guidance(
     return _SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
 
 
-def _load_state_guidance(load_state: str, *, interactive: bool, write_capable: bool) -> str:
-    if load_state == _LOADED:
+def _load_state_guidance(*, loaded: bool, interactive: bool, write_capable: bool) -> str:
+    if loaded:
         return (
             _HEADLESS_LOADED_REBUILD_GUIDANCE if write_capable else _READ_ONLY_LOADED_SQL_GUIDANCE
         )
@@ -544,7 +522,8 @@ def _partial_pipeline_note(providers: list[str]) -> str:
 # No `pipeline=` arg: run_materialization's LLM-facing schema is empty (all params
 # injected server-side); naming an argument it can't accept confused the agent (02#6).
 _INTERACTIVE_MATERIALIZE_GUIDANCE = (
-    "No data has been loaded yet. Call `run_materialization` yourself to start "
+    "No data has been loaded yet, and no load is running. Call `run_materialization` "
+    "yourself to start "
     "loading; do not ask the user to start it. This tool returns IMMEDIATELY "
     "with `status: started` — do NOT call other data tools in the same turn. "
     "Acknowledge to the user "
@@ -647,7 +626,8 @@ _READ_ONLY_LOADED_SQL_GUIDANCE = (
 _READ_ONLY_MATERIALIZE_GUIDANCE = (
     "Data is not currently queryable, and this user's workspace role is read-only. "
     "A read-write workspace role is required to load data or rebuild the semantic catalog, "
-    "so tell the user a workspace member with write access can refresh it."
+    "so tell the user a workspace member with write access can refresh it. If no data "
+    "has been loaded yet, the first chat such a member opens starts the load automatically."
 )
 
 _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (

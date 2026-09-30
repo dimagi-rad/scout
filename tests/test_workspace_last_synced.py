@@ -161,9 +161,8 @@ def _list_entry(client, user, workspace):
 
 
 @pytest.mark.django_db
-def test_list_schema_status_unavailable_without_schema(client, user, workspace):
-    # No TenantSchema at all → live state is unavailable.
-    assert _list_entry(client, user, workspace)["schema_status"] == "unavailable"
+def test_list_schema_status_not_loaded_without_schema(client, user, workspace):
+    assert _list_entry(client, user, workspace)["schema_status"] == "not_loaded"
 
 
 @pytest.mark.django_db
@@ -174,8 +173,11 @@ def test_list_schema_status_available_when_active(client, user, workspace, tenan
 
 @pytest.mark.django_db
 def test_list_schema_status_provisioning(client, user, workspace, tenant):
-    TenantSchema.objects.create(
+    schema = TenantSchema.objects.create(
         tenant=tenant, schema_name="prov_schema", state=SchemaState.PROVISIONING
+    )
+    MaterializationRun.objects.create(
+        tenant_schema=schema, pipeline="commcare", state=MaterializationRun.RunState.LOADING
     )
     assert _list_entry(client, user, workspace)["schema_status"] == "provisioning"
 
