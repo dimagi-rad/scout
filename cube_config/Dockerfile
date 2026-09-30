@@ -1,6 +1,6 @@
 FROM cubejs/cube:v1.6.39
 
-COPY package.json /cube/conf/package.json
+COPY package.json package-lock.json /cube/conf/
 COPY cube.js /cube/conf/cube.js
 COPY connection-slots.js /cube/conf/connection-slots.js
 COPY validator-core.js /cube/conf/validator-core.js
@@ -15,7 +15,7 @@ COPY patch-orchestrator-storage.js /cube/conf/patch-orchestrator-storage.js
 COPY start-cube-with-validator.sh /start-cube-with-validator.sh
 
 WORKDIR /cube/conf
-RUN npm install --omit=dev \
+RUN npm ci --omit=dev \
     && node /cube/conf/patch-local-cache.js \
     && node /cube/conf/patch-orchestrator-storage.js \
     && chmod +x /start-cube-with-validator.sh
