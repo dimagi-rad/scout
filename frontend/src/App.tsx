@@ -3,6 +3,7 @@ import { RouterProvider } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { BASE_PATH } from "@/config"
 import { NetworkStatusProvider } from "@/contexts/NetworkStatusContext"
+import { BusyNotice } from "@/components/BusyNotice/BusyNotice"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
 import { OnboardingWizard } from "@/components/OnboardingWizard/OnboardingWizard"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -15,6 +16,15 @@ function stripBasePath(pathname: string): string {
 }
 
 export default function App() {
+  return (
+    <>
+      <AppContent />
+      <BusyNotice />
+    </>
+  )
+}
+
+function AppContent() {
   const authStatus = useAppStore((s) => s.authStatus)
   const user = useAppStore((s) => s.user)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
