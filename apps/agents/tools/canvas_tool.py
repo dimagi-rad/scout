@@ -138,9 +138,12 @@ def _artifact_member_texts(workspace) -> list[tuple[str, str]]:
     Stories saved before manifests existed keep their members only in
     ``data.story_doc``, so it is scanned too, along with the normalized query rows.
     """
-    current = Artifact.objects.filter(
-        workspace=workspace, is_deleted=False, child_versions__isnull=True
-    ).only("title", "data", "semantic_queries", "semantic_query_manifest")
+    # A failed graph write leaves a soft-deleted child; only a live child supersedes.
+    current = (
+        Artifact.objects.filter(workspace=workspace, is_deleted=False)
+        .exclude(child_versions__is_deleted=False)
+        .only("title", "data", "semantic_queries", "semantic_query_manifest")
+    )
     members: dict[Any, list] = {}
     for artifact_id, query_members in ArtifactSemanticQuery.objects.filter(
         workspace=workspace

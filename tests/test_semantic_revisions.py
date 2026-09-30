@@ -617,3 +617,13 @@ def test_deleting_a_field_no_artifact_uses_needs_no_confirmation(canvas, semanti
         parent_artifact=old_story,
     )
     assert destructive_deletions(canvas)[0]["used_by_artifacts"] == ["Totals"]
+
+    Artifact.objects.create(
+        workspace=canvas.workspace,
+        title="Totals v2 (failed write)",
+        code="",
+        conversation_id="c",
+        parent_artifact=Artifact.objects.get(title="Totals"),
+        is_deleted=True,
+    )
+    assert destructive_deletions(canvas)[0]["used_by_artifacts"] == ["Totals"]
