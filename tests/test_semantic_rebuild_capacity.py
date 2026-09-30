@@ -116,7 +116,9 @@ async def test_another_identity_probe_failure_is_still_unverified(workspace, vie
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_capacity_refusal_leaves_a_serving_model_untouched(workspace, serving_model, reported):
+def test_a_capacity_refusal_defers_the_rebuild_without_an_error_diagnostic(
+    workspace, serving_model, reported
+):
     serving_model.metadata = {"last_build": {"ok": True}}
     serving_model.save()
     CubeSchema.objects.create(
@@ -137,13 +139,16 @@ def test_a_capacity_refusal_leaves_a_serving_model_untouched(workspace, serving_
     serving_model.refresh_from_db()
     assert str(raised.value) == BUSY_MESSAGE
     assert serving_model.status == SemanticModel.Status.ACTIVE
-    assert serving_model.metadata == {"last_build": {"ok": True}}
+    last_build = serving_model.metadata["last_build"]
+    assert (last_build["ok"], last_build["status"]) == (False, "deferred")
+    assert last_build["reason"] == BUSY_MESSAGE
+    assert "error" not in last_build
     assert serving_model.diagnostics == []
     reported.assert_called_once()
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_capacity_refusal_does_not_flip_an_unserved_model_to_error(
+def test_a_capacity_refusal_defers_an_unserved_model_without_flipping_it_to_error(
     workspace, serving_model, reported
 ):
     with (
@@ -154,7 +159,7 @@ def test_a_capacity_refusal_does_not_flip_an_unserved_model_to_error(
 
     serving_model.refresh_from_db()
     assert serving_model.status == SemanticModel.Status.ACTIVE
-    assert "last_build" not in (serving_model.metadata or {})
+    assert serving_model.metadata["last_build"]["status"] == "deferred"
 
 
 @pytest.mark.django_db

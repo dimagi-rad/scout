@@ -184,6 +184,9 @@ def build_and_promote_cube_schema(
         if capacity is None:
             raise
         report_capacity_exhausted(capacity.resource, str(exc), exc_info=exc)
+        # Keeps the rebuild owed: a stale "ok" last_build would read as ready and
+        # the chat-time self-heal would never retry.
+        record_cube_schema_build_deferred(workspace, BUSY_MESSAGE)
         raise CapacityExhausted(capacity.resource, BUSY_MESSAGE) from exc
     finally:
         close_old_connections()
