@@ -315,7 +315,7 @@ def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str
             if entry["object_type"] == DATASET and entry.get("after") is None
         }
         removing = {entry["object_uuid"] for entry in entries if entry.get("before") is None}
-        refs = _References(model)
+        refs = _References(model, entries)
         conflicts = [
             conflict
             for entry in entries
@@ -587,10 +587,17 @@ class _References:
     The conflict pass writes nothing, so one read serves every entry. Hidden
     datasets and fields, and joins with a hidden endpoint, are skipped as in
     ``generate_cube_schema`` (and the commit gate), since they cannot break it.
+    Fields this revision edited are read as the undo will leave them (their
+    ``before`` SQL), so a reference the same undo reverts does not count.
     """
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, entries: list[dict[str, Any]]) -> None:
         self._model = model
+        self._reverted = {
+            entry["object_uuid"]: entry["before"]
+            for entry in entries
+            if entry["object_type"] == FIELD and entry.get("before") and entry.get("after")
+        }
 
     @cached_property
     def _visible_datasets(self) -> set[str]:
@@ -606,7 +613,13 @@ class _References:
             dataset__semantic_model=self._model, dataset__is_visible=True, is_visible=True
         ).select_related("dataset")
         for field in fields:
-            text = field_sql_text({**(field.metadata or {}), "expression": field.expression})
+            state = self._reverted.get(str(field.id)) or {
+                "metadata": field.metadata,
+                "expression": field.expression,
+            }
+            text = field_sql_text(
+                {**(state.get("metadata") or {}), "expression": state.get("expression")}
+            )
             rows.append((str(field.id), field.dataset.name, field.name, text))
         return rows
 

@@ -1265,3 +1265,55 @@ def test_undo_refuses_to_restore_a_measure_filter_naming_a_member_removed_since(
 
     assert refusal["code"] == "INVALID"
     assert "total_amount" in refusal["conflicts"][0]["message"]
+
+
+def test_undo_of_a_rename_that_updated_its_references_in_the_same_save_succeeds(
+    canvas, semantic_model, workspace, user
+):
+    _commit_total_and_a_measure_using_it(canvas, user, "{total_amount} / 2")
+    _commit(
+        canvas,
+        user,
+        [
+            RENAME_TOTAL,
+            {
+                "op": "set",
+                "target": "field/raw_visits.ratio/cube_sql",
+                "value": "{amount_total} / 2",
+            },
+        ],
+    )
+    both = SemanticModelRevision.objects.order_by("-created_at").first()
+
+    result = undo_revision(workspace, both.id, user)
+
+    assert "refused" not in result, result
+    fields = semantic_model.datasets.get(name="raw_visits").fields
+    assert fields.filter(name="total_amount").exists()
+    assert fields.get(name="ratio").metadata["cube_sql"] == "{total_amount} / 2"
+
+
+def test_undo_of_a_field_created_and_wired_in_the_same_save_succeeds(
+    canvas, semantic_model, workspace, user
+):
+    _commit_total_and_a_measure_using_it(canvas, user, "{total_amount} / 2")
+    _commit(
+        canvas,
+        user,
+        [
+            _measure_op("other_total", measure_type="sum", expression="amount"),
+            {
+                "op": "set",
+                "target": "field/raw_visits.ratio/cube_sql",
+                "value": "{other_total} / 2",
+            },
+        ],
+    )
+    wired = SemanticModelRevision.objects.order_by("-created_at").first()
+
+    result = undo_revision(workspace, wired.id, user)
+
+    assert "refused" not in result, result
+    fields = semantic_model.datasets.get(name="raw_visits").fields
+    assert not fields.filter(name="other_total").exists()
+    assert fields.get(name="ratio").metadata["cube_sql"] == "{total_amount} / 2"
