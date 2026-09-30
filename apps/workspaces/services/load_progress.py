@@ -15,7 +15,6 @@ from apps.workspaces.models import (
     WorkspaceTenant,
 )
 from apps.workspaces.services.load_activity import aunserved_tenant_ids
-from apps.workspaces.services.query_state import synced_runs
 
 
 def workspace_ids_in_progress(workspace_ids) -> set:
@@ -28,17 +27,6 @@ def workspace_ids_in_progress(workspace_ids) -> set:
         tenant_schema__tenant__workspace_tenants__workspace_id__in=wanted,
     ).values_list("tenant_schema__tenant__workspace_tenants__workspace_id", flat=True)
     return set(active) & wanted
-
-
-def last_synced_by_tenant(tenant_ids) -> dict:
-    """Newest synced completion time per tenant id (one query)."""
-    rows = (
-        synced_runs()
-        .filter(tenant_schema__tenant_id__in=list(tenant_ids))
-        .order_by("tenant_schema__tenant_id", "-completed_at")
-        .distinct("tenant_schema__tenant_id")
-    )
-    return dict(rows.values_list("tenant_schema__tenant_id", "completed_at"))
 
 
 def progress_payload(progress: dict | None) -> dict | None:
