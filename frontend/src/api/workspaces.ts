@@ -60,7 +60,7 @@ export interface SourceFreshnessDetail {
   name: string
   provider: string
   provider_label: string
-  // In what the workspace queries (a multi-source workspace needs its view).
+  // True when this source's data is part of what the workspace currently queries.
   serving: boolean
   last_fetched_at: string | null
   last_load: "refreshed" | "reused" | "skipped" | null

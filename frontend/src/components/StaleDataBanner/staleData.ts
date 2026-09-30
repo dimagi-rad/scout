@@ -7,7 +7,7 @@ export interface StaleData {
   ageLabel: string
   /** Named only when several sources serve, so the age is not read as everyone's. */
   oldestSourceName: string | null
-  /** Providers whose sign-in this viewer must renew before a refresh can fetch them. */
+  /** Providers of serving sources whose sign-in this viewer must renew before a refresh helps. */
   reconnectProviders: string[]
 }
 
@@ -37,10 +37,12 @@ export function staleData(
   const oldest = serving[times.indexOf(oldestTime)]
   const ageMs = now - oldestTime
   const thresholdHours = freshness.stale_data_banner_hours ?? DEFAULT_STALE_HOURS
+  // A non-positive threshold switches the banner off rather than showing it always.
+  if (thresholdHours <= 0) return null
   if (!(ageMs >= thresholdHours * HOUR_MS)) return null
   const reconnectProviders = [
     ...new Set(
-      freshness.sources
+      serving
         .filter((source) => source.reconnect)
         .map((source) => source.provider_label || source.provider),
     ),

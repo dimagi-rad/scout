@@ -44,8 +44,8 @@ async def _skipped_load(workspace, tenant, loader_id):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_exposes_the_threshold_setting(user, workspace, settings):
-    body = (await _get(user, workspace)).json()
-    assert body["stale_data_banner_hours"] == 24
+    settings.STALE_DATA_BANNER_HOURS = 24
+    assert (await _get(user, workspace)).json()["stale_data_banner_hours"] == 24
 
     settings.STALE_DATA_BANNER_HOURS = 6
     assert (await _get(user, workspace)).json()["stale_data_banner_hours"] == 6

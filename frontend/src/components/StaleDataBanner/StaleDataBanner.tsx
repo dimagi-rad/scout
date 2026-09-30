@@ -49,6 +49,10 @@ export function StaleDataBanner({ workspaceId, loading = false, onRefreshStarted
 
   const subject = stale.oldestSourceName ? `${stale.oldestSourceName}'s data` : "This data"
   const reconnect = stale.reconnectProviders
+  let callToAction = canWrite ? "Refresh it now?" : READ_ONLY_REFRESH_NOTE
+  if (reconnect.length > 0) {
+    callToAction = `Your ${reconnect.join(" and ")} sign-in expired, so a refresh can't fetch it.`
+  }
 
   return (
     <div className="px-4 pt-1 pb-2" data-testid="stale-data-banner">
@@ -59,11 +63,7 @@ export function StaleDataBanner({ workspaceId, loading = false, onRefreshStarted
         <Clock className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
         <p className="min-w-[12rem] flex-1" data-testid="stale-data-banner-message">
           {subject} was last refreshed {stale.ageLabel}.{" "}
-          {reconnect.length > 0
-            ? `Your ${reconnect.join(" and ")} sign-in expired, so a refresh can't fetch it.`
-            : canWrite
-              ? "Refresh it now?"
-              : READ_ONLY_REFRESH_NOTE}
+          {callToAction}
         </p>
         {refresh.failure && (
           <p

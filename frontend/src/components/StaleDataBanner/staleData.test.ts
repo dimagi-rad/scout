@@ -49,6 +49,12 @@ describe("staleData", () => {
     expect(staleData(freshness([source("a", 23)]), { now: NOW })).toBeNull()
   })
 
+  it("treats a non-positive threshold as off", () => {
+    expect(
+      staleData(freshness([source("a", 72)], { stale_data_banner_hours: 0 }), { now: NOW }),
+    ).toBeNull()
+  })
+
   it("judges by the oldest serving source and names it", () => {
     const f = freshness([source("a", 2), source("b", 30)])
     expect(staleData(f, { now: NOW })).toMatchObject({
@@ -85,5 +91,13 @@ describe("staleData", () => {
       source("c", 1, { provider: "ocs", provider_label: "Open Chat Studio" }),
     ])
     expect(staleData(f, { now: NOW })?.reconnectProviders).toEqual(["CommCare HQ"])
+  })
+
+  it("keeps Refresh when only a non-serving source needs a reconnect", () => {
+    const f = freshness([
+      source("a", 72),
+      source("b", null, { reconnect: true, provider: "ocs", provider_label: "Open Chat Studio" }),
+    ])
+    expect(staleData(f, { now: NOW })?.reconnectProviders).toEqual([])
   })
 })
