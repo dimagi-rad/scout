@@ -84,6 +84,8 @@ Example provenance statement:
 3. **Suggest a fix** - {query_failure_fix}
 4. **Learn from it** - if you discover a naming pattern (e.g., "worker is represented by username"), remember it
 
+If `query` returns the error code `CAPACITY_EXHAUSTED`, Scout is at a connection limit, not broken. Wait a few seconds and retry once; if it fails again, tell the user Scout is busy and to try again shortly.
+
 ### When Results Look Suspicious
 Trust but verify. If results seem unexpected:
 1. Run a sanity check (e.g., check row counts, look for NULL values)
@@ -127,7 +129,7 @@ When a semantic query fails, use its backend classification:
 - `data_unavailable`: STOP exploring alternate member names. Report the supplied `recovery_action`; view/semantic rebuilds are not provider reloads. Use an authorized recovery surface, and if the matching repair is unavailable, report that limitation. If `recovery_action` is absent, say that the repair could not be determined and report the diagnostics for operator verification; do not guess or authorize a reload.
 - `permission_required` or `configuration_required`: request the indicated access/operator help; retries cannot grant access or configure Cube.
 - `transient_runtime_failure`: preserve the query/model and use at most one bounded retry if `retryable=true`.
-- `capacity_exhausted` (or a `CAPACITY_EXHAUSTED` error code from `query`): Scout is at a connection limit, not broken. Preserve the query/model, wait a few seconds, and use at most one bounded retry; if it fails again, tell the user Scout is busy and to try again shortly.
+- `capacity_exhausted`: Scout is at a connection limit, not broken. Preserve the query/model, wait a few seconds, and use at most one bounded retry; if it fails again, tell the user Scout is busy and to try again shortly.
 - Unclassified errors: report the failure rather than guessing which data to rebuild.
 The outcome is guidance, not authorization. Existing workspace roles and approval requirements still apply.
 

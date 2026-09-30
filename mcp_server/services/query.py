@@ -21,7 +21,6 @@ from psycopg import sql as psql
 
 from apps.common.capacity import (
     BUSY_MESSAGE,
-    CapacityResource,
     classify_capacity_error,
     report_capacity_exhausted,
 )
@@ -127,12 +126,11 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
             ctx, sql_executed, (), ctx.max_query_timeout_seconds
         )
     except Exception as e:
+        capacity = classify_capacity_error(e)
+        if capacity is not None:
+            await sync_to_async(report_capacity_exhausted)(capacity.resource, str(e), exc_info=e)
+            return error_response(CAPACITY_EXHAUSTED, BUSY_MESSAGE)
         code, message = _classify_error(e)
-        if code == CAPACITY_EXHAUSTED:
-            await sync_to_async(report_capacity_exhausted)(
-                CapacityResource.DATABASE, str(e), exc_info=e
-            )
-            return error_response(code, message)
         logger.error("Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)
         return error_response(code, message)
 
@@ -151,9 +149,6 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
 
 def _classify_error(exc: Exception) -> tuple[str, str]:
     """Classify a database exception into an error code and user-safe message."""
-    if classify_capacity_error(exc) is not None:
-        return CAPACITY_EXHAUSTED, BUSY_MESSAGE
-
     if isinstance(exc, psycopg.errors.QueryCanceled):
         return QUERY_TIMEOUT, "Query timed out. Consider adding filters or limiting the data range."
 

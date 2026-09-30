@@ -49,6 +49,8 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from apps.common.capacity import CapacityResource
+
 logger = logging.getLogger(__name__)
 
 # Connection-param keys that identify the base DB (NOT the per-schema options).
@@ -65,6 +67,26 @@ _POOL_MAX_IDLE_SECONDS = 60.0
 _MAX_POOLS = 4
 _SLOT_WAIT_SECONDS = 30.0
 _SLOT_POLL_SECONDS = 0.05
+
+
+class ManagedPoolExhausted(PoolTimeout):
+    """Every connection in a managed-DB pool stayed checked out past the timeout."""
+
+    capacity_resource = CapacityResource.DATABASE
+
+
+class ManagedPool(AsyncConnectionPool):
+    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy".
+
+    Only a checkout timeout is tagged: ``open()`` also raises ``PoolTimeout`` when
+    the database is down or refusing auth, which retrying would not fix.
+    """
+
+    async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
+        try:
+            return await super().getconn(timeout)
+        except PoolTimeout as exc:
+            raise ManagedPoolExhausted(str(exc)) from exc
 
 
 @dataclass
@@ -182,7 +204,7 @@ async def _get_or_open_pool(
 
 
 async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
-    pool = AsyncConnectionPool(
+    pool = ManagedPool(
         conninfo=_base_conninfo(params),
         min_size=_POOL_MIN_SIZE,
         max_size=_POOL_MAX_SIZE,

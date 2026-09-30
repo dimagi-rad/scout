@@ -765,7 +765,7 @@ def _summarize_error(exc: BaseException) -> str:
     - **The agent.** ``_aggregate_materialization_state`` copies it to
       ``detail["error"]``, which ``resume_thread_after_materialization``
       interpolates into the prompt as ``"Per-tenant: {summary}"``.
-    - **The end user.** ``_compose_failure_summary`` embeds it in
+    - **The end user.** ``compose_failure_summary`` embeds it in
       ``ThreadJob.error_summary``, which ``jobs/active/`` returns under
       ``recent_terminations`` and ``MaterializationFailure.tsx`` renders.
 

@@ -6,6 +6,7 @@ import pytest
 
 from apps.common.capacity import BUSY_MESSAGE, CapacityResource
 from mcp_server.context import QueryContext
+from mcp_server.services.pool import ManagedPoolExhausted
 from mcp_server.services.query import (
     _classify_error,
     _execute_async_parameterized,
@@ -151,39 +152,43 @@ class TestRoleErrorClassification:
 
 
 class TestCapacityClassification:
-    @pytest.mark.parametrize(
-        "exc",
-        [
-            psycopg.errors.TooManyConnections("sorry, too many clients already"),
-            psycopg.OperationalError("FATAL: remaining connection slots are reserved"),
-        ],
-    )
-    def test_connection_limit_is_capacity_exhausted(self, exc):
-        code, message = _classify_error(exc)
-        assert code == "CAPACITY_EXHAUSTED"
-        assert message == BUSY_MESSAGE
-
-    def test_other_connection_errors_unchanged(self):
-        code, message = _classify_error(psycopg.OperationalError("could not connect to server"))
-        assert code == "CONNECTION_ERROR"
-        assert "Could not connect" in message
-
-    @pytest.mark.asyncio
-    async def test_execute_query_returns_busy_envelope_and_reports(self):
+    @staticmethod
+    async def _run_failing_query(exc):
         ctx = QueryContext(
             tenant_id="t",
             schema_name="t",
             connection_params={"host": "localhost"},
         )
-        exc = psycopg.errors.TooManyConnections("sorry, too many clients already")
         with (
             patch("mcp_server.services.query._execute_async_parameterized", side_effect=exc),
             patch("mcp_server.services.query.report_capacity_exhausted") as report,
         ):
             result = await execute_query(ctx, "SELECT 1")
+        return result, report
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            psycopg.errors.TooManyConnections("sorry, too many clients already"),
+            psycopg.OperationalError("FATAL: remaining connection slots are reserved"),
+            ManagedPoolExhausted("couldn't get a connection after 30.00 sec"),
+        ],
+    )
+    async def test_connection_limit_yields_busy_envelope_and_alert(self, exc):
+        result, report = await self._run_failing_query(exc)
 
         assert result["success"] is False
         assert result["error"]["code"] == "CAPACITY_EXHAUSTED"
         assert result["error"]["message"] == BUSY_MESSAGE
         report.assert_called_once()
         assert report.call_args.args[0] == CapacityResource.DATABASE
+
+    @pytest.mark.asyncio
+    async def test_other_connection_errors_unchanged(self):
+        result, report = await self._run_failing_query(
+            psycopg.OperationalError("could not connect to server")
+        )
+
+        assert result["error"]["code"] == "CONNECTION_ERROR"
+        report.assert_not_called()

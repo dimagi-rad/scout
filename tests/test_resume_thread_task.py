@@ -1210,7 +1210,7 @@ async def test_resume_partial_run_sets_threadjob_error_summary():
     # ThreadJob.error_summary -> jobs/active/ recent_terminations ->
     # MaterializationFailure.tsx. Pinned for the same reason as the prompt hop
     # above (#388 review). NOTE: only the FIRST failed source's message survives;
-    # additional ones collapse to bare names in _compose_failure_summary.
+    # additional ones collapse to bare names in compose_failure_summary.
     assert "Connect 500" in tj.error_summary
 
 
