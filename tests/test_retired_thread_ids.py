@@ -23,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from psycopg.conninfo import make_conninfo
 
+from apps.agents.tools.canvas_tool import create_canvas_read_tool
 from apps.chat.checkpointer import thread_has_checkpoint
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
@@ -289,28 +290,25 @@ async def test_patch_on_another_users_thread_id_is_not_found():
 
 @pytest.mark.django_db
 def test_thread_has_checkpoint_is_false_without_checkpoint_tables():
+    # The test's transaction rolls this DDL back.
+    with connection.cursor() as cursor:
+        for table in CHECKPOINT_TABLES:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+
     assert thread_has_checkpoint(uuid.uuid4()) is False
 
 
-def test_canvas_does_not_create_a_thread_over_a_deleted_threads_checkpoints(
-    checkpoint_tables, client, workspace, user
-):
-    thread_id = str(uuid.uuid4())
-    with PostgresSaver.from_conn_string(checkpoint_tables) as saver:
-        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-        _stub_agent(saver).invoke(
-            {
-                "messages": [HumanMessage(content="old private question")],
-                "workspace_id": str(workspace.id),
-                "user_id": str(user.id),
-                "thread_id": thread_id,
-            },
-            config,
-        )
-    assert thread_has_checkpoint(thread_id) is True
+def test_thread_has_checkpoint_is_false_for_an_id_without_state(checkpoint_tables):
+    assert thread_has_checkpoint(uuid.uuid4()) is False
 
-    client.force_login(user)
-    response = client.get(f"/api/workspaces/{workspace.id}/threads/{thread_id}/canvas/")
 
-    assert response.status_code == 404
-    assert not Thread.objects.filter(id=thread_id).exists()
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_canvas_tool_does_not_recreate_a_deleted_thread(workspace, user):
+    conversation_id = str(uuid.uuid4())
+    tool = create_canvas_read_tool(workspace, user, conversation_id)
+
+    result = await tool.ainvoke({"selector": "graph"})
+
+    assert "no longer exists" in result
+    assert not await Thread.objects.filter(id=conversation_id).aexists()

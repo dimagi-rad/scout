@@ -52,10 +52,11 @@ def can_write_canvas(workspace, user) -> bool:
 
 def _resolve_canvas_sync(workspace, user, conversation_id: str):
     close_old_connections()
-    thread, _created = Thread.objects.get_or_create(
-        id=conversation_id,
-        defaults={"workspace": workspace, "user": user},
-    )
+    # Never create the row here: chat_view creates it before the turn starts, and a
+    # missing row means the thread was deleted, whose checkpoints must not be adopted.
+    thread = Thread.objects.filter(id=conversation_id).first()
+    if thread is None:
+        raise SemanticCatalogUnavailable("This conversation no longer exists.")
     if thread.workspace_id != workspace.id:
         raise SemanticCatalogUnavailable("This conversation belongs to another workspace.")
     return resolve_thread_canvas(workspace, thread, user)
