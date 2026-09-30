@@ -1436,7 +1436,7 @@ explicit confirmation of that specific deletion first; the commit or undo is
 refused until then. Ask, naming what will be deleted and the
 artifacts that use it, and end your turn. Only when the user's next message
 says yes, tell `canvas_manager` which objects they confirmed; a confirmation
-is accepted only in the user turn right after the question. A chart request
+is accepted only in a user turn after the question, within a few turns. A chart request
 or a general "go ahead" is not confirmation of a deletion.
 """)
     elif interactive:

@@ -50,6 +50,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 READ_SELECTORS = {"graph", "diff", "diagnostics", "all"}
+# How many later user turns may carry the answer to a deletion question.
+CONFIRMATION_WINDOW_TURNS = 3
 
 FORBIDDEN_ERROR = {
     "op_index": 0,
@@ -200,27 +202,30 @@ def _gate_deletions(
 ) -> dict[str, Any] | None:
     """Refuse unconfirmed deletions; None lets the write run.
 
-    A label in ``confirmed_deletions`` counts only in the user turn right after
-    the one where the agent was told to ask, so it cannot ask and confirm in one
-    turn or lean on a stale question. That the user said yes still rests on the
-    agent's reading of the reply.
+    A label in ``confirmed_deletions`` counts only in one of the few user turns
+    after the one where the agent was told to ask, so it cannot ask and confirm
+    in one turn or lean on a stale question. That the user said yes still rests
+    on the agent's reading of the reply.
     """
     pending = dict(canvas.pending_confirmations or {})
     confirmed = set(confirmed_deletions or [])
 
-    def accepted(label: str) -> bool:
+    def asked_recently(label: str) -> bool:
         asked_at = pending.get(label)
         return (
-            label in confirmed
-            and isinstance(asked_at, int)
+            isinstance(asked_at, int)
             and human_turn is not None
-            and asked_at == human_turn - 1
+            and human_turn - CONFIRMATION_WINDOW_TURNS <= asked_at <= human_turn
         )
+
+    def accepted(label: str) -> bool:
+        return label in confirmed and asked_recently(label) and pending[label] < human_turn
 
     unconfirmed = [deletion for deletion in deletions if not accepted(deletion["object"])]
     if unconfirmed:
-        for deletion in unconfirmed:
-            if human_turn is not None:
+        for deletion in deletions:
+            # Re-stamping a live question would void the answer the user is about to give.
+            if human_turn is not None and not asked_recently(deletion["object"]):
                 pending[deletion["object"]] = human_turn
         canvas.pending_confirmations = pending
         canvas.save(update_fields=["pending_confirmations", "updated_at"])

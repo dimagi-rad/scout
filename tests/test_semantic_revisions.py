@@ -673,3 +673,60 @@ async def test_a_confirmation_survives_a_commit_that_writes_nothing(
     assert not await SemanticDataset.objects.filter(name="visit_stats").aexists()
     canvas_row = await SemanticCanvas.objects.aget(thread_id=thread.id)
     assert "dataset/visit_stats" not in canvas_row.pending_confirmations
+
+
+async def _stage_visit_stats_delete(workspace, user, thread):
+    tools = _tools(workspace, user, thread)
+    await tools["canvas_apply"].ainvoke(
+        {
+            "operations": [
+                {
+                    "op": "create",
+                    "object_type": "custom_dataset",
+                    "value": {
+                        "name": "visit_stats",
+                        "primary_key": "username",
+                        "definition_sql": "select username from raw_visits",
+                    },
+                }
+            ]
+        }
+    )
+    assert (await tools["canvas_commit"].ainvoke({}))["committed"]
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [{"op": "delete_object", "object": "dataset/visit_stats"}]}
+    )
+    assert (await tools["canvas_commit"].ainvoke({}))["confirmation_required"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unconfirmed_retry_does_not_void_the_users_answer(
+    workspace, user, semantic_model, custom_sql
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await _stage_visit_stats_delete(workspace, user, thread)
+    next_turn = _tools(workspace, user, thread, human_turn=2)
+
+    assert (await next_turn["canvas_commit"].ainvoke({}))["confirmation_required"]
+    confirmed = await next_turn["canvas_commit"].ainvoke(
+        {"confirmed_deletions": ["dataset/visit_stats"]}
+    )
+
+    assert confirmed["committed"][0]["change_type"] == "delete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_confirmation_counts_a_few_turns_later_but_not_long_after(
+    workspace, user, semantic_model, custom_sql
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await _stage_visit_stats_delete(workspace, user, thread)
+    confirmed = {"confirmed_deletions": ["dataset/visit_stats"]}
+
+    stale = await _tools(workspace, user, thread, human_turn=5)["canvas_commit"].ainvoke(confirmed)
+    assert stale["confirmation_required"]
+
+    later = await _tools(workspace, user, thread, human_turn=7)["canvas_commit"].ainvoke(confirmed)
+    assert later["committed"][0]["change_type"] == "delete"
