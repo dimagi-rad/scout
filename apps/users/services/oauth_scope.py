@@ -3,6 +3,7 @@
 from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
 
+from apps.common.commcare_servers import server_for_provider
 from apps.users.providers.ocs.provider import team_slug_from_uid
 
 
@@ -65,7 +66,17 @@ def provider_accounts(user_id, provider):
 
 
 def account_scope(account) -> str:
-    if account is None or canonical_provider(account.provider) != "ocs":
+    """The scope an identity's token can reach: an OCS team, or a CommCare HQ server.
+
+    A CommCare token only works on the server that issued it, so www and EU
+    identities bind to separate connections exactly as two OCS teams do (#719).
+    """
+    if account is None:
+        return ""
+    provider = canonical_provider(account.provider)
+    if provider == "commcare":
+        return server_for_provider(account.provider)
+    if provider != "ocs":
         return ""
     # The qualified UID is allauth's identity key; prefer it over mutable claims.
     return (

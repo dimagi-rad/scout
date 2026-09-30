@@ -49,10 +49,10 @@ class TenantContext:
     max_query_timeout_seconds: int = 30
 
 
-async def load_tenant_context(tenant_id: str, provider: str) -> QueryContext:
+async def load_tenant_context(tenant_id: str, provider: str, server: str = "") -> QueryContext:
     """Load a QueryContext for a tenant from the managed database.
 
-    Uses ``(provider, external_id)`` — the tenant's full identity — to find the
+    Uses ``(provider, server, external_id)`` — the tenant's full identity — to find the
     TenantSchema and builds a QueryContext pointing at the managed DB with the
     tenant's schema. ``provider`` is required (arch #235): external_id alone is
     ambiguous, since a Connect opp and an OCS experiment can share an id and
@@ -64,6 +64,7 @@ async def load_tenant_context(tenant_id: str, provider: str) -> QueryContext:
     ts = await TenantSchema.objects.filter(
         tenant__external_id=tenant_id,
         tenant__provider=provider,
+        tenant__server=server,
         state=SchemaState.ACTIVE,
     ).afirst()
 
@@ -115,7 +116,7 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
 
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()
-        return await load_tenant_context(tenant.external_id, tenant.provider)
+        return await load_tenant_context(tenant.external_id, tenant.provider, tenant.server)
 
     try:
         vs = await WorkspaceViewSchema.objects.aget(

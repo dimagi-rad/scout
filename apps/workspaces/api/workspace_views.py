@@ -27,6 +27,7 @@ from apps.common.errors import (
 from apps.common.http import string_field
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
+from apps.users.services.oauth_scope import account_scope
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -152,17 +153,19 @@ async def _arenewed_access_tokens(user, provider, deadline) -> tuple[list[tuple]
     provider refused to renew it. A token that cannot be renewed and that admission
     counts as expired sets ``needs_sign_in`` even while it is still used.
     """
-    token_url = get_token_url(provider)
     now = timezone.now()
     pairs, failed, needs_sign_in = [], False, False
     for token in await aiter_social_tokens(user, provider):
+        # Per identity: a user's www and EU CommCare grants refresh at different servers.
+        scope_key = account_scope(token.account)
+        token_url = get_token_url(provider, scope_key)
         stored = (token.account, token.token) if _usable_as_is(token, now) else None
         can_refresh = bool(token_url and token.token_secret and token.app)
         if not can_refresh or not token_needs_refresh(token.expires_at):
             if stored:
                 pairs.append(stored)
             # Still used while it lists anything, but admission will refuse it anyway.
-            if not stored or oauth_token_counts_as_expired(token, provider):
+            if not stored or oauth_token_counts_as_expired(token, provider, scope_key):
                 needs_sign_in = True
             continue
         if asyncio.get_running_loop().time() >= deadline:

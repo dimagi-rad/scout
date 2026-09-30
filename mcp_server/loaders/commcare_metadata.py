@@ -8,8 +8,6 @@ from mcp_server.loaders.commcare_base import CommCareBaseLoader
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://www.commcarehq.org"
-
 
 class CommCareMetadataLoader(CommCareBaseLoader):
     """Discovers tenant metadata from CommCare HQ Application API.
@@ -45,7 +43,7 @@ class CommCareMetadataLoader(CommCareBaseLoader):
         }
 
     def _fetch_apps(self) -> list[dict]:
-        initial_url = f"{_BASE_URL}/a/{self.domain}/api/v0.5/application/"
+        initial_url = f"{self.base_url}/a/{self.domain}/api/v0.5/application/"
         url: str | None = initial_url
         params: dict = {"limit": 100}
         apps: list[dict] = []

@@ -4,13 +4,13 @@ from django.test import override_settings
 
 from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 from apps.users.providers.commcare_connect.views import CommCareConnectOAuth2Adapter
-from apps.users.services.token_refresh import PROVIDER_TOKEN_URLS, get_token_url
+from apps.users.services.token_refresh import get_token_url
 
 
 class TestProviderTokenUrls:
     def test_commcare_token_url_matches_adapter(self):
         adapter_url = CommCareOAuth2Adapter.access_token_url
-        refresh_url = PROVIDER_TOKEN_URLS["commcare"]
+        refresh_url = get_token_url("commcare")
         assert adapter_url == refresh_url, (
             f"CommCare token URL mismatch: Adapter={adapter_url}, Refresh={refresh_url}"
         )

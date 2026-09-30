@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 from django.conf import settings as django_settings
 
+from apps.common.commcare_servers import COMMCARE_SERVERS
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantConnection
 from apps.users.services.access_verification_types import (
@@ -63,7 +64,10 @@ def _provider_request(snapshot, settings):
     credential_type = snapshot.observation.credential_type
     credential = snapshot.credential
     if provider == "commcare":
-        url = "https://www.commcarehq.org/api/user_domains/v1/"
+        server = COMMCARE_SERVERS.get(snapshot.observation.scope_key)
+        if server is None:
+            return None
+        url = server.user_domains_url
         if credential_type == TenantConnection.OAUTH:
             headers = {"Authorization": f"Bearer {credential}"}
         elif credential_type == TenantConnection.API_KEY:

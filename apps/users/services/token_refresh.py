@@ -32,6 +32,7 @@ from django.db import connection as django_connection
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.common.commcare_servers import COMMCARE_SERVERS
 from apps.common.db_deadline import preserve_transaction_timeouts
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import TokenRefreshError, UpstreamRefreshFailed, UpstreamTokenExpired
@@ -62,19 +63,21 @@ def _connect_token_url() -> str:
     return f"{settings.CONNECT_API_URL.rstrip('/')}/o/token/"
 
 
-PROVIDER_TOKEN_URLS = {
-    "commcare": "https://www.commcarehq.org/oauth/token/",
-}
+def get_token_url(provider: str, scope_key: str = "") -> str | None:
+    """Return the OAuth token endpoint for a provider, or None if unknown.
 
-
-def get_token_url(provider: str) -> str | None:
-    """Return the OAuth token endpoint for a provider, or None if unknown."""
+    ``scope_key`` matters for CommCare only: it names the HQ server (``""`` = www)
+    whose token endpoint issued the credential, since EU grants are unknown to www.
+    """
     provider = canonical_provider(provider)
     if provider == "ocs":
         return _ocs_token_url()
     if provider == "commcare_connect":
         return _connect_token_url()
-    return PROVIDER_TOKEN_URLS.get(provider)
+    if provider == "commcare":
+        server = COMMCARE_SERVERS.get(scope_key)
+        return server.token_url if server else None
+    return None
 
 
 class TokenRefreshUnavailable(TokenRefreshError, UpstreamRefreshFailed):
@@ -259,11 +262,15 @@ def credential_fingerprint(token) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def token_health(token, provider, *, refresh_failed=False) -> str:
-    """User-action status, independent of the proactive refresh buffer."""
+def token_health(token, provider, *, scope_key="", refresh_failed=False) -> str:
+    """User-action status, independent of the proactive refresh buffer.
+
+    ``scope_key`` must be the credential's own scope, so a CommCare server the
+    registry no longer knows reads as unrenewable here as it does at resolution.
+    """
     if refresh_failed:
         return "expired"
-    token_url = get_token_url(provider)
+    token_url = get_token_url(provider, scope_key)
     if token_url and token.token_secret and token.app:
         return "connected"
     if token.expires_at is not None:

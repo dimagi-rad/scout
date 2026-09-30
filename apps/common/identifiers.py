@@ -88,22 +88,29 @@ def fit_identifier(
     return f"{head}{tail}"
 
 
-def tenant_schema_name(provider: str, external_id: str) -> str:
-    """Mint the schema name for a tenant, unique per ``(provider, external_id)``.
+def _identity_key(provider: str, external_id: str, server: str) -> str:
+    # The default server is left out so every name minted before #719 is unchanged.
+    if server:
+        return f"{provider}\x00{server}\x00{external_id}"
+    return f"{provider}\x00{external_id}"
 
-    Always carries the identity digest, so a cross-provider duplicate external_id
-    or a punctuation/length collision can never route one tenant into another's
-    physical schema.
+
+def tenant_schema_name(provider: str, external_id: str, server: str = "") -> str:
+    """Mint the schema name for a tenant, unique per ``(provider, server, external_id)``.
+
+    Always carries the identity digest, so a cross-provider duplicate external_id,
+    the same CommCare domain on two HQ servers, or a punctuation/length collision
+    can never route one tenant into another's physical schema.
     """
     return fit_identifier(
         external_id,
-        unique_key=f"{provider}\x00{external_id}",
+        unique_key=_identity_key(provider, external_id, server),
         max_bytes=_SCHEMA_NAME_MAX_BYTES,
         always_hash=True,
     )
 
 
-def refresh_schema_name(provider: str, external_id: str, *, token: str) -> str:
+def refresh_schema_name(provider: str, external_id: str, *, token: str, server: str = "") -> str:
     """Mint a unique schema name for one background refresh of a tenant.
 
     ``token`` (a short random hex string from the caller) makes the name unique
@@ -113,7 +120,7 @@ def refresh_schema_name(provider: str, external_id: str, *, token: str) -> str:
     return fit_identifier(
         external_id,
         suffix=f"_r{token}",
-        unique_key=f"{provider}\x00{external_id}",
+        unique_key=_identity_key(provider, external_id, server),
         always_hash=True,
     )
 

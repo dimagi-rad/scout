@@ -317,7 +317,7 @@ class SchemaManager:
             ts = resurrectable
             created = False
         else:
-            schema_name = tenant_schema_name(tenant.provider, tenant.external_id)
+            schema_name = tenant_schema_name(tenant.provider, tenant.external_id, tenant.server)
             created = True
             try:
                 ts = TenantSchema.objects.create(
@@ -414,7 +414,7 @@ class SchemaManager:
         Procrastinate task (refresh_tenant_schema) to run the materialization.
         """
         schema_name = refresh_schema_name(
-            tenant.provider, tenant.external_id, token=uuid.uuid4().hex[:8]
+            tenant.provider, tenant.external_id, token=uuid.uuid4().hex[:8], server=tenant.server
         )
         return TenantSchema.objects.create(
             tenant=tenant,

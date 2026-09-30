@@ -46,6 +46,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 # module that is in neither list nor excluded there, or when a module the raw
 # load reaches sits in the transform list.
 _RAW_LOAD_PATHS = (
+    "apps/common/commcare_servers.py",
     "mcp_server/services/materializer.py",
     "mcp_server/event_time.py",
     "mcp_server/loaders",

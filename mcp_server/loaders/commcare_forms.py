@@ -12,11 +12,10 @@ import logging
 from collections.abc import Iterator
 from typing import Any
 
+from apps.common.commcare_servers import DEFAULT_SERVER
 from mcp_server.loaders.commcare_base import CommCareBaseLoader, CommCareExportError
 
 logger = logging.getLogger(__name__)
-
-_BASE_URL = "https://www.commcarehq.org"
 
 
 class CommCareFormLoader(CommCareBaseLoader):
@@ -31,8 +30,14 @@ class CommCareFormLoader(CommCareBaseLoader):
         case_ids (list of case IDs touched by this form)
     """
 
-    def __init__(self, domain: str, credential: dict[str, str], page_size: int = 1000) -> None:
-        super().__init__(domain=domain, credential=credential)
+    def __init__(
+        self,
+        domain: str,
+        credential: dict[str, str],
+        page_size: int = 1000,
+        server: str = DEFAULT_SERVER,
+    ) -> None:
+        super().__init__(domain=domain, credential=credential, server=server)
         self.page_size = min(page_size, 1000)
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
@@ -41,7 +46,7 @@ class CommCareFormLoader(CommCareBaseLoader):
         ``total_count`` is read from the first response's ``meta.total_count``;
         subsequent pages yield ``None``.
         """
-        initial_url = f"{_BASE_URL}/a/{self.domain}/api/v0.5/form/"
+        initial_url = f"{self.base_url}/a/{self.domain}/api/v0.5/form/"
         url: str | None = initial_url
         params: dict = {"limit": self.page_size}
         total_loaded = 0
