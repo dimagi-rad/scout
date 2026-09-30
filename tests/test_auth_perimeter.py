@@ -18,14 +18,25 @@ import pytest
 from allauth.core.context import request_context
 from allauth.socialaccount.helpers import complete_social_login
 from allauth.socialaccount.models import SocialAccount, SocialLogin
+from allauth.urls import build_provider_urlpatterns
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.messages.middleware import MessageMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import Client
-from django.urls import NoReverseMatch, Resolver404, resolve, reverse
+from django.urls import NoReverseMatch, Resolver404, URLResolver, resolve, reverse
 
+from apps.users.allauth_urls import _provider_urlpatterns
 from apps.users.models import User
+
+
+def _routes(patterns, prefix=""):
+    for pattern in patterns:
+        if isinstance(pattern, URLResolver):
+            yield from _routes(pattern.url_patterns, prefix + str(pattern.pattern))
+        else:
+            yield (prefix + str(pattern.pattern), pattern.name)
+
 
 # --- 13#9: dangerous allauth HTML routes are no longer mounted ------------- #
 
@@ -103,6 +114,10 @@ class TestSpaOauthRoutesPreserved:
         """The exact path the SPA anchors to (commcare/login/) must resolve."""
         match = resolve("/accounts/commcare/login/")
         assert match is not None
+
+    def test_gated_provider_routes_match_allauths(self):
+        """The gated builder forks allauth's; an upgrade that changes the routes must fail here."""
+        assert list(_routes(_provider_urlpatterns())) == list(_routes(build_provider_urlpatterns()))
 
     def test_account_login_name_still_reverses(self):
         """The adapter redirects to account_login on allowlist rejection;
