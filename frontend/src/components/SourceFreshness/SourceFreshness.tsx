@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react"
-import { workspaceApi, type WorkspaceSourceFreshness } from "@/api/workspaces"
+import { useWorkspaceDetail } from "@/hooks/useWorkspaceDetail"
 import { formatRelativeTime } from "@/lib/relativeTime"
 
 interface Props {
@@ -10,32 +9,10 @@ interface Props {
 
 /**
  * One "Data as of" line per source, so a stale source is not hidden by a fresh one.
- * Mount with `key={workspaceId}`: a load blocks the refetch, which would otherwise
- * leave the previous workspace's lines up under the new one.
+ * Mount with `key={workspaceId}` (see useWorkspaceDetail).
  */
 export function SourceFreshness({ workspaceId, loading = false }: Props) {
-  const [sources, setSources] = useState<WorkspaceSourceFreshness[]>([])
-  const mountedRef = useRef(true)
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-    }
-  }, [])
-
-  // A load starting mid-fetch must not discard the response already on its way.
-  useEffect(() => {
-    if (loading) return
-    workspaceApi
-      .getDetail(workspaceId)
-      .then((detail) => {
-        if (mountedRef.current) setSources(detail.sources ?? [])
-      })
-      .catch(() => {
-        // Freshness is informational; the chat works without it.
-      })
-  }, [workspaceId, loading])
+  const sources = useWorkspaceDetail(workspaceId, loading)?.sources ?? []
 
   if (sources.length === 0) return null
 
