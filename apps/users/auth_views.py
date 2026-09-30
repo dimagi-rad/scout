@@ -13,6 +13,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
+from apps.common.commcare_servers import server_for_provider
 from apps.common.http import parse_json_object, string_field
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
@@ -28,6 +29,7 @@ from apps.users.services.oauth_scope import (
     is_active_identity,
     ocs_scope_unusable,
     provider_accounts,
+    scope_account_ids,
 )
 from apps.users.services.onboarding_cache import ME_ONBOARDING_TTL, me_onboarding_cache_key
 from apps.users.services.tenant_resolution import (
@@ -220,6 +222,29 @@ def disconnect_provider_view(request, provider_id):
     tokens = tokens | SocialToken.objects.filter(
         account__user=request.user, account__provider__in=configured_ids
     )
+    oauth_conns = TenantConnection.objects.filter(
+        user=request.user,
+        provider=provider,
+        credential_type=TenantConnection.OAUTH,
+    )
+    if provider == "commcare":
+        # Each HQ server is its own sign-in: disconnecting EU must leave www connected.
+        # www may be configured under an alias id (hq_production) that only the
+        # union above finds, so www keeps it and drops the other servers' identities.
+        server = server_for_provider(provider_id)
+        if server:
+            tokens = SocialToken.objects.filter(
+                account_id__in=scope_account_ids(request.user.pk, provider, server)
+            )
+        else:
+            tokens = tokens.exclude(
+                account_id__in=[
+                    account.pk
+                    for account in provider_accounts(request.user.pk, provider)
+                    if account_scope(account)
+                ]
+            )
+        oauth_conns = oauth_conns.filter(scope_key=server)
     if not tokens.exists():
         return JsonResponse({"error": "No active connection to disconnect"}, status=404)
 
@@ -227,11 +252,6 @@ def disconnect_provider_view(request, provider_id):
 
     # Remove the provider's OAuth connection and archive the chatbots it served
     # (their conversations/data are retained and restored if reconnected).
-    oauth_conns = TenantConnection.objects.filter(
-        user=request.user,
-        provider=provider,
-        credential_type=TenantConnection.OAUTH,
-    )
     TenantMembership.objects.filter(connection__in=oauth_conns).update(
         archived_at=timezone.now(), connection=None
     )

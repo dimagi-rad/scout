@@ -36,14 +36,26 @@ Scout is configured via environment variables, typically set in a `.env` file in
 
 ### Authentication
 
-OAuth client IDs and secrets live in allauth social application records. `manage.py setup_oauth_apps` creates or updates them from `COMMCARE_OAUTH_*`, `CONNECT_OAUTH_*`, `OCS_OAUTH_*`, `GOOGLE_OAUTH_*` and `GITHUB_OAUTH_*` `CLIENT_ID`/`CLIENT_SECRET` pairs. When `DEPLOY_ENVIRONMENT=staging` it reads Connect's from `STAGING_CONNECT_OAUTH_*` instead. You can also manage them in Django admin.
+OAuth client IDs and secrets live in allauth social application records. `manage.py setup_oauth_apps` creates or updates them from `COMMCARE_OAUTH_*`, `COMMCARE_EU_OAUTH_*`, `CONNECT_OAUTH_*`, `OCS_OAUTH_*`, `GOOGLE_OAUTH_*` and `GITHUB_OAUTH_*` `CLIENT_ID`/`CLIENT_SECRET` pairs. When `DEPLOY_ENVIRONMENT=staging` it reads Connect's from `STAGING_CONNECT_OAUTH_*` instead. You can also manage them in Django admin.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS` | `{"commcare": ["dimagi.com"]}` | JSON map of OAuth provider ID to allowed email domains. Providers not listed are unrestricted. A provider with a list rejects other domains and logins with no email. |
+| `COMMCARE_EU_OAUTH_CLIENT_ID`, `COMMCARE_EU_OAUTH_CLIENT_SECRET` | empty | OAuth application registered on CommCare HQ's EU server (`eu.commcarehq.org`). While either is empty, `setup_oauth_apps` skips the `commcare_eu` provider and EU sign-in is not offered. EU domains can still be connected with an API key. See [CommCare HQ on EU](#commcare-hq-on-eu). |
+| `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS` | `{"commcare": ["dimagi.com"]}` | JSON map of OAuth provider ID to allowed email domains. A provider not listed inherits its canonical provider's entry, so `commcare_eu` follows `commcare` unless it has its own. Providers with neither are unrestricted. A provider with a list rejects other domains and logins with no email. |
 | `ACCOUNT_DEFAULT_HTTP_PROTOCOL` | `http` | Protocol allauth uses for OAuth callback URLs. Set `https` behind TLS. |
 | `CONNECT_API_URL` | `https://connect-staging.dimagi.com` when `DEPLOY_ENVIRONMENT=staging`, otherwise `https://connect.dimagi.com` | CommCare Connect API and OAuth host. |
 | `OCS_URL` | `https://www.openchatstudio.com` | Open Chat Studio API and OAuth host. |
+
+### CommCare HQ on EU
+
+CommCare HQ runs a separate EU deployment at `eu.commcarehq.org`, with its own accounts, project spaces and OAuth applications. Scout records each CommCare data source's server, and a credential is only ever sent to the server it came from.
+
+- **API keys** work with no configuration. When adding a CommCare API key, pick "EU (eu.commcarehq.org)" as the server.
+- **OAuth sign-in** needs its own application on EU HQ:
+  1. On `eu.commcarehq.org`, register an OAuth2 application the same way as the www one: a confidential client with the authorization-code grant. Registering applications needs HQ admin access, so ask the HQ team if you don't have it.
+  2. Add one redirect URI per Scout host, for example `https://<scout-host>/accounts/commcare_eu/login/callback/`. Add staging and `http://localhost:8000/accounts/commcare_eu/login/callback/` if you want to use them.
+  3. Set `COMMCARE_EU_OAUTH_CLIENT_ID` and `COMMCARE_EU_OAUTH_CLIENT_SECRET` in the API container's environment and run `manage.py setup_oauth_apps` (the API entrypoint runs it on start).
+  4. "CommCare HQ (EU)" then appears on the Connections page and in the onboarding wizard. Sign-in requests the same `access_apis` scope as www.
 
 ### Cache
 
