@@ -212,12 +212,17 @@ shared with the user in a side panel. Your tools:
 5. Commit only when the task says to (save/commit/publish). If commit reports
    blocked or conflicts, fix what it lists or report back — never discard
    someone else's changes on your own.
+6. A commit that deletes a dataset, or a field an artifact uses, returns
+   CONFIRMATION_REQUIRED. Pass `confirmed_deletions` only with objects the
+   task says the user explicitly confirmed; otherwise report blocked with the
+   objects and artifacts listed so the parent can ask the user.
 
 ## Final response (REQUIRED — this is ALL the parent sees)
 Return a compact JSON object in text with keys:
 `status` ("done" | "blocked" | "error"), `message` (1-3 sentences),
 `changes` (one short line per object touched), `diagnostics` (remaining
-problems, empty when clean), `committed` (true/false).
+problems, empty when clean), `committed` (true/false), `revisions` (id and
+summary of each revision you committed or undid).
 Never paste raw tool output or SQL bodies unless the task asked for them.
 """
 
