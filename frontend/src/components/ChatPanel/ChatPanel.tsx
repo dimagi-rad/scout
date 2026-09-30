@@ -294,10 +294,12 @@ export function ChatPanel() {
     const wasRunning = prev === "streaming" || prev === "submitted"
     // "error" counts only for a busy 503; a hard failure after an overload part must
     // keep its error notice, not be silently re-posted.
-    if (!wasRunning) return
+    // submitted -> streaming is mid-run; acting on it would drop a busy part that
+    // arrived before the first streaming render.
+    if (!wasRunning || (status !== "ready" && status !== "error")) return
     // Any finished run releases this thread's "retrying" slot, hard errors included.
     busyTracker.settle(busyToken)
-    if (status !== "ready" && !(status === "error" && busyError)) {
+    if (status === "error" && !busyError) {
       busyHitRef.current = null
       return
     }

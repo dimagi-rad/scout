@@ -46,6 +46,25 @@ function busyStreamResponse() {
   })
 }
 
+/** The busy part lands, the UI renders "streaming", and only later does the run finish. */
+function busyThenSlowFinishResponse() {
+  return createUIMessageStreamResponse({
+    stream: createUIMessageStream({
+      execute: async ({ writer }) => {
+        // In one chunk with the first part, so onData runs before "streaming" renders.
+        writer.write({
+          type: "data-chat-status",
+          data: { kind: "retryable-error", reason: "busy", retryAfter: 5 },
+          transient: true,
+        })
+        writer.write({ type: "start", messageId: crypto.randomUUID() })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        writer.write({ type: "finish", finishReason: "stop" })
+      },
+    }),
+  })
+}
+
 function replyResponse() {
   return createUIMessageStreamResponse({
     stream: createUIMessageStream({
@@ -226,5 +245,19 @@ describe("a busy turn whose retry then fails hard", () => {
     expect(api.chatPosts).toHaveLength(2)
     expect(busyTracker.getSnapshot().retrying).toBe(0)
     consoleError.mockRestore()
+  })
+})
+
+describe("a busy stream part followed by a slow finish", () => {
+  it("still retries once and then offers the busy notice", async () => {
+    const api = mockChat(busyThenSlowFinishResponse)
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await waitFor(() => expect(api.messageLoads).toHaveLength(1))
+    await act(async () => {})
+
+    await send("How many visits last week?")
+
+    await screen.findByTestId("chat-busy-notice", {}, { timeout: 3000 })
+    expect(api.chatPosts).toHaveLength(2)
   })
 })
