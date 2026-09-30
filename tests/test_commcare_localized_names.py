@@ -65,15 +65,10 @@ def test_localized_case_type_generates_a_model(tenant):
     assert asset.description == "Staging model for Patient cases"
 
 
-def test_duplicate_forms_with_localized_app_name_stay_unique(tenant):
+def test_localized_and_plain_duplicate_form_names_are_disambiguated(tenant):
     forms = {
-        f"urn:synthetic:{index}": {
-            "name": "Registration",
-            "app_name": {"en": "Maternal App"},
-            "app_id": "synthetic-app",
-            "questions": [],
-        }
-        for index in range(2)
+        f"urn:synthetic:{index}": {"name": name, "questions": []}
+        for index, name in enumerate([{"en": "Registration"}, "Registration"])
     }
     names = [a.name for a in generate_system_assets(tenant, {"form_definitions": forms})]
     assert len(set(names)) == 2

@@ -48,7 +48,7 @@ def test_fallback_identity_is_stable_and_distinct_for_each_form(tenant):
 
 
 @pytest.mark.parametrize("app_name", ['">  ', "日本語"])
-def test_duplicate_forms_with_non_slugifiable_app_label_stay_unique(tenant, app_name):
+def test_non_slugifiable_app_labels_never_reach_duplicate_form_names(tenant, app_name):
     forms = {
         f"urn:synthetic:{index}": {
             "name": "Registration",

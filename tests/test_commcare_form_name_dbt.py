@@ -106,19 +106,23 @@ def test_duplicate_forms_build_under_stable_fitted_names(monkeypatch):
         models = set(built)
         with conn.cursor() as cursor:
             assert models <= _relations(cursor, name)
-            for model in models:
+            # Long repeat names lose their __repeat_ marker to the 63-byte fit.
+            forms = {model for model, sql in built.items() if "FROM raw_forms" in sql}
+            assert len(forms) == len(XMLNS)
+            for model in forms:
                 cursor.execute(
-                    psycopg.sql.SQL("SELECT count(*) FROM {}").format(
+                    psycopg.sql.SQL("SELECT DISTINCT xmlns FROM {}").format(
                         psycopg.sql.Identifier(name, model)
                     )
                 )
-                # Each form model reads exactly its own xmlns; repeats unnest 1..3 items.
-                assert cursor.fetchone()[0] in {1, 2, 3}
+                ((xmlns,),) = cursor.fetchall()
+                assert built[model].endswith(f"WHERE xmlns = '{xmlns}'")
 
             # Postgres would silently truncate an overlong view name; creating each
             # fitted name and reading it back proves none collapsed.
             prefix = manager._view_prefix(tenant)
             views = {view_name(prefix, model): model for model in models}
+            assert len(views) == len(models)
             cursor.execute(
                 psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(view_schema))
             )
