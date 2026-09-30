@@ -61,6 +61,10 @@ WORKER_DB_DEADLINE = 30.0
 #: failed write is worth a couple of quick retries before the user must reconnect (#758).
 SPENT_GRANT_PERSIST_RETRY_DELAYS = (0.1, 0.5)
 
+#: Persists whose caller was cancelled. The event loop holds tasks only weakly, so without
+#: this a detached write could be collected before it stores the rotated credential.
+_DETACHED_PERSISTS: set[asyncio.Task] = set()
+
 
 def _ocs_token_url() -> str:
     return f"{settings.OCS_URL.rstrip('/')}/o/token/"
@@ -804,6 +808,14 @@ async def _arecord_refresh_failure(
         raise TokenRefreshUnavailable("Failed to persist OAuth refresh failure.") from exc
 
 
+def _settle_detached_persist(task: asyncio.Task) -> None:
+    _DETACHED_PERSISTS.discard(task)
+    if not task.cancelled():
+        # Already logged (and the marker written) inside; retrieved so asyncio does not
+        # report it as never retrieved.
+        task.exception()
+
+
 def _retry_pause(attempt: int, deadline, clock) -> float | None:
     """The pause before persist attempt ``attempt + 1``, or None when there is none.
 
@@ -1031,8 +1043,9 @@ async def refresh_oauth_token_result(
 
     refreshed = _validate_refresh_response(response, preflight)
     # Shielded: past this point the provider may have rotated the grant, so a caller's
-    # timeout must not cancel the write (or the retry and marker) and lose it.
-    result = await asyncio.shield(
+    # timeout must not cancel the write (or the retry and marker) and lose it. Not
+    # drained on cancellation, which would hold the caller past its own timeout.
+    persist = asyncio.ensure_future(
         _apersist_with_retry(
             social_token,
             preflight,
@@ -1044,6 +1057,9 @@ async def refresh_oauth_token_result(
             record_failure=record_failure,
         )
     )
+    _DETACHED_PERSISTS.add(persist)
+    persist.add_done_callback(_settle_detached_persist)
+    result = await asyncio.shield(persist)
     _apply_persisted_snapshot(social_token, result.snapshot)
     if result.status is TokenRefreshStatus.SUPERSEDED:
         logger.warning(

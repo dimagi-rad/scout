@@ -10,6 +10,7 @@ the reconnect marker on the connection, and the severity of what was logged.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 from datetime import timedelta
 from unittest import mock
@@ -428,6 +429,45 @@ async def test_cancelling_the_caller_mid_retry_still_stores_the_rotated_credenti
     await asyncio.wait_for(stored.wait(), timeout=5)
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert (persisted.token, persisted.token_secret) == ("new-access", "new-refresh")
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_a_detached_persist_that_fails_still_marks_and_leaves_nothing_unretrieved(
+    oauth_identity, httpx_mock, monkeypatch
+):
+    token, connection = oauth_identity
+    monkeypatch.setattr(token_refresh, "SPENT_GRANT_PERSIST_RETRY_DELAYS", (0.2, 0.0))
+    _register_provider("async", _status(200, ROTATED), httpx_mock, None)
+    failed = asyncio.Event()
+
+    async def persist(*args, **kwargs):
+        failed.set()
+        raise DatabaseError("persist failed")
+
+    monkeypatch.setattr(token_refresh, "_apersist_refresh_response", persist)
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        task = asyncio.ensure_future(refresh_oauth_token_result(token, URL))
+        await asyncio.wait_for(failed.wait(), timeout=5)
+        (detached,) = token_refresh._DETACHED_PERSISTS
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait({detached}, timeout=5)
+        await asyncio.sleep(0)
+        del task, detached
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert not token_refresh._DETACHED_PERSISTS
+    assert unhandled == []
+    assert await _marker_recorded(connection) is True
 
 
 @pytest.mark.parametrize(
