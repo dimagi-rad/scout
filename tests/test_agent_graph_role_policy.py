@@ -258,9 +258,7 @@ async def test_only_writers_may_save_dataset_changes_without_approval(
 
     assert ("do NOT ask the user to approve each change" in prompt) is writer
     assert ("undo it from Data model history" in prompt) is writer
-    assert ("needs the user's explicit confirmation of that specific deletion" in prompt) is (
-        writer
-    )
+    assert ("needs the user's explicit confirmation of that specific change" in prompt) is (writer)
     assert ("a read-write workspace role is required" in prompt) is not writer
     assert "explicit permission before saving it" not in prompt
 
