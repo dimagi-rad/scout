@@ -12,6 +12,7 @@ from sqlglot.errors import OptimizeError
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlglot.optimizer.scope import traverse_scope
 
+from apps.common.capacity import classify_capacity_error
 from mcp_server.context import load_workspace_context
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
@@ -127,4 +128,9 @@ def infer_custom_dataset_columns(workspace, compiled_sql: str) -> list[dict[str,
     except CustomDatasetError:
         raise
     except Exception as exc:
+        # A refused connection says nothing about the SQL; recording it as a
+        # validation error would hide a healthy dataset until the next rebuild.
+        capacity = classify_capacity_error(exc)
+        if capacity is not None:
+            raise capacity from exc
         raise CustomDatasetError(f"Custom dataset SQL failed validation: {exc}") from exc

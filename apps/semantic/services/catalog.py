@@ -9,6 +9,7 @@ from typing import Any
 from asgiref.sync import async_to_sync
 from django.db import transaction
 
+from apps.common.capacity import classify_capacity_error
 from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import view_name
 from apps.knowledge.models import TableKnowledge
@@ -375,6 +376,11 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
             code=ErrorCode.SCHEMA_BUILD_FAILED,
         ) from exc
     except Exception as exc:
+        capacity = classify_capacity_error(exc)
+        if capacity is not None:
+            # Retryable, not a data problem: "refresh workspace data" would send the
+            # user to re-materialize because the DB merely refused a connection.
+            raise capacity from exc
         schema_status = workspace_schema_statuses([workspace.id])[workspace.id]
         if schema_status == "available":
             # Serving by its schema rows, yet its tables could not be read.
