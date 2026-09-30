@@ -76,6 +76,19 @@ class TestConfiguration:
         ids = [p["id"] for p in Client().get("/api/auth/providers/").json()["providers"]]
         assert ids == ["commcare"]
 
+    @pytest.mark.parametrize(
+        "path", ["/accounts/commcare_eu/login/", "/accounts/commcare_eu/login/callback/"]
+    )
+    def test_eu_routes_404_when_unconfigured(self, site, path):
+        # SCOUT-DJANGO-3W: a crawler's bare GET to the callback raised
+        # SocialApp.DoesNotExist, a 500, in prod where EU is not configured.
+        _app(site, "commcare", "CommCare HQ")
+        assert Client().get(path).status_code == 404
+
+    def test_eu_login_route_serves_once_configured(self, site):
+        _app(site, "commcare_eu", "CommCare HQ (EU)")
+        assert Client().get("/accounts/commcare_eu/login/").status_code == 200
+
     def test_eu_is_offered_once_configured(self, site):
         _app(site, "commcare", "CommCare HQ")
         _app(site, "commcare_eu", "CommCare HQ (EU)")
