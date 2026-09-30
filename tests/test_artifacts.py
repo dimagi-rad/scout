@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -17,7 +18,7 @@ from django.test import AsyncClient, Client
 
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.artifacts.services.export import ArtifactExporter
-from apps.artifacts.views import SANDBOX_HTML_TEMPLATE
+from apps.artifacts.views import SANDBOX_FLAGS, SANDBOX_HTML_TEMPLATE
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
@@ -533,6 +534,32 @@ class TestArtifactSandboxView:
         assert "https://cdn.jsdelivr.net" in csp
         assert "connect-src https://cdn.jsdelivr.net;" in csp
         assert "img-src data: blob:" in csp
+
+    def test_sandbox_csp_isolates_direct_navigation(
+        self, authenticated_client, artifact, workspace
+    ):
+        """The sandbox is opaque-origin by its own CSP, not only via the iframe attribute."""
+        response = authenticated_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
+        )
+
+        directives = {
+            d.strip().split(" ", 1)[0]: d.strip()
+            for d in response["Content-Security-Policy"].split(";")
+            if d.strip()
+        }
+        assert directives["sandbox"] == "sandbox allow-scripts allow-modals"
+        assert "allow-same-origin" not in response["Content-Security-Policy"]
+        assert directives["frame-ancestors"] == "frame-ancestors 'self'"
+        assert response["X-Frame-Options"] == "SAMEORIGIN"
+
+    def test_sandbox_flags_match_iframe_attribute(self):
+        """The CSP flags and the in-app iframe's sandbox attribute must not drift."""
+        canvas = (
+            Path(__file__).resolve().parent.parent
+            / "frontend/src/components/ArtifactViewer/ArtifactCanvas.tsx"
+        ).read_text()
+        assert f'sandbox="{SANDBOX_FLAGS}"' in canvas
 
 
 # ============================================================================
