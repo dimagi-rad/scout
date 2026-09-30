@@ -228,20 +228,6 @@ failed, and the whole import rolls back on a database error.
 | GET | `…/jobs/active/` | read | The workspace's active background jobs. |
 | POST | `…/jobs/<thread_job_id>/cancel/` | read_write | Cancel a background job. |
 
-## Transformations
-
-`/api/transformations/` is a DRF router over the user's tenant and workspace
-transformation assets and runs:
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET, POST | `/api/transformations/assets/` | List or create assets. |
-| GET, PUT, PATCH, DELETE | `/api/transformations/assets/<id>/` | One asset. System assets are read-only. |
-| GET | `/api/transformations/assets/<id>/lineage/` | The asset's lineage chain. |
-| GET | `/api/transformations/runs/` | Run history. Accepts `tenant_id`. |
-| GET | `/api/transformations/runs/<id>/` | One run. |
-| POST | `/api/transformations/runs/trigger/` | Run the pipeline for `tenant_id` (and optional `workspace_id`) synchronously. |
-
 ## Other endpoints
 
 | Method | Path | Description |

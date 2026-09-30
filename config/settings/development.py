@@ -2,6 +2,8 @@
 Django development settings for Scout data agent platform.
 """
 
+from apps.common.db_urls import build_pg_url
+
 from .base import *
 
 DEBUG = True
@@ -22,13 +24,13 @@ EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 # Default the managed DB to the app DB in dev (schema isolation still applies)
 if not MANAGED_DATABASE_URL:
     _db = DATABASES["default"]
-    _user = _db.get("USER", "postgres")
-    _password = _db.get("PASSWORD", "")
-    _host = _db.get("HOST", "localhost")
-    _port = _db.get("PORT", 5432)
-    _name = _db.get("NAME", "scout")
-    _cred = f"{_user}:{_password}@" if _password else f"{_user}@"
-    MANAGED_DATABASE_URL = f"postgresql://{_cred}{_host}:{_port}/{_name}"
+    MANAGED_DATABASE_URL = build_pg_url(
+        host=_db.get("HOST", "localhost"),
+        port=_db.get("PORT", 5432),
+        dbname=_db.get("NAME", "scout"),
+        user=_db.get("USER", "postgres"),
+        password=_db.get("PASSWORD", ""),
+    )
 
 # Allow local Connect Labs to embed Scout
 EMBED_ALLOWED_ORIGINS = ["http://localhost:8001", "http://localhost:8010", "http://localhost:3000"]

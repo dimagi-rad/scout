@@ -15,6 +15,7 @@ from apps.semantic.services import query as query_service
 from apps.semantic.services import query_outcomes
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.query import run_semantic_query
+from apps.semantic.services.query_readiness import QuerySurfaceReadiness
 
 
 @pytest.mark.asyncio
@@ -57,18 +58,15 @@ from apps.semantic.services.query import run_semantic_query
         ({"status": "ready", "queryable": True, "recovery_action": None}, "invalid_query", None),
     ],
 )
-async def test_query_uses_artifact_readiness_authority(monkeypatch, surface, category, action):
-    inspect = AsyncMock(return_value=surface)
-    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+async def test_query_uses_shared_readiness_authority(monkeypatch, surface, category, action):
+    inspect = AsyncMock(return_value=QuerySurfaceReadiness(surface))
+    monkeypatch.setattr(query_outcomes, "query_surface_readiness", inspect)
     workspace = SimpleNamespace(id="workspace")
     query = {"measures": ["visits.count"]}
     result = await query_outcomes.query_readiness_error(
         workspace, query, "VALIDATION_ERROR", "Failed", category="invalid_query"
     )
-    subject = inspect.await_args.args[0]
-    assert subject.workspace is workspace
-    assert subject.semantic_queries == [query]
-    assert subject.id is None
+    assert inspect.await_args.args == (workspace, [query])
     assert result["error"]["category"] == category
     assert result["error"]["recovery_action"] == action
     assert result["error"]["retryable"] is False
@@ -77,7 +75,9 @@ async def test_query_uses_artifact_readiness_authority(monkeypatch, surface, cat
 @pytest.mark.asyncio
 async def test_readiness_failure_does_not_guess_a_repair(monkeypatch):
     monkeypatch.setattr(
-        query_outcomes, "artifact_query_surface", AsyncMock(side_effect=RuntimeError("Unavailable"))
+        query_outcomes,
+        "query_surface_readiness",
+        AsyncMock(side_effect=RuntimeError("Unavailable")),
     )
     result = await query_outcomes.query_readiness_error(
         SimpleNamespace(id="workspace"),
@@ -134,12 +134,12 @@ async def test_cube_rejection_checks_serving_readiness_without_inventing_model_g
     monkeypatch.setattr(query_service, "build_cube_security_context", lambda *args, **kwargs: {})
     execute = AsyncMock(side_effect=query_service.CubeQueryError("Member not found: visits.count"))
     monkeypatch.setattr(query_service, "CubeClient", lambda: SimpleNamespace(execute_query=execute))
-    inspect = AsyncMock(return_value=surface)
-    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    inspect = AsyncMock(return_value=QuerySurfaceReadiness(surface))
+    monkeypatch.setattr(query_outcomes, "query_surface_readiness", inspect)
     result = await run_semantic_query(workspace, query)
     execute.assert_awaited_once()
     inspect.assert_awaited_once()
-    assert inspect.await_args.args[0].semantic_queries == [query]
+    assert inspect.await_args.args == (workspace, [query])
     assert result["error"]["category"] == category
     assert result["error"]["recovery_action"] == action
     assert result["error"]["retryable"] is False
@@ -244,8 +244,10 @@ async def test_batch_drift_cannot_turn_a_catalog_outage_into_a_model_edit(monkey
         "apps.semantic.services.query._compile_semantic_query_for_async",
         unavailable,
     )
-    inspect = AsyncMock(return_value={"status": "model_drift", "queryable": False})
-    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    inspect = AsyncMock(
+        return_value=QuerySurfaceReadiness({"status": "model_drift", "queryable": False})
+    )
+    monkeypatch.setattr(query_outcomes, "query_surface_readiness", inspect)
     artifact = SimpleNamespace(
         workspace_id="workspace",
         data={
@@ -376,7 +378,7 @@ def test_failed_write_never_exposes_a_soft_deleted_candidate(status, artifact_id
 @pytest.mark.asyncio
 async def test_failed_readiness_inspection_is_cached_and_logged_once(monkeypatch, caplog):
     inspect = AsyncMock(side_effect=RuntimeError("Unavailable"))
-    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    monkeypatch.setattr(query_outcomes, "query_surface_readiness", inspect)
     workspace = SimpleNamespace(id="workspace")
     readiness = query_outcomes.QueryReadiness(workspace, [{}])
     results = await asyncio.gather(
@@ -403,13 +405,15 @@ async def test_failed_readiness_inspection_is_cached_and_logged_once(monkeypatch
 @pytest.mark.asyncio
 async def test_batch_readiness_is_inspected_once_and_not_shared_between_requests(monkeypatch):
     inspect = AsyncMock(
-        return_value={
-            "status": "needs_materialization",
-            "queryable": False,
-            "recovery_action": "materialization",
-        }
+        return_value=QuerySurfaceReadiness(
+            {
+                "status": "needs_materialization",
+                "queryable": False,
+                "recovery_action": "materialization",
+            }
+        )
     )
-    monkeypatch.setattr(query_outcomes, "artifact_query_surface", inspect)
+    monkeypatch.setattr(query_outcomes, "query_surface_readiness", inspect)
     workspace = SimpleNamespace(id="workspace")
     queries = [{"measures": ["visits.count"]}, {"measures": ["forms.count"]}]
     readiness = query_outcomes.QueryReadiness(workspace, queries)
@@ -427,7 +431,7 @@ async def test_batch_readiness_is_inspected_once_and_not_shared_between_requests
         ]
     )
     inspect.assert_awaited_once()
-    assert inspect.await_args.args[0].semantic_queries == queries
+    assert inspect.await_args.args == (workspace, queries)
     await query_outcomes.QueryReadiness(workspace, queries).surface()
     assert inspect.await_count == 2
 

@@ -84,6 +84,39 @@ describe("ConnectionsPage", () => {
     expect(screen.getByTestId("disconnect-ocs")).toBeTruthy()
   })
 
+  it("marks a CommCare connection on the EU server", async () => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(
+        path === "/api/auth/providers/"
+          ? { providers: [] }
+          : [
+              {
+                connection_id: "eu1",
+                provider: "commcare",
+                credential_type: "api_key",
+                scope_key: "eu",
+                scope_label: "EU",
+                status: null,
+                chatbots: [],
+              },
+              {
+                connection_id: "www1",
+                provider: "commcare",
+                credential_type: "api_key",
+                scope_key: "",
+                scope_label: "",
+                status: null,
+                chatbots: [],
+              },
+            ],
+      ),
+    )
+    render(<ConnectionsPage />)
+
+    expect((await screen.findByTestId("connection-team-eu1")).textContent).toBe("CommCare HQ (EU)")
+    expect(screen.getByTestId("connection-team-www1").textContent).toBe("commcare")
+  })
+
   describe("filtering", () => {
     const chatbot = (id: string, name: string) => ({
       membership_id: id,

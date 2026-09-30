@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { BASE_PATH } from "@/config"
 import { oauthConnectUrl, type OAuthProvider } from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
@@ -16,8 +16,25 @@ interface MembershipResult {
   tenant_name: string
 }
 
+interface ServerOption {
+  value: string
+  label: string
+}
+
+interface ApiKeyProviderSchema {
+  id: string
+  fields: { key: string; options?: ServerOption[] }[]
+}
+
 export function OnboardingWizard() {
   const [step, setStep] = useState<Step>("choose")
+  const [server, setServer] = useState("")
+  const [serverOptions, setServerOptions] = useState<ServerOption[]>([])
+  const [serverOptionsState, setServerOptionsState] = useState<
+    "idle" | "loading" | "loaded" | "failed"
+  >("idle")
+  const [serverAttempt, setServerAttempt] = useState(0)
+  const serverOptionsLoaded = useRef(false)
   const [domain, setDomain] = useState("")
   const [username, setUsername] = useState("")
   const [apiKey, setApiKey] = useState("")
@@ -49,6 +66,37 @@ export function OnboardingWizard() {
     void loadProviders()
   }, [loadProviders])
 
+  // The server list comes from the API-key schema so it cannot drift from the backend.
+  const loadServerOptions = useCallback(async (isCurrent: () => boolean) => {
+    setServerOptionsState("loading")
+    try {
+      const schemas = await api.get<ApiKeyProviderSchema[]>("/api/auth/api-key-providers/")
+      if (!isCurrent()) return
+      const commcare = schemas.find((s) => s.id === "commcare")
+      const options = commcare?.fields.find((f) => f.key === "server")?.options ?? []
+      setServerOptions(options)
+      // Submit what the user sees: the shown default is the first option.
+      if (options.length) setServer(options[0].value)
+      setServerOptionsState("loaded")
+      serverOptionsLoaded.current = true
+    } catch (err) {
+      if (!isCurrent()) return
+      console.error("Failed to load CommCare HQ servers", err)
+      setServerOptionsState("failed")
+    }
+  }, [])
+
+  // Fetched once per wizard; a failure is shown with a retry rather than silently
+  // leaving the key to be checked on www.
+  useEffect(() => {
+    if (step !== "api-key" || serverOptionsLoaded.current) return
+    let current = true
+    void loadServerOptions(() => current)
+    return () => {
+      current = false
+    }
+  }, [step, serverAttempt, loadServerOptions])
+
   async function handleApiKeySubmit(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
@@ -57,6 +105,7 @@ export function OnboardingWizard() {
       await api.post<{ memberships: MembershipResult[] }>("/api/auth/connections/", {
         provider: "commcare",
         fields: {
+          server,
           domain,
           username,
           api_key: apiKey,
@@ -84,6 +133,40 @@ export function OnboardingWizard() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleApiKeySubmit} className="space-y-4">
+              {serverOptionsState === "failed" && (
+                <div className="space-y-1" data-testid="onboarding-server-error">
+                  <p className="text-sm text-destructive">
+                    Couldn&apos;t load the CommCare HQ servers, so the key will be checked on
+                    Global (www.commcarehq.org).
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setServerAttempt((n) => n + 1)}
+                  >
+                    Try again
+                  </Button>
+                </div>
+              )}
+              {serverOptions.length > 1 && (
+                <div className="space-y-2">
+                  <Label htmlFor="server">CommCare HQ server</Label>
+                  <select
+                    id="server"
+                    data-testid="onboarding-server"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={server}
+                    onChange={(e) => setServer(e.target.value)}
+                  >
+                    {serverOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label htmlFor="domain">CommCare Domain</Label>
                 <Input
@@ -128,7 +211,12 @@ export function OnboardingWizard() {
                 >
                   Back
                 </Button>
-                <Button type="submit" className="flex-1" disabled={loading}>
+                <Button
+                  type="submit"
+                  className="flex-1"
+                  // Submitting before the server list arrives would check the key on www.
+                  disabled={loading || serverOptionsState === "loading"}
+                >
                   {loading ? "Connecting..." : "Connect"}
                 </Button>
               </div>

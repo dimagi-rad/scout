@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple, TypedDict
+from typing import NamedTuple, NotRequired, TypedDict
+
+from apps.common.commcare_servers import DEFAULT_SERVER
 
 
 class TenantDescriptor(NamedTuple):
@@ -12,14 +14,20 @@ class TenantDescriptor(NamedTuple):
     canonical_name: str
 
 
+class FieldOption(TypedDict):
+    value: str
+    label: str
+
+
 class FormField(TypedDict):
     """A field in the Add/Edit dialog form schema."""
 
     key: str
     label: str
-    type: str  # "text" | "password"
+    type: str  # "text" | "password" | "select"
     required: bool
     editable_on_rotate: bool
+    options: NotRequired[list[FieldOption]]  # "select" only; the first is the default
 
 
 class CredentialVerificationError(Exception):
@@ -36,6 +44,19 @@ class CredentialProviderStrategy:
     provider_id: str = ""
     display_name: str = ""
     form_fields: list[FormField] = []
+
+    @classmethod
+    def server_for(cls, fields: dict[str, str]) -> str:
+        """The provider deployment the credential belongs to; stored as the tenant's server.
+
+        Raises CredentialVerificationError for a deployment the provider does not have.
+        """
+        return DEFAULT_SERVER
+
+    @classmethod
+    def server_label(cls, server: str) -> str:
+        """How the UI names ``server``; empty for the default deployment."""
+        return ""
 
     @classmethod
     def pack_credential(cls, fields: dict[str, str]) -> str:

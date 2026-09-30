@@ -49,6 +49,8 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from apps.common.capacity import CapacityResource, classify_capacity_error
+
 logger = logging.getLogger(__name__)
 
 # Connection-param keys that identify the base DB (NOT the per-schema options).
@@ -65,6 +67,48 @@ _POOL_MAX_IDLE_SECONDS = 60.0
 _MAX_POOLS = 4
 _SLOT_WAIT_SECONDS = 30.0
 _SLOT_POLL_SECONDS = 0.05
+
+
+class ManagedPoolExhausted(PoolTimeout):
+    """Every connection in a managed-DB pool stayed checked out past the timeout."""
+
+    capacity_resource = CapacityResource.DATABASE
+
+
+class ManagedPool(AsyncConnectionPool):
+    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy".
+
+    A checkout timeout is capacity when the pool is at ``max_size`` (every slot
+    held by a slow query) or when the last connect attempt was refused for lack
+    of server slots. The libpq FATAL is raised on the pool's background worker,
+    never to the caller, so ``_connect`` records it. A timeout on a pool that has
+    room but cannot fill it for any other reason means the database is
+    unreachable, which retrying would not fix. ``open()`` timeouts are not tagged
+    for the same reason.
+    """
+
+    _last_connect_error: BaseException | None = None
+
+    async def _connect(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
+        try:
+            conn = await super()._connect(timeout)
+        except BaseException as exc:
+            self._last_connect_error = exc
+            raise
+        self._last_connect_error = None
+        return conn
+
+    async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
+        try:
+            conn = await super().getconn(timeout)
+        except PoolTimeout as exc:
+            last = self._last_connect_error
+            full = self.get_stats().get("pool_size", 0) >= self.max_size
+            if full or (last is not None and classify_capacity_error(last) is not None):
+                raise ManagedPoolExhausted(str(exc)) from exc
+            raise
+        self._last_connect_error = None
+        return conn
 
 
 @dataclass
@@ -182,7 +226,7 @@ async def _get_or_open_pool(
 
 
 async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
-    pool = AsyncConnectionPool(
+    pool = ManagedPool(
         conninfo=_base_conninfo(params),
         min_size=_POOL_MIN_SIZE,
         max_size=_POOL_MAX_SIZE,
@@ -191,7 +235,7 @@ async def _open_pool(params: dict[str, Any]) -> AsyncConnectionPool:
         # check keeps the pool from handing out a connection that died
         # underneath it (RDS restart / idle timeout) — the long-lived-process
         # analogue of the worker's connection hygiene (arch #253, 08#0).
-        check=AsyncConnectionPool.check_connection,
+        check=ManagedPool.check_connection,
         kwargs={"autocommit": True, "prepare_threshold": 0},
     )
     try:

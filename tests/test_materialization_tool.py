@@ -5,10 +5,10 @@ import pytest
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.common.error_codes import ErrorCode
 from apps.workspaces.access import tool_write_denied
+from apps.workspaces.services.failure_guidance import credential_guidance
 from apps.workspaces.tasks import (
     _CREDENTIAL_GUIDANCE,
     _ROLE_DENIED_MESSAGE,
-    _credential_guidance,
     _summary_failures,
 )
 
@@ -112,7 +112,7 @@ async def test_headless_tool_renders_lost_tenant_denial_with_its_guidance(
             "error": "No tenant memberships found",
             "tenants": failures,
             "all_succeeded": False,
-            "guidance": _credential_guidance(_summary_failures(failures)),
+            "guidance": credential_guidance(_summary_failures(failures)),
         }
 
     monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _denied_after_wait)
@@ -144,7 +144,7 @@ async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, us
                 },
             ],
             "view_schema": {"ok": True, "error": None},
-            "guidance": _credential_guidance(
+            "guidance": credential_guidance(
                 _summary_failures(
                     [
                         {

@@ -254,6 +254,8 @@ The transformation authoring editor (CodeMirror-based) provides:
 
 ### 10\. Product surfacing and phasing
 
+> The HTTP API for transformation assets (the management and authoring surface below) was removed 2026-09-30 in #760: no UI or other caller was ever built and no user-authored assets existed; system-scope assets and the pipeline are unchanged. Re-introducing custom assets would need the central authorizer, SQL/Jinja validation and a non-privileged DB role.
+
 Phase the work:
 
 1. **Backend architecture** Provider contract, CommCare staging models (dynamic generation from metadata), `apps/transformations/` Django app with `TransformationAsset`/`TransformationRun`/`TransformationAssetRun`, three-stage dbt execution, lineage exposure via `get_lineage` MCP tool, agent context engineering for terminal model preference  
