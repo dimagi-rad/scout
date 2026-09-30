@@ -12,8 +12,13 @@ from apps.workspaces.models import WorkspaceDataRecovery
 
 async def artifact_query_surface(artifact) -> dict[str, Any]:
     readiness = await query_surface_readiness(artifact.workspace, artifact.semantic_queries)
-    surface = readiness.surface
-    if not (readiness.complete and surface["queryable"] and artifact.id is not None):
+    surface, model = readiness.surface, readiness.model
+    if not (
+        readiness.complete
+        and model is not None
+        and surface["queryable"]
+        and artifact.id is not None
+    ):
         return surface
     previous = (
         await WorkspaceDataRecovery.objects.filter(
@@ -32,7 +37,7 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
         # A failed dispatch/provider attempt may never reach the Cube build
         # recorder. Only a later verified build, not catalog updated_at,
         # proves that this old failure has been repaired by another session.
-        last_build = (readiness.model.metadata or {}).get("last_build") or {}
+        last_build = (model.metadata or {}).get("last_build") or {}
         verified_at = parse_datetime(str(last_build.get("at") or ""))
         repaired = (
             last_build.get("ok") is True

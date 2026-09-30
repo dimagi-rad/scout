@@ -35,7 +35,10 @@ from apps.workspaces.services.view_sources import ViewSourcesError, parse_view_s
 
 @dataclass(frozen=True)
 class QuerySurfaceReadiness:
-    """``complete`` is False when an early verdict skipped the remaining checks."""
+    """``complete`` is False when an early verdict skipped the remaining checks.
+
+    ``model`` is set whenever ``complete`` is True.
+    """
 
     surface: dict[str, Any]
     model: SemanticModel | None = None
