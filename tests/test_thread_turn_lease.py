@@ -281,6 +281,23 @@ class TestChatTurn:
         assert resp.status_code == 500
         assert (await _lease_row(thread.id))["turn_lease_token"] is None
 
+    async def test_a_turn_that_loses_the_thread_while_starting_is_told_it_is_busy(self):
+        ws, thread, client = await _chat_member("chat-lost")
+
+        async def lose_the_thread_then_stall(*_args, **_kwargs):
+            await _expire(thread.id)
+            await atry_acquire_turn_lease(thread.id)
+            await asyncio.sleep(5)
+
+        with (
+            _agent_layer(build_agent=AsyncMock(side_effect=lose_the_thread_then_stall)),
+            patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05),
+        ):
+            resp = await _post_chat(client, ws, thread)
+
+        assert resp.status_code == 409
+        assert resp.json()["reason"] == "thread_busy"
+
     async def test_a_lapsed_lease_does_not_block_the_user(self):
         ws, thread, client = await _chat_member("chat-stale")
         await atry_acquire_turn_lease(thread.id)

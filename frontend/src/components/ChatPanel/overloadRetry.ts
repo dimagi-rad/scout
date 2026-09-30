@@ -51,7 +51,11 @@ export function busyRetryAfter(part: { type?: string; data?: unknown }): number 
   return typeof data.retryAfter === "number" ? data.retryAfter : null
 }
 
-/** True for a chat POST answered with the busy 503; useChat's error message is the raw body. */
+/**
+ * True for a chat POST answered with the busy 503; useChat's error message is the raw body.
+ * Deliberately ignores the status: a thread another run holds answers 409 with the
+ * same body (apps/chat/views.py) and must take the same back-off-and-resend path.
+ */
 export function isBusyChatError(error: Error): boolean {
   try {
     return isBusyBody(JSON.parse(error.message))

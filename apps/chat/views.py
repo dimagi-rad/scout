@@ -7,6 +7,7 @@ does not support async streaming responses.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import logging
@@ -240,6 +241,14 @@ async def chat_view(request):
                 thread_id=thread_id,
                 user_content=user_content,
             )
+    except asyncio.CancelledError:
+        await lease.release()
+        if not lease.lost:
+            raise
+        # The heartbeat cancelled us because another run took the thread; that is
+        # a busy thread for the caller, not a dropped connection.
+        asyncio.current_task().uncancel()
+        return _thread_busy_response()
     except BaseException:
         await lease.release()
         raise
