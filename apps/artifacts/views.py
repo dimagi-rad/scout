@@ -137,6 +137,8 @@ def generate_csp_with_nonce(nonce: str) -> str:
         "connect-src https://cdn.jsdelivr.net; "
         "base-uri 'none'; "
         "form-action 'none'; "
+        # Mirrors X-Frame-Options: SAMEORIGIN below. Cross-origin embeds
+        # (EMBED_ALLOWED_ORIGINS) would need their origins added here too.
         "frame-ancestors 'self'; "
         f"sandbox {SANDBOX_FLAGS};"
     )

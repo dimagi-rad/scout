@@ -544,22 +544,28 @@ class TestArtifactSandboxView:
         )
 
         directives = {
-            d.strip().split(" ", 1)[0]: d.strip()
-            for d in response["Content-Security-Policy"].split(";")
-            if d.strip()
+            name: value
+            for name, _, value in (
+                d.strip().partition(" ") for d in response["Content-Security-Policy"].split(";")
+            )
+            if name
         }
-        assert directives["sandbox"] == "sandbox allow-scripts allow-modals"
+        assert directives["sandbox"] == "allow-scripts allow-modals"
         assert "allow-same-origin" not in response["Content-Security-Policy"]
-        assert directives["frame-ancestors"] == "frame-ancestors 'self'"
+        assert directives["frame-ancestors"] == "'self'"
         assert response["X-Frame-Options"] == "SAMEORIGIN"
 
     def test_sandbox_flags_match_iframe_attribute(self):
         """The CSP flags and the in-app iframe's sandbox attribute must not drift."""
-        canvas = (
+        canvas_path = (
             Path(__file__).resolve().parent.parent
             / "frontend/src/components/ArtifactViewer/ArtifactCanvas.tsx"
-        ).read_text()
-        assert f'sandbox="{SANDBOX_FLAGS}"' in canvas
+        )
+        if not canvas_path.exists():
+            pytest.fail(f"{canvas_path} moved; point this test at the artifact sandbox iframe")
+        assert f'sandbox="{SANDBOX_FLAGS}"' in canvas_path.read_text(), (
+            "ArtifactCanvas iframe sandbox attribute drifted from SANDBOX_FLAGS"
+        )
 
 
 # ============================================================================
