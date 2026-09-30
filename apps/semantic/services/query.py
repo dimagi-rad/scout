@@ -12,7 +12,7 @@ from typing import Any
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import close_old_connections
 
-from apps.common.errors import DataNotLoaded
+from apps.common.errors import validation_error_code
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
 from apps.semantic.services.cube_client import (
@@ -109,7 +109,7 @@ async def run_semantic_query(
         return await query_readiness_error(
             workspace,
             query_spec,
-            exc.code if isinstance(exc, DataNotLoaded) else VALIDATION_ERROR,
+            validation_error_code(exc),
             str(exc),
             category="data_unavailable",
             readiness=readiness,

@@ -223,10 +223,9 @@ def _schema_escalation_message(messages: list, *, write_capable: bool, interacti
     """
     trailing_codes = set()
     for message in reversed(messages):
-        if isinstance(message, ToolMessage):
-            trailing_codes.add(_tool_message_error_code(message.content))
-        elif not (isinstance(message, AIMessage) and getattr(message, "tool_calls", None)):
+        if not isinstance(message, ToolMessage):
             break
+        trailing_codes.add(_tool_message_error_code(message.content))
     if trailing_codes == {ErrorCode.SEMANTIC_MODEL_UNAVAILABLE}:
         return (
             SEMANTIC_ESCALATION_MESSAGE if write_capable else READ_ONLY_SEMANTIC_ESCALATION_MESSAGE

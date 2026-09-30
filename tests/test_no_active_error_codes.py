@@ -156,6 +156,17 @@ def test_a_missing_data_model_escalates_to_a_rebuild_not_a_reload(code, write_ca
     assert message == expected
 
 
+def test_an_earlier_successful_round_does_not_hide_a_missing_model():
+    messages = [
+        HumanMessage(content="q"),
+        AIMessage(content="", tool_calls=[{"name": "list_datasets", "args": {}, "id": "ok"}]),
+        ToolMessage(content='{"success": true, "data": {}}', tool_call_id="ok"),
+        *_repeated(SEMANTIC_MODEL_UNAVAILABLE)[1:],
+    ]
+    message = _schema_escalation_message(messages, write_capable=True, interactive=True)
+    assert message == SEMANTIC_ESCALATION_MESSAGE
+
+
 def test_a_mixed_round_is_not_blamed_on_the_data_model():
     messages = _repeated(SEMANTIC_MODEL_UNAVAILABLE)
     messages.insert(

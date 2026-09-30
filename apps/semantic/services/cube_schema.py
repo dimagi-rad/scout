@@ -53,6 +53,8 @@ class CubeSchemaBuildError(RuntimeError):
 
 
 class NoActiveCubeSchema(ExpectedStateError, CubeSchemaBuildError):
+    """The workspace has no ACTIVE Cube schema, so the semantic layer cannot answer."""
+
     code = ErrorCode.SEMANTIC_MODEL_UNAVAILABLE
 
 

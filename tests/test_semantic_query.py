@@ -353,7 +353,7 @@ async def test_run_semantic_query_executes_via_cube(monkeypatch, workspace, sema
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_run_semantic_query_returns_validation_error_for_expired_schema(
+async def test_run_semantic_query_keeps_validation_error_for_other_context_errors(
     monkeypatch, workspace, semantic_model
 ):
     async def expired_context(_workspace_id):

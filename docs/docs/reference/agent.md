@@ -116,11 +116,15 @@ After each tool round, the graph routes to `escalate` instead of back to
   `WORKSPACE_ACCESS_DENIED`. The denial applies to every remaining call, so
   the turn ends with the authorizer's message instead of retrying.
 - **Schema-error streak**: the last three tool results all returned
-  `NOT_FOUND` or `VALIDATION_ERROR`, which usually means the tables aren't
-  queryable. The graph matches the structured `error.code`, not the message
-  text. Any other result breaks the streak.
+  `NOT_FOUND`, `VALIDATION_ERROR`, `DATA_NOT_LOADED` or
+  `SEMANTIC_MODEL_UNAVAILABLE`, which usually means the data isn't queryable.
+  The graph matches the structured `error.code`, not the message text. Any
+  other result breaks the streak.
 
-For a schema-error streak, the message depends on the run. Read-only members
+For a schema-error streak, the message depends on the run. When every result
+of the latest tool round is `SEMANTIC_MODEL_UNAVAILABLE`, the message says the
+data model needs rebuilding, which reloads nothing (read-only members are told a
+member with write access can do it). Otherwise, read-only members
 are told that someone with write access can refresh the data. Chat asks whether
 to run materialization. Headless runs report that the data needs
 re-materializing. The message carries `scout_escalation` metadata

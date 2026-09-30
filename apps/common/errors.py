@@ -89,6 +89,11 @@ class DataNotLoaded(ExpectedStateError, ValueError):
     code = ErrorCode.DATA_NOT_LOADED
 
 
+def validation_error_code(exc: Exception) -> str:
+    """The code for a ValueError raised on a request: its own if it is unloaded data."""
+    return exc.code if isinstance(exc, DataNotLoaded) else ErrorCode.VALIDATION_ERROR
+
+
 class TokenRefreshError(Exception):
     """OAuth refresh failed; unclassified defects remain reportable."""
 
