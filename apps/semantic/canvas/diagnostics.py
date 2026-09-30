@@ -189,10 +189,12 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
         out.extend(_measure_filter_diagnostics(change, fields.get("filters"), columns))
     if cube_sql:
         if field_type == "measure":
-            try:
-                compile_measure_sql(cube_sql, columns=columns)
-            except MeasureSQLValidationError as exc:
-                out.append(_diagnostic("INVALID_MEASURE_SQL", change, "cube_sql", str(exc)))
+            # Generation publishes only string SQL, so only that is validated here.
+            if isinstance(cube_sql, str) and cube_sql.strip():
+                try:
+                    compile_measure_sql(cube_sql, columns=columns)
+                except MeasureSQLValidationError as exc:
+                    out.append(_diagnostic("INVALID_MEASURE_SQL", change, "cube_sql", str(exc)))
         else:
             try:
                 compile_dimension_sql(cube_sql, columns=columns)
@@ -230,7 +232,10 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
 def _measure_filter_diagnostics(change, filters: Any, columns: set[str]) -> list[dict]:
     out: list[dict[str, Any]] = []
     for index, item in enumerate(filters if isinstance(filters, list) else []):
-        sql = item.get("sql") if isinstance(item, dict) else item
+        # Same shape rule as generation, which skips anything else.
+        sql = item.get("sql") if isinstance(item, dict) else None
+        if not isinstance(sql, str) or not sql.strip():
+            continue
         try:
             compile_measure_filter_sql(sql, columns=columns)
         except MeasureSQLValidationError as exc:
