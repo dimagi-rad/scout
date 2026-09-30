@@ -42,26 +42,12 @@ DROPPED_JOIN_CODES = frozenset(DroppedJoin)
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     """Return a Cube-compatible schema document derived from a semantic model."""
     all_datasets = list(model.datasets.prefetch_related("fields"))
-    datasets = [
-        dataset
-        for dataset in all_datasets
-        if dataset.is_visible
-        and (
-            dataset.source_kind != dataset.SourceKind.CUSTOM
-            or dataset.metadata.get("cube_sql")
-            or dataset.metadata.get("sql")
-        )
-    ]
+    datasets = publishable_datasets(all_datasets)
     visible_ids = {dataset.id for dataset in datasets}
     known_references = {dataset.name for dataset in all_datasets} | {
         f"{dataset.name}.{field.name}" for dataset in all_datasets for field in dataset.fields.all()
     }
-    references = {dataset.name for dataset in datasets} | {
-        f"{dataset.name}.{field.name}"
-        for dataset in datasets
-        for field in dataset.fields.all()
-        if field.is_visible
-    }
+    references = published_member_references(datasets)
     relationships = SemanticRelationship.objects.filter(workspace=model.workspace).select_related(
         "from_dataset",
         "to_dataset",
@@ -114,7 +100,11 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
                 compile_join_sql(relationship.join_expression), references=join_references
             )
         except JoinSQLValidationError as exc:
-            unpublished(relationship, DroppedJoin.INVALID_SQL, str(exc)[:300])
+            unpublished(
+                relationship,
+                DroppedJoin.INVALID_SQL,
+                f"its join SQL is not publishable: {str(exc)[:300].rstrip('.')}",
+            )
             continue
         except CubeSQLReferenceError as exc:
             # A join only adds a path between cubes, so dropping one changes no
@@ -146,9 +136,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
         ]
         columns = dataset_column_names(dataset)
-        measure_references = (
-            references | {f.name for f in fields} | {f"CUBE.{f.name}" for f in fields} | {"CUBE"}
-        )
+        measure_references = cube_member_references(references, dataset)
         measures = [
             _cube_measure(field, references=measure_references, columns=columns)
             for field in fields
@@ -188,6 +176,36 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         "cubes": cubes,
         "diagnostics": diagnostics,
     }
+
+
+def publishable_datasets(all_datasets) -> list:
+    """Datasets that become cubes: visible, and custom ones only once they have SQL."""
+    return [
+        dataset
+        for dataset in all_datasets
+        if dataset.is_visible
+        and (
+            dataset.source_kind != dataset.SourceKind.CUSTOM
+            or dataset.metadata.get("cube_sql")
+            or dataset.metadata.get("sql")
+        )
+    ]
+
+
+def published_member_references(datasets) -> set[str]:
+    """Cube and member names other SQL may reference as {name} or {cube.member}."""
+    return {dataset.name for dataset in datasets} | {
+        f"{dataset.name}.{field.name}"
+        for dataset in datasets
+        for field in dataset.fields.all()
+        if field.is_visible
+    }
+
+
+def cube_member_references(references: set[str], dataset) -> set[str]:
+    """References a measure or filter of ``dataset`` may use, including its own members."""
+    fields = [field for field in dataset.fields.all() if field.is_visible]
+    return references | {f.name for f in fields} | {f"CUBE.{f.name}" for f in fields} | {"CUBE"}
 
 
 def cube_schema_yaml(schema: dict[str, Any]) -> str:

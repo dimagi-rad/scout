@@ -339,16 +339,14 @@ def _compile_member_sql(
     allow_subqueries: bool = False,
     max_length: int | None = _MAX_MEMBER_SQL_LENGTH,
 ) -> str:
-    if (
-        not isinstance(value, str)
-        or not value.strip()
-        or (max_length is not None and len(value) > max_length)
-    ):
-        limit = f" of at most {max_length} characters" if max_length is not None else ""
-        raise error(f"The {label} must be a nonempty string{limit}.")
+    if not isinstance(value, str) or not value.strip():
+        raise error(f"The {label} must be a nonempty string.")
+    value = value.strip()
+    if max_length is not None and len(value) > max_length:
+        raise error(f"The {label} must be at most {max_length} characters.")
     if _REFERENCE_PLACEHOLDER in value.lower():
         raise error(f"The {label} cannot use the reserved name '{_REFERENCE_PLACEHOLDER}'.")
-    text, references = _replace_member_references(value.strip(), label=label, error=error)
+    text, references = _replace_member_references(value, label=label, error=error)
     try:
         statement = SQLValidator().validate(f"SELECT {text}")
     except (SQLValidationError, TokenError) as exc:
