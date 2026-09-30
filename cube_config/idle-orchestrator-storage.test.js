@@ -6,7 +6,7 @@ const { tmpdir } = require('node:os');
 const { dirname, join } = require('node:path');
 const { test } = require('node:test');
 const { IdleOrchestratorStorage } = require('./idle-orchestrator-storage');
-const { patchOrchestratorStorage, ORIGINAL_SHA256, PATCHED_SOURCE } = require('./patch-orchestrator-storage');
+const { patchOrchestratorStorage, ORIGINAL_SHA256, PATCHED_SOURCE, UPSTREAM_METHODS } = require('./patch-orchestrator-storage');
 const { sha256 } = require('./patch-local-cache');
 
 // Exact upstream 1.6.39 installed CommonJS artifact, not a permissive mock hash.
@@ -209,6 +209,14 @@ function fixture(t) {
 
 test('upstream fixture matches the exact installed-artifact integrity guard', () => {
   assert.equal(sha256(ORIGINAL_SOURCE), ORIGINAL_SHA256);
+});
+
+test('the replacement provides every method the upstream storage does', () => {
+  const upstream = [...ORIGINAL_SOURCE.matchAll(/^    (?:async )?(\w+)\(/gm)].map((m) => m[1]).filter((name) => name !== 'constructor');
+  assert.deepEqual([...upstream].sort(), [...UPSTREAM_METHODS].sort());
+  for (const method of upstream) {
+    assert.equal(typeof IdleOrchestratorStorage.prototype[method], 'function', method);
+  }
 });
 
 test('patch installs and verifies through the actual serving resolver', t => {
