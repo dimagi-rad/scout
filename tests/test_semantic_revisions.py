@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from apps.agents.tools.canvas_tool import create_canvas_tools
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
     RevisionUndoError,
@@ -315,3 +316,57 @@ def test_revision_api_refuses_undo_for_read_only_members(
     assert client.get(base).json()["can_undo"] is False
     assert client.post(f"{base}{revision.id}/undo/").status_code == 403
     assert semantic_model.datasets.get(name="raw_visits").label == "One"
+
+
+def _tools(workspace, user, thread):
+    return {t.name: t for t in create_canvas_tools(workspace, user, str(thread.id))}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_writer_agent_commit_is_versioned_and_undo_restores_it(
+    workspace, user, semantic_model
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tools = _tools(workspace, user, thread)
+
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [{"op": "set", "target": "dataset/raw_visits/label", "value": "Site"}]}
+    )
+    report = await tools["canvas_commit"].ainvoke({})
+
+    assert report["committed"][0]["name"] == "raw_visits"
+    revision_id = report["revision"]["id"]
+    history = await tools["canvas_history"].ainvoke({})
+    assert history["revisions"][0]["id"] == revision_id
+    assert (await SemanticDataset.objects.aget(name="raw_visits")).label == "Site"
+
+    undone = await tools["canvas_undo"].ainvoke({"revision_id": revision_id})
+
+    assert undone["undone"]["id"] == revision_id
+    assert (await SemanticDataset.objects.aget(name="raw_visits")).label == "Visits"
+    assert (await SemanticModelRevision.objects.aget(reverts_id=revision_id)).thread_id == (
+        thread.id
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_read_only_member_cannot_undo_through_the_agent(
+    workspace, user, read_user, semantic_model
+):
+    writer_thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    writer_tools = _tools(workspace, user, writer_thread)
+    await writer_tools["canvas_apply"].ainvoke(
+        {"operations": [{"op": "set", "target": "dataset/raw_visits/label", "value": "Site"}]}
+    )
+    revision_id = (await writer_tools["canvas_commit"].ainvoke({}))["revision"]["id"]
+    reader_thread = await Thread.objects.acreate(workspace=workspace, user=read_user)
+    reader_tools = _tools(workspace, read_user, reader_thread)
+
+    result = await reader_tools["canvas_undo"].ainvoke({"revision_id": revision_id})
+
+    assert result["errors"][0]["code"] == "FORBIDDEN"
+    assert (await SemanticDataset.objects.aget(name="raw_visits")).label == "Site"
+    history = await reader_tools["canvas_history"].ainvoke({})
+    assert history["revisions"][0]["id"] == revision_id

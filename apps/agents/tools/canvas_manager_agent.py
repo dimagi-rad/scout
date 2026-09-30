@@ -91,7 +91,12 @@ shared with the user in a side panel. Your tools:
   Returns applied ops + current diagnostics; invalid batches return `errors`
   and write nothing.
 - `canvas_commit()` — persist the changeset to the semantic model and rebuild
-  the Cube schema. Blocked while error diagnostics remain.
+  the Cube schema. Blocked while error diagnostics remain. Every successful
+  commit is saved as a revision in the data model history; its result carries
+  the `revision` id and summary.
+- `canvas_history(limit)` — recent data model revisions, newest first.
+- `canvas_undo(revision_id)` — undo one revision (itself recorded as a revision).
+  Refused, writing nothing, if a later change touched the same objects.
 - `list_datasets`, `describe_dataset`, `semantic_query` — discover datasets and
   their columns/members; verify committed members are queryable.
 
@@ -233,7 +238,8 @@ def create_canvas_manager_tool(
         subagent_event_queue: Any | None = None,
     ) -> dict[str, Any]:
         """Delegate semantic canvas work (dataset edits, new fields/measures,
-        relationships, CTE datasets, commits) to the Canvas Manager subagent."""
+        relationships, CTE datasets, commits, undoing a data model revision)
+        to the Canvas Manager subagent."""
         parent_tool_call_id = tool_call_id or f"missing-parent-{uuid.uuid4().hex[:8]}"
         queue_token = set_subagent_event_queue(subagent_event_queue)
         prompt = f"Task: {task.strip()}" + (f"\nIntent: {intent}" if intent else "")
@@ -504,7 +510,18 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
     last_state: dict[str, Any] = {}
     last_errors: list = []
     pending_count = None
+    revisions: list[dict[str, Any]] = []
     for message in messages:
+        if isinstance(message, ToolMessage) and message.name == "canvas_undo":
+            undo_report = _parse_json_object(message.content) or {}
+            if isinstance(undo_report.get("revision"), dict):
+                revisions.append(
+                    {
+                        "id": undo_report["revision"].get("id"),
+                        "summary": undo_report["revision"].get("summary"),
+                    }
+                )
+            continue
         if not isinstance(message, ToolMessage) or message.name not in {
             "canvas_apply",
             "canvas_commit",
@@ -531,6 +548,8 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
         if message.name != "canvas_commit" or not isinstance(committed, list) or not committed:
             continue
         last_commit = report
+        if isinstance(report.get("revision"), dict):
+            revisions.append(report["revision"])
         for obj in committed:
             if not isinstance(obj, dict):
                 continue
@@ -560,6 +579,7 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
         "committed": bool(committed_objects),
         "committed_objects": committed_objects,
         "pending_count": pending_count,
+        "revisions": revisions,
     }
     problems = []
     blocked = (

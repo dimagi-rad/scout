@@ -1,8 +1,9 @@
 """Local agent tools for the thread-bound semantic canvas.
 
-Three tools share one service layer with the REST API (single write path):
+The tools share one service layer with the REST API (single write path):
 ``canvas_read`` (bounded projections), ``canvas_apply`` (atomic op batches),
-and ``canvas_commit`` (persist to the semantic model + Cube rebuild).
+``canvas_commit`` (persist to the semantic model + Cube rebuild, recorded as a
+revision), and ``canvas_history`` / ``canvas_undo`` over those revisions.
 
 The parent Scout agent carries only ``canvas_read``; writes are delegated to
 the Canvas Manager subagent (see canvas_manager_agent.py) so the apply/diagnose
@@ -12,6 +13,7 @@ loop's token churn stays out of the parent's context.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from asgiref.sync import sync_to_async
@@ -20,11 +22,14 @@ from langchain_core.tools import tool
 
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
+    RevisionUndoError,
     apply_operations,
     canvas_projection,
     commit_canvas,
+    list_revisions,
     render_projection_text,
     resolve_thread_canvas,
+    undo_revision,
 )
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.sample_rows import sample_dataset_rows
@@ -175,4 +180,54 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
 
         return await sync_to_async(_commit, thread_sensitive=True)()
 
-    return [canvas_read, canvas_sample_rows, canvas_apply, canvas_commit]
+    @tool
+    async def canvas_history(limit: int = 10) -> dict[str, Any]:
+        """List recent saved data model changes, newest first.
+
+        Each revision has an id, a summary, who made it, and whether it was
+        already undone. Use the id with `canvas_undo`.
+        """
+        if not await aworkspace_read_allowed(user, workspace.id):
+            return {"errors": [{"code": "FORBIDDEN", "message": "Workspace read access required."}]}
+
+        def _history() -> dict[str, Any]:
+            close_old_connections()
+            return {"revisions": list_revisions(workspace, limit=max(1, min(limit, 50)))}
+
+        return await sync_to_async(_history, thread_sensitive=True)()
+
+    @tool
+    async def canvas_undo(revision_id: str) -> dict[str, Any]:
+        """Undo one saved data model revision, restoring what it changed.
+
+        Refused without writing anything if a later change touched the same
+        objects; undo the later revision first. The undo is itself a revision.
+        """
+
+        def _undo() -> dict[str, Any]:
+            if not can_write_canvas(workspace, user):
+                return {"errors": [FORBIDDEN_ERROR]}
+            try:
+                revision_uuid = uuid.UUID(str(revision_id))
+            except ValueError:
+                return {"errors": [{"code": "NOT_FOUND", "message": "Unknown revision id."}]}
+            thread_id = (
+                Thread.objects.filter(id=conversation_id, workspace=workspace)
+                .values_list("id", flat=True)
+                .first()
+            )
+            try:
+                return undo_revision(workspace, revision_uuid, user, thread_id=thread_id)
+            except RevisionUndoError as exc:
+                return {"errors": [exc.as_dict()]}
+
+        return await sync_to_async(_undo, thread_sensitive=True)()
+
+    return [
+        canvas_read,
+        canvas_sample_rows,
+        canvas_apply,
+        canvas_commit,
+        canvas_history,
+        canvas_undo,
+    ]
