@@ -60,6 +60,22 @@ function replyResponse() {
   })
 }
 
+function overloadThenHardErrorResponse() {
+  return createUIMessageStreamResponse({
+    stream: createUIMessageStream({
+      execute: ({ writer }) => {
+        writer.write({ type: "start", messageId: crypto.randomUUID() })
+        writer.write({
+          type: "data-chat-status",
+          data: { kind: "retryable-error", reason: "overloaded" },
+          transient: true,
+        })
+        writer.write({ type: "error", errorText: "An error occurred. Ref: abc123" })
+      },
+    }),
+  })
+}
+
 function mockChat(busyAnswer: () => Response) {
   let busyLeft = Number.POSITIVE_INFINITY
   const chatPosts: string[] = []
@@ -169,6 +185,23 @@ describe.each([
 
     await waitFor(() => expect(screen.queryByTestId("chat-busy-notice")).toBeNull())
     expect(api.chatPosts).toHaveLength(postsBeforeNotice)
+    consoleError.mockRestore()
+  })
+})
+
+describe("a turn that hits an overload and then fails hard", () => {
+  it("keeps its error notice instead of being re-posted", async () => {
+    const api = mockChat(overloadThenHardErrorResponse)
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await waitFor(() => expect(api.messageLoads).toHaveLength(1))
+    await act(async () => {})
+
+    await send("How many visits last week?")
+
+    await screen.findByTestId("chat-error")
+    await act(async () => {})
+    expect(api.chatPosts).toHaveLength(1)
     consoleError.mockRestore()
   })
 })

@@ -285,9 +285,11 @@ export function ChatPanel() {
   useEffect(() => {
     const prev = prevRetryStatusRef.current
     prevRetryStatusRef.current = status
-    const justFinished =
-      (prev === "streaming" || prev === "submitted") && (status === "ready" || status === "error")
-    if (!justFinished) return
+    const wasRunning = prev === "streaming" || prev === "submitted"
+    // "error" counts only for a busy 503; a hard failure after an overload part must
+    // keep its error notice, not be silently re-posted.
+    if (!wasRunning || (status !== "ready" && !(status === "error" && busyError))) return
+    busyTracker.settle(busyToken)
 
     // A busy 503 is raised before the agent runs or writes a checkpoint, so resending
     // is safe and gets the full budget. A busy stream part comes after the turn was
@@ -304,7 +306,6 @@ export function ChatPanel() {
         busyTracker.startRetry(busyToken)
         busyTimerRef.current = setTimeout(() => {
           busyTimerRef.current = null
-          busyTracker.settle(busyToken)
           void regenerate()
         }, busyRetryDelayMs(busy.retryAfter, busyAttemptsRef.current))
       } else {
