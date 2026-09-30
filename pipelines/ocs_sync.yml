@@ -9,7 +9,9 @@ sources:
   - name: sessions
     description: "Chat sessions with timestamps, tags, and participant info (participant_platform is the session's channel, e.g. web or telegram)"
   - name: messages
-    description: "Individual messages within sessions. Message identity is snapshot-local, not a durable upstream ID; inspect identity metadata before saving reviewed labels."
+    description: "Individual messages within sessions. Message identity is snapshot-local, not a durable upstream ID; inspect identity metadata before saving reviewed labels. Rows with is_synthetic_summary = true are OCS-generated conversation summaries, not messages anyone sent: filter them out (WHERE NOT is_synthetic_summary) before counting messages or analysing user/bot turns."
+    column_descriptions:
+      is_synthetic_summary: "TRUE for machine-generated conversation summaries OCS inserts into long chats (role 'system'). Not real traffic; exclude with WHERE NOT is_synthetic_summary when counting or analysing messages."
     # Messages are fetched one session-detail request at a time; progress is
     # counted in sessions because OCS exposes no message total (issue #221).
     progress_unit: sessions

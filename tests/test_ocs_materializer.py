@@ -260,3 +260,42 @@ def test_write_ocs_participants_creates_table_and_rows(tenant_schema):
         ]
     finally:
         conn.close()
+
+
+def test_write_ocs_messages_stores_summary_flag_and_excludes_it_from_count(tenant_schema):
+    conn = get_managed_db_connection()
+    conn.autocommit = False
+
+    def msg(idx: int, *, synthetic: bool) -> dict:
+        return {
+            "message_id": f"s1:{idx}",
+            "snapshot_revision": "snapshot-fixture",
+            "message_version": f"content-{idx}",
+            "session_id": "s1",
+            "message_index": idx,
+            "is_synthetic_summary": synthetic,
+            "role": "system" if synthetic else "user",
+            "content": "summary" if synthetic else "hi",
+            "created_at": "2026-04-01T00:00:00Z",
+            "metadata": {},
+            "tags": [],
+        }
+
+    try:
+        n = _write_ocs_messages(
+            iter([([msg(0, synthetic=False), msg(1, synthetic=True)], 1)]),
+            tenant_schema.schema_name,
+            conn,
+        )
+        conn.commit()
+        assert n == 1
+        assert _row_count(conn, tenant_schema.schema_name, "raw_messages") == 2
+        with conn.cursor() as cur:
+            cur.execute(
+                psql.SQL(
+                    "SELECT message_index FROM {}.raw_messages WHERE is_synthetic_summary"
+                ).format(psql.Identifier(tenant_schema.schema_name))
+            )
+            assert cur.fetchall() == [(1,)]
+    finally:
+        conn.close()

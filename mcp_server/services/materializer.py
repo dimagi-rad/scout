@@ -1081,7 +1081,8 @@ def _write_ocs_messages(
     The loader yields one ``(rows, total_sessions)`` tuple per session (rows
     may be empty), so progress here is denominated in sessions — the unit the
     N+1 detail fetches actually advance in — not message rows. The return
-    value is still the number of message rows written.
+    value is the number of real messages written: OCS' synthetic summary rows
+    are stored but flagged ``is_synthetic_summary`` and not counted.
     """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -1096,6 +1097,7 @@ def _write_ocs_messages(
             message_version TEXT NOT NULL,
             session_id TEXT,
             message_index INTEGER,
+            is_synthetic_summary BOOLEAN NOT NULL DEFAULT FALSE,
             role TEXT,
             content TEXT,
             created_at TIMESTAMPTZ,
@@ -1118,6 +1120,7 @@ def _write_ocs_messages(
                     r.get("message_id", ""),
                     r.get("session_id", ""),
                     r.get("message_index", 0),
+                    bool(r.get("is_synthetic_summary", False)),
                     r.get("role", ""),
                     r.get("content", ""),
                     r.get("created_at"),
@@ -1129,7 +1132,7 @@ def _write_ocs_messages(
                 for r in page
             ]
             cur.executemany(ins_sql, rows)
-            total += len(page)
+            total += sum(not r.get("is_synthetic_summary", False) for r in page)
         if on_page is not None:
             on_page(sessions_done, sessions_total)
 
@@ -1657,9 +1660,9 @@ _OCS_SESSIONS_INSERT = psql.SQL(
 _OCS_MESSAGES_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_messages
-        (message_id, session_id, message_index, role, content,
+        (message_id, session_id, message_index, is_synthetic_summary, role, content,
          created_at, metadata, tags, snapshot_revision, message_version)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (message_id) DO NOTHING
     """
 )

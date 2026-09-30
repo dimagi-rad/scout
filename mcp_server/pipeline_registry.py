@@ -27,8 +27,15 @@ class SourceConfig:
     # fetch at a time, so their progress is denominated in "sessions".
     progress_unit: str = "rows"
     auxiliary_tables: dict[str, str] = field(default_factory=dict)
+    # Column name -> note the agent sees in describe_table for this source's table.
+    column_descriptions: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
+        if not isinstance(self.column_descriptions, dict) or any(
+            not isinstance(name, str) or not name or not isinstance(note, str)
+            for name, note in self.column_descriptions.items()
+        ):
+            raise ValueError("column_descriptions must map column names to descriptions.")
         if not isinstance(self.auxiliary_tables, dict) or any(
             not isinstance(name, str) or not name or not isinstance(description, str)
             for name, description in self.auxiliary_tables.items()
@@ -188,6 +195,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
             resumable=s.get("resumable", True),
             progress_unit=s.get("progress_unit", "rows"),
             auxiliary_tables=s.get("auxiliary_tables") or {},
+            column_descriptions=s.get("column_descriptions") or {},
         )
         for s in data.get("sources", [])
     ]

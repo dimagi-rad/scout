@@ -63,7 +63,7 @@ class OCSMessageLoader(OCSBaseLoader):
             # JSON parse itself is validated via _get_json (finding 03#6).
             messages = self._get_json(detail_url).get("messages") or []
             rows = map_session_messages(session_id, messages)
-            total_messages += len(rows)
+            total_messages += sum(not row["is_synthetic_summary"] for row in rows)
             yield rows, total_sessions
         logger.info(
             "Fetched %d messages across %d sessions for experiment %s",
@@ -102,6 +102,18 @@ def map_session_messages(session_id: str, messages: list[dict]) -> list[dict]:
     return [_map_message(session_id, index, row, revision) for index, row in enumerate(projected)]
 
 
+def _is_synthetic_summary(row: dict) -> bool:
+    """True for the in-memory summary OCS interleaves into ``messages``.
+
+    OCS ``ChatMessage.make_summary_message`` emits ``role=system`` with
+    ``metadata.compression_marker == "summarize"``; the payload carries no
+    explicit type field. The marker alone is not enough: a real, saved message
+    can also carry it (checkpoint sentinel), but those are user/assistant turns,
+    so requiring the system role keeps them counted.
+    """
+    return row["role"] == "system" and row["metadata"].get("compression_marker") == "summarize"
+
+
 def _map_message(session_id: str, index: int, row: dict, revision: str) -> dict:
     return {
         "message_id": f"{session_id}:v2:{revision}:{index}",
@@ -109,6 +121,7 @@ def _map_message(session_id: str, index: int, row: dict, revision: str) -> dict:
         "message_version": _revision(row),
         "session_id": session_id,
         "message_index": index,
+        "is_synthetic_summary": _is_synthetic_summary(row),
         **row,
     }
 
