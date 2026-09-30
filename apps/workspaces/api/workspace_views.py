@@ -482,6 +482,7 @@ def _workspace_delete_refusal(user, workspace, *, last_source=False) -> Response
     # Deleting destroys every member's content, so without coverage it is a
     # remediation only for a workspace nobody else is in.
     missing = {t.tenant_id for t in missing_tenants_for_member(user, workspace)}
+    # authz-exempt: counts the OTHER members; the requester was already admitted.
     if missing and workspace.memberships.exclude(user=user).exists():
         return Response(
             {
