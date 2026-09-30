@@ -387,6 +387,7 @@ async def test_invalid_client_alerts_ops_with_a_stable_fingerprint_and_no_marker
     real_logger_error = token_refresh.logger.error
 
     def capture(*args, **kwargs):
+        # Scope.fingerprint is setter-only in sentry-sdk 2.x; there is no public reader.
         fingerprints.append(sentry_sdk.get_current_scope()._fingerprint)
         return real_logger_error(*args, **kwargs)
 
@@ -397,7 +398,7 @@ async def test_invalid_client_alerts_ops_with_a_stable_fingerprint_and_no_marker
 
     assert type(result) is TokenRefreshUnavailable
     assert await _marker_recorded(connection) is False
-    assert fingerprints == [["oauth-invalid-client", "commcare"]]
+    assert fingerprints == [["oauth-invalid-client", "commcare", "client"]]
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert "app-secret" not in errors[0].getMessage()

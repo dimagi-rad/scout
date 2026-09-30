@@ -109,7 +109,9 @@ class TestSyncRefreshLogLevels:
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warnings, "expected a WARNING record"
-        assert body_marker not in warnings[0].getMessage(), "the provider body must stay out"
+        message = warnings[0].getMessage()
+        assert error_code in message or error_code == "other_error"
+        assert body_marker not in message, "the provider body must stay out"
         assert body_marker not in caplog.text
 
     def test_invalid_client_is_a_retryable_error_log_without_the_body_or_secret(self, caplog):
@@ -125,7 +127,7 @@ class TestSyncRefreshLogLevels:
 
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert len(errors) == 1
-        assert "commcare" in errors[0].getMessage()
+        assert "client-abc" in errors[0].getMessage()
         assert "bad-secret-body" not in caplog.text
         assert "shh" not in caplog.text
 

@@ -4,6 +4,7 @@ Comprehensive tests for Phase 4 (Auth) of the Scout data agent platform.
 Tests OAuth integration with django-allauth, custom providers, and header-based auth.
 """
 
+from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 from django.db import IntegrityError
+from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.providers.commcare.provider import (
@@ -22,6 +24,7 @@ from apps.users.providers.commcare.views import (
     CommCareOAuth2Adapter,
 )
 from apps.users.providers.ocs.provider import OCSProvider
+from apps.users.services.token_refresh import TokenRefreshUnavailable
 
 User = get_user_model()
 
@@ -748,6 +751,28 @@ class TestProvidersEndpoint:
 
         providers = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
         assert providers["ocs"]["status"] == "expired"
+
+    def test_unavailable_refresh_does_not_report_expired(self, client, user, site):
+        """A blip or Scout's own rejected client credentials (#759) is not a reconnect."""
+        ocs_app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+        ocs_app.sites.add(site)
+        account = SocialAccount.objects.create(user=user, provider="ocs", uid="ocs-1#acme")
+        SocialToken.objects.create(
+            app=ocs_app,
+            account=account,
+            token="tok",
+            token_secret="refresh",
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        client.force_login(user)
+
+        with patch(
+            "apps.users.auth_views.refresh_oauth_token",
+            side_effect=TokenRefreshUnavailable("down"),
+        ):
+            providers = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
+
+        assert providers["ocs"]["status"] == "connected"
 
 
 # ============================================================================

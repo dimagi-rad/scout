@@ -478,6 +478,7 @@ class TestDirectAdd:
 
         assert body["result"] == "invite_awaiting_access"
         assert body["needs_sign_in"] is False
+        assert body["recheck_complete"] is False
         conn.refresh_from_db()
         assert conn.oauth_refresh_failure_fingerprint == ""
 

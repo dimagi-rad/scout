@@ -390,18 +390,21 @@ def classify_http_failure(
     return HttpFailureVerdict(error, not (transient or misconfigured), log_level, reason)
 
 
-def _log_invalid_client(provider: str, status: int | None) -> None:
-    """Alert ops that Scout's OAuth client credentials are refused, once per provider.
+def _log_invalid_client(provider: str, client_id: str, status: int | None) -> None:
+    """Alert ops that Scout's OAuth client credentials are refused.
 
-    The fixed fingerprint collapses every affected user into one Sentry issue. Only the
-    provider and status are logged -- never the client secret or the response body.
+    The fixed fingerprint groups every affected user into one Sentry issue per app; each
+    attempt still logs one event. ``provider`` is canonical (www and EU CommCare share
+    it), so the client id -- public, unlike the secret -- tells ops which SocialApp to
+    fix. The secret and the response body are never logged.
     """
     with sentry_sdk.new_scope() as scope:
-        scope.fingerprint = ["oauth-invalid-client", provider]
+        scope.fingerprint = ["oauth-invalid-client", provider, client_id]
         logger.error(
-            "OAuth provider %s rejected Scout's client credentials (HTTP %s); "
-            "check the SocialApp client id/secret",
+            "OAuth provider %s rejected Scout's client credentials for app %s (HTTP %s); "
+            "check that SocialApp's client id/secret",
             provider,
+            client_id,
             status,
         )
 
@@ -838,7 +841,7 @@ async def refresh_oauth_token_result(
             cause=e,
         )
         if verdict.reason == "invalid_client":
-            _log_invalid_client(preflight.account_provider, status)
+            _log_invalid_client(preflight.account_provider, social_token.app.client_id, status)
         elif verdict.log_level >= logging.ERROR:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         else:
@@ -1008,7 +1011,7 @@ def refresh_oauth_token_result_sync(
             cause=e,
         )
         if verdict.reason == "invalid_client":
-            _log_invalid_client(preflight.account_provider, status)
+            _log_invalid_client(preflight.account_provider, social_token.app.client_id, status)
         elif verdict.log_level >= logging.ERROR:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         else:
