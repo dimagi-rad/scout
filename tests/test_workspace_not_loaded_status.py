@@ -20,7 +20,8 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.tasks import materialize_workspace
+from apps.workspaces.services.load_activity import REBUILD_VIEW_TASK_NAME
+from apps.workspaces.tasks import materialize_workspace, rebuild_workspace_view_schema
 from mcp_server.server import get_schema_status
 from tests.tenant_access import grant_tenant_access
 from tests.test_chat_first_load import queued_jobs  # noqa: F401 (registers the fixture)
@@ -46,9 +47,11 @@ def _statuses(user, workspace):
     return listed["schema_status"], detail["schema_status"]
 
 
-def _running_load(tenant, state=SchemaState.PROVISIONING):
+def _running_load(tenant):
     schema = TenantSchema.objects.create(
-        tenant=tenant, schema_name=f"s_{tenant.external_id}".replace("-", "_"), state=state
+        tenant=tenant,
+        schema_name=f"s_{tenant.external_id}".replace("-", "_"),
+        state=SchemaState.PROVISIONING,
     )
     MaterializationRun.objects.create(tenant_schema=schema, pipeline="commcare_sync", state=LOADING)
     return schema
@@ -82,7 +85,7 @@ def test_a_building_view_row_without_a_load_is_not_loaded(user, workspace, secon
 
 
 @pytest.mark.django_db
-def test_a_running_first_load_is_provisioning(user, workspace, tenant, second_tenant):
+def test_a_running_first_load_is_provisioning(user, workspace, second_tenant):
     _running_load(second_tenant)
     assert _statuses(user, workspace) == ("provisioning", "provisioning")
 
@@ -93,6 +96,27 @@ def test_a_queued_first_load_is_provisioning(user, workspace, queued_jobs):  # n
         workspace_id=str(workspace.id), user_id="", only_unserved=True, notify_thread=False
     )
     assert _statuses(user, workspace) == ("provisioning", "provisioning")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_queued_view_rebuild_is_provisioning(
+    user,
+    workspace,
+    tenant,
+    second_tenant,
+    queued_jobs,  # noqa: F811
+):
+    """Adding a source to a serving workspace queues only a view rebuild, no load."""
+    TenantSchema.objects.create(tenant=tenant, schema_name="serving", state=SchemaState.ACTIVE)
+    WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_rebuilding", state=SchemaState.PROVISIONING
+    )
+    rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+    assert _statuses(user, workspace) == ("provisioning", "provisioning")
+
+
+def test_rebuild_task_name_matches_the_task():
+    assert rebuild_workspace_view_schema.name == REBUILD_VIEW_TASK_NAME
 
 
 @pytest.mark.django_db
@@ -155,9 +179,7 @@ def _catalog_status(workspace):
 
 
 @pytest.mark.django_db
-def test_catalog_judges_a_multi_source_workspace_by_all_of_its_sources(
-    workspace, tenant, second_tenant
-):
+def test_catalog_judges_a_multi_source_workspace_by_all_of_its_sources(workspace, second_tenant):
     """The first source alone used to decide; a load of any other source went unseen."""
     assert _catalog_status(workspace) == "not_loaded"
     _running_load(second_tenant)
