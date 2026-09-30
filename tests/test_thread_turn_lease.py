@@ -33,13 +33,15 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.reconciliation import (
+    RESUME_TASK_NAME,
+    _resume_in_flight,
+    persist_synthetic_failure_message,
+    reconcile_stale_thread_job,
+)
 from apps.workspaces.tasks import (
     RESUME_BUSY_MAX_ATTEMPTS,
-    RESUME_TASK_NAME,
     RESUME_THREAD_BUSY_SUMMARY,
-    _persist_synthetic_failure_message,
-    _resume_in_flight,
-    reconcile_stale_thread_job,
     resume_thread_after_materialization,
 )
 from tests.tenant_access import ausable_connection
@@ -437,8 +439,8 @@ class TestSyntheticFailureMessage:
         await atry_acquire_turn_lease(tj.thread_id)
         build = AsyncMock()
 
-        with patch("apps.workspaces.tasks._build_agent_for_resume", build):
-            await _persist_synthetic_failure_message(tj, "failed")
+        with patch("apps.workspaces.services.reconciliation.build_agent_for_resume", build):
+            await persist_synthetic_failure_message(tj, "failed")
 
         build.assert_not_awaited()
 
@@ -448,8 +450,11 @@ class TestSyntheticFailureMessage:
         )
         agent = MagicMock(aupdate_state=AsyncMock())
 
-        with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
-            await _persist_synthetic_failure_message(tj, "failed")
+        with patch(
+            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            AsyncMock(return_value=agent),
+        ):
+            await persist_synthetic_failure_message(tj, "failed")
 
         agent.aupdate_state.assert_awaited_once()
         assert (await _lease_row(tj.thread_id))["turn_lease_token"] is None
@@ -535,17 +540,17 @@ class TestReconcilerDuringBackoff:
 
     async def test_the_reconciler_does_not_restart_a_backing_off_resume(self):
         tj = await _resumable_job("reconcile-skip", 880012)
-        resume = MagicMock(defer_async=AsyncMock())
+        reconciliation = "apps.workspaces.services.reconciliation"
 
         with (
-            patch("apps.workspaces.tasks._procrastinate_job_status", return_value="succeeded"),
-            patch("apps.workspaces.tasks._resume_in_flight", return_value=True),
-            patch("apps.workspaces.tasks.resume_thread_after_materialization", resume),
+            patch(f"{reconciliation}._procrastinate_job_status", return_value="succeeded"),
+            patch(f"{reconciliation}._resume_in_flight", return_value=True),
+            patch(f"{reconciliation}.app.configure_task") as configure_resume,
         ):
             action = await reconcile_stale_thread_job(tj)
 
         assert action is None
-        resume.defer_async.assert_not_awaited()
+        configure_resume.assert_not_called()
 
 
 def test_the_in_flight_lookup_names_the_real_task():

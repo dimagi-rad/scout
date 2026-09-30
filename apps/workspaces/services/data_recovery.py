@@ -13,12 +13,85 @@ from typing import Any
 from apps.artifacts.models import Artifact
 from apps.artifacts.services.query_state import artifact_query_surface
 from apps.chat.models import ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.workspaces.models import (
     MaterializationRun,
     WorkspaceDataRecovery,
 )
+from apps.workspaces.services.access_freshness import FRESHNESS_ERROR_CODES
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.query_state import workspace_query_surface
+
+ROLE_DENIED_MESSAGE = (
+    "The requesting user no longer has a read-write or manage workspace role. "
+    "Ask a workspace member with write access to retry."
+)
+
+
+def workspace_recovery_error(result: dict, surface: dict) -> str:
+    """Select the most useful persisted error for an artifact recovery card."""
+    if result.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
+        # A role denial is not a source failure; don't label it as one.
+        return str(result.get("error") or ROLE_DENIED_MESSAGE)[:1000]
+    freshness_codes = set(FRESHNESS_ERROR_CODES.values())
+    if result.get("status") == "denied" and result.get("error_code") in freshness_codes:
+        # A requester whose access could not be confirmed is not a failed source.
+        return str(result["error"])[:1000]
+    failed = [
+        tenant
+        for tenant in result.get("tenants") or []
+        if isinstance(tenant, dict) and tenant.get("success") is not True
+    ]
+    unverified = ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
+    if failed and all(tenant.get("error_code") == unverified for tenant in failed):
+        # A mid-run checkpoint denial skips the remaining tenants without a
+        # run-level status. The credential codes it can also carry are genuine
+        # source remedies, so only the verification-only code is re-labelled.
+        return str(failed[0].get("error") or "")[:1000]
+    # A failed source commonly causes a downstream Cube *skip*, not a Cube
+    # failure. Show the source remedy first; never infer auth advice by parsing
+    # human/provider error text, or conflate missing credentials with a 403.
+    source_errors: dict[str, list[str]] = {}
+    for tenant in result.get("tenants") or []:
+        if not isinstance(tenant, dict) or tenant.get("success") is True:
+            continue
+        error = (
+            CREDENTIAL_GUIDANCE.get(tenant.get("error_code"))
+            or " ".join(str(tenant.get("error") or "").split())[:200]
+        )
+        if not error or (error not in source_errors and len(source_errors) == 3):
+            continue
+        name = tenant.get("display_name")
+        if not name:
+            name = str(tenant.get("tenant") or "Source")
+            if tenant.get("provider"):
+                name = f"{name} ({tenant['provider']})"
+        label = " ".join(str(name).split())[:80]
+        labels = source_errors.setdefault(error, [])
+        if label not in labels and len(labels) < 3:
+            labels.append(label)
+    if source_errors:
+        # Opposite remedies (reconnect vs restore upstream permissions) must
+        # keep their subjects, even when several sources share one diagnosis.
+        return (
+            "Data source loading failed: "
+            + " ".join(f"{', '.join(labels)}: {error}" for error, labels in source_errors.items())
+        )[:1000]
+    if result.get("error"):
+        return str(result["error"])[:1000]
+    cube_result = result.get("cube_schema") or {}
+    cube_error = cube_result.get("error") or cube_result.get("reason")
+    if cube_error:
+        return str(cube_error)[:1000]
+    if cube_result.get("ok") is False:
+        return "The semantic model rebuild did not complete successfully."
+    view_error = (result.get("view_schema") or {}).get("error")
+    if view_error:
+        return str(view_error)[:1000]
+    if surface.get("detail"):
+        return str(surface["detail"])[:1000]
+    return str(surface.get("message") or "Scout could not restore this artifact's data.")[:1000]
 
 
 async def artifact_data_state(artifact) -> dict[str, Any]:

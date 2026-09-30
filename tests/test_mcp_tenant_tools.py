@@ -13,8 +13,10 @@ import pytest_asyncio
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.test import override_settings
+from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.capacity import CapacityExhausted, CapacityResource
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import DataNotLoaded
 from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
@@ -1337,6 +1339,26 @@ async def test_schema_status_reports_no_load_when_every_run_has_finished(user):
 
     assert result["success"] is True
     assert result["data"]["load_in_progress"] is None
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_schema_status_answers_busy_when_the_catalog_hits_the_connection_limit(user):
+    workspace = await Workspace.objects.acreate(name="Full", created_by=user)
+    tenant = await _tenant_in(workspace, "full")
+    run = await _run(tenant, MaterializationRun.RunState.COMPLETED, 9)
+    await MaterializationRun.objects.filter(pk=run.pk).aupdate(completed_at=timezone.now())
+
+    with (
+        patch(
+            "mcp_server.server.pipeline_list_tables",
+            AsyncMock(side_effect=CapacityExhausted(CapacityResource.DATABASE)),
+        ),
+        patch("mcp_server.server.report_capacity_exhausted"),
+    ):
+        result = await get_schema_status(workspace_id=str(workspace.id))
+
+    assert result["success"] is False
+    assert result["error"]["code"] == ErrorCode.CAPACITY_EXHAUSTED
 
 
 async def _schema_status(workspace):

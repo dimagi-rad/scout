@@ -119,7 +119,7 @@ def test_each_exhaustion_signal_is_classified(exc, resource):
         CubeConnectionError("Cube is temporarily unavailable."),
         CubeServiceUnavailable("schema validation failed: HTTP 503"),
         ValueError("too many connections"),
-        # A pool that cannot even open means the database is down, not full.
+        # An untagged open timeout stays a down database; the pool tags a refusal itself.
         PoolTimeout("pool initialization incomplete after 10.0 sec"),
         # Scout's own per-process managed-pool cap is not a connection limit.
         PoolTimeout("all 4 managed-DB pool slots are in use"),
@@ -139,9 +139,15 @@ def test_a_bug_raised_while_handling_capacity_stays_a_bug():
         assert classify_capacity_error(bug) is None
 
 
+def _checkpointer_pool(pool_size):
+    pool = CheckpointerPool("dbname=unused", max_size=4, open=False)
+    pool.get_stats = lambda: {"pool_size": pool_size}
+    return pool
+
+
 @pytest.mark.asyncio
-async def test_the_checkpointer_pool_tags_a_checkout_timeout_as_capacity():
-    pool = CheckpointerPool("dbname=unused", open=False)
+async def test_the_checkpointer_pool_tags_a_full_pool_checkout_timeout_as_capacity():
+    pool = _checkpointer_pool(pool_size=4)
     with patch.object(
         AsyncConnectionPool,
         "getconn",
@@ -150,6 +156,60 @@ async def test_the_checkpointer_pool_tags_a_checkout_timeout_as_capacity():
         with pytest.raises(CheckpointerPoolExhausted) as raised:
             await pool.getconn(timeout=0.1)
     assert classify_capacity_error(raised.value).resource == CapacityResource.CHECKPOINTER_POOL
+
+
+@pytest.mark.asyncio
+async def test_the_checkpointer_pool_tags_a_timeout_after_a_slot_refusal_as_capacity():
+    pool = _checkpointer_pool(pool_size=1)
+    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", AsyncMock(side_effect=refusal)),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(
+            AsyncConnectionPool, "getconn", AsyncMock(side_effect=PoolTimeout("timed out"))
+        ),
+        pytest.raises(CheckpointerPoolExhausted),
+    ):
+        await pool.getconn(timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_the_checkpointer_pool_leaves_a_timeout_on_an_unreachable_database_untagged():
+    pool = _checkpointer_pool(pool_size=1)
+    down = psycopg.OperationalError("connection refused")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", AsyncMock(side_effect=down)),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(
+            AsyncConnectionPool, "getconn", AsyncMock(side_effect=PoolTimeout("timed out"))
+        ),
+        pytest.raises(PoolTimeout) as raised,
+    ):
+        await pool.getconn(timeout=0.1)
+    assert not isinstance(raised.value, CheckpointerPoolExhausted)
+    assert classify_capacity_error(raised.value) is None
+
+
+@pytest.mark.asyncio
+async def test_a_checkpointer_cold_open_timeout_after_a_slot_refusal_is_capacity():
+    pool = _checkpointer_pool(pool_size=0)
+    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", AsyncMock(side_effect=refusal)),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(AsyncConnectionPool, "open", AsyncMock(side_effect=PoolTimeout("timed out"))),
+        pytest.raises(CheckpointerPoolExhausted),
+    ):
+        await pool.open(wait=True, timeout=1)
 
 
 @pytest.mark.parametrize(("exc", "resource"), EXHAUSTION_SIGNALS.values(), ids=EXHAUSTION_SIGNALS)

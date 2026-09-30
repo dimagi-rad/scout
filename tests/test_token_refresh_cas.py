@@ -317,10 +317,20 @@ async def test_malformed_refresh_response_never_mutates_token(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sync", "async"])
-async def test_persistence_failure_is_typed_unavailable_and_does_not_expose_network_token(
-    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"access_token": "must-not-escape"}, TokenRefreshUnavailable),
+        # A rotated grant is dead upstream once the write fails, so it is a reconnect (#758).
+        ({"access_token": "must-not-escape", "refresh_token": "also-secret"}, TokenRefreshRejected),
+    ],
+    ids=["grant-kept", "grant-spent"],
+)
+async def test_persistence_failure_is_typed_and_does_not_expose_network_token(
+    oauth_identity, mode, payload, error, httpx_mock, requests_mock, monkeypatch
 ):
     token, _connection = oauth_identity
+    monkeypatch.setattr(token_refresh, "SPENT_GRANT_PERSIST_RETRY_DELAYS", (0, 0))
     if mode == "async":
 
         async def fail(*args, **kwargs):
@@ -334,16 +344,12 @@ async def test_persistence_failure_is_typed_unavailable_and_does_not_expose_netw
 
         monkeypatch.setattr("apps.users.services.token_refresh._persist_refresh_response", fail)
 
-    with pytest.raises(TokenRefreshUnavailable) as caught:
-        await _refresh(
-            mode,
-            token,
-            httpx_mock,
-            requests_mock,
-            {"access_token": "must-not-escape", "refresh_token": "also-secret"},
-        )
+    with pytest.raises(error) as caught:
+        await _refresh(mode, token, httpx_mock, requests_mock, payload)
 
+    assert caught.type is error
     assert "must-not-escape" not in str(caught.value)
+    assert "also-secret" not in str(caught.value)
     assert token.token == "old-access"
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "old-access"

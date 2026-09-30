@@ -213,7 +213,7 @@ async def test_status_poll_releases_recovery_whose_queue_job_failed(recovery_set
     )
 
     with patch(
-        "apps.workspaces.tasks._procrastinate_job_status",
+        "apps.workspaces.services.reconciliation._procrastinate_job_status",
         new=AsyncMock(return_value="failed"),
     ):
         response = await recovery_setup.client.get(recovery_setup.url)

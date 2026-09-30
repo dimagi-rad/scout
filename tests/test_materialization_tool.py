@@ -5,12 +5,9 @@ import pytest
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.common.error_codes import ErrorCode
 from apps.workspaces.access import tool_write_denied
-from apps.workspaces.services.failure_guidance import credential_guidance
-from apps.workspaces.tasks import (
-    _CREDENTIAL_GUIDANCE,
-    _ROLE_DENIED_MESSAGE,
-    _summary_failures,
-)
+from apps.workspaces.services.data_recovery import ROLE_DENIED_MESSAGE
+from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE, credential_guidance
+from apps.workspaces.tasks import _summary_failures
 
 
 @pytest.mark.asyncio
@@ -70,7 +67,7 @@ async def test_headless_materialization_tool_preserves_post_wait_authorization_d
     denied = {
         "status": "denied",
         "error_code": ErrorCode.WORKSPACE_ROLE_INSUFFICIENT,
-        "error": _ROLE_DENIED_MESSAGE,
+        "error": ROLE_DENIED_MESSAGE,
         "tenants": [],
         "all_succeeded": False,
         "guidance": [],
@@ -121,7 +118,7 @@ async def test_headless_tool_renders_lost_tenant_denial_with_its_guidance(
 
     assert result["status"] == "failed"
     assert result["tenants_not_loaded"] == ["lost"]
-    assert _CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in result["message"]
+    assert CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in result["message"]
 
 
 @pytest.mark.asyncio
@@ -166,7 +163,7 @@ async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, us
     assert result["tenants_not_loaded"] == ["not-mine"]
     assert "not-mine" in result["message"]
     assert "connect that account" in result["message"]
-    assert _CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in result["message"]
+    assert CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in result["message"]
     assert "none of its data is in these results" not in result["message"]
     assert "older data may still be included" in result["message"]
     assert "NOT in the results" not in result["message"]

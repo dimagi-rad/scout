@@ -30,7 +30,7 @@ REBUILD_VIEW_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_view_schema"
 _STATUS_TASK_NAMES = (MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME)
 _QUEUED_OR_RUNNING = ("todo", "doing", "aborting")
 _STARTED = ("doing", "aborting")
-# Matches MATERIALIZATION_STALLED_HEARTBEAT_SECONDS in tasks: a started job whose
+# Matches MATERIALIZATION_STALLED_HEARTBEAT_SECONDS in reconciliation: a started job whose
 # worker stopped heart-beating is dead and must not hold off every later load.
 _STALLED_AFTER = timedelta(seconds=300)
 

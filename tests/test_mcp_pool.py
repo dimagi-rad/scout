@@ -400,11 +400,49 @@ async def test_checkout_timeout_on_an_unreachable_database_is_not_capacity():
     assert classify_capacity_error(raised.value) is None
 
 
+@pytest.mark.asyncio
+async def test_a_cold_open_timeout_after_a_slot_refusal_is_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
+    with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=refusal),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(AsyncConnectionPool, "open", side_effect=PoolTimeout("timed out")),
+        pytest.raises(pool_mod.ManagedPoolExhausted) as raised,
+    ):
+        await pool.open(wait=True, timeout=1)
+
+    assert classify_capacity_error(raised.value).resource == CapacityResource.DATABASE
+
+
+@pytest.mark.asyncio
+async def test_a_cold_open_timeout_on_an_unreachable_database_is_not_capacity():
+    pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
+    with (
+        patch.object(AsyncConnectionPool, "_connect", side_effect=psycopg.OperationalError("down")),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pool._connect()
+    with (
+        patch.object(AsyncConnectionPool, "open", side_effect=PoolTimeout("timed out")),
+        pytest.raises(PoolTimeout) as raised,
+    ):
+        await pool.open(wait=True, timeout=1)
+
+    assert classify_capacity_error(raised.value) is None
+
+
 def test_pool_internals_the_capacity_tag_relies_on_still_exist():
     pool = pool_mod.ManagedPool(conninfo="host=localhost", min_size=1, max_size=3, open=False)
 
     assert "pool_size" in pool.get_stats()
     assert inspect.iscoroutinefunction(AsyncConnectionPool._connect)
+    open_params = list(inspect.signature(AsyncConnectionPool.open).parameters.values())[1:3]
+    assert [p.name for p in open_params] == ["wait", "timeout"]
+    assert [p.kind for p in open_params] == [inspect.Parameter.POSITIONAL_OR_KEYWORD] * 2
     assert "timeout" in inspect.signature(AsyncConnectionPool._connect).parameters
 
 
