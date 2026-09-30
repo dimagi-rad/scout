@@ -4,9 +4,12 @@
 // with no idle expiry, and drops evicted ones without releasing their drivers.
 const DEFAULTS = Object.freeze({
   maxEntries: 100,
+  // Use is refreshed on every request, including each "Continue wait" poll, and
+  // Cube's queue drops a job nobody has polled for 120s (orphanedTimeout). So no
+  // work can outlive 10 idle minutes.
   idleTtlMs: 10 * 60 * 1000,
-  // A query admitted just before retirement can still be waiting for a pool
-  // connection (20s) or running (30s statement timeout).
+  // Covers the pool-size eviction path, where a query admitted just before can
+  // still be waiting for a connection (20s) or running (30s statement timeout).
   releaseGraceMs: 60 * 1000,
   sweepIntervalMs: 60 * 1000,
 });
