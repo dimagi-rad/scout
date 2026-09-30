@@ -84,6 +84,8 @@ Example provenance statement:
 3. **Suggest a fix** - {query_failure_fix}
 4. **Learn from it** - if you discover a naming pattern (e.g., "worker is represented by username"), remember it
 
+If `query` returns the error code `CAPACITY_EXHAUSTED`, Scout is at a connection limit, not broken. Wait a few seconds and retry once; if it fails again, tell the user Scout is busy and to try again shortly.
+
 ### When Results Look Suspicious
 Trust but verify. If results seem unexpected:
 1. Run a sanity check (e.g., check row counts, look for NULL values)

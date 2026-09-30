@@ -22,13 +22,13 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.failure_guidance import credential_guidance
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
     STALE_JOB_THRESHOLD,
     TENANT_NOT_RUN,
     _aggregate_materialization_state,
-    _credential_guidance,
     _defer_cube_promotion,
     _semantic_layer_state,
     _summary_failures,
@@ -1210,7 +1210,7 @@ async def test_resume_partial_run_sets_threadjob_error_summary():
     # ThreadJob.error_summary -> jobs/active/ recent_terminations ->
     # MaterializationFailure.tsx. Pinned for the same reason as the prompt hop
     # above (#388 review). NOTE: only the FIRST failed source's message survives;
-    # additional ones collapse to bare names in _compose_failure_summary.
+    # additional ones collapse to bare names in compose_failure_summary.
     assert "Connect 500" in tj.error_summary
 
 
@@ -1544,7 +1544,7 @@ async def test_aggregate_reports_a_reachable_tenant_with_no_run_row_without_advi
     assert status == "partial"
     entry = next(t for t in summary if t["tenant"] == uncovered.external_id)
     assert entry["error_code"] == ErrorCode.INTERNAL_ERROR
-    assert _credential_guidance(_summary_failures(summary)) == []
+    assert credential_guidance(_summary_failures(summary)) == []
 
 
 @pytest.mark.asyncio
