@@ -79,6 +79,7 @@ from apps.workspaces.services.access_freshness import (
     acheck_freshness_many,
     freshness_enforced,
 )
+from apps.workspaces.services.load_activity import aworkspace_schema_status
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     acapture_workspace_load_intent,
@@ -1813,7 +1814,8 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
     """Check whether data has been loaded for this workspace.
 
     Returns schema existence, state, last materialization timestamp, and table
-    list; exists=False if no schema has been provisioned yet. Safe to call
+    list. While no data is serving, exists=False and state is ``provisioning``
+    when a load is queued or running, else ``not_loaded``. Safe to call
     before any data has been loaded. While a load is running,
     ``load_in_progress`` reports which source it is on (e.g. "source 2 of 3"),
     how many sources finished or failed, and that source's step and row progress.
@@ -1850,38 +1852,40 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
-        not_provisioned = success_response(
-            {
-                "exists": False,
-                "state": "not_provisioned",
-                "last_materialized_at": None,
-                "sources": [],
-                "tables": [],
-            },
-            schema="",
-        )
-
         try:
             workspace = await Workspace.objects.aget(id=workspace_id)
         except Workspace.DoesNotExist:
             # A genuinely missing workspace is NOT the same as an existing-but-
-            # unprovisioned one. Returning the empty 'not_provisioned' success
-            # envelope here invited the agent to materialize against a phantom
-            # workspace (07#7); surface a NOT_FOUND error so it stops instead.
+            # unloaded one. Returning the empty 'not_loaded' success envelope here
+            # invited the agent to materialize against a phantom workspace (07#7);
+            # surface a NOT_FOUND error so it stops instead.
             tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
 
+        schema_status = await aworkspace_schema_status(workspace.id)
         query_surface = await workspace_query_surface(workspace)
         load_in_progress = await _load_in_progress(workspace)
-        not_provisioned["data"]["query_surface"] = query_surface
-        not_provisioned["data"]["load_in_progress"] = load_in_progress
+        # The same status the workspace API reports, so the two never disagree
+        # about an unserved workspace (#662 discrepancy 3).
+        not_serving = success_response(
+            {
+                "exists": False,
+                "state": "provisioning" if schema_status == "provisioning" else "not_loaded",
+                "last_materialized_at": None,
+                "sources": [],
+                "tables": [],
+                "query_surface": query_surface,
+                "load_in_progress": load_in_progress,
+            },
+            schema="",
+        )
         tenant_count = await workspace.tenants.acount()
 
         if tenant_count == 0:
-            tc["result"] = not_provisioned
+            tc["result"] = not_serving
             return tc["result"]
         sources = await aworkspace_source_freshness(workspace.id, user_id)
-        not_provisioned["data"]["sources"] = sources
+        not_serving["data"]["sources"] = sources
 
         synced_at = (
             await synced_runs()
@@ -1899,7 +1903,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             ).afirst()
 
             if ts is None:
-                tc["result"] = not_provisioned
+                tc["result"] = not_serving
                 return tc["result"]
 
             last_run = await synced_runs().filter(tenant_schema=ts).afirst()
@@ -1944,10 +1948,14 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             # but the workspace query layer could not be assembled, which the
             # agent must surface (and must NOT mistake for "just run
             # materialization"). Additive fields only — shape stays compatible.
-            failed_vs = await WorkspaceViewSchema.objects.filter(
-                workspace_id=workspace_id,
-                state=SchemaState.FAILED,
-            ).afirst()
+            failed_vs = (
+                await WorkspaceViewSchema.objects.filter(
+                    workspace_id=workspace_id,
+                    state=SchemaState.FAILED,
+                ).afirst()
+                if schema_status == "failed"
+                else None
+            )
             if failed_vs is not None:
                 # Return a TOP-LEVEL error envelope (success=False), not a
                 # success envelope carrying ``data.error`` (arch #246, 13#6).
@@ -1961,7 +1969,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                     detail=failed_vs.last_error or "View schema build failed.",
                 )
                 return tc["result"]
-            tc["result"] = not_provisioned
+            tc["result"] = not_serving
             return tc["result"]
 
         # Authorized at the top of this tool; do not pay for the check twice.

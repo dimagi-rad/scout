@@ -23,57 +23,47 @@ SYNCED_RUN_STATES = (
 
 
 def derive_schema_status(
-    tenant_count: int, active_count: int, provisioning: bool, view_schema_state: str | None
+    tenant_count: int, active_count: int, load_running: bool, view_schema_state: str | None
 ) -> str:
-    """The workspace ``schema_status`` the list and detail APIs report.
+    """The workspace ``schema_status`` every surface reports.
 
-    Returns "available" | "provisioning" | "unavailable" | "failed".
+    Returns "available" | "provisioning" | "failed" | "not_loaded".
     ``active_count`` counts sources, not schema rows; callers holding rows should
     go through ``workspace_schema_status``, which does that counting.
 
-    - Single-tenant: available iff every tenant is ACTIVE; provisioning if any is
-      mid-provisioning; else unavailable.
-    - Multi-tenant: tracked by the view schema — ACTIVE ⇒ available, FAILED ⇒
-      failed (per-tenant data may have loaded but there's no queryable surface),
-      else provisioning.
+    - available: data is serving. A single source serves from its ACTIVE schema,
+      several sources from their ACTIVE view schema.
+    - provisioning: nothing serves yet and a load or build is actually running.
+      A PROVISIONING row alone is not one: a load that died leaves it behind (#249).
+    - failed: the multi-source view schema failed to build and nothing is retrying.
+    - not_loaded: nothing serves and nothing is loading.
     """
     if tenant_count > 1:
-        if view_schema_state == SchemaState.ACTIVE:
-            return "available"
-        if view_schema_state == SchemaState.FAILED:
-            return "failed"
-        return "provisioning"
-
-    if active_count == tenant_count and tenant_count > 0:
+        serving = view_schema_state == SchemaState.ACTIVE
+    else:
+        serving = tenant_count > 0 and active_count == tenant_count
+    if serving:
         return "available"
-    if provisioning:
+    if load_running:
         return "provisioning"
-    return "unavailable"
-
-
-def classify_tenant_schemas(rows: Iterable[tuple[Any, str]]) -> tuple[set, set]:
-    """``(tenants with an ACTIVE schema, tenants with one mid-provisioning)`` from
-    ``(tenant_id, state)`` rows. Counting tenants, not rows, keeps a source with
-    two ACTIVE schema rows from reading as a different status in list and detail.
-    """
-    active, provisioning = set(), set()
-    for tenant_id, state in rows:
-        if state == SchemaState.ACTIVE:
-            active.add(tenant_id)
-        elif state == SchemaState.PROVISIONING:
-            provisioning.add(tenant_id)
-    return active, provisioning
+    if tenant_count > 1 and view_schema_state == SchemaState.FAILED:
+        return "failed"
+    return "not_loaded"
 
 
 def workspace_schema_status(
-    tenant_ids: Iterable[Any], active: set, provisioning: set, view_schema_state: str | None
+    tenant_ids: Iterable[Any], active: set, load_running: bool, view_schema_state: str | None
 ) -> str:
-    """``derive_schema_status`` for a workspace over ``classify_tenant_schemas`` output."""
+    """``derive_schema_status`` over the ids of tenants holding an ACTIVE schema.
+
+    Counting tenants, not schema rows, keeps a source with two ACTIVE schema rows
+    from reading as a different status in list and detail.
+    """
     tenant_ids = set(tenant_ids)
     return derive_schema_status(
         tenant_count=len(tenant_ids),
         active_count=len(tenant_ids & active),
-        provisioning=bool(tenant_ids & provisioning),
+        load_running=load_running,
         view_schema_state=view_schema_state,
     )
 

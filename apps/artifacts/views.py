@@ -23,10 +23,11 @@ from django.shortcuts import get_object_or_404
 from django.views import View
 
 from apps.artifacts.services.query_context import resolve_artifact_queries
+from apps.common.capacity import CapacityExhausted, CapacityResource, classify_capacity_error
 from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
-from apps.semantic.services.query import run_semantic_query
+from apps.semantic.services.query import is_capacity_exhausted, run_semantic_query
 from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceDataRecovery, WorkspaceRole
@@ -894,7 +895,10 @@ class ArtifactQueryDataView(View):
                         user_id=str(user.id),
                         readiness=readiness,
                     )
-            except Exception:
+            except Exception as exc:
+                capacity = classify_capacity_error(exc)
+                if capacity is not None:
+                    return {"name": name, "capacity_exhausted": capacity.resource}
                 logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
                 return {
                     "name": name,
@@ -902,6 +906,8 @@ class ArtifactQueryDataView(View):
                     "error": "Semantic query failed",
                 }
 
+            if is_capacity_exhausted(result):
+                return {"name": name, "capacity_exhausted": CapacityResource.CUBE}
             if not result.get("success", True) or result.get("error"):
                 error_info = result.get("error", {})
                 msg = (
@@ -922,6 +928,11 @@ class ArtifactQueryDataView(View):
         results = list(
             await asyncio.gather(*(_run_one(i, entry) for i, entry in enumerate(queries)))
         )
+        # One full pool makes the whole panel retryable, rather than caching nothing
+        # and rendering a per-chart error the user cannot act on.
+        full = next((r["capacity_exhausted"] for r in results if r.get("capacity_exhausted")), None)
+        if full is not None:
+            raise CapacityExhausted(full)
 
         for i, entry in enumerate(artifact.source_queries):
             name = entry.get("name", f"query_{i}")

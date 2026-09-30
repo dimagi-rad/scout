@@ -12,6 +12,7 @@ from typing import Any
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import close_old_connections
 
+from apps.common.capacity import CapacityExhausted, CapacityResource, report_capacity_exhausted
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
 from apps.semantic.services.cube_client import (
@@ -36,6 +37,7 @@ from mcp_server.context import load_workspace_context
 from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR
 
 MAX_SEMANTIC_LIMIT = 500
+CAPACITY_EXHAUSTED_CATEGORY = "capacity_exhausted"
 SUPPORTED_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 
 
@@ -56,6 +58,17 @@ class ResolvedMember:
     @property
     def alias(self) -> str:
         return self.member.replace(".", "__")
+
+
+def is_capacity_exhausted(result: dict[str, Any]) -> bool:
+    error = result.get("error")
+    return isinstance(error, dict) and error.get("category") == CAPACITY_EXHAUSTED_CATEGORY
+
+
+def raise_if_capacity_exhausted(result: dict[str, Any]) -> None:
+    """Let an HTTP caller answer a full Cube pool with the shared "busy" 503."""
+    if is_capacity_exhausted(result):
+        raise CapacityExhausted(CapacityResource.CUBE, result["error"].get("message", ""))
 
 
 def run_semantic_query_sync(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +141,14 @@ async def run_semantic_query(
     except (CubeConfigurationError, CubeAuthenticationError) as exc:
         return query_error(VALIDATION_ERROR, str(exc), category="configuration_required")
     except CubeConnectionError as exc:
+        if exc.capacity_resource is not None:
+            await sync_to_async(report_capacity_exhausted)(exc.capacity_resource, str(exc))
+            return query_error(
+                CONNECTION_ERROR,
+                "Cube is at its database connection limit. Retry the query in a few seconds.",
+                category=CAPACITY_EXHAUSTED_CATEGORY,
+                retryable=True,
+            )
         return query_error(
             CONNECTION_ERROR,
             f"Cube query execution failed: {exc}",

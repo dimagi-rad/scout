@@ -31,7 +31,7 @@ async def test_ensure_checkpointer_uses_configured_pool_limits():
             LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S=3,
         ),
         patch("apps.chat.checkpointer.get_database_url", return_value="postgresql://example/db"),
-        patch("apps.chat.checkpointer.AsyncConnectionPool", return_value=pool) as pool_cls,
+        patch("apps.chat.checkpointer.CheckpointerPool", return_value=pool) as pool_cls,
         patch("apps.chat.checkpointer.AsyncPostgresSaver", return_value=saver),
     ):
         result = await checkpointer.ensure_checkpointer(force_new=True)
@@ -69,7 +69,7 @@ async def test_init_failure_raises_and_caches_nothing(settings):
     settings.DEBUG = True
     with (
         patch("apps.chat.checkpointer.get_database_url", return_value="postgresql://example/db"),
-        patch("apps.chat.checkpointer.AsyncConnectionPool", side_effect=OSError("db down")),
+        patch("apps.chat.checkpointer.CheckpointerPool", side_effect=OSError("db down")),
         pytest.raises(OSError, match="db down"),
     ):
         await checkpointer.ensure_checkpointer()

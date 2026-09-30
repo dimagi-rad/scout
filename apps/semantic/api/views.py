@@ -21,7 +21,7 @@ from apps.semantic.services.catalog import (
     serialize_catalog,
     serialize_dataset,
 )
-from apps.semantic.services.query import run_semantic_query_sync
+from apps.semantic.services.query import raise_if_capacity_exhausted, run_semantic_query_sync
 from apps.workspaces.access import workspace_write_allowed
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
@@ -73,6 +73,7 @@ class SemanticQueryView(APIView):
             return err
 
         result = run_semantic_query_sync(workspace, request.data or {})
+        raise_if_capacity_exhausted(result)
         if not result.get("success", True) or result.get("error"):
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)

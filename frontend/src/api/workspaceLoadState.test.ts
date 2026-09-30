@@ -4,7 +4,7 @@ import { workspaceHasRecordedLoad, workspaceLoadState } from "./workspaces"
 const last_synced_at = "2026-04-16T12:00:00Z"
 
 describe("workspace recorded load metadata", () => {
-  it.each(["available", "provisioning", "unavailable", "failed"] as const)(
+  it.each(["available", "provisioning", "not_loaded", "unavailable", "failed"] as const)(
     "only treats an actual load timestamp as recorded history for %s",
     (schema_status) => {
       const metadata = { schema_status, last_synced_at }
@@ -17,6 +17,16 @@ describe("workspace recorded load metadata", () => {
     expect(
       workspaceLoadState({ schema_status: "available", in_progress: true, last_synced_at }),
     ).toBe("loading")
+  })
+
+  it("shows a never-loaded workspace as not loaded, not as loading", () => {
+    expect(workspaceLoadState({ schema_status: "not_loaded", last_synced_at: null })).toBe(
+      "not_loaded",
+    )
+  })
+
+  it("still shows loading when a load starts on a not-loaded workspace", () => {
+    expect(workspaceLoadState({ schema_status: "not_loaded", in_progress: true })).toBe("loading")
   })
 
   it.each([
