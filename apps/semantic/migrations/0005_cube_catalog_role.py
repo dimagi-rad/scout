@@ -8,18 +8,18 @@ CATALOG_ROLE = "scout_cube_catalog"
 GRANT = """
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'scout_cube_catalog') THEN
-        CREATE ROLE scout_cube_catalog NOLOGIN;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN
+        CREATE ROLE {role} NOLOGIN;
     END IF;
 EXCEPTION WHEN duplicate_object THEN
     NULL;
 END
 $$;
-GRANT scout_cube_catalog TO CURRENT_USER;
-GRANT SELECT ON semantic_cubeschema TO scout_cube_catalog;
-"""
+GRANT {role} TO CURRENT_USER;
+GRANT SELECT ON semantic_cubeschema TO {role};
+""".replace("{role}", CATALOG_ROLE)
 
-REVOKE = "REVOKE SELECT ON semantic_cubeschema FROM scout_cube_catalog;"
+REVOKE = "REVOKE SELECT ON semantic_cubeschema FROM {role};".replace("{role}", CATALOG_ROLE)
 
 
 class Migration(migrations.Migration):
