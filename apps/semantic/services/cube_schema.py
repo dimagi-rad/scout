@@ -64,9 +64,12 @@ class CubeValidatorBusyError(CubeValidatorUnavailableError):
 class _ValidatorSlot:
     """One of ``VALIDATOR_CONCURRENCY`` slots shared by every worker process.
 
-    Taken just before validation. Inside the refresh transaction it is only
-    tried, never waited for, so a wait never holds row locks. Released as soon
-    as validation returns, so promotion and the Cube warm-up never hold it.
+    Normally taken just before validation and released as soon as it returns,
+    so promotion and the Cube warm-up never hold it. A refresh with an active
+    schema must validate inside its transaction (so a failure rolls the catalog
+    refresh back, #622) but must not wait there under row locks. So it only
+    tries for the slot there; under contention it waits outside and holds the
+    slot across the redone refresh and generation too.
     """
 
     def __init__(self, slot: int) -> None:

@@ -355,7 +355,7 @@ def test_explicit_model_build_generates_without_holding_a_validator_slot(
 
 @pytest.fixture
 def raw_holder():
-    """A plain psycopg session another thread may use to hold and release slots."""
+    """A psycopg session outside Django that holds slots for the build to contend with."""
     settings_dict = connection.settings_dict
     holder = psycopg.connect(
         dbname=settings_dict["NAME"],
