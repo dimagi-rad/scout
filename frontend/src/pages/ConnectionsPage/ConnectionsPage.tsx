@@ -43,7 +43,8 @@ function commcareServerLabel(conn: ApiKeyConnection): string | null {
 }
 
 function teamLabelFor(conn: ApiKeyConnection): string {
-  if (commcareServerLabel(conn)) return conn.provider
+  const server = commcareServerLabel(conn)
+  if (server) return `${conn.provider} (${server})`
   // scope_label is the credential's own team; the chatbot fallback covers
   // connections created before the scope was recorded on the connection.
   if (conn.scope_label) return conn.scope_label
