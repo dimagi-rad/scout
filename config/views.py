@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from django.http import HttpResponse
 from django.views.decorators.cache import cache_control
 
@@ -5,7 +7,6 @@ from django.views.decorators.cache import cache_control
 @cache_control(public=True, max_age=3600)
 def widget_js_view(request):
     """Serve the Scout embed widget SDK."""
-    from pathlib import Path
 
     widget_path = Path(__file__).parent.parent / "frontend" / "public" / "widget.js"
     try:

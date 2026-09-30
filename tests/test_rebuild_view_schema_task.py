@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -91,12 +92,21 @@ async def test_rebuild_view_schema_reports_coverage_when_cube_build_fails(worksp
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace, tenant):
+async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace, tenant, caplog):
+    """SCOUT-DJANGO-7: a routine state, recorded on the row, never logged at ERROR."""
     await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=workspace).aupdate(
         state=SchemaState.EXPIRED
     )
 
-    result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
+    with caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"):
+        result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
+
+    task_records = [r for r in caplog.records if r.name == "apps.workspaces.tasks"]
+    assert any("Cannot build view schema" in r.getMessage() for r in task_records)
+    assert not [r for r in task_records if r.levelno >= logging.ERROR]
+    vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
+    assert vs.state == SchemaState.FAILED
+    assert "has no active schema for any tenant" in vs.last_error
     assert "error" in result
     assert result["tenant_coverage"] == {
         "included_tenants": [],

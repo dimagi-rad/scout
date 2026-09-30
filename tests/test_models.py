@@ -2,12 +2,14 @@
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from apps.knowledge.models import (
     AgentLearning,
     KnowledgeEntry,
     TableKnowledge,
 )
+from apps.workspaces.models import TenantMetadata
 
 User = get_user_model()
 
@@ -90,9 +92,6 @@ class TestKnowledgeModels:
 @pytest.mark.django_db
 class TestTenantMetadata:
     def test_create_and_retrieve_metadata(self, tenant):
-        from django.utils import timezone
-
-        from apps.workspaces.models import TenantMetadata
 
         payload = {
             "case_types": ["patient", "household"],
@@ -109,14 +108,12 @@ class TestTenantMetadata:
 
     def test_one_to_one_with_tenant(self, tenant):
         """The unique constraint is what stops the per-member duplicates of #305."""
-        from apps.workspaces.models import TenantMetadata
 
         TenantMetadata.objects.create(tenant=tenant)
         with pytest.raises(Exception, match="unique constraint"):
             TenantMetadata.objects.create(tenant=tenant)
 
     def test_metadata_defaults_to_empty_dict(self, tenant):
-        from apps.workspaces.models import TenantMetadata
 
         meta = TenantMetadata.objects.create(tenant=tenant)
         assert meta.metadata == {}

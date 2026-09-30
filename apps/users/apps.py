@@ -11,13 +11,14 @@ class UsersConfig(AppConfig):
     def ready(self):
         install_socialtoken_encryption(self.apps.get_model("socialaccount", "SocialToken"))
 
-        from allauth.socialaccount.signals import (
+        # Signal modules import models, which aren't loadable until the app registry is ready.
+        from allauth.socialaccount.signals import (  # noqa: PLC0415
             pre_social_login,
             social_account_added,
         )
 
-        import apps.users.signals  # noqa: F401 — connects auto_create_workspace_on_membership
-        from apps.users.signals import (
+        import apps.users.signals  # noqa: F401, PLC0415 — connects auto_create_workspace_on_membership
+        from apps.users.signals import (  # noqa: PLC0415
             reconcile_existing_user_on_login,
             resolve_existing_tenants_on_social_login,
             resolve_tenant_on_social_login,

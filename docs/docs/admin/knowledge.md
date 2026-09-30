@@ -48,7 +48,7 @@ The agent only has `save_learning` in conversations with **Read-Write** and **Ma
 
 Table knowledge annotates individual tables: a description, use cases, data quality notes, owner, refresh frequency, related tables with join hints, and per-column notes. The agent sees it in the prompt, and the semantic catalog uses the column notes as field descriptions.
 
-There is no page for table knowledge in the Scout UI. It can be edited in the Django admin, or through the API at `/api/workspaces/<workspace_id>/data-dictionary/tables/<table>/` (`PUT` requires **Read-Write** or **Manager**). For CommCare Connect workspaces, Scout fills in column notes for the visits table from the opportunity's form definitions when data loads.
+There is no page for table knowledge in the Scout UI. It is edited in the Django admin. For CommCare Connect workspaces, Scout fills in column notes for the visits table from the opportunity's form definitions when data loads.
 
 ## The Knowledge page
 

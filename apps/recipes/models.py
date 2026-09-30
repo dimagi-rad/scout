@@ -1,9 +1,11 @@
-"""Recipe, RecipeStep, and RecipeRun models for reusable conversation workflows."""
+"""Recipe and RecipeRun models for reusable conversation workflows."""
 
 import uuid
+from datetime import datetime
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class RecipeSoftDeleteManager(models.Manager):
@@ -82,7 +84,6 @@ class Recipe(models.Model):
         return f"{self.name} ({self.workspace})"
 
     def soft_delete(self, deleted_by) -> None:
-        from django.utils import timezone
 
         self.is_deleted = True
         self.deleted_at = timezone.now()
@@ -109,7 +110,6 @@ class Recipe(models.Model):
 
     def validate_variable_values(self, values: dict) -> list[str]:
         """Validate ``values`` against variable definitions; return error messages (empty if valid)."""
-        from datetime import datetime
 
         errors = []
         required_vars = set(self.get_variable_names())
@@ -162,47 +162,6 @@ class Recipe(models.Model):
                         )
 
         return errors
-
-
-class RecipeStep(models.Model):
-    """A single ordered step in a recipe workflow with a {{variable}} prompt template."""
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    recipe = models.ForeignKey(
-        Recipe,
-        on_delete=models.CASCADE,
-        related_name="steps",
-    )
-    order = models.PositiveIntegerField(
-        help_text="Execution order of this step (starting from 1).",
-    )
-    prompt_template = models.TextField(
-        help_text="Prompt template with {{variable}} placeholders.",
-    )
-    expected_tool = models.CharField(
-        max_length=100,
-        blank=True,
-        help_text="Optional: expected tool the agent should use (e.g., 'semantic_query').",
-    )
-    description = models.TextField(
-        blank=True,
-        help_text="Optional description of what this step accomplishes.",
-    )
-
-    class Meta:
-        ordering = ["recipe", "order"]
-        unique_together = ["recipe", "order"]
-
-    def __str__(self):
-        return f"Step {self.order}: {self.recipe.name}"
-
-    def render_prompt(self, variable_values: dict) -> str:
-        """Render the prompt template by substituting variable values."""
-        prompt = self.prompt_template
-        for name, value in variable_values.items():
-            placeholder = "{{" + name + "}}"
-            prompt = prompt.replace(placeholder, str(value))
-        return prompt
 
 
 class RecipeRunStatus(models.TextChoices):

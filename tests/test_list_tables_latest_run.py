@@ -6,12 +6,10 @@ null timestamp reported in place of the real last sync.
 """
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from rest_framework.test import APIClient
 
-from apps.workspaces.api.views import _sync_pipeline_list_tables
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
 from mcp_server.services.metadata import pipeline_list_tables
@@ -69,29 +67,3 @@ async def test_mcp_list_tables_ignores_a_run_without_completed_at(schema_with_ti
         tables = await pipeline_list_tables(schema_with_timestampless_run, PIPELINE)
 
     assert tables == EXPECTED
-
-
-@pytest.mark.django_db
-def test_api_list_tables_ignores_a_run_without_completed_at(schema_with_timestampless_run):
-    tables = _sync_pipeline_list_tables(schema_with_timestampless_run, PIPELINE, {"raw_cases"})
-
-    assert tables == EXPECTED
-
-
-@pytest.mark.django_db
-def test_data_dictionary_generated_at_ignores_a_run_without_completed_at(
-    user, workspace, schema_with_timestampless_run
-):
-    client = APIClient()
-    client.force_authenticate(user=user)
-    with (
-        patch("apps.workspaces.api.views.get_managed_db_connection", return_value=MagicMock()),
-        patch("apps.workspaces.api.views._live_tables_from_conn", return_value={"raw_cases"}),
-        patch("apps.workspaces.api.views._columns_from_conn", return_value={}),
-    ):
-        response = client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert list(body["tables"]) == ["served.raw_cases"]
-    assert body["generated_at"] == SYNCED_AT.isoformat()

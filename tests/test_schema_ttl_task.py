@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from apps.users.models import Tenant
 from apps.workspaces.models import (
+    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -30,6 +31,7 @@ from apps.workspaces.tasks import (
     _rebuild_dependent_view_schemas,
     expire_inactive_schemas,
     teardown_schema,
+    teardown_view_schema_task,
 )
 from tests.tenant_lock_probe import try_tenant_data_lock
 
@@ -53,8 +55,6 @@ async def test_expire_inactive_schemas_marks_stale_schema_for_teardown(active_sc
     with patch(
         "apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock
     ) as mock_defer:
-        from apps.workspaces.tasks import expire_inactive_schemas
-
         await expire_inactive_schemas()
 
     await active_schema.arefresh_from_db()
@@ -103,8 +103,6 @@ async def test_active_schema_not_expired_if_recently_accessed(active_schema):
     active_schema.last_accessed_at = timezone.now() - timedelta(hours=1)
     await active_schema.asave(update_fields=["last_accessed_at"])
 
-    from apps.workspaces.tasks import expire_inactive_schemas
-
     await expire_inactive_schemas()
 
     await active_schema.arefresh_from_db()
@@ -117,8 +115,6 @@ async def test_schema_with_null_last_accessed_is_not_expired(active_schema):
     """Schemas that have never been accessed (null) should not be auto-expired."""
     active_schema.last_accessed_at = None
     await active_schema.asave(update_fields=["last_accessed_at"])
-
-    from apps.workspaces.tasks import expire_inactive_schemas
 
     await expire_inactive_schemas()
 
@@ -136,7 +132,6 @@ async def test_teardown_schema_marks_expired_on_success(active_schema):
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.return_value = None
-        from apps.workspaces.tasks import teardown_schema
 
         await teardown_schema(schema_id=str(active_schema.id))
 
@@ -165,8 +160,6 @@ async def test_expire_inactive_schemas_does_not_stale_runs_before_drop(active_sc
     )
 
     with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
-        from apps.workspaces.tasks import expire_inactive_schemas
-
         await expire_inactive_schemas()
 
     await active_schema.arefresh_from_db()
@@ -208,7 +201,6 @@ async def test_teardown_schema_marks_runs_stale_on_success(active_schema):
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.return_value = None
-        from apps.workspaces.tasks import teardown_schema
 
         await teardown_schema(schema_id=str(active_schema.id))
 
@@ -229,7 +221,6 @@ async def test_teardown_schema_rolls_back_to_active_on_failure(active_schema):
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("DB error")
-        from apps.workspaces.tasks import teardown_schema
 
         with pytest.raises(RuntimeError):
             await teardown_schema(schema_id=str(active_schema.id))
@@ -266,7 +257,6 @@ async def test_teardown_schema_leaves_runs_terminal_when_drop_fails(active_schem
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("DB error")
-        from apps.workspaces.tasks import teardown_schema
 
         with pytest.raises(RuntimeError):
             await teardown_schema(schema_id=str(active_schema.id))
@@ -298,8 +288,6 @@ async def test_expire_then_failed_teardown_keeps_data_visible(active_schema):
         state=MaterializationRun.RunState.COMPLETED,
         result={"sources": {"cases": {"state": "completed", "rows": 1}}},
     )
-
-    from apps.workspaces.tasks import expire_inactive_schemas, teardown_schema
 
     # Step 1: the periodic janitor flips the schema to TEARDOWN and dispatches
     # teardown_schema (dispatch is mocked; we invoke the task directly below).
@@ -380,7 +368,6 @@ async def test_teardown_schema_fails_dependent_multitenant_view_schemas(
     # teardown cascade (marked) — not the empty fallback that get_schema_status
     # would render as the generic "View schema build failed." and that the resume
     # prompt would misread as "a system-side fix is required, do NOT re-run".
-    from apps.workspaces.models import VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER
 
     assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in vs_b.last_error
     # C is single-tenant — its view schema must not be clobbered.
@@ -572,8 +559,6 @@ async def test_teardown_view_schema_aborts_when_row_resurrected_to_active(db, us
         workspace=workspace, schema_name="ws_cas_active", state=SchemaState.ACTIVE
     )
 
-    from apps.workspaces.tasks import teardown_view_schema_task
-
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         await teardown_view_schema_task(view_schema_id=str(vs.id))
 
@@ -592,8 +577,6 @@ async def test_teardown_view_schema_still_drops_when_state_is_teardown(db, user)
     vs = await WorkspaceViewSchema.objects.acreate(
         workspace=workspace, schema_name="ws_cas_teardown", state=SchemaState.TEARDOWN
     )
-
-    from apps.workspaces.tasks import teardown_view_schema_task
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         MockManager.return_value.teardown_view_schema.return_value = None

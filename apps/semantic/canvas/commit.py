@@ -61,7 +61,7 @@ class _CatalogChanged(Exception):
 
 def commit_canvas(canvas, user=None) -> dict[str, Any]:
     """Persist all pending canvas changes; returns a structured commit report."""
-    from apps.semantic.canvas.diagnostics import compute_diagnostics
+    from apps.semantic.canvas.diagnostics import compute_diagnostics  # noqa: PLC0415 — cycle
 
     changes = list(canvas.changes.all())
     pending = [c for c in changes if _is_pending(canvas, c)]
@@ -340,7 +340,7 @@ def _create_relationship(model, workspace, change, user):
 
 
 def _create_custom_dataset(canvas, model, workspace, change, user):
-    from apps.semantic.canvas.service import custom_dataset_primary_key
+    from apps.semantic.canvas.service import custom_dataset_primary_key  # noqa: PLC0415 — cycle
 
     fields = change.fields
     validation = fields.get("_validation") or {}

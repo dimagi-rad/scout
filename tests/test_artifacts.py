@@ -579,13 +579,6 @@ class TestArtifactDataView:
 
     def test_artifact_data_requires_workspace_membership(self, db, user, client):
         """Test that artifact access requires workspace membership (no membership -> 403)."""
-        from apps.users.models import Tenant, TenantMembership
-        from apps.workspaces.models import (
-            Workspace,
-            WorkspaceMembership,
-            WorkspaceRole,
-            WorkspaceTenant,
-        )
 
         # Create a workspace owned by a different user (no membership for `user`)
         other_user = User.objects.create_user(email="other2@example.com", password="pass")

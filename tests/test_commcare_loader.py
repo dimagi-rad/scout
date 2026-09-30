@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+from mcp_server.loaders.commcare_base import HTTP_TIMEOUT, build_auth_header
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 
 
@@ -20,7 +21,9 @@ class TestCommCareCaseLoader:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.return_value = mock_response
-            loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
+            loader = CommCareCaseLoader(
+                domain="dimagi", credential={"type": "oauth", "value": "fake-token"}
+            )
             cases = loader.load()
 
         assert len(cases) == 2
@@ -46,7 +49,9 @@ class TestCommCareCaseLoader:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.side_effect = [page1, page2]
-            loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
+            loader = CommCareCaseLoader(
+                domain="dimagi", credential={"type": "oauth", "value": "fake-token"}
+            )
             cases = loader.load()
 
         assert len(cases) == 3
@@ -54,19 +59,16 @@ class TestCommCareCaseLoader:
 
 class TestCommCareBaseLoader:
     def test_build_auth_header_api_key(self):
-        from mcp_server.loaders.commcare_base import build_auth_header
 
         h = build_auth_header({"type": "api_key", "value": "user@example.com:abc"})
         assert h["Authorization"] == "ApiKey user@example.com:abc"
 
     def test_build_auth_header_oauth(self):
-        from mcp_server.loaders.commcare_base import build_auth_header
 
         h = build_auth_header({"type": "oauth", "value": "tok123"})
         assert h["Authorization"] == "Bearer tok123"
 
     def test_http_timeout_is_tuple(self):
-        from mcp_server.loaders.commcare_base import HTTP_TIMEOUT
 
         assert isinstance(HTTP_TIMEOUT, tuple)
         assert len(HTTP_TIMEOUT) == 2

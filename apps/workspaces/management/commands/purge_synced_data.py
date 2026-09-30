@@ -7,7 +7,6 @@ from django.core.management.base import BaseCommand
 from apps.workspaces.models import (
     TenantMetadata,
     TenantSchema,
-    Workspace,
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
@@ -19,8 +18,7 @@ class Command(BaseCommand):
     help = (
         "Purge all materialized tenant data: drops managed-DB tenant AND view "
         "schemas, deletes TenantSchema/MaterializationRun/TenantMetadata/"
-        "WorkspaceViewSchema records, and clears data dictionaries. Chat, "
-        "artifacts, and learnings are preserved."
+        "WorkspaceViewSchema records. Chat, artifacts, and learnings are preserved."
     )
 
     def add_arguments(self, parser):
@@ -35,7 +33,6 @@ class Command(BaseCommand):
         schema_count = TenantSchema.objects.count()
         metadata_count = TenantMetadata.objects.count()
         view_schema_count = WorkspaceViewSchema.objects.count()
-        workspace_count = Workspace.objects.exclude(data_dictionary=None).count()
 
         self.stdout.write(
             self.style.WARNING(
@@ -43,7 +40,6 @@ class Command(BaseCommand):
                 f"  TenantSchema records (+ cascaded MaterializationRun): {schema_count}\n"
                 f"  WorkspaceViewSchema records (+ ws_* schemas): {view_schema_count}\n"
                 f"  TenantMetadata records: {metadata_count}\n"
-                f"  Workspace records with data_dictionary to clear: {workspace_count}\n"
             )
         )
 
@@ -84,7 +80,6 @@ class Command(BaseCommand):
         deleted_view_schemas, _ = WorkspaceViewSchema.objects.all().delete()
         deleted_schemas, _ = TenantSchema.objects.all().delete()
         deleted_metadata, _ = TenantMetadata.objects.all().delete()
-        Workspace.objects.update(data_dictionary=None, data_dictionary_generated_at=None)
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -92,7 +87,6 @@ class Command(BaseCommand):
                 f"  Deleted {deleted_schemas} TenantSchema/MaterializationRun rows\n"
                 f"  Deleted {deleted_view_schemas} WorkspaceViewSchema rows\n"
                 f"  Deleted {deleted_metadata} TenantMetadata rows\n"
-                f"  Cleared data_dictionary on {workspace_count} Workspace(s)\n"
             )
         )
 

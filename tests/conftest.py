@@ -8,6 +8,12 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from tests.pipeline_doubles import no_candidate_ddl  # noqa: F401 (registers the fixture)
 from tests.production_settings import PRODUCTION_SETTINGS, load_production_settings
 from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_connection
@@ -48,7 +54,6 @@ def admin_user(db):
 
 @pytest.fixture
 def tenant(db):
-    from apps.users.models import Tenant
 
     return Tenant.objects.create(
         provider="commcare", external_id="test-domain", canonical_name="Test Domain"
@@ -118,12 +123,6 @@ def workspace(db, user, tenant):
     auto_create_workspace_on_membership signal (which would spawn a second,
     auto-created workspace and break count/listing assertions).
     """
-    from apps.workspaces.models import (
-        Workspace,
-        WorkspaceMembership,
-        WorkspaceRole,
-        WorkspaceTenant,
-    )
 
     ws = Workspace.objects.create(name=tenant.canonical_name, created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
@@ -135,7 +134,6 @@ def workspace(db, user, tenant):
 @pytest.fixture
 def read_user(db, workspace, tenant):
     User = get_user_model()
-    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="reader@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ)
@@ -146,7 +144,6 @@ def read_user(db, workspace, tenant):
 @pytest.fixture
 def write_user(db, workspace, tenant):
     User = get_user_model()
-    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="writer@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ_WRITE)

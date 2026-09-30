@@ -4,12 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from apps.agents.graph.base import _build_system_prompt, _system_prompt_cache
+
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_system_prompt_is_cached_across_calls():
     """Calling _build_system_prompt twice with same workspace returns cached result."""
-    from apps.agents.graph.base import _build_system_prompt, _system_prompt_cache
 
     _system_prompt_cache.clear()
 
@@ -38,7 +39,6 @@ async def test_system_prompt_is_cached_across_calls():
 @pytest.mark.asyncio
 async def test_system_prompt_cache_invalidates_on_prompt_change():
     """Cache miss when workspace system_prompt changes."""
-    from apps.agents.graph.base import _build_system_prompt, _system_prompt_cache
 
     _system_prompt_cache.clear()
 
@@ -68,7 +68,6 @@ async def test_system_prompt_cache_invalidates_on_prompt_change():
 @pytest.mark.asyncio
 async def test_system_prompt_cache_separates_canvas_write_mode():
     """Write-capable chats must not reuse a read-only canvas prompt."""
-    from apps.agents.graph.base import _build_system_prompt, _system_prompt_cache
 
     _system_prompt_cache.clear()
 

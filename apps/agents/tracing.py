@@ -41,8 +41,9 @@ def get_langfuse_callback(
         return None
 
     try:
-        from langfuse import Langfuse
-        from langfuse.langchain import CallbackHandler
+        # Kept lazy so a broken langfuse install only disables tracing.
+        from langfuse import Langfuse  # noqa: PLC0415
+        from langfuse.langchain import CallbackHandler  # noqa: PLC0415
 
         Langfuse(secret_key=secret_key, public_key=public_key, host=host)
         return CallbackHandler()
@@ -66,7 +67,7 @@ def langfuse_trace_context(
         return contextlib.nullcontext()
 
     try:
-        from langfuse import propagate_attributes
+        from langfuse import propagate_attributes  # noqa: PLC0415
 
         return propagate_attributes(
             session_id=session_id,

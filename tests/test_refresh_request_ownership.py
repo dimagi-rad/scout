@@ -1085,7 +1085,7 @@ def test_one_queue_scan_serves_every_unbound_candidate(tenant, tenant_membership
 
 @pytest.mark.django_db(transaction=True)
 def test_periodic_sweep_settles_dead_refresh_without_a_retry(
-    manage_client, workspace, tenant, tenant_membership, refresh_job, queue_worker
+    workspace, tenant, tenant_membership, refresh_job, queue_worker
 ):
     candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     _run_on_worker(job_id, None)
@@ -1097,9 +1097,6 @@ def test_periodic_sweep_settles_dead_refresh_without_a_retry(
     assert result == {"settled": 1, "recovery_needed": 0}
     assert candidate.state == SchemaState.FAILED
     drop.assert_called_once_with(schema_id=str(candidate.id))
-    status_response = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-    assert status_response.data["refresh_state"] == SchemaState.FAILED
-    assert status_response.data["error"]
 
 
 @pytest.mark.django_db(transaction=True)

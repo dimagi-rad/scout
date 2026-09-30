@@ -14,7 +14,6 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
-    WorkspaceViewSchema,
 )
 from apps.workspaces.tasks import refresh_tenant_schema
 from tests.row_locks import row_locked
@@ -137,26 +136,6 @@ def test_non_member_cannot_trigger_refresh(api_client, other_user, workspace):
     assert resp.status_code == 403
 
 
-@pytest.mark.django_db
-def test_refresh_status_returns_schema_state(manage_client, workspace, tenant):
-    TenantSchema.objects.create(
-        tenant=tenant,
-        schema_name="status_test_schema",
-        state=SchemaState.ACTIVE,
-    )
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-    assert resp.status_code == 200
-    assert resp.data["state"] == "available"
-    assert resp.data["refresh_state"] == SchemaState.ACTIVE
-
-
-@pytest.mark.django_db
-def test_refresh_status_no_schema_returns_unavailable(manage_client, workspace):
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-    assert resp.status_code == 200
-    assert resp.data["state"] == "unavailable"
-
-
 def _add_source(workspace, user, external_id):
     extra = Tenant.objects.create(
         provider="commcare", external_id=external_id, canonical_name=external_id
@@ -238,27 +217,6 @@ def test_refresh_reports_each_source_that_could_not_start(
 
 
 @pytest.mark.django_db
-def test_refresh_status_reports_each_source_and_never_hides_a_failure(
-    manage_client, workspace, tenant, user
-):
-    failed = _add_source(workspace, user, "failed-source")
-    TenantSchema.objects.create(tenant=tenant, schema_name="ok_live", state=SchemaState.ACTIVE)
-    TenantSchema.objects.create(tenant=failed, schema_name="bad_r1", state=SchemaState.FAILED)
-
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-
-    assert resp.data["refresh_state"] == SchemaState.FAILED
-    assert {t["tenant_id"]: t["refresh_state"] for t in resp.data["tenants"]} == {
-        str(tenant.id): SchemaState.ACTIVE,
-        str(failed.id): SchemaState.FAILED,
-    }
-    assert {t["tenant_id"]: t["state"] for t in resp.data["tenants"]} == {
-        str(tenant.id): "available",
-        str(failed.id): "unavailable",
-    }
-
-
-@pytest.mark.django_db
 def test_a_refresh_where_no_source_could_start_is_a_conflict(
     manage_client, workspace, tenant, user, tenant_membership_for_user
 ):
@@ -281,46 +239,6 @@ def test_a_refresh_where_no_source_could_start_is_a_conflict(
     assert "code" not in resp.data
     # The shared reason is the message clients show.
     assert resp.data["error"] == "A refresh is already in progress."
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("states", "aggregate"),
-    [
-        ((SchemaState.PROVISIONING, SchemaState.FAILED), SchemaState.FAILED),
-        ((SchemaState.ACTIVE, SchemaState.EXPIRED), SchemaState.EXPIRED),
-        ((SchemaState.EXPIRED, SchemaState.ACTIVE), SchemaState.EXPIRED),
-    ],
-)
-def test_refresh_status_aggregate_is_deterministic_and_matches_its_error(
-    manage_client, workspace, tenant, user, states, aggregate
-):
-    second = _add_source(workspace, user, "second-status")
-    for source, state in zip((tenant, second), states, strict=True):
-        TenantSchema.objects.create(
-            tenant=source, schema_name=f"s_{source.external_id}", state=state
-        )
-
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-
-    assert resp.data["refresh_state"] == aggregate
-    assert (resp.data["error"] is not None) == (aggregate == SchemaState.FAILED)
-
-
-@pytest.mark.django_db
-def test_refresh_status_timestamp_describes_the_failed_source(
-    manage_client, workspace, tenant, user
-):
-    second = _add_source(workspace, user, "newer-success")
-    failed = TenantSchema.objects.create(
-        tenant=tenant, schema_name="old_failure", state=SchemaState.FAILED
-    )
-    TenantSchema.objects.create(tenant=second, schema_name="new_success", state=SchemaState.ACTIVE)
-
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-
-    assert resp.data["refresh_state"] == SchemaState.FAILED
-    assert resp.data["started_at"] == failed.created_at.isoformat()
 
 
 @pytest.mark.django_db
@@ -454,92 +372,3 @@ def test_a_single_source_error_is_a_server_error(
     assert resp.status_code == 500
     assert resp.data == {"error": "The refresh could not be started because of a server error."}
     assert not TenantSchema.objects.filter(tenant=tenant).exists()
-
-
-@pytest.mark.django_db
-def test_refresh_status_does_not_let_a_never_loaded_source_mask_the_others(
-    manage_client, workspace, tenant, user
-):
-    """B4: one newly added source made the whole workspace report "unavailable"."""
-    second = _add_source(workspace, user, "second-active")
-    added = _add_source(workspace, user, "just-added")
-    for source in (tenant, second):
-        TenantSchema.objects.create(
-            tenant=source, schema_name=f"live_{source.external_id}", state=SchemaState.ACTIVE
-        )
-
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-
-    assert resp.data["refresh_state"] == SchemaState.ACTIVE
-    assert {t["tenant_id"]: t["refresh_state"] for t in resp.data["tenants"]} == {
-        str(tenant.id): SchemaState.ACTIVE,
-        str(second.id): SchemaState.ACTIVE,
-        str(added.id): "unavailable",
-    }
-
-
-def _detail_status(client, workspace):
-    return client.get(f"/api/workspaces/{workspace.id}/").data["schema_status"]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "scenario",
-    ["active", "provisioning_first_load", "failed_first_load", "refresh_failed_behind_active"],
-)
-def test_refresh_status_state_matches_workspace_detail(manage_client, workspace, tenant, scenario):
-    if scenario in ("active", "refresh_failed_behind_active"):
-        TenantSchema.objects.create(tenant=tenant, schema_name="serving", state=SchemaState.ACTIVE)
-    if scenario == "provisioning_first_load":
-        TenantSchema.objects.create(
-            tenant=tenant, schema_name="first", state=SchemaState.PROVISIONING
-        )
-    if scenario in ("failed_first_load", "refresh_failed_behind_active"):
-        TenantSchema.objects.create(tenant=tenant, schema_name="attempt", state=SchemaState.FAILED)
-
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-
-    expected = {
-        "active": "available",
-        "provisioning_first_load": "provisioning",
-        "failed_first_load": "unavailable",
-        "refresh_failed_behind_active": "available",
-    }[scenario]
-    assert resp.data["state"] == expected == _detail_status(manage_client, workspace)
-
-
-@pytest.mark.django_db
-def test_a_failed_refresh_behind_serving_data_is_available_and_still_reported(
-    manage_client, workspace, tenant
-):
-    TenantSchema.objects.create(tenant=tenant, schema_name="serving", state=SchemaState.ACTIVE)
-    attempt = TenantSchema.objects.create(
-        tenant=tenant, schema_name="serving_r", state=SchemaState.FAILED
-    )
-
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-
-    assert resp.data["state"] == "available"
-    assert resp.data["refresh_state"] == SchemaState.FAILED
-    assert resp.data["started_at"] == attempt.created_at.isoformat()
-    assert resp.data["error"]
-
-
-@pytest.mark.django_db
-def test_refresh_status_reports_a_failed_view_even_when_every_source_loaded(
-    manage_client, workspace, tenant, user
-):
-    second = _add_source(workspace, user, "view-failed")
-    for source in (tenant, second):
-        TenantSchema.objects.create(
-            tenant=source, schema_name=f"ok_{source.external_id}", state=SchemaState.ACTIVE
-        )
-    WorkspaceViewSchema.objects.create(
-        workspace=workspace, schema_name="ws_view", state=SchemaState.FAILED, last_error="boom"
-    )
-
-    resp = manage_client.get(f"/api/workspaces/{workspace.id}/refresh/status/")
-
-    assert resp.data["state"] == "failed" == _detail_status(manage_client, workspace)
-    assert resp.data["refresh_state"] == SchemaState.ACTIVE
-    assert resp.data["error"] == "boom"

@@ -258,9 +258,6 @@ class Workspace(models.Model):
         related_name="+",
     )
     system_prompt = models.TextField(blank=True)
-    # Legacy fields retained from the original per-tenant workspace model
-    data_dictionary = models.JSONField(null=True, blank=True)
-    data_dictionary_generated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -320,6 +317,10 @@ class WorkspaceTenant(models.Model):
     tenant = models.ForeignKey(
         "users.Tenant", on_delete=models.PROTECT, related_name="workspace_tenants"
     )
+    # What this workspace's latest load did with the source (refreshed, reused or
+    # skipped, with its error code). Per workspace because a load runs as one
+    # member's credentials; see services/source_freshness.py (#715).
+    last_load = models.JSONField(null=True, blank=True)
 
     class Meta:
         unique_together = [["workspace", "tenant"]]

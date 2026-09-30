@@ -35,7 +35,15 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.users.services.token_refresh import credential_fingerprint, get_token_url, token_health
+from apps.users.services.token_refresh import (
+    INTERACTIVE_DB_DEADLINE,
+    TokenRefreshError,
+    credential_fingerprint,
+    get_token_url,
+    refresh_oauth_token,
+    token_health,
+    token_needs_refresh,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,12 +251,6 @@ def _record_status(seen: dict[str, set[str]], provider: str, status: str) -> Non
 @require_GET
 def providers_view(request):
     """Return OAuth providers configured for this site, with connection status if authenticated."""
-    from apps.users.services.token_refresh import (
-        INTERACTIVE_DB_DEADLINE,
-        TokenRefreshError,
-        refresh_oauth_token,
-        token_needs_refresh,
-    )
 
     current_site = Site.objects.get_current()
     apps = SocialApp.objects.filter(sites=current_site).order_by("provider")

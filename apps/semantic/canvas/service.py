@@ -134,7 +134,7 @@ def apply_operations(canvas: SemanticCanvas, operations: list, user=None) -> dic
     Raises nothing: invalid batches return ``{"errors": [...]}`` with nothing
     written.
     """
-    from apps.semantic.canvas.projections import canvas_projection
+    from apps.semantic.canvas.projections import canvas_projection  # noqa: PLC0415 — cycle
 
     if not isinstance(operations, list) or not operations:
         return {
@@ -236,7 +236,7 @@ def _op_set(canvas, model, index, raw_op, user) -> dict[str, Any]:
             allowed = allowed | {"primary_key"}
         _require_key(index, key, allowed, "dataset")
         if key == "primary_key":
-            from apps.semantic.canvas.objects import dataset_column_names
+            from apps.semantic.canvas.objects import dataset_column_names  # noqa: PLC0415 — cycle
 
             columns = dataset_column_names(dataset)
             if value and value not in columns:
@@ -891,7 +891,7 @@ def validate_custom_dataset_draft(
 
 
 def field_expression_columns(dataset: SemanticDataset) -> set[str]:
-    from apps.semantic.canvas.objects import dataset_column_names
+    from apps.semantic.canvas.objects import dataset_column_names  # noqa: PLC0415 — cycle
 
     return dataset_column_names(dataset)
 
