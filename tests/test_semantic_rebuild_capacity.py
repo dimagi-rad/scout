@@ -1,5 +1,6 @@
 """A full DB connection limit during a catalog rebuild is busy, never stale or degraded (#775)."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -7,7 +8,12 @@ import psycopg
 import pytest
 from asgiref.sync import async_to_sync
 
-from apps.common.capacity import BUSY_MESSAGE, CapacityExhausted, CapacityResource
+from apps.common.capacity import (
+    BUSY_MESSAGE,
+    CapacityExhausted,
+    CapacityResource,
+    reraise_if_capacity,
+)
 from apps.semantic.models import CubeSchema, CustomDataset, SemanticDataset, SemanticModel
 from apps.semantic.services import catalog, cube_schema, custom_datasets
 from apps.semantic.services.catalog import (
@@ -214,3 +220,31 @@ def test_a_refused_custom_probe_keeps_the_dataset_active_and_rolls_the_rebuild_b
     assert custom.status == CustomDataset.Status.ACTIVE
     assert custom.diagnostics == []
     assert not SemanticDataset.objects.filter(workspace=workspace).exists()
+
+
+def test_a_capacity_error_deeper_in_the_chain_is_raised_without_closing_a_cycle():
+    wrapper = RuntimeError("wrapped")
+    wrapper.__cause__ = FULL
+    try:
+        raise wrapper
+    except RuntimeError as exc:
+        with pytest.raises(CapacityExhausted) as raised:
+            reraise_if_capacity(exc)
+
+    assert raised.value is FULL
+    assert FULL.__cause__ is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("error", "level"),
+    [(REFUSAL, logging.WARNING), (ValueError("bug"), logging.ERROR)],
+    ids=["capacity", "other"],
+)
+def test_a_failed_deferred_marker_is_only_an_error_when_it_is_not_capacity(
+    workspace, serving_model, caplog, error, level
+):
+    with patch.object(SemanticModel, "save", side_effect=error):
+        cube_schema.record_cube_schema_build_deferred(workspace, "reason")
+
+    assert [record.levelno for record in caplog.records] == [level]

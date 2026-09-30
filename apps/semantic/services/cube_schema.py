@@ -231,13 +231,12 @@ def record_cube_schema_build_deferred(workspace, reason: str) -> None:
         if previous_error:
             model.metadata["last_build"]["error"] = previous_error
         model.save(update_fields=["metadata", "updated_at"])
-    except Exception:
-        # Warning, not exception: during a connection-limit incident this write is
-        # refused too, and an ungrouped ERROR would shadow the rate-limited alert.
-        logger.warning(
-            "Failed to record deferred Cube promotion for workspace %s",
-            workspace.id,
-            exc_info=True,
+    except Exception as exc:
+        # A refused write during a connection-limit incident must not raise a second,
+        # ungrouped ERROR beside the rate-limited capacity alert.
+        log = logger.warning if classify_capacity_error(exc) is not None else logger.exception
+        log(
+            "Failed to record deferred Cube promotion for workspace %s", workspace.id, exc_info=True
         )
 
 
