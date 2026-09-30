@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import psycopg.errors
 import pytest
 
+from apps.common.capacity import BUSY_MESSAGE, CapacityResource
 from mcp_server.context import QueryContext
 from mcp_server.services.query import (
     _classify_error,
@@ -147,3 +148,42 @@ class TestRoleErrorClassification:
         code, message = _classify_error(exc)
         assert code == "CONNECTION_ERROR"
         assert "administrator" in message.lower()
+
+
+class TestCapacityClassification:
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            psycopg.errors.TooManyConnections("sorry, too many clients already"),
+            psycopg.OperationalError("FATAL: remaining connection slots are reserved"),
+        ],
+    )
+    def test_connection_limit_is_capacity_exhausted(self, exc):
+        code, message = _classify_error(exc)
+        assert code == "CAPACITY_EXHAUSTED"
+        assert message == BUSY_MESSAGE
+
+    def test_other_connection_errors_unchanged(self):
+        code, message = _classify_error(psycopg.OperationalError("could not connect to server"))
+        assert code == "CONNECTION_ERROR"
+        assert "Could not connect" in message
+
+    @pytest.mark.asyncio
+    async def test_execute_query_returns_busy_envelope_and_reports(self):
+        ctx = QueryContext(
+            tenant_id="t",
+            schema_name="t",
+            connection_params={"host": "localhost"},
+        )
+        exc = psycopg.errors.TooManyConnections("sorry, too many clients already")
+        with (
+            patch("mcp_server.services.query._execute_async_parameterized", side_effect=exc),
+            patch("mcp_server.services.query.report_capacity_exhausted") as report,
+        ):
+            result = await execute_query(ctx, "SELECT 1")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "CAPACITY_EXHAUSTED"
+        assert result["error"]["message"] == BUSY_MESSAGE
+        report.assert_called_once()
+        assert report.call_args.args[0] == CapacityResource.DATABASE
