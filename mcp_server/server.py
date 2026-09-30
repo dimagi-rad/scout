@@ -80,7 +80,11 @@ from apps.workspaces.services.access_freshness import (
     acheck_freshness_many,
     freshness_enforced,
 )
-from apps.workspaces.services.load_activity import aworkspace_schema_status
+from apps.workspaces.services.load_activity import (
+    active_runs_for_workspaces,
+    aworkspace_schema_status,
+    owned_run_q,
+)
 from apps.workspaces.services.load_generations import (
     INTENT_FULL_REFRESH,
     acapture_workspace_load_intent,
@@ -1725,25 +1729,13 @@ async def _load_in_progress(workspace: Workspace) -> dict | None:
     """
     tenants = [t async for t in workspace.tenants.order_by("canonical_name")]
     tenant_ids = [t.id for t in tenants]
-    active_runs = MaterializationRun.objects.filter(
-        tenant_schema__tenant_id__in=tenant_ids,
-        state__in=MaterializationRun.ACTIVE_STATES,
-    )
+    active_runs = active_runs_for_workspaces([workspace.id])
     if not await active_runs.aexists():
         return None
     workspace_jobs = ThreadJob.objects.filter(
         thread__workspace_id=workspace.id, job_type=ThreadJob.JobType.MATERIALIZATION
     )
-    # A load candidate carries load_workspace_id only until promotion, which is
-    # after its run finishes; finished runs are found through the job id instead.
-    own_filter = (
-        Q(tenant_schema__load_workspace_id=workspace.id)
-        | Q(
-            tenant_schema__refresh_workspace_id=workspace.id,
-            tenant_schema__state=SchemaState.PROVISIONING,
-        )
-        | Q(procrastinate_job_id__in=workspace_jobs.values("procrastinate_job_id"))
-    )
+    own_filter = owned_run_q(workspace)
     own = [
         run
         async for run in active_runs.filter(own_filter)

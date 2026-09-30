@@ -4,17 +4,18 @@ Shared by the workspace payloads and the workspace-scoped active-jobs endpoint s
 every member sees a load, not just the one who started it (#369, #411).
 """
 
-from django.db.models import Q
 from procrastinate.contrib.django.models import ProcrastinateJob
 
-from apps.chat.models import ThreadJob
 from apps.workspaces.models import (
     MaterializationRun,
-    SchemaState,
     Workspace,
     WorkspaceTenant,
 )
-from apps.workspaces.services.load_activity import aunserved_tenant_ids
+from apps.workspaces.services.load_activity import (
+    active_runs_for_workspaces,
+    aunserved_tenant_ids,
+    owned_run_q,
+)
 
 
 def workspace_ids_in_progress(workspace_ids) -> set:
@@ -22,10 +23,9 @@ def workspace_ids_in_progress(workspace_ids) -> set:
     wanted = set(workspace_ids)
     if not wanted:
         return set()
-    active = MaterializationRun.objects.filter(
-        state__in=MaterializationRun.ACTIVE_STATES,
-        tenant_schema__tenant__workspace_tenants__workspace_id__in=wanted,
-    ).values_list("tenant_schema__tenant__workspace_tenants__workspace_id", flat=True)
+    active = active_runs_for_workspaces(wanted).values_list(
+        "tenant_schema__tenant__workspace_tenants__workspace_id", flat=True
+    )
     return set(active) & wanted
 
 
@@ -68,26 +68,10 @@ async def aworkspace_load_progress(workspace: Workspace) -> list[dict]:
     }
     if not tenants:
         return []
-    workspace_job_ids = ThreadJob.objects.filter(
-        thread__workspace_id=workspace.id, job_type=ThreadJob.JobType.MATERIALIZATION
-    ).values("procrastinate_job_id")
-    # A load candidate carries load_workspace_id only until promotion, which is
-    # after its run finishes; finished runs are found through the job id instead.
-    own_filter = (
-        Q(tenant_schema__load_workspace_id=workspace.id)
-        | Q(
-            tenant_schema__refresh_workspace_id=workspace.id,
-            tenant_schema__state=SchemaState.PROVISIONING,
-        )
-        | Q(procrastinate_job_id__in=workspace_job_ids)
-    )
     active = [
         run
-        async for run in MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=list(tenants),
-            state__in=MaterializationRun.ACTIVE_STATES,
-        )
-        .filter(own_filter)
+        async for run in active_runs_for_workspaces([workspace.id])
+        .filter(owned_run_q(workspace))
         .select_related("tenant_schema")
         .order_by("started_at")
     ]
