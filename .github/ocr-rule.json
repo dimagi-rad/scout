@@ -1,0 +1,9 @@
+{
+  "exclude": [
+    "**/tests/**",
+    "**/test_*.py",
+    "**/conftest.py",
+    "**/*.test.cjs",
+    "**/package-lock.json"
+  ]
+}

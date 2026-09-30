@@ -6,7 +6,7 @@ const { evaluateClaudeRun, evaluateClaudeReview, describeDenials, finalResult, r
 const { evaluateReview } = require('./ocr-gate.cjs');
 const { MARKER, encodeState, readState, chooseReview, validateRange, nativeCheckpointMatches } = require('./ocr-state.cjs');
 
-const policyFiles = ['.github/workflows/ocr.yml', '.github/scripts/ocr-gate.cjs',
+const policyFiles = ['.github/workflows/ocr.yml', '.github/ocr-rule.json', '.github/scripts/ocr-gate.cjs',
   '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs', '.github/scripts/claude-review-gate.cjs'];
 const trustedComment = (comment) => comment?.user?.login === 'github-actions[bot]'
   && comment.user?.type === 'Bot'
@@ -171,7 +171,7 @@ async function prepareReview({ github, context, core, fs, env }) {
   // whatever happens to be checked out afterward.
   const snapshot = path.join(env.RUNNER_TEMP, 'scout-ocr-policy');
   fs.mkdirSync(snapshot, { recursive: true });
-  for (const file of policyFiles.filter((file) => file.endsWith('.cjs'))) {
+  for (const file of policyFiles.filter((file) => !file.endsWith('.yml'))) {
     fs.copyFileSync(path.join(env.GITHUB_WORKSPACE, file), path.join(snapshot, path.basename(file)));
   }
   const manualBudget = Number(env.MANUAL_BUDGET);

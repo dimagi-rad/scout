@@ -7,7 +7,7 @@ OCR posts actionable inline findings, routes low-severity findings to its sticky
 - **High or critical findings:** block Claude; address the findings and push again.
 - **Low or medium findings only:** allow Claude to run.
 - **Failed, partial, budget-limited, waived-file, malformed or unclassified results:** block Claude until a complete review can establish the outcome.
-- **No OCR-reviewable files** (OCR filters out Markdown and other non-code paths, so a docs-only PR selects nothing): OCR reports a skipped run with empty coverage. The gate passes it, and Claude reviews its usual range (the whole PR unless it completed the accepted checkpoint), told that no OCR review covers the skipped range. A skipped run with any finding, coverage entry, failure or mismatched range still blocks. On fork PRs, which get no Claude follow-up, it blocks instead of reporting a review that never happened.
+- **No OCR-reviewable files** (OCR filters out Markdown, other non-code paths and Scout's excluded test files, so a docs-only or tests-only PR selects nothing): OCR reports a skipped run with empty coverage. The gate passes it, and Claude reviews its usual range (the whole PR unless it completed the accepted checkpoint), told that no OCR review covers the skipped range. A skipped run with any finding, coverage entry, failure or mismatched range still blocks. On fork PRs, which get no Claude follow-up, it blocks instead of reporting a review that never happened.
 - **Fork PRs:** receive OCR feedback; automatic Claude follow-up is disabled.
 
 The first review covers the full PR. After a complete review passes the gate, the next push can review only changes since that accepted head. The gate validates both ends of that range, the originating workflow run and Git ancestry. Duplicate-comment suppression is separate from incremental review: it reduces noise, not the amount of code reviewed.
@@ -55,6 +55,7 @@ Configuration lives in `.github/workflows/ocr.yml`:
 - OCR action pinned to commit `b3dbcb634cbb39344e0a3c48ccb1cef3ecd51532`, CLI `1.12.2`.
 - Anthropic Opus 5, adaptive thinking, high model effort; medium OCR review effort.
 - Two concurrent OCR tasks, 15-minute per-task timeout, and a total-token budget scaled to PR size (500,000 to 4,000,000; see [Token budget and manual overrides](#token-budget-and-manual-overrides)).
+- `.github/ocr-rule.json` excludes tests (`tests/` directories, `test_*.py`, `conftest.py`, `*.test.cjs`) and `package-lock.json` from OCR. OCR's built-in test excludes only match `*_test.py`, so Scout's pytest files were reviewed and made up about 40% of selected files. The Claude follow-up still reviews tests. The rule file is snapshotted from the trusted workflow revision and is part of the policy fingerprint.
 - Native cross-push checkpoints enabled, subject to Scout’s accepted-state validation.
 - Low-severity findings go to the summary; their severity is still evaluated by the gate. The review prompt asks for demonstrated defects rather than speculative API mismatches or style/test-coverage requests without a concrete failure.
 - 45-minute job timeout, including the Claude follow-up.

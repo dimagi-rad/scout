@@ -140,6 +140,9 @@ jobs:
           review_concurrency: '2'
           review_task_timeout: '15'
           max_tokens_budget: ${{ steps.baseline.outputs.token_budget }}
+          # Snapshotted from the trusted workflow revision by prepareReview. OCR's
+          # default test excludes miss Scout's test_*.py naming; Claude still reviews tests.
+          rule: ${{ runner.temp }}/scout-ocr-policy/ocr-rule.json
           effort: medium
           stream_progress: 'true'
           sticky_summary: 'true'

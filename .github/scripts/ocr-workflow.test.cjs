@@ -8,7 +8,7 @@ const { MARKER, encodeState, readState } = require('./ocr-state.cjs');
 
 const HEAD = 'a'.repeat(40), BASE = 'b'.repeat(40), PRIOR = 'c'.repeat(40), MERGE = 'd'.repeat(40);
 const POLICY = 'e'.repeat(64);
-const policyFiles = ['.github/workflows/ocr.yml', '.github/scripts/ocr-gate.cjs',
+const policyFiles = ['.github/workflows/ocr.yml', '.github/ocr-rule.json', '.github/scripts/ocr-gate.cjs',
   '.github/scripts/ocr-state.cjs', '.github/scripts/ocr-workflow.cjs', '.github/scripts/claude-review-gate.cjs'];
 function state(overrides = {}) {
   return { version: 1, head: PRIOR, base: BASE, policy: POLICY, run: '10', passed: true, claudeHead: null, ...overrides };
@@ -227,7 +227,7 @@ test('the Claude prompt carries the gate scope note', () => {
 test('prepare snapshots every trusted script and fingerprints changes to each policy file', async () => {
   const original = harness(); await prepareReview(original);
   assert.match(original.outputs.policy, /^[a-f0-9]{64}$/);
-  assert.deepEqual(original.copies.map(([source]) => source), policyFiles.filter(file => file.endsWith('.cjs')).map(file => `/workspace/${file}`));
+  assert.deepEqual(original.copies.map(([source]) => source), policyFiles.filter(file => !file.endsWith('.yml')).map(file => `/workspace/${file}`));
   for (const [source, destination] of original.copies) {
     assert.equal(destination, path.join('/runner/scout-ocr-policy', path.basename(source)));
     assert.equal(original.files.get(destination), original.files.get(source));
