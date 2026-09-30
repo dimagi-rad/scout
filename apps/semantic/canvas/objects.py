@@ -246,3 +246,19 @@ def field_sql_text(values: dict[str, Any]) -> str:
             ]
         )
     )
+
+
+def references_field(text: str, dataset: str, field: str, *, same_dataset: bool) -> bool:
+    """Whether normalized SQL names ``dataset.field`` the ways Cube resolves it.
+
+    Inside its own dataset a member is also reachable as ``{field}`` and
+    ``{CUBE.field}`` (cube._cube_measure's reference set).
+    """
+    if f"{{{dataset}.{field}}}" in text:
+        return True
+    return same_dataset and (f"{{{field}}}" in text or f"{{CUBE.{field}}}" in text)
+
+
+def references_dataset(text: str, dataset: str) -> bool:
+    """Whether normalized SQL names the dataset itself or any of its members."""
+    return f"{{{dataset}}}" in text or f"{{{dataset}." in text

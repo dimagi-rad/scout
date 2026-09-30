@@ -18,7 +18,11 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
 
-from apps.semantic.canvas.objects import field_sql_text, normalize_member_references
+from apps.semantic.canvas.objects import (
+    field_sql_text,
+    normalize_member_references,
+    references_field,
+)
 from apps.semantic.canvas.service import allowed_custom_dataset_tables
 from apps.semantic.models import (
     CustomDataset,
@@ -457,18 +461,18 @@ class _References:
         ]
 
     def user_of(self, field_snapshot: dict[str, Any], removing: set[str]) -> str:
-        """Name a field or join that references this field by ``{name}`` or ``{dataset.name}``."""
+        """Name a field or join that references this field."""
         dataset, name = field_snapshot["dataset_name"], field_snapshot["name"]
-        qualified = f"{{{dataset}.{name}}}"
-        local = f"{{{name}}}"
         excluded = {*map(str, removing), str(field_snapshot["id"])}
         for field_id, field_dataset, field_name, text in self._fields:
             if field_id in excluded:
                 continue
-            if qualified in text or (field_dataset == dataset and local in text):
+            if references_field(text, dataset, name, same_dataset=field_dataset == dataset):
                 return f"Field {field_dataset}.{field_name}"
         for join_id, join_name, expression in self._joins:
-            if join_id not in excluded and qualified in expression:
+            if join_id not in excluded and references_field(
+                expression, dataset, name, same_dataset=False
+            ):
                 return f"Relationship {join_name}"
         return ""
 

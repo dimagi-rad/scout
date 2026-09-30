@@ -337,28 +337,34 @@ def test_commit_refuses_to_rename_or_delete_a_field_another_field_uses(
     )
 
 
-def test_member_references_match_cube_whitespace_joins_drafts_and_visibility(
-    canvas, semantic_model, user
-):
-    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
-    _commit(
-        canvas,
-        user,
-        [_measure_op("ratio", measure_type="number", cube_sql="{ total_amount } / 2")],
-    )
-    rename = {
-        "op": "set",
-        "target": "field/raw_visits.total_amount/name",
-        "value": "amount_total",
-    }
-    revert = {"op": "revert_object", "object": "field/raw_visits.total_amount"}
+RENAME_TOTAL = {
+    "op": "set",
+    "target": "field/raw_visits.total_amount/name",
+    "value": "amount_total",
+}
 
-    apply_operations(canvas, [rename], user)
+
+def _blocking_message(canvas, user, operations):
+    apply_operations(canvas, operations, user)
     [problem] = commit_canvas(canvas, user)["blocking_diagnostics"]
-    assert "raw_visits.ratio" in problem["message"]
-    apply_operations(canvas, [revert], user)
+    assert problem["code"] == "MEMBER_IN_USE"
+    return problem["message"]
 
-    SemanticField.objects.filter(name="ratio").update(is_visible=False)
+
+def _total_and_user(canvas, user, cube_sql):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    _commit(canvas, user, [_measure_op("ratio", measure_type="number", cube_sql=cube_sql)])
+
+
+@pytest.mark.parametrize("cube_sql", ["{ total_amount } / 2", "{CUBE.total_amount} / 2"])
+def test_commit_sees_every_reference_form_cube_accepts(canvas, semantic_model, user, cube_sql):
+    _total_and_user(canvas, user, cube_sql)
+
+    assert "raw_visits.ratio" in _blocking_message(canvas, user, [RENAME_TOTAL])
+
+
+def test_commit_sees_a_join_drafted_in_the_same_batch(canvas, semantic_model, user):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
     join = {
         "op": "create",
         "object_type": "relationship",
@@ -370,10 +376,47 @@ def test_member_references_match_cube_whitespace_joins_drafts_and_visibility(
             "relationship_type": "many_to_one",
         },
     }
-    apply_operations(canvas, [join, rename], user)
-    [problem] = commit_canvas(canvas, user)["blocking_diagnostics"]
-    assert problem["code"] == "MEMBER_IN_USE"
-    assert "Relationship" in problem["message"]
+
+    assert "Relationship" in _blocking_message(canvas, user, [join, RENAME_TOTAL])
+
+
+def test_commit_ignores_references_cube_never_publishes(canvas, semantic_model, user):
+    _total_and_user(canvas, user, "{total_amount} / 2")
+    semantic_model.datasets.get(name="raw_visits").fields.filter(name="ratio").update(
+        is_visible=False
+    )
+
+    _commit(canvas, user, [RENAME_TOTAL])
+
+
+def test_commit_refuses_to_delete_a_dataset_named_bare(
+    canvas, semantic_model, workspace, user, custom_sql
+):
+    _create_visit_stats(canvas, user)
+    _commit(
+        canvas,
+        user,
+        [_measure_op("stat_rows", measure_type="number", cube_sql="(select 1 from {visit_stats})")],
+    )
+
+    message = _blocking_message(
+        canvas, user, [{"op": "delete_object", "object": "dataset/visit_stats"}]
+    )
+    assert "raw_visits.stat_rows" in message
+
+
+def test_undo_sees_a_cube_prefixed_reference(canvas, semantic_model, workspace, user):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    created = SemanticModelRevision.objects.get()
+    _commit(
+        canvas,
+        user,
+        [_measure_op("ratio", measure_type="number", cube_sql="{CUBE.total_amount} / 2")],
+    )
+
+    refusal = undo_revision(workspace, created.id, user)["refused"]
+
+    assert "raw_visits.ratio" in refusal["conflicts"][0]["message"]
 
 
 def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(
