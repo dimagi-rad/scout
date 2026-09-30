@@ -66,10 +66,11 @@ def commcare_base_url(key: str | None) -> str:
 def server_for_provider(provider_id: str) -> str:
     """The server key an allauth CommCare identity signed in to.
 
-    Aliases configured for the www app (``commcare_prod``) predate EU support and
-    stay on www.
+    Matched by prefix, like ``canonical_provider``, because a deployment may
+    configure the EU app under an alias id (``commcare_eu_prod``). Any other
+    CommCare id, including www aliases such as ``commcare_prod``, is www.
     """
     for server in COMMCARE_SERVERS.values():
-        if server.key and provider_id == server.provider_id:
+        if server.key and provider_id.startswith(server.provider_id):
             return server.key
     return DEFAULT_SERVER
