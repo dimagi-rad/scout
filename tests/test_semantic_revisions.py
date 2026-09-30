@@ -286,3 +286,32 @@ def test_undo_is_scoped_to_the_workspace(canvas, semantic_model, user):
         undo_revision(other_workspace, revision.id, user)
 
     assert exc_info.value.code == "NOT_FOUND"
+
+
+def test_revision_api_lists_and_undoes_for_writers(client, canvas, semantic_model, workspace, user):
+    _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
+    revision = SemanticModelRevision.objects.get()
+    client.force_login(user)
+    base = f"/api/workspaces/{workspace.id}/data-model/revisions/"
+
+    listing = client.get(base).json()
+    assert listing["can_undo"] is True
+    assert listing["revisions"][0]["summary"] == "Edited dataset raw_visits"
+
+    response = client.post(f"{base}{revision.id}/undo/")
+    assert response.status_code == 200
+    assert semantic_model.datasets.get(name="raw_visits").label == "Visits"
+    assert client.post(f"{base}{revision.id}/undo/").status_code == 409
+
+
+def test_revision_api_refuses_undo_for_read_only_members(
+    client, canvas, semantic_model, workspace, user, read_user
+):
+    _commit(canvas, user, [{"op": "set", "target": "dataset/raw_visits/label", "value": "One"}])
+    revision = SemanticModelRevision.objects.get()
+    client.force_login(read_user)
+    base = f"/api/workspaces/{workspace.id}/data-model/revisions/"
+
+    assert client.get(base).json()["can_undo"] is False
+    assert client.post(f"{base}{revision.id}/undo/").status_code == 403
+    assert semantic_model.datasets.get(name="raw_visits").label == "One"
