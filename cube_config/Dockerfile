@@ -8,6 +8,7 @@ COPY validator-server.js /cube/conf/validator-server.js
 COPY validator-compiler.js /cube/conf/validator-compiler.js
 COPY validator-worker.js /cube/conf/validator-worker.js
 COPY bounded-local-cache.js /cube/conf/bounded-local-cache.js
+COPY pinned-patch.js /cube/conf/pinned-patch.js
 COPY patch-local-cache.js /cube/conf/patch-local-cache.js
 COPY idle-orchestrator-storage.js /cube/conf/idle-orchestrator-storage.js
 COPY patch-orchestrator-storage.js /cube/conf/patch-orchestrator-storage.js

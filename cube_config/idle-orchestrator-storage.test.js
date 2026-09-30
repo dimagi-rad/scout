@@ -7,7 +7,7 @@ const { dirname, join } = require('node:path');
 const { test } = require('node:test');
 const { IdleOrchestratorStorage } = require('./idle-orchestrator-storage');
 const { patchOrchestratorStorage, ORIGINAL_SHA256, PATCHED_SOURCE, UPSTREAM_METHODS } = require('./patch-orchestrator-storage');
-const { sha256 } = require('./patch-local-cache');
+const { sha256 } = require('./pinned-patch');
 
 // Exact upstream 1.6.39 installed CommonJS artifact, not a permissive mock hash.
 const ORIGINAL_SOURCE = `"use strict";
@@ -255,6 +255,7 @@ test('startup verification neither installs a missing patch nor accepts a modifi
 
 test('image build and both startup paths validate the orchestrator patch', () => {
   const dockerfile = readFileSync(join(__dirname, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /^COPY pinned-patch\.js \/cube\/conf\/pinned-patch\.js$/m);
   assert.match(dockerfile, /^COPY idle-orchestrator-storage\.js \/cube\/conf\/idle-orchestrator-storage\.js$/m);
   assert.match(dockerfile, /^COPY patch-orchestrator-storage\.js \/cube\/conf\/patch-orchestrator-storage\.js$/m);
   assert.match(dockerfile, /&& node \/cube\/conf\/patch-orchestrator-storage\.js \\/);
