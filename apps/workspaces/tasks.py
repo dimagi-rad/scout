@@ -76,8 +76,18 @@ from apps.workspaces.services.data_operation import (
     workspace_data_lock,
     workspace_data_lock_if_free,
 )
-from apps.workspaces.services.data_recovery import recovery_query_surface
-from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE as _CREDENTIAL_GUIDANCE
+from apps.workspaces.services.data_operation import (
+    to_thread_fresh_db as _to_thread_fresh_db,
+)
+from apps.workspaces.services.data_recovery import (
+    ROLE_DENIED_MESSAGE as _ROLE_DENIED_MESSAGE,
+)
+from apps.workspaces.services.data_recovery import (
+    recovery_query_surface,
+)
+from apps.workspaces.services.data_recovery import (
+    workspace_recovery_error as _workspace_recovery_error,
+)
 from apps.workspaces.services.failure_guidance import compose_failure_summary, credential_guidance
 from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
 from apps.workspaces.services.load_activity import active_runs_for_workspaces
@@ -534,12 +544,6 @@ def _missing_tenant_results(tenants: Iterable, missing_tenants: Iterable[Missing
     ]
     _set_tenant_display_names(results)
     return results
-
-
-_ROLE_DENIED_MESSAGE = (
-    "The requesting user no longer has a read-write or manage workspace role. "
-    "Ask a workspace member with write access to retry."
-)
 
 
 async def _materialization_write_denial(workspace_id: str, user_id: str) -> dict | None:
@@ -1435,23 +1439,6 @@ async def _rebuild_dependent_view_schemas(tenant_ids, *, exclude_workspace_id=No
             logger.exception(
                 "Failed to defer dependent view-schema rebuild for workspace %s", ws_id
             )
-
-
-async def _to_thread_fresh_db(func, /, *args, **kwargs):
-    """Run a sync ORM-touching callable on a to_thread pool thread, closing
-    stale/dead DB connections on that SAME thread first (arch #253, 08#0).
-
-    Pool threads are reused across jobs and the worker's connection cleanup only
-    reaches the async-ORM thread, so a connection that died since this pool
-    thread's last run would otherwise poison the call. The cleanup runs inside
-    the threaded callable so it never touches the caller thread's connection.
-    """
-
-    def _guarded():
-        close_old_connections()
-        return func(*args, **kwargs)
-
-    return await run_data_thread(_guarded)
 
 
 def _run_pipeline_with_progress(
@@ -2431,71 +2418,6 @@ def _recovery_requester_denied_message(access: WorkspaceAccess | None) -> str:
     if access is not None and access.denied_reason in FRESHNESS_ERROR_CODES:
         return f"The requesting user's access could not be confirmed: {access_denied_body(access)['error']}"
     return _ROLE_DENIED_MESSAGE
-
-
-def _workspace_recovery_error(result: dict, surface: dict) -> str:
-    """Select the most useful persisted error for an artifact recovery card."""
-    if result.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
-        # A role denial is not a source failure; don't label it as one.
-        return str(result.get("error") or _ROLE_DENIED_MESSAGE)[:1000]
-    freshness_codes = set(FRESHNESS_ERROR_CODES.values())
-    if result.get("status") == "denied" and result.get("error_code") in freshness_codes:
-        # A requester whose access could not be confirmed is not a failed source.
-        return str(result["error"])[:1000]
-    failed = [
-        tenant
-        for tenant in result.get("tenants") or []
-        if isinstance(tenant, dict) and tenant.get("success") is not True
-    ]
-    unverified = ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
-    if failed and all(tenant.get("error_code") == unverified for tenant in failed):
-        # A mid-run checkpoint denial skips the remaining tenants without a
-        # run-level status. The credential codes it can also carry are genuine
-        # source remedies, so only the verification-only code is re-labelled.
-        return str(failed[0].get("error") or "")[:1000]
-    # A failed source commonly causes a downstream Cube *skip*, not a Cube
-    # failure. Show the source remedy first; never infer auth advice by parsing
-    # human/provider error text, or conflate missing credentials with a 403.
-    source_errors: dict[str, list[str]] = {}
-    for tenant in result.get("tenants") or []:
-        if not isinstance(tenant, dict) or tenant.get("success") is True:
-            continue
-        error = (
-            _CREDENTIAL_GUIDANCE.get(tenant.get("error_code"))
-            or " ".join(str(tenant.get("error") or "").split())[:200]
-        )
-        if not error or (error not in source_errors and len(source_errors) == 3):
-            continue
-        name = tenant.get("display_name")
-        if not name:
-            name = str(tenant.get("tenant") or "Source")
-            if tenant.get("provider"):
-                name = f"{name} ({tenant['provider']})"
-        label = " ".join(str(name).split())[:80]
-        labels = source_errors.setdefault(error, [])
-        if label not in labels and len(labels) < 3:
-            labels.append(label)
-    if source_errors:
-        # Opposite remedies (reconnect vs restore upstream permissions) must
-        # keep their subjects, even when several sources share one diagnosis.
-        return (
-            "Data source loading failed: "
-            + " ".join(f"{', '.join(labels)}: {error}" for error, labels in source_errors.items())
-        )[:1000]
-    if result.get("error"):
-        return str(result["error"])[:1000]
-    cube_result = result.get("cube_schema") or {}
-    cube_error = cube_result.get("error") or cube_result.get("reason")
-    if cube_error:
-        return str(cube_error)[:1000]
-    if cube_result.get("ok") is False:
-        return "The semantic model rebuild did not complete successfully."
-    view_error = (result.get("view_schema") or {}).get("error")
-    if view_error:
-        return str(view_error)[:1000]
-    if surface.get("detail"):
-        return str(surface["detail"])[:1000]
-    return str(surface.get("message") or "Scout could not restore this artifact's data.")[:1000]
 
 
 @app.task

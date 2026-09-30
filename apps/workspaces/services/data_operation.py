@@ -22,7 +22,7 @@ from functools import wraps
 
 import psycopg
 import psycopg.errors
-from django.db import connections
+from django.db import close_old_connections, connections
 
 _LOCK_NAMESPACE = 0x53434441
 _TENANT_LOCK_NAMESPACE = 0x5343544E
@@ -84,6 +84,23 @@ async def run_data_thread(function, /, *args, **kwargs):
         if not work.cancelled():
             work.exception()  # Retrieve any failure while preserving cancellation.
         raise
+
+
+async def to_thread_fresh_db(func, /, *args, **kwargs):
+    """Run a sync ORM-touching callable on a to_thread pool thread, closing
+    stale/dead DB connections on that SAME thread first (arch #253, 08#0).
+
+    Pool threads are reused across jobs and the worker's connection cleanup only
+    reaches the async-ORM thread, so a connection that died since this pool
+    thread's last run would otherwise poison the call. The cleanup runs inside
+    the threaded callable so it never touches the caller thread's connection.
+    """
+
+    def _guarded():
+        close_old_connections()
+        return func(*args, **kwargs)
+
+    return await run_data_thread(_guarded)
 
 
 def _lock_key(value) -> int:
