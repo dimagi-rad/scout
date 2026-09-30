@@ -40,7 +40,6 @@ from apps.users.services.tenant_resolution import (
 from apps.users.services.token_refresh import (
     INTERACTIVE_DB_DEADLINE,
     TokenRefreshError,
-    TokenRefreshUnavailable,
     credential_fingerprint,
     get_token_url,
     refresh_oauth_token,
@@ -326,10 +325,6 @@ def providers_view(request):
                     async_to_sync(refresh_oauth_token)(
                         social_token, token_url, db_timeout=INTERACTIVE_DB_DEADLINE
                     )
-                except TokenRefreshUnavailable:
-                    # A provider blip or Scout's own client credentials (#759): neither
-                    # is fixed by the user reconnecting.
-                    pass
                 except TokenRefreshError:
                     refresh_failed = True
             refresh_failed = (
