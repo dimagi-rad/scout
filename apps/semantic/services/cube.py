@@ -97,7 +97,11 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             continue
         try:
             join_sql = embed_cube_sql(
-                compile_join_sql(relationship.join_expression), references=join_references
+                compile_join_sql(
+                    relationship.join_expression,
+                    columns=dataset_column_names(relationship.from_dataset),
+                ),
+                references=join_references,
             )
         except JoinSQLValidationError as exc:
             unpublished(

@@ -80,3 +80,19 @@ def test_stored_denied_join_is_not_published(model):
     assert "joins" not in visits
     assert [d["code"] for d in schema["diagnostics"]] == [DroppedJoin.INVALID_SQL]
     assert schema["diagnostics"][0]["relationship"] == "visits_users"
+
+
+def test_join_on_owning_cube_column_is_published(model):
+    SemanticRelationship.objects.create(
+        workspace=model.workspace,
+        name="visits_users",
+        from_dataset=_visits(model),
+        to_dataset=model.datasets.get(name="users"),
+        join_expression='{CUBE}."user_id" = {users.id}',
+    )
+
+    schema = generate_cube_schema(model)
+
+    visits = next(cube for cube in schema["cubes"] if cube["name"] == "visits")
+    assert visits["joins"][0]["sql"] == '{CUBE}."user_id" = {users.id}'
+    assert schema["diagnostics"] == []

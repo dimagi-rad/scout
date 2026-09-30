@@ -309,12 +309,13 @@ def compile_measure_filter_sql(value: str, *, columns: set[str]) -> str:
     )
 
 
-def compile_join_sql(value: str) -> str:
+def compile_join_sql(value: str, *, columns: set[str] | None = None) -> str:
     """Validate a relationship's join condition.
 
-    Generated identity joins filter the target through ``IN (SELECT ... GROUP BY
-    ... HAVING COUNT(*) = 1)``, so unqualified subqueries stay legal here; the
-    shared validator still bounds their functions and tables.
+    ``columns`` are the owning (from) dataset's columns, which ``{CUBE}.column``
+    may name. Generated identity joins filter the target through ``IN (SELECT ...
+    GROUP BY ... HAVING COUNT(*) = 1)``, so unqualified subqueries stay legal
+    here; the shared validator still bounds their functions and tables.
     """
     return _compile_member_sql(
         value,
@@ -324,7 +325,8 @@ def compile_join_sql(value: str) -> str:
         allow_aggregates=True,
         allow_subqueries=True,
         max_length=None,
-        columns=None,
+        columns=columns,
+        check_bare_columns=False,
     )
 
 
@@ -337,6 +339,7 @@ def _compile_member_sql(
     allow_aggregates: bool,
     columns: set[str] | None,
     allow_subqueries: bool = False,
+    check_bare_columns: bool = True,
     max_length: int | None = _MAX_MEMBER_SQL_LENGTH,
 ) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -395,7 +398,9 @@ def _compile_member_sql(
                 expression = reference
             else:
                 column.replace(reference)
-        elif columns is not None and not _inside_subquery(column, expression):
+        elif (
+            check_bare_columns and columns is not None and not _inside_subquery(column, expression)
+        ):
             _require_dataset_column(column, columns, label=label, error=error)
     sql = expression.sql(dialect="postgres", comments=False)
     # Anything left over sat somewhere other than a value or column qualifier.
@@ -409,7 +414,8 @@ def _qualified_column_error(
 ) -> SemanticSQLValidationError:
     if columns is None:
         return error(
-            f"The {label} cannot use qualified columns; write members as {{dataset.field}}."
+            f"The {label} can only qualify columns as {{CUBE}}.column of the owning "
+            "dataset; write other members as {dataset.field}."
         )
     return error(
         f"The {label} can only qualify columns as {{CUBE}}.column; "
@@ -426,7 +432,7 @@ def _require_dataset_column(
 ) -> None:
     identifier = column.this
     if not isinstance(identifier, exp.Identifier):
-        raise error(f"The {label} can only use * inside count(*).")
+        raise error(f"The {label} can only reference named columns of this dataset.")
     name = identifier.name if identifier.quoted else identifier.name.lower()
     if name not in columns:
         raise error(

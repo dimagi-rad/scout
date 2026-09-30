@@ -330,8 +330,15 @@ def test_measure_filter_sql_accepts_jsonb_key_operators(source):
     assert compile_measure_filter_sql(source, columns=MEMBER_COLUMNS)
 
 
-def test_join_sql_rejects_qualified_columns():
-    with pytest.raises(JoinSQLValidationError):
-        compile_join_sql("{visits.user_id} = {CUBE}.id")
-    with pytest.raises(JoinSQLValidationError):
-        compile_join_sql("{visits.user_id} IN (SELECT raw_users.id FROM raw_users)")
+def test_join_sql_qualifies_only_owning_dataset_columns():
+    assert compile_join_sql('{CUBE}."user_id" = {users.id}', columns={"user_id"}) == (
+        '{CUBE}."user_id" = {users.id}'
+    )
+    for source in (
+        "{CUBE}.not_a_column = {users.id}",
+        "{CUBE}.user_id = {users.id}",
+        "{visits}.user_id = {users.id}",
+        "{visits.user_id} IN (SELECT raw_users.id FROM raw_users)",
+    ):
+        with pytest.raises(JoinSQLValidationError):
+            compile_join_sql(source, columns={"user_id"} if "not_a" in source else None)
