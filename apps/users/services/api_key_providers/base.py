@@ -54,6 +54,11 @@ class CredentialProviderStrategy:
         return DEFAULT_SERVER
 
     @classmethod
+    def server_label(cls, server: str) -> str:
+        """How the UI names ``server``; empty for the default deployment."""
+        return ""
+
+    @classmethod
     def pack_credential(cls, fields: dict[str, str]) -> str:
         """Serialize form fields into the opaque encrypted_credential string."""
         raise NotImplementedError

@@ -5,6 +5,7 @@ from django.test import Client
 
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.api_key_providers import CredentialVerificationError
 from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
 EU_DOMAINS = "https://eu.commcarehq.org/api/user_domains/v1/"
@@ -41,13 +42,15 @@ def test_eu_key_does_not_join_a_www_tenant_with_the_same_domain(user, httpx_mock
     www = Tenant.objects.create(provider="commcare", external_id="dom")
     httpx_mock.add_response(url=EU_DOMAINS, json={"objects": [{"domain_name": "dom"}]})
 
-    _client(user).post(
+    response = _client(user).post(
         "/api/auth/connections/",
         data={"provider": "commcare", "fields": {**FIELDS, "server": "eu"}},
         content_type="application/json",
     )
 
+    assert response.status_code == 201
     assert not TenantMembership.objects.filter(user=user, tenant=www).exists()
+    assert TenantMembership.objects.filter(user=user, tenant__server="eu").exists()
 
 
 @pytest.mark.django_db
@@ -93,3 +96,38 @@ def test_the_add_form_offers_each_server_defaulting_to_www():
     assert not server["editable_on_rotate"]
     assert [o["value"] for o in server["options"]] == ["", "eu"]
     assert CommCareStrategy.server_for(FIELDS) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_domain_on_a_later_page_is_found(httpx_mock):
+    httpx_mock.add_response(
+        url=EU_DOMAINS,
+        json={
+            "objects": [{"domain_name": "other"}],
+            "meta": {"next": "/api/user_domains/v1/?offset=1"},
+        },
+    )
+    httpx_mock.add_response(
+        url=f"{EU_DOMAINS}?offset=1",
+        json={"objects": [{"domain_name": "dom"}], "meta": {"next": None}},
+    )
+
+    descriptors = await CommCareStrategy.verify_and_discover({**FIELDS, "server": "eu"})
+
+    assert [d.external_id for d in descriptors] == ["dom"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"json": {"meta": {"next": None}}},
+        {"text": "<html>maintenance</html>"},
+        {"json": {"objects": [], "meta": {"next": "https://evil.example/api/"}}},
+    ],
+)
+async def test_an_unexpected_domain_list_is_a_rejection(httpx_mock, response):
+    httpx_mock.add_response(url=EU_DOMAINS, **response)
+
+    with pytest.raises(CredentialVerificationError, match="unexpected domain list"):
+        await CommCareStrategy.verify_and_discover({**FIELDS, "server": "eu"})
