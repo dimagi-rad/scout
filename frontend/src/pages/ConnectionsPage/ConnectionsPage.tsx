@@ -54,9 +54,15 @@ const WARNING_BADGE =
 
 /** Status line and connect-button label per provider status. */
 const PROVIDER_STATUS_COPY: Partial<
-  Record<OAuthProviderStatus, { label: string; action: string; warn: boolean }>
+  Record<OAuthProviderStatus, { label: string; action: string | null; warn: boolean }>
 > = {
   connected: { label: "Connected", action: "Connect", warn: false },
+  // No action: reconnecting can't fix a provider blip, so offering it would mislead (#779).
+  unavailable: {
+    label: "Connected, but we couldn't check right now. Try again later.",
+    action: null,
+    warn: true,
+  },
   expired: { label: "Connection expired", action: "Reconnect", warn: true },
   needs_team: { label: "No team selected", action: "Connect a team", warn: true },
 }
@@ -247,20 +253,26 @@ export function ConnectionsPage() {
         ) : (
           providers.map((provider) => {
             const copy = (provider.status && PROVIDER_STATUS_COPY[provider.status]) || NOT_CONNECTED
-            // A team-less sign-in's token is live, so it must stay disconnectable (#379).
+            // A team-less sign-in's token is live, so it must stay disconnectable (#379);
+            // so is one we merely couldn't refresh (#779).
             const canDisconnect =
-              provider.status === "connected" || provider.status === "needs_team"
+              provider.status === "connected" ||
+              provider.status === "needs_team" ||
+              provider.status === "unavailable"
             return (
               <Card key={provider.id}>
                 <CardContent className="flex items-center justify-between p-4">
                   <div>
                     <p className="font-medium">{provider.name}</p>
-                    <p className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}>
+                    <p
+                      className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}
+                      data-testid={`provider-status-${provider.id}`}
+                    >
                       {copy.label}
                     </p>
                   </div>
                   <div className="flex shrink-0 gap-2">
-                    {provider.status === "connected" &&
+                    {(provider.status === "connected" || provider.status === "unavailable") &&
                       provider.supports_multiple_scopes && (
                         <Button
                           variant="outline"
@@ -271,7 +283,7 @@ export function ConnectionsPage() {
                           <a href={connectUrlFor(provider)}>Connect another team</a>
                         </Button>
                       )}
-                    {provider.status !== "connected" && (
+                    {provider.status !== "connected" && copy.action && (
                       <Button
                         variant="outline"
                         size="sm"

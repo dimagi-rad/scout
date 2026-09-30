@@ -1,7 +1,15 @@
 import { BASE_PATH } from "@/config"
 
-/** needs_team: a team-less OCS sign-in that can reach no data (#379). */
-export type OAuthProviderStatus = "connected" | "expired" | "needs_team" | "disconnected"
+/**
+ * needs_team: a team-less OCS sign-in that can reach no data (#379).
+ * unavailable: a refresh couldn't run right now; the credential isn't known to be dead (#779).
+ */
+export type OAuthProviderStatus =
+  | "connected"
+  | "unavailable"
+  | "expired"
+  | "needs_team"
+  | "disconnected"
 
 /** One entry of GET /api/auth/providers/. */
 export interface OAuthProvider {
