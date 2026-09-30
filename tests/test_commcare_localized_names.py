@@ -76,7 +76,8 @@ def test_duplicate_forms_with_localized_app_name_stay_unique(tenant):
         for index in range(2)
     }
     names = [a.name for a in generate_system_assets(tenant, {"form_definitions": forms})]
-    assert names == ["stg_form_registration", "stg_form_registration_maternal_app_1"]
+    assert len(set(names)) == 2
+    assert all(re.fullmatch(r"stg_form_registration_[0-9a-f]{8}", name) for name in names)
 
 
 def test_localized_form_name_names_the_model_and_description(tenant):

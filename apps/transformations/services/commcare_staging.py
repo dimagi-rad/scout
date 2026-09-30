@@ -334,6 +334,29 @@ def _case_model_names(
     return _disambiguate_model_names(names, identity_prefix="case:")
 
 
+def _form_model_names(
+    form_definitions: dict[str, dict], fallbacks: _NameFallbacks | None = None
+) -> dict[str, str]:
+    """Model name per form xmlns; forms sharing a display name get xmlns digests.
+
+    The digest keys on xmlns, the form's stable identity, so reordering metadata
+    never renames a duplicate the way the old enumeration counter did (#470).
+    """
+    names = {
+        xmlns: dbt_model_name(
+            "stg_form_"
+            + _slug_or_digest(
+                form_def.get("name", xmlns),
+                identity=f"form:{xmlns}",
+                kind="form name",
+                fallbacks=fallbacks,
+            )
+        )
+        for xmlns, form_def in form_definitions.items()
+    }
+    return _disambiguate_model_names(names, identity_prefix="form:")
+
+
 def _repeat_base_model_name(
     parent_model: str, group_path: str, fallbacks: _NameFallbacks | None = None
 ) -> str:
@@ -421,7 +444,7 @@ def _generate_form_asset(
     tenant,
     form_xmlns: str,
     form_def: dict,
-    model_name_slug: str,
+    model_name: str,
     fallbacks: _NameFallbacks | None = None,
 ) -> TransformationAsset:
     """Generate a staging asset for a single form."""
@@ -458,7 +481,6 @@ def _generate_form_asset(
         )
         for q in staged_questions
     ]
-    model_name = dbt_model_name(f"stg_form_{model_name_slug}")
     kept = fold_to_column_budget(columns, fixed_count=len(select_parts))
     warn_folded(tenant, model_name, total=len(columns), kept=len(kept), raw_column="form_data")
     select_parts.extend(column.select_sql() for column in kept)
@@ -542,39 +564,12 @@ def generate_system_assets(
             )
         )
 
-    seen_form_slugs: dict[str, int] = {}  # slug → count for disambiguation
     form_definitions = metadata.get("form_definitions", {})
+    form_model_names = _form_model_names(form_definitions, fallbacks)
 
     for xmlns, form_def in form_definitions.items():
-        app_name = localized_str(form_def.get("app_name"))
-        base_slug = _slug_or_digest(
-            form_def.get("name", xmlns),
-            identity=f"form:{xmlns}",
-            kind="form name",
-            fallbacks=fallbacks,
-        )
-
-        # Disambiguate duplicate form names across apps; always incorporate the
-        # counter so 3+ collisions stay unique.
-        if base_slug in seen_form_slugs:
-            count = seen_form_slugs[base_slug]
-            app_slug = (
-                _slug_or_digest(
-                    app_name,
-                    identity=f"app:{form_def.get('app_id') or app_name}",
-                    kind="app name",
-                    fallbacks=fallbacks,
-                )
-                if app_name
-                else ""
-            )
-            app_suffix = f"_{app_slug}" if app_slug else ""
-            slug = f"{base_slug}{app_suffix}_{count}"
-        else:
-            slug = base_slug
-        seen_form_slugs[base_slug] = seen_form_slugs.get(base_slug, 0) + 1
-
-        assets.append(_generate_form_asset(tenant, xmlns, form_def, slug, fallbacks))
+        parent_model = form_model_names[xmlns]
+        assets.append(_generate_form_asset(tenant, xmlns, form_def, parent_model, fallbacks))
 
         repeat_groups: dict[str, list[dict]] = {}
         for q in form_def.get("questions", []):
@@ -582,8 +577,6 @@ def generate_system_assets(
             if isinstance(repeat_path, str) and repeat_path:
                 repeat_groups.setdefault(repeat_path, []).append(q)
 
-        # Must match the form asset's (possibly hash-bounded) name so ref() resolves.
-        parent_model = dbt_model_name(f"stg_form_{slug}")
         model_names = _repeat_model_names(parent_model, repeat_groups, fallbacks)
         for group_path, child_qs in repeat_groups.items():
             asset = _generate_repeat_group_asset(
