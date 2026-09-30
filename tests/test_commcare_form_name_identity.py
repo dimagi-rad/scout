@@ -164,3 +164,19 @@ def test_upsert_replaces_legacy_counter_names_and_keeps_repeat_consumers(caplog)
         assert f"ref('{new_parent}')" in stored[name]
     for new, old in renames.items():
         assert f"{old} -> {new}" in caplog.text
+
+
+@pytest.mark.django_db
+def test_upsert_logs_a_model_name_reassigned_to_another_form(caplog):
+    tenant = Tenant.objects.create(provider="commcare", external_id="synthetic-swapped-forms")
+    forms = {"urn:synthetic:a": _form("Registration"), "urn:synthetic:b": _form("Visit")}
+    metadata = TenantMetadata.objects.create(tenant=tenant, metadata={"form_definitions": forms})
+    upsert_system_assets(tenant, metadata)
+
+    swapped = {"urn:synthetic:a": _form("Visit"), "urn:synthetic:b": _form("Registration")}
+    metadata.metadata = {"form_definitions": swapped}
+    metadata.save()
+    upsert_system_assets(tenant, metadata)
+
+    assert "stg_form_registration -> stg_form_visit" in caplog.text
+    assert "stg_form_visit -> stg_form_registration" in caplog.text

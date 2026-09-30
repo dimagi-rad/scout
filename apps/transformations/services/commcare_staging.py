@@ -122,6 +122,8 @@ def _slug_or_digest(
         return fit_identifier("unnamed", unique_key=identity, always_hash=True)
 
 
+# Coupled to _generate_form_asset's fixed tail (unchanged since #106); it only
+# feeds the rename warning, so a missed match loses a log line, never data.
 _FORM_XMLNS = re.compile(r"\nFROM raw_forms\nWHERE xmlns = '((?:[^']|'')*)'\Z")
 
 
@@ -679,11 +681,13 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
     # Form renames are accepted without a migration (#470), unlike case types, so
     # leave a searchable record of which old names SQL or knowledge may still use.
     form_names = _form_model_names(metadata.get("form_definitions", {}))
+    # Compare per xmlns, not name presence, so a name reassigned to another form
+    # is recorded too.
     renamed_forms = sorted(
-        (asset.name, form_names[xmlns])
+        (asset.name, new_name)
         for asset in existing_assets
-        if asset.name not in current_names
-        and (xmlns := _form_xmlns(asset.sql_content)) in form_names
+        if (xmlns := _form_xmlns(asset.sql_content)) in form_names
+        and (new_name := form_names[xmlns]) != asset.name
     )
     if renamed_forms:
         logger.warning(
