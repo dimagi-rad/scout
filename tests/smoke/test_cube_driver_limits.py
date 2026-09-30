@@ -42,7 +42,16 @@ async function run() {
   // With one tenant slot, a leaked slot from the first refused connect would
   // leave the second waiting forever instead of failing fast.
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    await assert.rejects(driver.testConnection());
+    let timer;
+    const leaked = new Promise((resolve) => {
+      timer = setTimeout(() => resolve('A refused tenant connect did not return its slot'), 5000);
+    });
+    const outcome = await Promise.race([
+      driver.testConnection().then(() => 'connected', () => 'refused'),
+      leaked,
+    ]);
+    clearTimeout(timer);
+    assert.equal(outcome, 'refused');
   }
   await driver.release();
   await readiness.release();

@@ -12,9 +12,12 @@ const DEFAULTS = Object.freeze({
 });
 
 class IdleOrchestratorStorage {
+  // Also accepts upstream's option names; Cube 1.6.39 itself passes none.
   constructor({
-    maxEntries = DEFAULTS.maxEntries,
-    idleTtlMs = DEFAULTS.idleTtlMs,
+    compilerCacheSize,
+    maxCompilerCacheKeepAlive,
+    maxEntries = compilerCacheSize || DEFAULTS.maxEntries,
+    idleTtlMs = maxCompilerCacheKeepAlive || DEFAULTS.idleTtlMs,
     releaseGraceMs = DEFAULTS.releaseGraceMs,
     sweepIntervalMs = DEFAULTS.sweepIntervalMs,
     now = Date.now,

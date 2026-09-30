@@ -182,6 +182,9 @@ test('defaults keep upstream capacity and expire orchestrators idle for ten minu
   assert.equal(s.maxEntries, 100);
   assert.equal(s.idleTtlMs, 600000);
   assert.equal(s.releaseGraceMs, 60000);
+  const upstream = new IdleOrchestratorStorage({ compilerCacheSize: 7, maxCompilerCacheKeepAlive: 1234 });
+  assert.equal(upstream.maxEntries, 7);
+  assert.equal(upstream.idleTtlMs, 1234);
 });
 
 function write(path, value) {
