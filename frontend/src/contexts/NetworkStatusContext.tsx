@@ -13,6 +13,12 @@ const NetworkStatusContext = createContext<NetworkStatusContextValue>({
   status: "online",
 })
 
+async function isBusyHealth(res: Response): Promise<boolean> {
+  if (res.status !== 503) return false
+  const body: unknown = await res.json().catch(() => undefined)
+  return typeof body === "object" && body !== null && (body as { status?: unknown }).status === "busy"
+}
+
 const POLL_INTERVAL = 5000
 const RECONNECT_DISPLAY_MS = 2000
 
@@ -28,7 +34,9 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
       if (!polling) return
       try {
         const res = await fetch(withBasePath("/health/"), { method: "GET", cache: "no-store" })
-        if (res.ok) {
+        // A server at its connection limit is reachable, just busy: BusyNotice
+        // covers that, and the red "unreachable" bar would only alarm people.
+        if (res.ok || (await isBusyHealth(res))) {
           if (wasOfflineRef.current) {
             wasOfflineRef.current = false
             setStatus("reconnecting")
