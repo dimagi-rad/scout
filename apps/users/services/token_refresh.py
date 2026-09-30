@@ -829,13 +829,18 @@ async def refresh_oauth_token_result(
                 logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         raise verdict.error from e
     except Exception as e:
-        logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         verdict = classify_http_failure(
             None,
             transient=_is_transient_error(e),
             rejected=False,
             misconfigured=False,
             cause=e,
+        )
+        logger.log(
+            verdict.log_level,
+            "Token refresh failed for app %s",
+            social_token.app.client_id,
+            exc_info=True,
         )
         if record_failure and verdict.record_marker:
             try:
@@ -990,13 +995,18 @@ def refresh_oauth_token_result_sync(
                 logger.warning("Could not record OAuth refresh failure marker", exc_info=True)
         raise verdict.error from e
     except Exception as e:
-        logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         verdict = classify_http_failure(
             None,
             transient=_is_transient_error(e),
             rejected=False,
             misconfigured=False,
             cause=e,
+        )
+        logger.log(
+            verdict.log_level,
+            "Sync token refresh failed for app %s",
+            social_token.app.client_id,
+            exc_info=True,
         )
         if verdict.record_marker:
             try:

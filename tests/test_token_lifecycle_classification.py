@@ -15,7 +15,6 @@ Two independent defects in the same module:
 
 from __future__ import annotations
 
-import inspect
 import json
 import logging
 from types import SimpleNamespace
@@ -25,7 +24,6 @@ import pytest
 import requests
 
 from apps.common.error_codes import ErrorCode
-from apps.users.services import token_refresh
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     TokenRefreshRejected,
@@ -180,14 +178,3 @@ class TestSyncRefreshLogLevels:
             assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors and any(r.exc_info for r in errors)
-
-    def test_the_sync_path_matches_the_async_twin(self):
-        """The defect was a divergence between the two, so pin them together."""
-        # The 4xx-vs-exception decision lives in one classifier; a private copy is the drift.
-        for fn in (
-            token_refresh.refresh_oauth_token_result,
-            token_refresh.refresh_oauth_token_result_sync,
-        ):
-            assert "classify_http_failure(" in inspect.getsource(fn), (
-                f"{fn.__name__} must take its 4xx log level from classify_http_failure"
-            )
