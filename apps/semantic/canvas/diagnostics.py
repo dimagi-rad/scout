@@ -9,9 +9,15 @@ diagnostics gate commit.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
-from apps.semantic.canvas.objects import FIELD_CURATION_KEYS, FIELD_TYPES, MEASURE_TYPES
+from apps.semantic.canvas.objects import (
+    FIELD_CURATION_KEYS,
+    FIELD_TYPES,
+    MEASURE_TYPES,
+    field_sql_text,
+    normalize_member_references,
+)
 from apps.semantic.canvas.service import (
     ChangeType,
     ObjectType,
@@ -116,15 +122,30 @@ def compute_diagnostics(
     return diagnostics
 
 
+class _Reference(NamedTuple):
+    """SQL that may name members, and who owns it."""
+
+    object_id: str
+    dataset_id: str  # "" for a join, which never resolves a bare {name}
+    label: str
+    text: str
+
+
+class _Target(NamedTuple):
+    change: SemanticCanvasChange
+    path: str
+    verb: str
+    dataset: SemanticDataset
+    field: SemanticField | None  # None when the whole dataset goes
+
+
 def _reference_diagnostics(canvas, model, changes) -> list[dict]:
-    """Refuse removing or renaming a field another field's SQL or a join still names.
+    """Refuse removing or renaming a member that published SQL or a join still names.
 
     The Cube build runs after the commit, so a dangling ``{member}`` would
     leave the saved model unbuildable rather than block the save.
     """
-    targets = []
-    gone_fields: set[str] = set()
-    gone_datasets: set[str] = set()
+    targets: list[_Target] = []
     for change in changes:
         if change.change_type == ChangeType.CREATE:
             continue
@@ -132,51 +153,103 @@ def _reference_diagnostics(canvas, model, changes) -> list[dict]:
         if change.object_type == ObjectType.DATASET and is_delete:
             dataset = model.datasets.filter(id=change.object_uuid).first()
             if dataset is not None:
-                gone_datasets.add(str(dataset.id))
-                targets.append((change, "", dataset.name, None, "Deleting"))
+                targets.append(_Target(change, "", "Deleting", dataset, None))
         elif change.object_type == ObjectType.FIELD and (is_delete or "name" in change.fields):
             field = (
                 SemanticField.objects.filter(id=change.object_uuid)
                 .select_related("dataset")
                 .first()
             )
-            if field is None:
-                continue
-            if is_delete:
-                gone_fields.add(str(field.id))
-            path, verb = ("", "Deleting") if is_delete else ("name", "Renaming")
-            targets.append((change, path, field.dataset.name, field, verb))
+            if field is not None:
+                path, verb = ("", "Deleting") if is_delete else ("name", "Renaming")
+                targets.append(_Target(change, path, verb, field.dataset, field))
     if not targets:
         return []
 
-    pending = {str(change.object_uuid): change for change in changes}
-    dataset_names = {
+    references = _published_references(model, changes, targets)
+    out = []
+    for target in targets:
+        if target.field is None:
+            prefix = f"{{{target.dataset.name}."
+            user = next((ref.label for ref in references if prefix in ref.text), "")
+            what = f"dataset {target.dataset.name}"
+        else:
+            qualified = f"{{{target.dataset.name}.{target.field.name}}}"
+            local = f"{{{target.field.name}}}"
+            user = next(
+                (
+                    ref.label
+                    for ref in references
+                    if ref.object_id != str(target.field.id)
+                    and (
+                        qualified in ref.text
+                        or (ref.dataset_id == str(target.dataset.id) and local in ref.text)
+                    )
+                ),
+                "",
+            )
+            what = f"field {target.dataset.name}.{target.field.name}"
+        if user:
+            out.append(
+                _diagnostic(
+                    "MEMBER_IN_USE",
+                    target.change,
+                    target.path,
+                    f"{target.verb} {what} would break {user}, which references it. "
+                    "Update or remove that reference in the same batch first.",
+                )
+            )
+    return out
+
+
+def _published_references(model, changes, targets: list[_Target]) -> list[_Reference]:
+    """SQL the Cube build will publish once this canvas commits.
+
+    Mirrors ``generate_cube_schema``: hidden datasets and fields, and joins with a
+    hidden endpoint, are never published, so what they name cannot break it.
+    """
+    gone_datasets = {str(t.dataset.id) for t in targets if t.field is None}
+    gone_fields = {str(t.field.id) for t in targets if t.field is not None and t.verb == "Deleting"}
+    visible = {
         str(id_): name
-        for id_, name in SemanticDataset.objects.filter(semantic_model=model).values_list(
-            "id", "name"
-        )
+        for id_, name in SemanticDataset.objects.filter(
+            semantic_model=model, is_visible=True
+        ).values_list("id", "name")
+        if str(id_) not in gone_datasets
     }
-    texts = []
-    for field in SemanticField.objects.filter(dataset__semantic_model=model):
-        if str(field.id) in gone_fields or str(field.dataset_id) in gone_datasets:
+    pending = {str(change.object_uuid): change for change in changes}
+    references = []
+    for field in SemanticField.objects.filter(dataset__semantic_model=model, is_visible=True):
+        dataset_id = str(field.dataset_id)
+        if str(field.id) in gone_fields or dataset_id not in visible:
             continue
         edit = pending.get(str(field.id))
         draft = edit.fields if edit is not None and edit.change_type == ChangeType.UPDATE else {}
-        merged = {
-            "expression": field.expression,
-            **(field.metadata or {}),
-            **{key: value for key, value in draft.items() if key != "name"},
-        }
-        label = (
-            f"Field {dataset_names.get(str(field.dataset_id), '')}.{draft.get('name', field.name)}"
-        )
-        texts.append((str(field.id), str(field.dataset_id), label, _sql_text(merged)))
+        merged = {"expression": field.expression, **(field.metadata or {}), **draft}
+        # The persisted name is the one canvas ops resolve.
+        label = f"Field {visible[dataset_id]}.{field.name}"
+        references.append(_Reference(str(field.id), dataset_id, label, field_sql_text(merged)))
     for change in changes:
-        if change.object_type == ObjectType.FIELD and change.change_type == ChangeType.CREATE:
-            dataset_id = str(change.fields.get("dataset_uuid", ""))
-            name = change.fields.get("name", "")
-            label = f"Field {dataset_names.get(dataset_id, '')}.{name}"
-            texts.append((str(change.object_uuid), dataset_id, label, _sql_text(change.fields)))
+        if change.change_type != ChangeType.CREATE:
+            continue
+        fields = change.fields
+        if change.object_type == ObjectType.FIELD:
+            dataset_id = str(fields.get("dataset_uuid", ""))
+            label = f"Field {visible.get(dataset_id, '')}.{fields.get('name', '')}"
+            references.append(
+                _Reference(str(change.object_uuid), dataset_id, label, field_sql_text(fields))
+            )
+        elif change.object_type == ObjectType.RELATIONSHIP:
+            # Commit synthesizes the join from these names (commit._create_relationship).
+            text = (
+                f"{{{fields.get('from_dataset', '')}.{fields.get('from_field', '')}}} = "
+                f"{{{fields.get('to_dataset', '')}.{fields.get('to_field', '')}}}"
+            )
+            references.append(
+                _Reference(
+                    str(change.object_uuid), "", f"Relationship {fields.get('name', '')}", text
+                )
+            )
     deleted_joins = {
         str(change.object_uuid)
         for change in changes
@@ -184,68 +257,17 @@ def _reference_diagnostics(canvas, model, changes) -> list[dict]:
     }
     for relationship in SemanticRelationship.objects.filter(workspace_id=model.workspace_id):
         endpoints = {str(relationship.from_dataset_id), str(relationship.to_dataset_id)}
-        if str(relationship.id) in deleted_joins or endpoints & gone_datasets:
+        if str(relationship.id) in deleted_joins or not endpoints <= set(visible):
             continue
-        texts.append(
-            (
+        references.append(
+            _Reference(
                 str(relationship.id),
                 "",
                 f"Relationship {relationship.name}",
-                relationship.join_expression or "",
+                normalize_member_references(relationship.join_expression or ""),
             )
         )
-
-    out = []
-    for change, path, dataset_name, field, verb in targets:
-        if field is None:
-            prefix = f"{{{dataset_name}."
-            user = next(
-                (
-                    label
-                    for _id, owner, label, text in texts
-                    if owner != str(change.object_uuid) and prefix in text
-                ),
-                "",
-            )
-            what = f"dataset {dataset_name}"
-        else:
-            qualified = f"{{{dataset_name}.{field.name}}}"
-            local = f"{{{field.name}}}"
-            user = next(
-                (
-                    label
-                    for id_, owner, label, text in texts
-                    if id_ != str(field.id)
-                    and (qualified in text or (owner == str(field.dataset_id) and local in text))
-                ),
-                "",
-            )
-            what = f"field {dataset_name}.{field.name}"
-        if user:
-            out.append(
-                _diagnostic(
-                    "MEMBER_IN_USE",
-                    change,
-                    path,
-                    f"{verb} {what} would break {user}, which references it. "
-                    "Update or remove that reference in the same batch first.",
-                )
-            )
-    return out
-
-
-def _sql_text(values: dict[str, Any]) -> str:
-    return " ".join(
-        [
-            str(values.get("expression") or ""),
-            str(values.get("cube_sql") or ""),
-            *(
-                str(item.get("sql", ""))
-                for item in values.get("filters") or []
-                if isinstance(item, dict)
-            ),
-        ]
-    )
+    return references
 
 
 def _field_draft_diagnostics(model, change, siblings) -> list[dict]:

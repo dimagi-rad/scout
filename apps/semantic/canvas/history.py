@@ -18,6 +18,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
 
+from apps.semantic.canvas.objects import field_sql_text, normalize_member_references
 from apps.semantic.canvas.service import allowed_custom_dataset_tables
 from apps.semantic.models import (
     CustomDataset,
@@ -442,21 +443,14 @@ class _References:
             "dataset"
         )
         for field in fields:
-            metadata = field.metadata or {}
-            text = " ".join(
-                [
-                    field.expression or "",
-                    str(metadata.get("cube_sql") or ""),
-                    *(str(item.get("sql", "")) for item in metadata.get("filters") or []),
-                ]
-            )
+            text = field_sql_text({**(field.metadata or {}), "expression": field.expression})
             rows.append((str(field.id), field.dataset.name, field.name, text))
         return rows
 
     @cached_property
     def _joins(self) -> list[tuple[str, str, str]]:
         return [
-            (str(id_), name, expression or "")
+            (str(id_), name, normalize_member_references(expression or ""))
             for id_, name, expression in SemanticRelationship.objects.filter(
                 workspace_id=self._model.workspace_id
             ).values_list("id", "name", "join_expression")

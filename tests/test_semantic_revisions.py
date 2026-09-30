@@ -337,6 +337,45 @@ def test_commit_refuses_to_rename_or_delete_a_field_another_field_uses(
     )
 
 
+def test_member_references_match_cube_whitespace_joins_drafts_and_visibility(
+    canvas, semantic_model, user
+):
+    _commit(canvas, user, [_measure_op("total_amount", measure_type="sum", expression="amount")])
+    _commit(
+        canvas,
+        user,
+        [_measure_op("ratio", measure_type="number", cube_sql="{ total_amount } / 2")],
+    )
+    rename = {
+        "op": "set",
+        "target": "field/raw_visits.total_amount/name",
+        "value": "amount_total",
+    }
+    revert = {"op": "revert_object", "object": "field/raw_visits.total_amount"}
+
+    apply_operations(canvas, [rename], user)
+    [problem] = commit_canvas(canvas, user)["blocking_diagnostics"]
+    assert "raw_visits.ratio" in problem["message"]
+    apply_operations(canvas, [revert], user)
+
+    SemanticField.objects.filter(name="ratio").update(is_visible=False)
+    join = {
+        "op": "create",
+        "object_type": "relationship",
+        "value": {
+            "from_dataset": "raw_visits",
+            "from_field": "total_amount",
+            "to_dataset": "raw_users",
+            "to_field": "username",
+            "relationship_type": "many_to_one",
+        },
+    }
+    apply_operations(canvas, [join, rename], user)
+    [problem] = commit_canvas(canvas, user)["blocking_diagnostics"]
+    assert problem["code"] == "MEMBER_IN_USE"
+    assert "Relationship" in problem["message"]
+
+
 def test_undo_refuses_to_restore_a_dataset_whose_sql_no_longer_compiles(
     canvas, semantic_model, workspace, user, custom_sql
 ):

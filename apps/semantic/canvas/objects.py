@@ -20,6 +20,7 @@ The canvas edits four object kinds. Policy summary (the user-facing contract):
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -32,6 +33,8 @@ from apps.semantic.models import (
 from apps.semantic.services.field_sql import dataset_column_names as dataset_column_names
 
 CANVAS_SOURCE = "canvas"
+# Cube strips whitespace inside a reference's braces, so ``{ a.b }`` names ``a.b``.
+_MEMBER_REFERENCE_RE = re.compile(r"\{\s*([^{}]*?)\s*\}")
 
 DATASET_EDITABLE_KEYS = frozenset({"label", "description"})
 FIELD_DISPLAY_METADATA_KEYS = frozenset({"format", "currency"})
@@ -222,3 +225,24 @@ def serialize_base(obj) -> dict[str, Any]:
     if isinstance(obj, SemanticRelationship):
         return serialize_relationship_base(obj)
     return {}
+
+
+def normalize_member_references(text: str) -> str:
+    return _MEMBER_REFERENCE_RE.sub(r"{\1}", text)
+
+
+def field_sql_text(values: dict[str, Any]) -> str:
+    """All of a field's SQL (expression, ``cube_sql``, filter SQL), references normalized."""
+    return normalize_member_references(
+        " ".join(
+            [
+                str(values.get("expression") or ""),
+                str(values.get("cube_sql") or ""),
+                *(
+                    str(item.get("sql", ""))
+                    for item in values.get("filters") or []
+                    if isinstance(item, dict)
+                ),
+            ]
+        )
+    )
