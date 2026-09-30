@@ -39,6 +39,9 @@ async function run() {
   assert.equal(isDriver(readiness), true);
   assert.equal(driver.pool.max, 2);
   assert.equal(readiness.pool.max, 1);
+  // The tenant limit overrides createConnection(); the pinned driver's pool
+  // factory must still route through it or the limit is inert.
+  assert.match(driver.pool._factory.create.toString(), /this\.createConnection\(/);
   // With one tenant slot, a leaked slot from the first refused connect would
   // leave the second waiting forever instead of failing fast.
   for (let attempt = 0; attempt < 2; attempt += 1) {

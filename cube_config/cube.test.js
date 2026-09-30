@@ -20,7 +20,7 @@ class FakePostgresDriver {
   }
 }
 
-function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = [], env = {}, catalog = { roleExists: true, probes: 0, warnings: [] }) {
+function loadConfig(query = () => { throw new Error('Unexpected database access'); }, pools = [], env = {}, catalog = { roleExists: true, probes: 0, warnings: [] }, PostgresDriver = FakePostgresDriver) {
   const sandbox = {
     module: { exports: {} },
     process: { env },
@@ -42,7 +42,7 @@ function loadConfig(query = () => { throw new Error('Unexpected database access'
           }
         } };
       }
-      if (name === '@cubejs-backend/postgres-driver') return { PostgresDriver: FakePostgresDriver };
+      if (name === '@cubejs-backend/postgres-driver') return { PostgresDriver };
       if (name.startsWith('./')) return require(join(__dirname, name));
       return require(name);
     },
@@ -345,6 +345,11 @@ test('a slot wait is bounded and a timed-out waiter leaves the queue', async () 
   assert.equal(timers[1].cleared, true);
   next();
   assert.ok(await slots.acquire());
+});
+
+test('a driver without the createConnection hook fails startup instead of leaving the limit inert', () => {
+  class HooklessDriver {}
+  assert.throws(() => loadConfig(undefined, [], {}, undefined, HooklessDriver), /tenant connection limit would be inert/);
 });
 
 test('an invalid tenant connection limit fails startup', () => {

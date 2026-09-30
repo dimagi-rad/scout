@@ -26,6 +26,12 @@ const driverSlots = createConnectionSlots(
   DRIVER_SLOT_WAIT_MS
 );
 
+// The limit hooks the driver's createConnection(); without it the cap would
+// silently do nothing, so refuse to start instead.
+if (typeof PostgresDriver.prototype.createConnection !== 'function') {
+  throw new Error('PostgresDriver.createConnection is missing; the tenant connection limit would be inert');
+}
+
 // Counts every tenant connection, including the unpooled one Cube opens for
 // testConnection(), against one process-wide limit.
 class SlottedPostgresDriver extends PostgresDriver {
