@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from apps.agents.tools import canvas_tool
 from apps.agents.tools.canvas_tool import create_canvas_tools, destructive_deletions
 from apps.artifacts.models import Artifact
 from apps.chat.models import Thread
@@ -18,6 +19,7 @@ from apps.semantic.canvas import commit as canvas_commit_module
 from apps.semantic.canvas import service as canvas_service
 from apps.semantic.models import (
     CustomDataset,
+    SemanticCanvas,
     SemanticCanvasChange,
     SemanticDataset,
     SemanticField,
@@ -627,3 +629,47 @@ def test_deleting_a_field_no_artifact_uses_needs_no_confirmation(canvas, semanti
         is_deleted=True,
     )
     assert destructive_deletions(canvas)[0]["used_by_artifacts"] == ["Totals"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_confirmation_survives_a_commit_that_writes_nothing(
+    workspace, user, semantic_model, custom_sql, monkeypatch
+):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tools = _tools(workspace, user, thread)
+    await tools["canvas_apply"].ainvoke(
+        {
+            "operations": [
+                {
+                    "op": "create",
+                    "object_type": "custom_dataset",
+                    "value": {
+                        "name": "visit_stats",
+                        "primary_key": "username",
+                        "definition_sql": "select username from raw_visits",
+                    },
+                }
+            ]
+        }
+    )
+    assert (await tools["canvas_commit"].ainvoke({}))["committed"]
+    await tools["canvas_apply"].ainvoke(
+        {"operations": [{"op": "delete_object", "object": "dataset/visit_stats"}]}
+    )
+    assert (await tools["canvas_commit"].ainvoke({}))["confirmation_required"]
+
+    real_commit = canvas_tool.commit_canvas
+    blocked = {"committed": [], "blocked": True, "conflicts": [], "blocking_diagnostics": []}
+    monkeypatch.setattr(canvas_tool, "commit_canvas", lambda *_args, **_kwargs: blocked)
+    next_turn = _tools(workspace, user, thread, human_turn=2)
+    confirmed = {"confirmed_deletions": ["dataset/visit_stats"]}
+    assert (await next_turn["canvas_commit"].ainvoke(confirmed))["blocked"] is True
+
+    monkeypatch.setattr(canvas_tool, "commit_canvas", real_commit)
+    retried = await next_turn["canvas_commit"].ainvoke(confirmed)
+
+    assert retried["committed"][0]["change_type"] == "delete"
+    assert not await SemanticDataset.objects.filter(name="visit_stats").aexists()
+    canvas_row = await SemanticCanvas.objects.aget(thread_id=thread.id)
+    assert "dataset/visit_stats" not in canvas_row.pending_confirmations

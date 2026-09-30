@@ -198,7 +198,7 @@ def _confirmation_required(deletions: list[dict[str, Any]], *, retry: str) -> di
 def _gate_deletions(
     canvas, deletions, confirmed_deletions, human_turn: int | None, *, retry: str
 ) -> dict[str, Any] | None:
-    """Refuse unconfirmed deletions, or clear the ones confirmed; None lets the write run.
+    """Refuse unconfirmed deletions; None lets the write run.
 
     A label in ``confirmed_deletions`` counts only in the user turn right after
     the one where the agent was told to ask, so it cannot ask and confirm in one
@@ -225,12 +225,18 @@ def _gate_deletions(
         canvas.pending_confirmations = pending
         canvas.save(update_fields=["pending_confirmations", "updated_at"])
         return _confirmation_required(unconfirmed, retry=retry)
-    if any(deletion["object"] in pending for deletion in deletions):
-        for deletion in deletions:
-            pending.pop(deletion["object"], None)
-        canvas.pending_confirmations = pending
-        canvas.save(update_fields=["pending_confirmations", "updated_at"])
     return None
+
+
+def _clear_confirmations(canvas, deletions) -> None:
+    """Called only once the write happened, so a blocked retry keeps the user's yes."""
+    pending = dict(canvas.pending_confirmations or {})
+    if not any(deletion["object"] in pending for deletion in deletions):
+        return
+    for deletion in deletions:
+        pending.pop(deletion["object"], None)
+    canvas.pending_confirmations = pending
+    canvas.save(update_fields=["pending_confirmations", "updated_at"])
 
 
 def _resolve_canvas_sync(workspace, user, conversation_id: str):
@@ -369,14 +375,16 @@ def create_canvas_tools(
                 canvas = _resolve_canvas_sync(workspace, user, conversation_id)
             except SemanticCatalogUnavailable as exc:
                 return {"errors": [{"op_index": 0, "code": "UNAVAILABLE", "message": str(exc)}]}
+            deletions = destructive_deletions(canvas)
             refusal = _gate_deletions(
-                canvas,
-                destructive_deletions(canvas),
-                confirmed_deletions,
-                human_turn,
-                retry="commit",
+                canvas, deletions, confirmed_deletions, human_turn, retry="commit"
             )
-            return refusal or commit_canvas(canvas, user)
+            if refusal:
+                return refusal
+            report = commit_canvas(canvas, user)
+            if "revision" in report:
+                _clear_confirmations(canvas, deletions)
+            return report
 
         return await sync_to_async(_commit, thread_sensitive=True)()
 
@@ -420,18 +428,16 @@ def create_canvas_tools(
                 canvas = _resolve_canvas_sync(workspace, user, conversation_id)
             except SemanticCatalogUnavailable as exc:
                 return {"errors": [{"code": "UNAVAILABLE", "message": str(exc)}]}
+            deletions = undo_deletions(workspace, revision_uuid)
             refusal = _gate_deletions(
-                canvas,
-                undo_deletions(workspace, revision_uuid),
-                confirmed_deletions,
-                human_turn,
-                retry="undo",
+                canvas, deletions, confirmed_deletions, human_turn, retry="undo"
             )
             if refusal:
                 return refusal
             result = undo_revision(workspace, revision_uuid, user, thread_id=canvas.thread_id)
             if refusal := result.get("refused"):
                 return {"errors": [refusal]}
+            _clear_confirmations(canvas, deletions)
             return result
 
         return await sync_to_async(_undo, thread_sensitive=True)()
