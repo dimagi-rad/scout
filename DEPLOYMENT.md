@@ -307,6 +307,14 @@ frontend. In addition to the production
 deploy secrets, the GitHub `staging` environment must contain the two
 Connect-staging OAuth secrets and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
 
+Cube's npm dependencies are locked in `cube_config/package-lock.json` and the
+image installs them with `npm ci`, so deploys don't re-resolve from the registry.
+To change them, edit `cube_config/package.json` and regenerate the lockfile
+inside the base image so the npm version matches (`docker run --rm -v
+"$PWD/cube_config:/w" -w /tmp cubejs/cube:<tag> sh -c 'mkdir p && cp /w/package.json p/
+&& cd p && npm install --package-lock-only && cp package-lock.json /w/'`).
+Bumping the `cubejs/cube` base image tag additionally requires re-auditing the pinned patch hashes (see `cube_config/README.md`).
+
 Tests are not a gate — staging is for trying work in progress. The workflow is
 `workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.
 

@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import logging
 import os
 import subprocess
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import ParamSpec
 
 import django
 import uvicorn
@@ -38,6 +41,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.capacity import BUSY_MESSAGE, classify_capacity_error, report_capacity_exhausted
 from apps.common.errors import validation_error_code
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
@@ -104,6 +108,7 @@ from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     AUTH_ACCESS_DENIED,
+    CAPACITY_EXHAUSTED,
     INTERNAL_ERROR,
     NOT_FOUND,
     PIPELINE_UNRESOLVED,
@@ -130,6 +135,34 @@ mcp = FastMCP("scout")
 
 MAX_WORKSPACE_DISCOVERY_LIMIT = 100
 MAX_DATASET_DISCOVERY_LIMIT = 100
+
+
+_P = ParamSpec("_P")
+
+
+def busy_on_capacity(
+    tool: Callable[_P, Awaitable[dict]],
+) -> Callable[_P, Awaitable[dict]]:
+    """Answer a tool that hit the DB connection limit with the retryable busy result.
+
+    Applied per tool rather than per call site: a catalog read several layers down
+    (pool checkout, cold open, information_schema probe) can refuse the connection.
+    """
+
+    @functools.wraps(tool)
+    async def guarded(*args: _P.args, **kwargs: _P.kwargs) -> dict:
+        try:
+            return await tool(*args, **kwargs)
+        except Exception as exc:
+            capacity = classify_capacity_error(exc)
+            if capacity is None:
+                raise
+            await sync_to_async(report_capacity_exhausted)(
+                capacity.resource, str(exc), exc_info=exc
+            )
+            return error_response(CAPACITY_EXHAUSTED, BUSY_MESSAGE)
+
+    return guarded
 
 
 class _WorkspaceAccessDenied(Exception):
@@ -195,6 +228,7 @@ def _pipeline_unresolved_response(exc: PipelineResolutionError) -> dict:
 
 
 @mcp.tool()
+@busy_on_capacity
 async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """List all tables in the workspace's database schema.
 
@@ -265,6 +299,7 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
 
 
 @mcp.tool()
+@busy_on_capacity
 async def describe_table(
     table_name: str, workspace_id: str = "", user_id: str = "", thread_id: str = ""
 ) -> dict:
@@ -328,6 +363,7 @@ async def describe_table(
 
 
 @mcp.tool()
+@busy_on_capacity
 async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Get a complete metadata snapshot for the workspace's database.
 
@@ -1804,6 +1840,7 @@ async def _load_in_progress(workspace: Workspace) -> dict | None:
 
 
 @mcp.tool()
+@busy_on_capacity
 async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Check whether data has been loaded for this workspace.
 

@@ -84,6 +84,60 @@ describe("ConnectionsPage", () => {
     expect(screen.getByTestId("disconnect-ocs")).toBeTruthy()
   })
 
+  it.each([
+    ["unavailable", "Connected, but we couldn't check right now. Try again later.", false, true],
+    ["expired", "Connection expired", true, false],
+  ])("renders a %s provider with the right Reconnect affordance", async (status, label, reconnect, disconnect) => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(
+        path === "/api/auth/providers/"
+          ? {
+              providers: [
+                {
+                  id: "commcare",
+                  name: "CommCare HQ",
+                  login_url: "/accounts/commcare/login/",
+                  connected: true,
+                  status,
+                },
+              ],
+            }
+          : [],
+      ),
+    )
+    render(<ConnectionsPage />)
+
+    expect((await screen.findByTestId("provider-status-commcare")).textContent).toBe(label)
+    expect(screen.queryByTestId("connect-commcare") !== null).toBe(reconnect)
+    expect(screen.queryByText("Reconnect") !== null).toBe(reconnect)
+    expect(screen.queryByTestId("disconnect-commcare") !== null).toBe(disconnect)
+  })
+
+  it("still offers connecting another team while a scoped provider is unavailable", async () => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(
+        path === "/api/auth/providers/"
+          ? {
+              providers: [
+                {
+                  id: "ocs",
+                  name: "Open Chat Studio",
+                  login_url: "/accounts/ocs/login/",
+                  connected: true,
+                  status: "unavailable",
+                  supports_multiple_scopes: true,
+                },
+              ],
+            }
+          : [],
+      ),
+    )
+    render(<ConnectionsPage />)
+
+    expect(await screen.findByTestId("connect-another-ocs")).toBeTruthy()
+    expect(screen.queryByTestId("connect-ocs")).toBeNull()
+  })
+
   it("marks a CommCare connection on the EU server", async () => {
     vi.mocked(api.get).mockImplementation((path) =>
       Promise.resolve(

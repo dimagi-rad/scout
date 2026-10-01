@@ -18,7 +18,6 @@ from apps.agents.graph.base import (
 )
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant, TenantMembership
-from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -28,7 +27,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services import load_activity, thread_job_dispatch
+from apps.workspaces.services import load_activity, reconciliation, thread_job_dispatch
 from apps.workspaces.services.load_activity import MATERIALIZE_TASK_NAME, athread_awaits_load
 from apps.workspaces.services.thread_job_dispatch import astart_chat_load
 from apps.workspaces.tasks import materialize_workspace
@@ -124,12 +123,10 @@ def test_the_queue_lookup_names_the_real_task():
 
 
 def test_the_queue_lookup_treats_stalled_jobs_as_the_worker_janitor_does():
-    stalled = workspaces_tasks.MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
+    stalled = reconciliation.MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
     assert load_activity._STALLED_AFTER.total_seconds() == stalled
-    assert (
-        set(load_activity._QUEUED_OR_RUNNING) == workspaces_tasks._PROCRASTINATE_INFLIGHT_STATUSES
-    )
-    assert list(load_activity._STARTED) == workspaces_tasks._STARTED_JOB_STATUSES
+    assert set(load_activity._QUEUED_OR_RUNNING) == reconciliation._PROCRASTINATE_INFLIGHT_STATUSES
+    assert list(load_activity._STARTED) == reconciliation._STARTED_JOB_STATUSES
 
 
 @pytest.mark.asyncio

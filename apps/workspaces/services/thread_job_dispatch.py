@@ -1,9 +1,11 @@
 """Queue a chat-bound materialization together with the ThreadJob that resumes it."""
 
 import logging
+from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat.models import ThreadJob
@@ -21,6 +23,7 @@ from apps.workspaces.services.query_state import (
     workspace_query_surface,
 )
 from apps.workspaces.tasks import (
+    CAPACITY_REFUSED_KEY,
     CHAT_RECOVERY_SOURCE,
     materialize_workspace,
     recover_workspace_data,
@@ -29,11 +32,14 @@ from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-# The resume can't tell a live turn is still streaming on the same thread, and a
-# load refused in preflight settles in about a second. The delay usually lets
-# the chat's one-sentence acknowledgement finish first; it narrows the race
-# rather than closing it (a slow or tool-calling turn can still overlap).
+# A load refused in preflight settles in about a second. The resume waits out a
+# still-streaming turn via the thread's turn lease (apps/chat/turn_lease.py);
+# this delay just spares it the retry backoff in the common case.
 CHAT_LOAD_START_DELAY_SECONDS = 30
+
+# A rebuild refused at the connection limit doesn't spend the member's retry, but a
+# sustained outage must not queue one per message: wait this long after a refusal.
+CAPACITY_RETRY_COOLDOWN = timedelta(minutes=5)
 
 
 @sync_to_async
@@ -185,12 +191,21 @@ async def _semantic_rebuild_needed(workspace, user) -> bool:
         .values_list("completed_at", flat=True)
         .afirst()
     )
-    # Only this member's own failures count: another member's attempt may have
-    # failed on their own access, which says nothing about this one's.
-    failures = WorkspaceDataRecovery.objects.filter(
+    rebuilds = WorkspaceDataRecovery.objects.filter(
         workspace=workspace,
-        requested_by=user,
         recovery_type=WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD,
+    )
+    capacity_refused = {f"result__{CAPACITY_REFUSED_KEY}": True}
+    # Capacity is shared, so any member's refusal holds everyone off for the cooldown.
+    if await rebuilds.filter(
+        completed_at__gt=timezone.now() - CAPACITY_RETRY_COOLDOWN, **capacity_refused
+    ).aexists():
+        return False
+    # Only this member's own failures count: another member's attempt may have
+    # failed on their own access, which says nothing about this one's. A capacity
+    # refusal never ran the build, so it doesn't count.
+    failures = rebuilds.exclude(result__has_key=CAPACITY_REFUSED_KEY).filter(
+        requested_by=user,
         state=WorkspaceDataRecovery.State.FAILED,
     )
     if last_sync is not None:

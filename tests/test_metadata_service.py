@@ -8,6 +8,7 @@ import pytest
 from mcp_server.context import QueryContext
 from mcp_server.pipeline_registry import (
     PipelineConfig,
+    PipelineRegistry,
     RelationshipConfig,
     SourceConfig,
     TransformConfig,
@@ -592,3 +593,33 @@ class TestLiveTablesInSchema:
         with patch("mcp_server.services.metadata.settings.MANAGED_DATABASE_URL", ""):
             result = await _live_tables_in_schema("t_acme")
         assert result == set()
+
+
+@pytest.mark.asyncio
+async def test_describe_ocs_messages_tells_agent_to_filter_synthetic_summaries():
+    ctx = QueryContext(
+        tenant_id="t",
+        schema_name="test_schema",
+        max_rows_per_query=500,
+        max_query_timeout_seconds=30,
+        connection_params={},
+    )
+    pipeline_config = PipelineRegistry().get_by_provider("ocs")
+
+    with patch(
+        "mcp_server.services.metadata._execute_async_parameterized",
+        new=AsyncMock(
+            return_value={
+                "rows": [
+                    ["message_id", "text", "NO", None],
+                    ["is_synthetic_summary", "boolean", "NO", "false"],
+                ]
+            }
+        ),
+    ):
+        result = await pipeline_describe_table("raw_messages", ctx, None, pipeline_config)
+
+    columns = {c["name"]: c["description"] for c in result["columns"]}
+    assert columns["message_id"] == ""
+    assert "NOT is_synthetic_summary" in columns["is_synthetic_summary"]
+    assert "NOT is_synthetic_summary" in result["description"]

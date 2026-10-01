@@ -1,33 +1,30 @@
 from apps.common.error_codes import ErrorCode
 from apps.workspaces.access import WorkspaceAccess
 from apps.workspaces.services.access_freshness import VERIFICATION_UNAVAILABLE
-from apps.workspaces.tasks import (
-    _ROLE_DENIED_MESSAGE,
-    _recovery_requester_denied_message,
-    _workspace_recovery_error,
-)
+from apps.workspaces.services.data_recovery import ROLE_DENIED_MESSAGE, workspace_recovery_error
+from apps.workspaces.tasks import _recovery_requester_denied_message
 
 
 def test_role_denial_recovery_uses_public_message():
     result = {
         "status": "denied",
         "error_code": ErrorCode.WORKSPACE_ROLE_INSUFFICIENT,
-        "error": _ROLE_DENIED_MESSAGE,
+        "error": ROLE_DENIED_MESSAGE,
         "tenants": [
             {
                 "tenant": "t1",
                 "success": False,
-                "error": _ROLE_DENIED_MESSAGE,
+                "error": ROLE_DENIED_MESSAGE,
                 "error_code": ErrorCode.WORKSPACE_ROLE_INSUFFICIENT,
             }
         ],
     }
-    assert _workspace_recovery_error(result, {}) == _ROLE_DENIED_MESSAGE
+    assert workspace_recovery_error(result, {}) == ROLE_DENIED_MESSAGE
 
 
 def test_role_denial_recovery_without_error_text_still_explains():
     result = {"error_code": ErrorCode.WORKSPACE_ROLE_INSUFFICIENT}
-    assert _workspace_recovery_error(result, {}) == _ROLE_DENIED_MESSAGE
+    assert workspace_recovery_error(result, {}) == ROLE_DENIED_MESSAGE
 
 
 def test_verification_denial_recovery_is_not_a_source_failure():
@@ -45,7 +42,7 @@ def test_verification_denial_recovery_is_not_a_source_failure():
             }
         ],
     }
-    assert _workspace_recovery_error(result, {}) == message
+    assert workspace_recovery_error(result, {}) == message
 
 
 def test_mid_run_verification_denial_is_not_a_source_failure():
@@ -61,7 +58,7 @@ def test_mid_run_verification_denial_is_not_a_source_failure():
             },
         ],
     }
-    assert _workspace_recovery_error(result, {}) == message
+    assert workspace_recovery_error(result, {}) == message
 
 
 def test_requester_freshness_denial_names_the_access_problem():

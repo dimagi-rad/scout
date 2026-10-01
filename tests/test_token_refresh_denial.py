@@ -119,7 +119,8 @@ async def test_inconclusive_refresh_preserves_access(
             simulate_timeout=simulate_timeout,
         )
     assert not isinstance(caught.value, UpstreamTokenExpired)
-    transient = simulate_timeout or status in (429, 503)
+    # invalid_client is Scout's own fault, so it is retryable and never blames the user.
+    transient = simulate_timeout or status in (429, 503) or payload == {"error": "invalid_client"}
     if transient:
         assert isinstance(caught.value, UpstreamRefreshFailed)
     else:

@@ -15,6 +15,7 @@ from uuid import UUID
 from django.conf import settings
 from django.db import models
 
+from apps.common.capacity import reraise_if_capacity
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
 from apps.transformations.services.repeat_identity import (
@@ -148,8 +149,10 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
     """Return the set of table names that actually exist in ``schema_name``.
 
     Used by ``pipeline_list_tables`` to reconcile the catalog with reality.
-    Returns an empty set on query failure (treated as "nothing live"), so a
-    transient DB error surfaces as an empty list rather than phantom rows.
+    Returns an empty set on other query failures (treated as "nothing live"), so a
+    transient DB error surfaces as an empty list rather than phantom rows. A full
+    connection limit is raised as ``CapacityExhausted`` instead: an empty set would
+    tell the agent the tables are gone when the database merely refused us.
 
     Builds ``connection_params`` from ``MANAGED_DATABASE_URL`` the same way
     ``load_tenant_context``/``load_workspace_context`` do. Constructing the
@@ -180,7 +183,8 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
             (schema_name,),
             ctx.max_query_timeout_seconds,
         )
-    except Exception:
+    except Exception as exc:
+        reraise_if_capacity(exc)
         logger.warning(
             "Could not enumerate live tables in schema %s; catalog will be empty",
             schema_name,
@@ -199,7 +203,9 @@ async def pipeline_table_primary_keys(ctx: QueryContext) -> dict[str, str]:
     Composite primary keys are omitted (a single CharField holds the semantic
     dataset's primary key, and Cube's per-cube primary key wants one member).
     Views (multi-tenant view schemas) have no PK constraints and yield nothing.
-    Best-effort: introspection failure must not break catalog builds.
+    Best-effort for ordinary introspection failures, but a full connection limit
+    is raised as ``CapacityExhausted``: an empty map would make the rebuild persist
+    fallback primary keys into a model promoted to ACTIVE.
     """
     try:
         result = await _execute_async_parameterized(
@@ -214,7 +220,8 @@ async def pipeline_table_primary_keys(ctx: QueryContext) -> dict[str, str]:
             (ctx.schema_name,),
             ctx.max_query_timeout_seconds,
         )
-    except Exception:
+    except Exception as exc:
+        reraise_if_capacity(exc)
         logger.warning(
             "Could not read primary keys for schema %s; datasets will omit them",
             ctx.schema_name,
@@ -295,6 +302,12 @@ async def pipeline_describe_table(
         else {}
     )
     jsonb_annotations = _build_jsonb_annotations(table_name, tenant_metadata)
+    pipeline_column_notes = {
+        column: note
+        for source in (pipeline_config.sources if pipeline_config is not None else [])
+        if source.physical_table_name == table_name
+        for column, note in source.column_descriptions.items()
+    }
 
     columns = []
     for row in result["rows"]:
@@ -305,7 +318,8 @@ async def pipeline_describe_table(
                 "type": data_type,
                 "nullable": is_nullable == "YES",
                 "default": default,
-                "description": jsonb_annotations.get(col_name, ""),
+                "description": jsonb_annotations.get(col_name)
+                or pipeline_column_notes.get(col_name, ""),
             }
         )
 
@@ -340,7 +354,8 @@ async def workspace_table_identity(
         if sources is not None:
             published = await workspace_list_tables(ctx)
             validate_published_views(sources, {table["name"] for table in published})
-    except Exception:
+    except Exception as exc:
+        reraise_if_capacity(exc)
         logger.warning(
             "Could not verify source identity for workspace %s table %s",
             workspace_id,

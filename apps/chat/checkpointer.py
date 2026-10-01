@@ -4,12 +4,15 @@ import asyncio
 import logging
 import os
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.db import connection
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.conninfo import make_conninfo
-from psycopg_pool import AsyncConnectionPool, PoolTimeout
+from psycopg_pool import PoolTimeout
 
 from apps.common.capacity import CapacityResource
+from apps.common.capacity_pool import CapacityTaggingPool
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +28,10 @@ class CheckpointerPoolExhausted(PoolTimeout):
     capacity_resource = CapacityResource.CHECKPOINTER_POOL
 
 
-class CheckpointerPool(AsyncConnectionPool):
-    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy".
+class CheckpointerPool(CapacityTaggingPool):
+    """Tags a full pool as capacity so ``apps.common.capacity`` answers "busy"."""
 
-    Only a checkout timeout is tagged: ``open()`` also raises ``PoolTimeout`` when
-    the database is down or refusing auth, which retrying would not fix.
-    """
-
-    async def getconn(self, timeout: float | None = None):  # noqa: ASYNC109 -- psycopg_pool signature
-        try:
-            return await super().getconn(timeout)
-        except PoolTimeout as exc:
-            raise CheckpointerPoolExhausted(str(exc)) from exc
+    exhausted_error = CheckpointerPoolExhausted
 
 
 def get_database_url() -> str:
@@ -141,3 +136,26 @@ async def ensure_checkpointer(*, force_new: bool = False):
             raise
 
     return _checkpointer
+
+
+def thread_has_checkpoint(thread_id) -> bool:
+    """True when the checkpointer holds conversation state under ``thread_id``.
+
+    Deleting a Thread keeps its checkpoints (#265), so a Thread row must never be
+    created for an id that has some: its new owner would resume the old conversation.
+    Reads Django's connection because the saver's tables live in the same platform
+    database (``get_database_url``); no table yet means no state yet.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass('checkpoints') IS NOT NULL")
+        if not cursor.fetchone()[0]:
+            return False
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM checkpoints WHERE thread_id = %s)", [str(thread_id)]
+        )
+        return cursor.fetchone()[0]
+
+
+async def athread_has_checkpoint(thread_id) -> bool:
+    # Django has no async raw-SQL cursor.
+    return await sync_to_async(thread_has_checkpoint)(thread_id)

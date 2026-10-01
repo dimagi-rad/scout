@@ -23,10 +23,14 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.failure_guidance import credential_guidance
+from apps.workspaces.services.reconciliation import (
+    STALE_JOB_THRESHOLD,
+    SYNTHETIC_MESSAGE_TIMEOUT_SECONDS,
+)
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
+    RESUME_SETUP_BUDGET_SECONDS,
     RESUME_TIMEOUT_MESSAGE,
-    STALE_JOB_THRESHOLD,
     TENANT_NOT_RUN,
     _aggregate_materialization_state,
     _defer_cube_promotion,
@@ -966,9 +970,15 @@ async def test_ainvoke_timeout_marks_failed_and_persists_message():
     mock_agent.ainvoke = AsyncMock(side_effect=_sleeping_invoke)
     mock_agent.aupdate_state = AsyncMock(return_value=None)
 
-    with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=mock_agent),
+    with (
+        patch(
+            "apps.workspaces.tasks._build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+        patch(
+            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1006,9 +1016,15 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
     mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("upstream LLM 500"))
     mock_agent.aupdate_state = AsyncMock(return_value=None)
 
-    with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=mock_agent),
+    with (
+        patch(
+            "apps.workspaces.tasks._build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+        patch(
+            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1129,9 +1145,15 @@ async def test_resume_agent_failure_sets_error_summary():
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("LLM 503"))
-    with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=mock_agent),
+    with (
+        patch(
+            "apps.workspaces.tasks._build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+        patch(
+            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1581,7 +1603,7 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     assert "<ErrorCode." not in body
     assert "nothing you query covers" not in body
     assert "say the numbers exclude them" not in body
-    # The advice comes from _CREDENTIAL_GUIDANCE, attributed to the tenant — a
+    # The advice comes from CREDENTIAL_GUIDANCE, attributed to the tenant — a
     # tenant with no run row could not reach any guidance path before (#364).
     assert ("not connected to your account" in body) is not reachable
     assert "Per-tenant data loaded successfully" not in body
@@ -1839,3 +1861,14 @@ def test_resume_timeout_leaves_room_for_thinking_but_beats_the_stale_reconcile()
     flip a healthy, still-running resume to FAILED."""
     assert dj_settings.AGENT_RESUME_TIMEOUT_S >= 300
     assert STALE_JOB_THRESHOLD.total_seconds() > dj_settings.AGENT_RESUME_TIMEOUT_S
+
+
+def test_the_whole_resume_deadline_beats_the_stale_reconcile():
+    """The resume's outer deadline plus its bounded failure write is how long a
+    resume can legitimately stay RUNNING; the sweep must not fail it sooner."""
+    longest_resume = (
+        dj_settings.AGENT_RESUME_TIMEOUT_S
+        + RESUME_SETUP_BUDGET_SECONDS
+        + SYNTHETIC_MESSAGE_TIMEOUT_SECONDS
+    )
+    assert STALE_JOB_THRESHOLD.total_seconds() > longest_resume

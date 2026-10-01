@@ -112,6 +112,27 @@ def classify_capacity_error(exc: BaseException) -> CapacityExhausted | None:
     return None
 
 
+def reraise_if_capacity(exc: BaseException) -> None:
+    """Raise the ``CapacityExhausted`` behind ``exc``, if any; return for other errors.
+
+    For ``except`` blocks that would otherwise swallow or re-label a failure: a
+    refused connection must not read as "no rows", "invalid" or "refresh data".
+    Call it first inside the block.
+    """
+    capacity = classify_capacity_error(exc)
+    if capacity is None:
+        return
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if current is capacity:
+            # Already in the chain; linking it as exc's cause would close a cycle.
+            raise capacity
+        seen.add(id(current))
+        current = current.__cause__
+    raise capacity from exc
+
+
 def busy_payload() -> dict:
     return {"error": BUSY_ERROR, "code": ErrorCode.CAPACITY_EXHAUSTED, "message": BUSY_MESSAGE}
 

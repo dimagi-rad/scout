@@ -7,6 +7,8 @@ does not support async streaming responses.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import logging
 import time
@@ -20,16 +22,17 @@ from langchain_core.messages import HumanMessage
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
-from apps.chat.checkpointer import ensure_checkpointer
+from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.helpers import (
     _resolve_chat_access,
     async_login_required,
     repair_dangling_tool_calls,
 )
-from apps.chat.models import Thread, ThreadJob
+from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
-from apps.common.capacity import classify_capacity_error
+from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
+from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
 from apps.workspaces.access import access_denied_body, role_satisfies
 from apps.workspaces.models import WorkspaceRole
@@ -118,6 +121,11 @@ def _foreign_thread_response(thread: Thread, user, workspace) -> JsonResponse:
 
 
 MAX_MESSAGE_LENGTH = 10_000
+
+TURN_LEASE_WAIT_SECONDS = 2
+THREAD_BUSY_MESSAGE = (
+    "A response is still being generated for this conversation. Please retry in a moment."
+)
 
 
 def _last_message_text(message) -> tuple[str | None, JsonResponse | None]:
@@ -210,26 +218,13 @@ async def chat_view(request):
     existing_thread = await Thread.objects.filter(id=thread_id).afirst()
     if existing_thread is not None and _is_foreign_thread(existing_thread, user, workspace):
         return _foreign_thread_response(existing_thread, user, workspace)
-
-    # A RUNNING resume job means a resume ainvoke is writing this thread's checkpoint;
-    # a concurrent live turn is a second unsynchronized writer (no CAS), so reject it.
-    resume_in_flight = (
-        existing_thread is not None
-        and await ThreadJob.objects.filter(
-            thread=existing_thread,
-            state=ThreadJob.State.RUNNING,
-        ).aexists()
-    )
-    if resume_in_flight:
-        return JsonResponse(
-            {
-                "error": (
-                    "A background response is still being generated for this "
-                    "conversation. Please retry in a moment."
-                )
-            },
-            status=409,
+    if existing_thread is None and await athread_has_checkpoint(thread_id):
+        logger.warning(
+            "Rejected chat POST reusing a deleted thread's id: thread_id=%s requesting_user=%s",
+            thread_id,
+            user.pk,
         )
+        return JsonResponse({"error": "Thread not found"}, status=404)
 
     # The Thread row is the only authorization for this checkpointer key, so a
     # failed upsert must propagate rather than fall through to the agent.
@@ -238,6 +233,54 @@ async def chat_view(request):
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
 
+    # A brief wait covers Stop-then-resend: the stopped turn releases the lease
+    # only after persisting its partial reply.
+    lease = await aacquire_turn_lease(thread_id, wait_seconds=TURN_LEASE_WAIT_SECONDS)
+    if lease is None:
+        return _thread_busy_response()
+    try:
+        async with lease.kept_alive():
+            response = await _start_turn(
+                lease,
+                user=user,
+                workspace=workspace,
+                access=access,
+                thread_id=thread_id,
+                user_content=user_content,
+            )
+    except asyncio.CancelledError:
+        await lease.release()
+        if not lease.lost:
+            raise
+        # The heartbeat cancelled us because another run took the thread; that is
+        # a busy thread for the caller, not a dropped connection.
+        asyncio.current_task().uncancel()
+        return _thread_busy_response()
+    except BaseException:
+        await lease.release()
+        raise
+    if lease.lost or not isinstance(response, StreamingHttpResponse):
+        await lease.release()
+        if lease.lost:
+            return _thread_busy_response()
+    return response
+
+
+def _thread_busy_response() -> JsonResponse:
+    # The "busy" error code makes the chat UI back off and resend, as it does for a
+    # capacity 503: the turn was refused before anything touched the checkpoint.
+    response = JsonResponse(
+        {"error": BUSY_ERROR, "reason": "thread_busy", "message": THREAD_BUSY_MESSAGE},
+        status=409,
+    )
+    response["Retry-After"] = str(RETRY_AFTER_SECONDS)
+    return response
+
+
+async def _start_turn(
+    lease: TurnLease, *, user, workspace, access, thread_id: str, user_content: str
+):
+    """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
@@ -327,15 +370,50 @@ async def chat_view(request):
         metadata=trace_metadata,
     )
 
-    async def _traced_stream():
-        with trace_ctx:
-            async for chunk in langgraph_to_ui_stream(agent, input_state, config):
-                yield chunk
+    response = _TurnStreamingResponse(lease)
 
-    response = StreamingHttpResponse(
-        _traced_stream(),
-        content_type="text/event-stream; charset=utf-8",
-    )
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
+    async def _traced_stream():
+        response.turn_started = True
+        # aclosing: nothing else closes the inner stream on disconnect, and its
+        # cleanup (stopping the run, saving the partial reply) must finish before
+        # the lease is released and another turn can take the thread.
+        async with lease.held():
+            with trace_ctx:
+                async with contextlib.aclosing(
+                    langgraph_to_ui_stream(
+                        agent, input_state, config, owns_thread=lambda: not lease.lost
+                    )
+                ) as stream:
+                    async for chunk in stream:
+                        yield chunk
+
+    response.streaming_content = _traced_stream()
     return response
+
+
+class _TurnStreamingResponse(StreamingHttpResponse):
+    """The turn's SSE response; frees the thread if the server closes it unsent.
+
+    Once the body has started, the stream itself releases the lease after its
+    cleanup, so ``close`` must leave a started turn alone.
+    """
+
+    def __init__(self, lease: TurnLease):
+        super().__init__(content_type="text/event-stream; charset=utf-8")
+        self["Cache-Control"] = "no-cache"
+        self["X-Accel-Buffering"] = "no"
+        self.lease = lease
+        self.turn_started = False
+
+    def close(self):
+        try:
+            if not self.turn_started:
+                self.lease.release_sync()
+        except Exception:
+            logger.warning(
+                "Could not release the turn lease of unsent response on thread %s",
+                self.lease.thread_id,
+                exc_info=True,
+            )
+        finally:
+            super().close()
