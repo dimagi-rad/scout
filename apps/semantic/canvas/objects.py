@@ -20,6 +20,7 @@ The canvas edits four object kinds. Policy summary (the user-facing contract):
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -32,6 +33,8 @@ from apps.semantic.models import (
 from apps.semantic.services.field_sql import dataset_column_names as dataset_column_names
 
 CANVAS_SOURCE = "canvas"
+# Cube strips whitespace inside a reference's braces, so ``{ a.b }`` names ``a.b``.
+_MEMBER_REFERENCE_RE = re.compile(r"\{\s*([^{}]*?)\s*\}")
 
 DATASET_EDITABLE_KEYS = frozenset({"label", "description"})
 FIELD_DISPLAY_METADATA_KEYS = frozenset({"format", "currency"})
@@ -222,3 +225,40 @@ def serialize_base(obj) -> dict[str, Any]:
     if isinstance(obj, SemanticRelationship):
         return serialize_relationship_base(obj)
     return {}
+
+
+def normalize_member_references(text: str) -> str:
+    return _MEMBER_REFERENCE_RE.sub(r"{\1}", text)
+
+
+def field_sql_text(values: dict[str, Any]) -> str:
+    """All of a field's SQL (expression, ``cube_sql``, filter SQL), references normalized."""
+    return normalize_member_references(
+        " ".join(
+            [
+                str(values.get("expression") or ""),
+                str(values.get("cube_sql") or ""),
+                *(
+                    str(item.get("sql", ""))
+                    for item in values.get("filters") or []
+                    if isinstance(item, dict)
+                ),
+            ]
+        )
+    )
+
+
+def references_field(text: str, dataset: str, field: str, *, same_dataset: bool) -> bool:
+    """Whether normalized SQL names ``dataset.field`` the ways Cube resolves it.
+
+    Inside its own dataset a member is also reachable as ``{field}`` and
+    ``{CUBE.field}`` (cube._cube_measure's reference set).
+    """
+    if f"{{{dataset}.{field}}}" in text:
+        return True
+    return same_dataset and (f"{{{field}}}" in text or f"{{CUBE.{field}}}" in text)
+
+
+def references_dataset(text: str, dataset: str) -> bool:
+    """Whether normalized SQL names the dataset itself or any of its members."""
+    return f"{{{dataset}}}" in text or f"{{{dataset}." in text

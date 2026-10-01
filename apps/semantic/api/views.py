@@ -11,7 +11,9 @@ from apps.semantic.canvas import (
     apply_operations,
     canvas_projection,
     commit_canvas,
+    list_revisions,
     resolve_thread_canvas,
+    undo_revision,
 )
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
@@ -21,6 +23,7 @@ from apps.semantic.services.catalog import (
     serialize_dataset,
 )
 from apps.semantic.services.query import raise_if_capacity_exhausted, run_semantic_query_sync
+from apps.workspaces.access import workspace_write_allowed
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -148,3 +151,41 @@ class ThreadCanvasCommitView(APIView):
         report = commit_canvas(canvas, request.user)
         report["projection"] = canvas_projection(canvas)
         return Response(report)
+
+
+class DataModelRevisionListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return err
+        return Response(
+            {
+                "revisions": list_revisions(workspace),
+                "can_undo": workspace_write_allowed(request.user, workspace.id),
+            }
+        )
+
+
+class DataModelRevisionUndoView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, workspace_id, revision_id):
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return err
+        if not workspace_write_allowed(request.user, workspace.id):
+            return Response(
+                {"error": "Read-write or manage role required to undo data model changes."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        result = undo_revision(workspace, revision_id, request.user)
+        if refusal := result.get("refused"):
+            code = (
+                status.HTTP_404_NOT_FOUND
+                if refusal["code"] == "NOT_FOUND"
+                else status.HTTP_409_CONFLICT
+            )
+            return Response({**refusal, "error": refusal["message"]}, status=code)
+        return Response(result)

@@ -1,0 +1,915 @@
+"""Data model history: a revision per saved change, and undo.
+
+Every canvas commit records a ``SemanticModelRevision`` holding full before and
+after snapshots of each object it touched. Undo writes the ``before`` side back
+in one transaction and records itself as a new revision, so an undo can be
+undone too. Undo refuses (and writes nothing) when a touched object changed
+after the revision, because writing old values over a later edit would silently
+lose that edit.
+"""
+
+from __future__ import annotations
+
+import logging
+from functools import cached_property
+from typing import Any
+
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import Q
+
+from apps.semantic.canvas.diagnostics import saved_field_diagnostics
+from apps.semantic.canvas.objects import (
+    FIELD_CURATION_KEYS,
+    field_sql_text,
+    normalize_member_references,
+    references_dataset,
+    references_field,
+)
+from apps.semantic.canvas.service import allowed_custom_dataset_tables
+from apps.semantic.models import (
+    CustomDataset,
+    SemanticCanvasChange,
+    SemanticDataset,
+    SemanticField,
+    SemanticModel,
+    SemanticModelRevision,
+    SemanticRelationship,
+)
+from apps.semantic.services.cube import (
+    cube_member_references,
+    publishable_datasets,
+    published_member_references,
+)
+from apps.semantic.services.cube_sql import CubeSQLReferenceError, embed_cube_sql
+from apps.semantic.services.custom_datasets import CustomDatasetError, compile_custom_dataset_sql
+
+logger = logging.getLogger(__name__)
+
+DATASET = "dataset"
+FIELD = "field"
+RELATIONSHIP = "relationship"
+CREATE = "create"
+UPDATE = "update"
+DELETE = "delete"
+CANVAS_SOURCE = "canvas"
+CURATED_KEY = "metadata.curated_fields"
+
+DATASET_COLUMNS = (
+    "name",
+    "label",
+    "description",
+    "source_kind",
+    "schema_name",
+    "table_name",
+    "primary_key",
+    "row_count",
+    "is_visible",
+)
+FIELD_COLUMNS = (
+    "name",
+    "label",
+    "description",
+    "field_type",
+    "data_type",
+    "expression",
+    "measure_type",
+    "is_visible",
+)
+RELATIONSHIP_COLUMNS = ("name", "relationship_type", "join_expression")
+CUSTOM_DATASET_COLUMNS = (
+    "name",
+    "label",
+    "description",
+    "definition_sql",
+    "definition_json",
+    "status",
+    "is_visible",
+)
+# Refreshes rewrite the rest of field metadata (nullable, source_column, ...);
+# only these keys are authored, so only they decide whether a field "changed".
+FIELD_AUTHORED_METADATA_KEYS = ("format", "currency", "filters", "cube_sql")
+SUMMARY_MAX_ITEMS = 3
+VERBS = {CREATE: "Created", UPDATE: "Edited", DELETE: "Deleted"}
+
+
+def refused(code: str, message: str, conflicts: list[dict] | None = None) -> dict[str, Any]:
+    """An undo that wrote nothing; a plain result, so no exception text reaches a response."""
+    return {"refused": {"code": code, "message": message, "conflicts": conflicts or []}}
+
+
+def snapshot_field(field: SemanticField) -> dict[str, Any]:
+    return {
+        "id": str(field.id),
+        "dataset_id": str(field.dataset_id),
+        "dataset_name": field.dataset.name,
+        **{column: getattr(field, column) for column in FIELD_COLUMNS},
+        "metadata": dict(field.metadata or {}),
+    }
+
+
+def snapshot_relationship(relationship: SemanticRelationship) -> dict[str, Any]:
+    return {
+        "id": str(relationship.id),
+        "from_dataset_id": str(relationship.from_dataset_id),
+        "to_dataset_id": str(relationship.to_dataset_id),
+        **{column: getattr(relationship, column) for column in RELATIONSHIP_COLUMNS},
+        "metadata": dict(relationship.metadata or {}),
+    }
+
+
+def snapshot_dataset(dataset: SemanticDataset, *, deep: bool) -> dict[str, Any]:
+    """``deep`` adds the custom definition, fields and relationships, which a
+    create or delete needs to be reversed; an edit needs only the row."""
+    snapshot: dict[str, Any] = {
+        "id": str(dataset.id),
+        **{column: getattr(dataset, column) for column in DATASET_COLUMNS},
+        "metadata": dict(dataset.metadata or {}),
+    }
+    if not deep:
+        return snapshot
+    custom = dataset.custom_dataset
+    snapshot["custom_dataset"] = (
+        None
+        if custom is None
+        else {
+            "id": str(custom.id),
+            "created_by_id": str(custom.created_by_id) if custom.created_by_id else None,
+            **{column: getattr(custom, column) for column in CUSTOM_DATASET_COLUMNS},
+        }
+    )
+    snapshot["fields"] = [
+        snapshot_field(field) for field in dataset.fields.select_related("dataset").order_by("name")
+    ]
+    relationships = SemanticRelationship.objects.filter(
+        Q(from_dataset=dataset) | Q(to_dataset=dataset), workspace_id=dataset.workspace_id
+    ).order_by("name")
+    snapshot["relationships"] = [snapshot_relationship(rel) for rel in relationships]
+    return snapshot
+
+
+def snapshot_object(object_type: str, obj, *, deep: bool = False) -> dict[str, Any]:
+    if object_type == DATASET:
+        return snapshot_dataset(obj, deep=deep)
+    if object_type == FIELD:
+        return snapshot_field(obj)
+    return snapshot_relationship(obj)
+
+
+def display_name(object_type: str, snapshot: dict[str, Any] | None) -> str:
+    if not snapshot:
+        return ""
+    if object_type == FIELD:
+        return f"{snapshot.get('dataset_name', '')}.{snapshot.get('name', '')}"
+    return snapshot.get("name", "")
+
+
+def change_entry(
+    object_type: str,
+    object_uuid,
+    change_type: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "object_type": object_type,
+        "object_uuid": str(object_uuid),
+        "change_type": change_type,
+        "name": display_name(object_type, after or before),
+        "before": before,
+        "after": after,
+    }
+
+
+def summarize(entries: list[dict[str, Any]]) -> str:
+    parts = [
+        f"{VERBS.get(entry['change_type'], 'Changed')} {entry['object_type']} {entry['name']}"
+        for entry in entries[:SUMMARY_MAX_ITEMS]
+    ]
+    if len(entries) > SUMMARY_MAX_ITEMS:
+        parts.append(f"and {len(entries) - SUMMARY_MAX_ITEMS} more")
+    return "; ".join(parts)[:500]
+
+
+def record_revision(
+    workspace,
+    entries: list[dict[str, Any]],
+    *,
+    source: str,
+    user=None,
+    thread_id=None,
+    reverts: SemanticModelRevision | None = None,
+    summary: str | None = None,
+) -> SemanticModelRevision:
+    return SemanticModelRevision.objects.create(
+        workspace=workspace,
+        source=source,
+        summary=summary if summary is not None else summarize(entries),
+        changes=entries,
+        reverts=reverts,
+        thread_id=thread_id,
+        created_by=user if getattr(user, "is_authenticated", False) else None,
+    )
+
+
+def serialize_revision(revision: SemanticModelRevision, *, undone: bool) -> dict[str, Any]:
+    creator = revision.created_by
+    return {
+        "id": str(revision.id),
+        "source": revision.source,
+        "summary": revision.summary,
+        "created_at": revision.created_at.isoformat(),
+        "created_by": (
+            None
+            if creator is None
+            else {"id": str(creator.id), "name": creator.get_full_name() or creator.email}
+        ),
+        "thread_id": str(revision.thread_id) if revision.thread_id else None,
+        "reverts_id": str(revision.reverts_id) if revision.reverts_id else None,
+        "undone": undone,
+        "changes": [
+            {
+                "object_type": entry.get("object_type"),
+                "change_type": entry.get("change_type"),
+                "name": entry.get("name"),
+            }
+            for entry in revision.changes or []
+        ],
+    }
+
+
+def list_revisions(workspace, limit: int = 50) -> list[dict[str, Any]]:
+    revisions = list(
+        SemanticModelRevision.objects.filter(workspace=workspace)
+        .select_related("created_by")
+        .order_by("-created_at")[:limit]
+    )
+    reverter = _reverters([rev.id for rev in revisions])
+    return [serialize_revision(rev, undone=_is_undone(rev.id, reverter)) for rev in revisions]
+
+
+def _reverters(revision_ids) -> dict[Any, Any]:
+    """Map each revision to the undo that reverted it, following undo-of-undo chains."""
+    reverter: dict[Any, Any] = {}
+    frontier = list(revision_ids)
+    while frontier:
+        pairs = list(
+            SemanticModelRevision.objects.filter(reverts_id__in=frontier).values_list(
+                "reverts_id", "id"
+            )
+        )
+        reverter.update(pairs)
+        frontier = [undo_id for _reverted, undo_id in pairs]
+    return reverter
+
+
+def _is_undone(revision_id, reverter: dict[Any, Any]) -> bool:
+    """Undone while its undo stands; undoing that undo puts the revision back in effect."""
+    undone = False
+    while revision_id in reverter:
+        undone = not undone
+        revision_id = reverter[revision_id]
+    return undone
+
+
+def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str, Any]:
+    """Reverse one revision atomically, or return ``refused(...)`` having written nothing."""
+    with transaction.atomic():
+        requested = (
+            SemanticModelRevision.objects.select_for_update()
+            .filter(id=revision_id, workspace=workspace)
+            .first()
+        )
+        if requested is None:
+            return refused("NOT_FOUND", "No such data model revision in this workspace.")
+        reverter = _reverters([requested.id])
+        if _is_undone(requested.id, reverter):
+            return refused("ALREADY_UNDONE", "This revision has already been undone.")
+        # Undone and then re-applied: a revision is undone at most once (``reverts``
+        # is one-to-one), so reverse the latest re-application, which has its effect.
+        head_id = requested.id
+        while head_id in reverter:
+            head_id = reverter[head_id]
+        revision = (
+            requested
+            if head_id == requested.id
+            else SemanticModelRevision.objects.select_for_update().get(
+                id=head_id, workspace=workspace
+            )
+        )
+        # Another revision in the chain may have reversed the head while we waited for its lock.
+        if (
+            revision is not requested
+            and SemanticModelRevision.objects.filter(reverts=revision).exists()
+        ):
+            return refused("ALREADY_UNDONE", "This revision has already been undone.")
+        model = _lock_model(workspace)
+        if model is None:
+            return refused(
+                "CATALOG_BUSY", "The data model is being refreshed. Try the undo again shortly."
+            )
+        entries = list(revision.changes or [])
+        restoring = {
+            entry["object_uuid"]
+            for entry in entries
+            if entry["object_type"] == DATASET and entry.get("after") is None
+        }
+        removing = {entry["object_uuid"] for entry in entries if entry.get("before") is None}
+        refs = _References(model, entries)
+        conflicts = [
+            conflict
+            for entry in entries
+            if (conflict := _undo_conflict(workspace, model, entry, restoring, removing, refs))
+            is not None
+        ]
+        if conflicts:
+            return refused(
+                "CONFLICT",
+                "Undoing this revision would overwrite or break a later change. Undo the later "
+                "revision first, or edit the objects directly.",
+                conflicts,
+            )
+        try:
+            undo_entries = _apply_undo(workspace, model, entries)
+        except _InvalidRestore as invalid:
+            return refused(
+                "INVALID",
+                "What this revision replaced no longer passes the current field rules, so "
+                "restoring it would break the data model. Edit the objects directly instead.",
+                invalid.problems,
+            )
+        if undo_entries is None:
+            return refused("CONFLICT", "The restored objects collide with the current data model.")
+        removed = [
+            object_uuid
+            for entry in undo_entries
+            if entry["after"] is None
+            # A dataset's fields and joins are deleted with it, so their rows go too.
+            for object_uuid in (
+                entry["object_uuid"],
+                *(field["id"] for field in (entry["before"] or {}).get("fields") or []),
+                *(rel["id"] for rel in (entry["before"] or {}).get("relationships") or []),
+            )
+        ]
+        # A settled canvas row over a now-missing object would read as a conflict.
+        SemanticCanvasChange.objects.filter(
+            canvas__workspace=workspace,
+            object_uuid__in=removed,
+            change_type=SemanticCanvasChange.ChangeType.UPDATE,
+            fields={},
+        ).delete()
+        undo = record_revision(
+            workspace,
+            undo_entries,
+            source=SemanticModelRevision.Source.UNDO,
+            user=user,
+            thread_id=thread_id,
+            reverts=revision,
+            summary=f"Undid: {requested.summary}"[:500],
+        )
+    return {
+        "undone": serialize_revision(requested, undone=True),
+        "revision": serialize_revision(undo, undone=False),
+    }
+
+
+class _InvalidRestore(Exception):
+    def __init__(self, problems: list[dict[str, Any]]) -> None:
+        super().__init__("restored fields fail validation")
+        self.problems = problems
+
+
+def _apply_undo(workspace, model, entries) -> list[dict[str, Any]] | None:
+    """None when a write hit a uniqueness race the checks could not see; rolled back.
+
+    Raises ``_InvalidRestore`` (also rolled back) when a restored field fails
+    today's field rules, e.g. SQL written before those rules tightened.
+    """
+    try:
+        with transaction.atomic():
+            undone = [_undo_entry(workspace, model, entry) for entry in reversed(entries)]
+            if problems := _restored_field_problems(model, entries):
+                raise _InvalidRestore(problems)
+            return undone
+    except IntegrityError:
+        logger.warning("Undo of a data model revision collided in workspace %s", workspace.id)
+        return None
+
+
+def _restored_field_problems(model, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate authored fields this undo wrote back, in their saved state.
+
+    Catalog-generated fields are the refresh's to keep valid, as on the canvas.
+    """
+    restored: set[str] = set()
+    for entry in entries:
+        before, after = entry.get("before"), entry.get("after")
+        if before is None:
+            continue
+        if entry["object_type"] == FIELD and (after is None or changes_definition(before, after)):
+            restored.add(entry["object_uuid"])
+        elif entry["object_type"] == DATASET and entry.get("after") is None:
+            restored.update(field["id"] for field in before.get("fields") or [])
+    problems = []
+    published: dict[Any, Any] | None = None
+    references: set[str] = set()
+    for field in SemanticField.objects.filter(id__in=restored).select_related("dataset"):
+        metadata = field.metadata or {}
+        authored = metadata.get("source") == CANVAS_SOURCE or any(
+            metadata.get(key) for key in ("cube_sql", "filters")
+        )
+        if not authored:
+            continue
+        messages = [diagnostic["message"] for diagnostic in saved_field_diagnostics(field)]
+        if not messages and field.field_type == SemanticField.FieldType.MEASURE:
+            if published is None:
+                datasets = publishable_datasets(list(model.datasets.prefetch_related("fields")))
+                published = {dataset.id: dataset for dataset in datasets}
+                references = published_member_references(datasets)
+            if (dataset := published.get(field.dataset_id)) is not None and (
+                missing := _missing_reference(field, cube_member_references(references, dataset))
+            ):
+                messages = [f"It references {missing}, which no longer exists."]
+        problems.extend(
+            {
+                "object": f"field/{field.dataset.name}.{field.name}",
+                "object_uuid": str(field.id),
+                "message": message,
+            }
+            for message in messages
+        )
+    return problems
+
+
+def _missing_reference(field: SemanticField, references: set[str]) -> str:
+    """A ``{member}`` the Cube build could not resolve; unlike a join's, it fails the build."""
+    metadata = field.metadata or {}
+    sources = [
+        metadata.get("cube_sql"),
+        *(item.get("sql") for item in metadata.get("filters") or [] if isinstance(item, dict)),
+    ]
+    for sql in sources:
+        if not (isinstance(sql, str) and sql.strip()):
+            continue
+        try:
+            embed_cube_sql(sql, references=references)
+        except CubeSQLReferenceError as exc:
+            return exc.reference[:200]
+    return ""
+
+
+def changes_definition(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Whether undoing this edit writes back more than curation (as canvas diagnostics judge it).
+
+    A curation-only undo leaves the SQL as it is, so it must not be refused
+    over SQL it does not touch.
+    """
+    curation = {*FIELD_CURATION_KEYS, "curated_fields"}
+    return any(
+        key.removeprefix("metadata.") not in curation for key in _changed_values(before, after)
+    )
+
+
+def _model_class(object_type: str):
+    return {DATASET: SemanticDataset, FIELD: SemanticField, RELATIONSHIP: SemanticRelationship}[
+        object_type
+    ]
+
+
+def _current(entry: dict[str, Any]):
+    return (
+        _model_class(entry["object_type"])
+        .objects.select_for_update()
+        .filter(id=entry["object_uuid"])
+        .first()
+    )
+
+
+def _conflict(entry: dict[str, Any], message: str) -> dict[str, Any]:
+    return {
+        "object": f"{entry['object_type']}/{entry['name']}",
+        "object_uuid": entry["object_uuid"],
+        "message": message,
+    }
+
+
+def _lock_model(workspace) -> SemanticModel | None:
+    """None while a catalog refresh holds the model.
+
+    Same no-wait lock a custom-dataset commit takes, so an undo never races a
+    refresh that re-syncs the custom datasets it adds or removes.
+    """
+    try:
+        # Savepoint: a refused NOWAIT aborts the transaction it runs in.
+        with transaction.atomic():
+            return SemanticModel.objects.select_for_update(nowait=True).get(workspace=workspace)
+    except OperationalError as exc:
+        if getattr(exc.__cause__, "sqlstate", None) == "55P03":
+            return None
+        raise
+
+
+def _undo_conflict(workspace, model, entry, restoring: set[str], removing: set[str], refs):
+    object_type = entry["object_type"]
+    before, after = entry.get("before"), entry.get("after")
+    current = _current(entry)
+    if after is None:
+        if current is not None:
+            return _conflict(entry, "It exists again, so it cannot be restored.")
+        return _restore_conflict(workspace, model, entry, before, restoring)
+    if current is None:
+        if _dataset_restored_first(entry, restoring):
+            return None
+        return _conflict(entry, "It was removed afterwards.")
+    if before is None:
+        now = snapshot_object(object_type, current, deep=True)
+        if _authored(object_type, now) != _authored(object_type, after):
+            return _conflict(entry, "It was edited afterwards, so removing it would lose that.")
+        if user := _removal_user(refs, object_type, now, removing):
+            return _conflict(entry, f"{user} uses it, so removing it would break that.")
+        return None
+    now = snapshot_object(object_type, current)
+    changed = _changed_values(before, after)
+    for key, (_old, new) in changed.items():
+        if key != CURATED_KEY and _read(now, key) != new:
+            return _conflict(entry, f"Its {key.removeprefix('metadata.')} changed afterwards.")
+    if "name" in changed:
+        return _rename_conflict(workspace, entry, before, after, removing, refs)
+    return None
+
+
+def _dataset_restored_first(entry: dict[str, Any], restoring: set[str]) -> bool:
+    """A later entry of this revision deleted the object's dataset, cascading it away.
+
+    Entries replay in reverse, so that dataset (with this object in its deep
+    snapshot) is restored before this entry is undone.
+    """
+    after = entry["after"]
+    if entry["object_type"] == FIELD:
+        return after["dataset_id"] in restoring
+    if entry["object_type"] == RELATIONSHIP:
+        return bool({after["from_dataset_id"], after["to_dataset_id"]} & restoring)
+    return False
+
+
+def _removal_user(refs, object_type: str, now: dict[str, Any], removing: set[str]) -> str:
+    if object_type == FIELD:
+        return refs.user_of(now, removing)
+    if object_type != DATASET:
+        return ""
+    fields = now.get("fields") or []
+    going = {
+        *removing,
+        *(field["id"] for field in fields),
+        *(relationship["id"] for relationship in now.get("relationships") or []),
+    }
+    return refs.user_of_dataset(now["name"], going)
+
+
+def _rename_conflict(workspace, entry, before, after, removing: set[str], refs):
+    old_name = before["name"]
+    if entry["object_type"] == FIELD:
+        taken = SemanticField.objects.filter(dataset_id=after["dataset_id"], name=old_name)
+        if user := refs.user_of(after, removing):
+            return _conflict(entry, f"{user} uses its current name, so renaming would break it.")
+    elif entry["object_type"] == RELATIONSHIP:
+        taken = SemanticRelationship.objects.filter(workspace=workspace, name=old_name)
+    else:
+        return None
+    if taken.exclude(id=entry["object_uuid"]).exists():
+        return _conflict(entry, f"Another {entry['object_type']} is now named '{old_name}'.")
+    return None
+
+
+def _after_undo(
+    expression: str, metadata: dict[str, Any], before: dict[str, Any], after: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """A field's SQL once undone: only the revision's changed keys go back, as in _undo_entry.
+
+    Later edits to other keys stay, so the live state is the starting point.
+    """
+    metadata = dict(metadata)
+    for key, (old, _new) in _changed_values(before, after).items():
+        if key == CURATED_KEY:
+            continue
+        if key.startswith("metadata."):
+            meta_key = key.removeprefix("metadata.")
+            if meta_key in (before.get("metadata") or {}):
+                metadata[meta_key] = old
+            else:
+                metadata.pop(meta_key, None)
+        elif key == "expression":
+            expression = old
+    return expression, metadata
+
+
+class _References:
+    """The field SQL and joins the Cube build publishes, read once per undo on first use.
+
+    The conflict pass writes nothing, so one read serves every entry. Hidden
+    datasets and fields, and joins with a hidden endpoint, are skipped as in
+    ``generate_cube_schema`` (and the commit gate), since they cannot break it.
+    Fields this revision edited are read as the undo will leave them, so a
+    reference the same undo reverts does not count.
+    """
+
+    def __init__(self, model, entries: list[dict[str, Any]]) -> None:
+        self._model = model
+        self._reverted = {
+            entry["object_uuid"]: (entry["before"], entry["after"])
+            for entry in entries
+            if entry["object_type"] == FIELD and entry.get("before") and entry.get("after")
+        }
+
+    @cached_property
+    def _visible_datasets(self) -> set[str]:
+        return {
+            str(id_)
+            for id_ in self._model.datasets.filter(is_visible=True).values_list("id", flat=True)
+        }
+
+    @cached_property
+    def _fields(self) -> list[tuple[str, str, str, str]]:
+        rows = []
+        fields = SemanticField.objects.filter(
+            dataset__semantic_model=self._model, dataset__is_visible=True, is_visible=True
+        ).select_related("dataset")
+        for field in fields:
+            expression, metadata = field.expression, dict(field.metadata or {})
+            if reverted := self._reverted.get(str(field.id)):
+                expression, metadata = _after_undo(expression, metadata, *reverted)
+            text = field_sql_text({**metadata, "expression": expression})
+            rows.append((str(field.id), field.dataset.name, field.name, text))
+        return rows
+
+    @cached_property
+    def _joins(self) -> list[tuple[str, str, str]]:
+        return [
+            (str(id_), name, normalize_member_references(expression or ""))
+            for id_, name, expression, from_id, to_id in SemanticRelationship.objects.filter(
+                workspace_id=self._model.workspace_id
+            ).values_list("id", "name", "join_expression", "from_dataset_id", "to_dataset_id")
+            if {str(from_id), str(to_id)} <= self._visible_datasets
+        ]
+
+    def user_of_dataset(self, dataset: str, removing: set[str]) -> str:
+        """Name a field or join that references the dataset itself or any of its members."""
+        excluded = set(map(str, removing))
+        for field_id, field_dataset, field_name, text in self._fields:
+            if field_id not in excluded and references_dataset(text, dataset):
+                return f"Field {field_dataset}.{field_name}"
+        for join_id, join_name, expression in self._joins:
+            if join_id not in excluded and references_dataset(expression, dataset):
+                return f"Relationship {join_name}"
+        return ""
+
+    def user_of(self, field_snapshot: dict[str, Any], removing: set[str]) -> str:
+        """Name a field or join that references this field."""
+        dataset, name = field_snapshot["dataset_name"], field_snapshot["name"]
+        excluded = {*map(str, removing), str(field_snapshot["id"])}
+        for field_id, field_dataset, field_name, text in self._fields:
+            if field_id in excluded:
+                continue
+            if references_field(text, dataset, name, same_dataset=field_dataset == dataset):
+                return f"Field {field_dataset}.{field_name}"
+        for join_id, join_name, expression in self._joins:
+            if join_id not in excluded and references_field(
+                expression, dataset, name, same_dataset=False
+            ):
+                return f"Relationship {join_name}"
+        return ""
+
+
+def _restore_conflict(workspace, model, entry, before, restoring: set[str]):
+    object_type = entry["object_type"]
+    if object_type == DATASET:
+        name = before["name"]
+        taken = SemanticDataset.objects.filter(workspace=workspace, name=name).exists() or (
+            CustomDataset.objects.filter(workspace=workspace, name=name).exists()
+        )
+        if taken:
+            return _conflict(entry, f"Another dataset is now named '{name}'.")
+        if before.get("custom_dataset"):
+            try:
+                _compiled_custom_sql(model, before["custom_dataset"])
+            except CustomDatasetError:
+                return _conflict(entry, "Its SQL no longer works on the current data.")
+        for relationship in before.get("relationships", []):
+            if problem := _relationship_restore_problem(workspace, relationship, restoring):
+                return _conflict(entry, problem)
+        return None
+    if object_type == FIELD:
+        if before["dataset_id"] in restoring:
+            return None
+        if not model.datasets.filter(id=before["dataset_id"]).exists():
+            return _conflict(entry, "Its dataset no longer exists.")
+        if SemanticField.objects.filter(
+            dataset_id=before["dataset_id"], name=before["name"]
+        ).exists():
+            return _conflict(entry, f"Another field is now named '{before['name']}'.")
+        return None
+    problem = _relationship_restore_problem(workspace, before, restoring)
+    return _conflict(entry, problem) if problem else None
+
+
+def _relationship_restore_problem(workspace, snapshot, restoring: set[str]) -> str:
+    endpoints = {snapshot["from_dataset_id"], snapshot["to_dataset_id"]} - restoring
+    if SemanticDataset.objects.filter(id__in=endpoints).count() != len(endpoints):
+        return f"A dataset joined by '{snapshot['name']}' no longer exists."
+    if SemanticRelationship.objects.filter(workspace=workspace, name=snapshot["name"]).exists():
+        return f"Another relationship is now named '{snapshot['name']}'."
+    return ""
+
+
+def _comparable(object_type: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    if object_type == FIELD:
+        return {
+            **{column: snapshot.get(column) for column in FIELD_COLUMNS},
+            **{
+                f"metadata.{key}": _read(snapshot, f"metadata.{key}") or None
+                for key in FIELD_AUTHORED_METADATA_KEYS
+            },
+        }
+    return {
+        "name": snapshot.get("name"),
+        "from": snapshot.get("from_dataset_id"),
+        "to": snapshot.get("to_dataset_id"),
+        "type": snapshot.get("relationship_type"),
+        "description": _read(snapshot, "metadata.description"),
+    }
+
+
+def _curated_values(snapshot: dict[str, Any], columns) -> dict[str, Any]:
+    curated = _read(snapshot, CURATED_KEY) or []
+    return {key: _read(snapshot, key if key in columns else f"metadata.{key}") for key in curated}
+
+
+def _authored(object_type: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The user-authored state of an object; refreshes rewrite everything else.
+
+    A catalog refresh re-derives labels, generated fields and joins, so only
+    canvas-created objects and curated keys show whether a person changed it.
+    """
+    if object_type != DATASET:
+        return _authored_member(object_type, snapshot)
+    fields = {
+        field["id"]: authored
+        for field in snapshot.get("fields") or []
+        if (authored := _authored_member(FIELD, field))
+    }
+    relationships = {
+        relationship["id"]: _comparable(RELATIONSHIP, relationship)
+        for relationship in snapshot.get("relationships") or []
+        if _read(relationship, "metadata.source") == CANVAS_SOURCE
+    }
+    return {
+        "curated": _curated_values(snapshot, DATASET_COLUMNS),
+        "fields": fields,
+        "relationships": relationships,
+    }
+
+
+def _authored_member(object_type: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    if object_type == RELATIONSHIP or _read(snapshot, "metadata.source") == CANVAS_SOURCE:
+        return _comparable(object_type, snapshot)
+    return _curated_values(snapshot, FIELD_COLUMNS)
+
+
+def _changed_values(before: dict[str, Any], after: dict[str, Any]) -> dict[str, tuple]:
+    """Keys the revision changed, with metadata split per key: ``{key: (old, new)}``."""
+    changed: dict[str, tuple] = {}
+    for key in set(before) | set(after):
+        if key in {"id", "metadata", "fields", "relationships", "custom_dataset"}:
+            continue
+        if before.get(key) != after.get(key):
+            changed[key] = (before.get(key), after.get(key))
+    old_meta, new_meta = before.get("metadata") or {}, after.get("metadata") or {}
+    for key in set(old_meta) | set(new_meta):
+        if old_meta.get(key) != new_meta.get(key):
+            changed[f"metadata.{key}"] = (old_meta.get(key), new_meta.get(key))
+    return changed
+
+
+def _read(snapshot: dict[str, Any], key: str):
+    if key.startswith("metadata."):
+        return (snapshot.get("metadata") or {}).get(key.removeprefix("metadata."))
+    return snapshot.get(key)
+
+
+def _undo_entry(workspace, model, entry: dict[str, Any]) -> dict[str, Any]:
+    object_type = entry["object_type"]
+    before, after = entry.get("before"), entry.get("after")
+    current = _current(entry)
+    if before is None:
+        current_snapshot = snapshot_object(object_type, current, deep=True)
+        _remove(object_type, current)
+        return change_entry(object_type, entry["object_uuid"], DELETE, current_snapshot, None)
+    if after is None:
+        restored = _recreate(workspace, model, object_type, before)
+        return change_entry(
+            object_type,
+            entry["object_uuid"],
+            CREATE,
+            None,
+            snapshot_object(object_type, restored, deep=True),
+        )
+    current_snapshot = snapshot_object(object_type, current)
+    metadata = dict(current.metadata or {})
+    for key, (old, new) in _changed_values(before, after).items():
+        if key == CURATED_KEY:
+            # Keep curation that later revisions added; drop only this one's.
+            added = set(new or []) - set(old or [])
+            metadata["curated_fields"] = sorted(set(metadata.get("curated_fields", [])) - added)
+        elif key.startswith("metadata."):
+            meta_key = key.removeprefix("metadata.")
+            if meta_key in (before.get("metadata") or {}):
+                metadata[meta_key] = old
+            else:
+                metadata.pop(meta_key, None)
+        else:
+            setattr(current, key, old)
+    current.metadata = metadata
+    current.save()
+    return change_entry(
+        object_type,
+        entry["object_uuid"],
+        UPDATE,
+        current_snapshot,
+        snapshot_object(object_type, current),
+    )
+
+
+def _remove(object_type: str, obj) -> None:
+    if object_type == DATASET:
+        custom = obj.custom_dataset
+        obj.delete()
+        if custom is not None:
+            custom.delete()
+        return
+    obj.delete()
+
+
+def _recreate(workspace, model, object_type: str, snapshot: dict[str, Any]):
+    if object_type == FIELD:
+        return _create_field(snapshot)
+    if object_type == RELATIONSHIP:
+        return _create_relationship(workspace, snapshot)
+    custom = None
+    if custom_snapshot := snapshot.get("custom_dataset"):
+        creator_id = custom_snapshot.get("created_by_id")
+        if creator_id and not get_user_model().objects.filter(id=creator_id).exists():
+            creator_id = None
+        custom = CustomDataset.objects.create(
+            id=custom_snapshot["id"],
+            workspace=workspace,
+            created_by_id=creator_id,
+            **{column: custom_snapshot[column] for column in CUSTOM_DATASET_COLUMNS},
+        )
+    metadata = dict(snapshot.get("metadata") or {})
+    if custom_snapshot:
+        metadata["cube_sql"] = _compiled_custom_sql(model, custom_snapshot)
+    dataset = SemanticDataset.objects.create(
+        id=snapshot["id"],
+        semantic_model=model,
+        workspace=workspace,
+        custom_dataset=custom,
+        metadata=metadata,
+        **{column: snapshot[column] for column in DATASET_COLUMNS},
+    )
+    for field in snapshot.get("fields") or []:
+        _create_field(field)
+    for relationship in snapshot.get("relationships") or []:
+        _create_relationship(workspace, relationship)
+    return dataset
+
+
+def _compiled_custom_sql(model, custom_snapshot: dict[str, Any]) -> str:
+    """Recompile against today's tables; the snapshot's SQL may predate a refresh."""
+    return compile_custom_dataset_sql(
+        custom_snapshot["definition_sql"],
+        allowed_tables=allowed_custom_dataset_tables(model),
+    )
+
+
+def _create_field(snapshot: dict[str, Any]) -> SemanticField:
+    return SemanticField.objects.create(
+        id=snapshot["id"],
+        dataset_id=snapshot["dataset_id"],
+        metadata=snapshot.get("metadata") or {},
+        **{column: snapshot[column] for column in FIELD_COLUMNS},
+    )
+
+
+def _create_relationship(workspace, snapshot: dict[str, Any]) -> SemanticRelationship:
+    existing = SemanticRelationship.objects.filter(id=snapshot["id"]).first()
+    if existing is not None:
+        # Both endpoints of a join can be restored by one undo; the first creates it.
+        return existing
+    return SemanticRelationship.objects.create(
+        id=snapshot["id"],
+        workspace=workspace,
+        from_dataset_id=snapshot["from_dataset_id"],
+        to_dataset_id=snapshot["to_dataset_id"],
+        metadata=snapshot.get("metadata") or {},
+        **{column: snapshot[column] for column in RELATIONSHIP_COLUMNS},
+    )

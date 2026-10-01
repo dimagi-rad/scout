@@ -223,7 +223,7 @@ name. Use exact discovered source_datasets/source_members; describe the need,
 grain, and unresolved decisions. Do not invent member names, require a new
 dataset for every field, infer join keys, or save a placeholder artifact.
 Requirements are proposals, never authorization. The parent must verify them
-and obtain explicit user approval before delegating to `canvas_manager`.
+before delegating any model change to `canvas_manager`.
 Existing schema or query execution errors must follow the typed outcome above,
 not invent a replacement data model. Keep raw-data inspection and SQL outside
 this subagent.

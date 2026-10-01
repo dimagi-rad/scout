@@ -36,7 +36,7 @@ async def test_canvas_manager_receives_the_current_reporting_clock(monkeypatch):
 
     prefix = "apps.agents.tools.canvas_manager_agent"
     monkeypatch.setattr(f"{prefix}.ChatAnthropic", lambda **kwargs: Model())
-    monkeypatch.setattr(f"{prefix}.create_canvas_tools", lambda *args: [])
+    monkeypatch.setattr(f"{prefix}.create_canvas_tools", lambda *args, **kwargs: [])
     monkeypatch.setattr(f"{prefix}.agent_date_context", lambda: "\nReporting clock: 2026-09-24 UTC")
     graph = _build_canvas_manager_graph(SimpleNamespace(id="workspace"), None, [], None)
     await graph.ainvoke({"messages": [HumanMessage(content="Inspect dates")]})
@@ -118,6 +118,40 @@ def test_canvas_manager_summary_falls_back_to_tool_diagnostics():
 
     assert summary["committed"] is False
     assert summary["diagnostics"][0]["code"] == "UNKNOWN_COLUMN"
+
+
+def test_canvas_manager_summary_reports_a_refused_undo():
+    undo_result = {"errors": [{"code": "CONFLICT", "message": "changed afterwards"}]}
+    messages = [
+        ToolMessage(content=json.dumps(undo_result), tool_call_id="toolu_UNDO", name="canvas_undo"),
+        AIMessage(content='{"status": "done", "message": "Undone."}'),
+    ]
+
+    summary = _summarize_result(messages)
+
+    assert summary["status"] == "error"
+    assert summary["diagnostics"][0]["code"] == "CONFLICT"
+    assert summary["revisions"] == []
+
+
+def test_canvas_manager_summary_counts_an_undo_as_a_saved_change():
+    undo_result = {
+        "undone": {"id": "rev-1"},
+        "revision": {"id": "rev-2", "summary": "Undid: Edited dataset raw_visits"},
+        "cube_schema": {"ok": False, "error": "validator unavailable"},
+    }
+    messages = [
+        ToolMessage(content=json.dumps(undo_result), tool_call_id="toolu_UNDO", name="canvas_undo"),
+        AIMessage(content="Undone."),
+    ]
+
+    summary = _summarize_result(messages)
+
+    assert summary["committed"] is True
+    assert summary["changes"] == ["Undid: Edited dataset raw_visits"]
+    assert summary["revisions"] == [{"id": "rev-2", "summary": "Undid: Edited dataset raw_visits"}]
+    assert "No successful commit" not in summary["message"]
+    assert summary["message"].startswith("Some semantic changes were committed")
 
 
 @pytest.mark.asyncio
@@ -325,7 +359,7 @@ async def test_real_nested_graph_step_limit_preserves_partial_commit_and_closes_
     )
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent.create_canvas_tools",
-        lambda *args: [canvas_apply, canvas_commit],
+        lambda *args, **kwargs: [canvas_apply, canvas_commit],
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")
@@ -538,7 +572,7 @@ async def test_canvas_manager_failed_result_closes_lifecycle_as_failed(monkeypat
 
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
-        lambda *_args: FailedGraph(),
+        lambda *_args, **_kwargs: FailedGraph(),
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")
@@ -567,7 +601,7 @@ async def test_canvas_manager_failure_before_confirmed_commit_is_truthful(
 
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
-        lambda *args: FailingGraph(),
+        lambda *args, **kwargs: FailingGraph(),
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")

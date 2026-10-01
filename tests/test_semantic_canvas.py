@@ -1369,7 +1369,7 @@ def test_pending_dataset_field_error_explains_safe_next_step(
     assert error["op_index"] == int(same_batch)
     assert "This atomic batch was not applied" in error["message"]
     assert "Otherwise keep the existing draft" in error["message"]
-    assert "Commit only if authorized" in error["message"]
+    assert "Commit if the task says to" in error["message"]
     assert canvas.changes.count() == (0 if same_batch else 1)
     assert not canvas.semantic_model.datasets.filter(name="visit_stats").exists()
 
@@ -1489,7 +1489,7 @@ async def test_canvas_manager_reports_clean_canvas_only_operations_as_completed(
 
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
-        lambda *_args: CleanGraph(),
+        lambda *_args, **_kwargs: CleanGraph(),
     )
     queue = asyncio.Queue()
     manager = create_canvas_manager_tool(workspace, user, [], str(canvas.thread_id))

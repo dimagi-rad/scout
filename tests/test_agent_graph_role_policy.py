@@ -242,6 +242,29 @@ async def test_static_prompt_rebuild_offers_match_role(workspace, read_user, wri
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("writer", [False, True])
+async def test_only_writers_may_save_dataset_changes_without_approval(
+    workspace, read_user, write_user, writer
+):
+    _system_prompt_cache.clear()
+    stable, _ = await _build_system_prompt(
+        workspace,
+        write_user if writer else read_user,
+        interactive=True,
+        canvas_write=writer,
+        write_capable=writer,
+    )
+    prompt = " ".join(stable.split())
+
+    assert ("do NOT ask the user to approve each change" in prompt) is writer
+    assert ("undo it from Data model history" in prompt) is writer
+    assert ("needs the user's explicit confirmation of that specific change" in prompt) is (writer)
+    assert ("a read-write workspace role is required" in prompt) is not writer
+    assert "explicit permission before saving it" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, write_user):
     _system_prompt_cache.clear()
     stable, _ = await _build_system_prompt(

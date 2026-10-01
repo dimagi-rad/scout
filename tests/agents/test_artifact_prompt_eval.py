@@ -66,8 +66,9 @@ def test_provider_neutral_artifacts_have_an_explicit_data_model_handoff():
         assert "data_requirements" in prompt
         assert "`canvas_manager`" in prompt
     assert "prepare the data model first" in ARTIFACT_PROMPT_ADDITION
-    assert "Only after the user requests or approves creating/saving" in ARTIFACT_PROMPT_ADDITION
-    assert "permission to change the model from a chart request alone" in ARTIFACT_PROMPT_ADDITION
+    assert "Once the gap is verified, delegate the change" in ARTIFACT_PROMPT_ADDITION
+    assert "You do not need the user's approval" in ARTIFACT_PROMPT_ADDITION
+    assert "Deletions still need the user's explicit confirmation" in ARTIFACT_PROMPT_ADDITION
     assert "examined versus\neligible rows" in ARTIFACT_PROMPT_ADDITION
     assert "keyword rules are not NLP" in ARTIFACT_PROMPT_ADDITION
     assert "identity/version guard" in ARTIFACT_PROMPT_ADDITION

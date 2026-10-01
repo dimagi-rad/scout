@@ -9,9 +9,18 @@ diagnostics gate commit.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
-from apps.semantic.canvas.objects import FIELD_CURATION_KEYS, FIELD_TYPES, MEASURE_TYPES
+from apps.semantic.canvas.objects import (
+    FIELD_CURATION_KEYS,
+    FIELD_TYPES,
+    MEASURE_TYPES,
+    field_sql_text,
+    normalize_member_references,
+    references_dataset,
+    references_field,
+    serialize_field_base,
+)
 from apps.semantic.canvas.service import (
     ChangeType,
     ObjectType,
@@ -19,7 +28,13 @@ from apps.semantic.canvas.service import (
     custom_dataset_primary_key,
     validate_custom_dataset_draft,
 )
-from apps.semantic.models import CustomDataset, SemanticCanvasChange, SemanticField
+from apps.semantic.models import (
+    CustomDataset,
+    SemanticCanvasChange,
+    SemanticDataset,
+    SemanticField,
+    SemanticRelationship,
+)
 from apps.semantic.services.field_sql import (
     DimensionSQLValidationError,
     MeasureSQLValidationError,
@@ -94,6 +109,8 @@ def compute_diagnostics(
             )
         )
 
+    diagnostics.extend(_reference_diagnostics(canvas, model, changes))
+
     for change in changes:
         if change.change_type == ChangeType.CREATE:
             continue
@@ -109,6 +126,176 @@ def compute_diagnostics(
                 )
             )
     return diagnostics
+
+
+class _Reference(NamedTuple):
+    """SQL that may name members, and who owns it."""
+
+    object_id: str
+    dataset_id: str  # "" for a join, which never resolves a bare {name}
+    label: str
+    text: str
+
+
+class _Target(NamedTuple):
+    change: SemanticCanvasChange
+    path: str
+    verb: str
+    dataset: SemanticDataset
+    field: SemanticField | None  # None when the whole dataset goes
+
+
+def _reference_diagnostics(canvas, model, changes) -> list[dict]:
+    """Refuse removing or renaming a member that published SQL or a join still names.
+
+    The Cube build runs after the commit, so a dangling ``{member}`` would
+    leave the saved model unbuildable rather than block the save.
+    """
+    targets: list[_Target] = []
+    for change in changes:
+        if change.change_type == ChangeType.CREATE:
+            continue
+        is_delete = change.change_type == ChangeType.DELETE
+        if change.object_type == ObjectType.DATASET and is_delete:
+            dataset = model.datasets.filter(id=change.object_uuid).first()
+            if dataset is not None:
+                targets.append(_Target(change, "", "Deleting", dataset, None))
+        elif change.object_type == ObjectType.FIELD and (is_delete or "name" in change.fields):
+            field = (
+                SemanticField.objects.filter(id=change.object_uuid)
+                .select_related("dataset")
+                .first()
+            )
+            if field is not None:
+                path, verb = ("", "Deleting") if is_delete else ("name", "Renaming")
+                targets.append(_Target(change, path, verb, field.dataset, field))
+    if not targets:
+        return []
+
+    references = _published_references(model, changes, targets)
+    out = []
+    for target in targets:
+        if target.field is None:
+            user = next(
+                (
+                    ref.label
+                    for ref in references
+                    if references_dataset(ref.text, target.dataset.name)
+                ),
+                "",
+            )
+            what = f"dataset {target.dataset.name}"
+        else:
+            user = next(
+                (
+                    ref.label
+                    for ref in references
+                    if ref.object_id != str(target.field.id)
+                    and references_field(
+                        ref.text,
+                        target.dataset.name,
+                        target.field.name,
+                        same_dataset=ref.dataset_id == str(target.dataset.id),
+                    )
+                ),
+                "",
+            )
+            what = f"field {target.dataset.name}.{target.field.name}"
+        if user:
+            out.append(
+                _diagnostic(
+                    "MEMBER_IN_USE",
+                    target.change,
+                    target.path,
+                    f"{target.verb} {what} would break {user}, which references it. "
+                    "Update or remove that reference in the same batch first.",
+                )
+            )
+    return out
+
+
+def _published_references(model, changes, targets: list[_Target]) -> list[_Reference]:
+    """SQL the Cube build will publish once this canvas commits.
+
+    Mirrors ``generate_cube_schema``: hidden datasets and fields, and joins with a
+    hidden endpoint, are never published, so what they name cannot break it.
+    """
+    gone_datasets = {str(t.dataset.id) for t in targets if t.field is None}
+    gone_fields = {
+        str(t.field.id)
+        for t in targets
+        if t.field is not None and t.change.change_type == ChangeType.DELETE
+    }
+    names, hidden = {}, set()
+    for id_, name, is_visible in SemanticDataset.objects.filter(semantic_model=model).values_list(
+        "id", "name", "is_visible"
+    ):
+        names[str(id_)] = name
+        if not is_visible:
+            hidden.add(str(id_))
+    unpublished = hidden | gone_datasets
+    visible = {id_: name for id_, name in names.items() if id_ not in unpublished}
+    pending = {str(change.object_uuid): change for change in changes}
+    references = []
+    for field in SemanticField.objects.filter(dataset__semantic_model=model, is_visible=True):
+        dataset_id = str(field.dataset_id)
+        if str(field.id) in gone_fields or dataset_id not in visible:
+            continue
+        edit = pending.get(str(field.id))
+        draft = edit.fields if edit is not None and edit.change_type == ChangeType.UPDATE else {}
+        merged = {"expression": field.expression, **(field.metadata or {}), **draft}
+        # The persisted name is the one canvas ops resolve.
+        label = f"Field {visible[dataset_id]}.{field.name}"
+        references.append(_Reference(str(field.id), dataset_id, label, field_sql_text(merged)))
+    for change in changes:
+        if change.change_type != ChangeType.CREATE:
+            continue
+        fields = change.fields
+        if change.object_type == ObjectType.FIELD:
+            # A draft on a dataset this batch deletes still counts: it could not commit.
+            dataset_id = str(fields.get("dataset_uuid", ""))
+            if dataset_id in hidden:
+                continue
+            label = f"Field {names.get(dataset_id, '')}.{fields.get('name', '')}"
+            references.append(
+                _Reference(str(change.object_uuid), dataset_id, label, field_sql_text(fields))
+            )
+        elif (
+            change.object_type == ObjectType.RELATIONSHIP
+            and not {
+                str(fields.get("from_dataset_uuid", "")),
+                str(fields.get("to_dataset_uuid", "")),
+            }
+            & hidden
+        ):
+            # Commit synthesizes the join from these names (commit._create_relationship).
+            text = (
+                f"{{{fields.get('from_dataset', '')}.{fields.get('from_field', '')}}} = "
+                f"{{{fields.get('to_dataset', '')}.{fields.get('to_field', '')}}}"
+            )
+            references.append(
+                _Reference(
+                    str(change.object_uuid), "", f"Relationship {fields.get('name', '')}", text
+                )
+            )
+    deleted_joins = {
+        str(change.object_uuid)
+        for change in changes
+        if change.object_type == ObjectType.RELATIONSHIP and change.change_type == ChangeType.DELETE
+    }
+    for relationship in SemanticRelationship.objects.filter(workspace_id=model.workspace_id):
+        endpoints = {str(relationship.from_dataset_id), str(relationship.to_dataset_id)}
+        if str(relationship.id) in deleted_joins or not endpoints <= visible.keys():
+            continue
+        references.append(
+            _Reference(
+                str(relationship.id),
+                "",
+                f"Relationship {relationship.name}",
+                normalize_member_references(relationship.join_expression or ""),
+            )
+        )
+    return references
 
 
 def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
@@ -141,6 +328,18 @@ def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
 
     out.extend(_field_expression_diagnostics(dataset, change, fields))
     return out
+
+
+def saved_field_diagnostics(field: SemanticField) -> list[dict]:
+    """The canvas field contract applied to a saved field, such as one an undo writes back."""
+    change = SemanticCanvasChange(
+        object_type=ObjectType.FIELD, object_uuid=field.id, fields={"name": field.name}
+    )
+    values = serialize_field_base(field)
+    return [
+        *_field_expression_diagnostics(field.dataset, change, values),
+        *_calculated_measure_diagnostics(change, values),
+    ]
 
 
 def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> list[dict]:

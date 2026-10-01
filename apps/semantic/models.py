@@ -338,6 +338,9 @@ class SemanticCanvas(models.Model):
         related_name="semantic_canvases",
     )
     committed_at = models.DateTimeField(null=True, blank=True)
+    # {"<kind>:dataset/<name>": user turn when the agent was told to ask}. A deletion
+    # is accepted only in a later user turn, so the agent cannot confirm itself.
+    pending_confirmations = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -399,3 +402,61 @@ class SemanticCanvasChange(models.Model):
 
     def __str__(self) -> str:
         return f"{self.change_type} {self.object_type}/{self.object_uuid}"
+
+
+class SemanticModelRevision(models.Model):
+    """One saved change to the data model, kept so it can be undone.
+
+    ``changes`` holds, per touched object, full ``before`` and ``after``
+    snapshots (``None`` for a create or delete). Undoing a revision writes the
+    ``before`` side back and records the undo as its own revision, so an undo
+    can itself be undone.
+
+    No FK to SemanticModel: inserting one takes a key-share lock on the model
+    row, so a canvas commit would wait out a catalog refresh holding it.
+    """
+
+    class Source(models.TextChoices):
+        CANVAS_COMMIT = "canvas_commit", "Canvas commit"
+        UNDO = "undo", "Undo"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="semantic_revisions",
+    )
+    source = models.CharField(max_length=20, choices=Source.choices)
+    summary = models.CharField(max_length=500, blank=True)
+    changes = models.JSONField(default=list, blank=True)
+    reverts = models.OneToOneField(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="undo_revision",
+    )
+    thread = models.ForeignKey(
+        "chat.Thread",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="semantic_revisions",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="semantic_revisions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["workspace", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace}: {self.summary or self.source}"
