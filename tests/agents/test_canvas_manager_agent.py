@@ -134,6 +134,26 @@ def test_canvas_manager_summary_reports_a_refused_undo():
     assert summary["revisions"] == []
 
 
+def test_canvas_manager_summary_counts_an_undo_as_a_saved_change():
+    undo_result = {
+        "undone": {"id": "rev-1"},
+        "revision": {"id": "rev-2", "summary": "Undid: Edited dataset raw_visits"},
+        "cube_schema": {"ok": False, "error": "validator unavailable"},
+    }
+    messages = [
+        ToolMessage(content=json.dumps(undo_result), tool_call_id="toolu_UNDO", name="canvas_undo"),
+        AIMessage(content="Undone."),
+    ]
+
+    summary = _summarize_result(messages)
+
+    assert summary["committed"] is True
+    assert summary["changes"] == ["Undid: Edited dataset raw_visits"]
+    assert summary["revisions"] == [{"id": "rev-2", "summary": "Undid: Edited dataset raw_visits"}]
+    assert "No successful commit" not in summary["message"]
+    assert summary["message"].startswith("Some semantic changes were committed")
+
+
 @pytest.mark.asyncio
 async def test_forwarder_buffers_local_tool_start_until_tool_message_id():
     queue: asyncio.Queue = asyncio.Queue()

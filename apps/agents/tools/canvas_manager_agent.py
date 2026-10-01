@@ -530,6 +530,7 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
     pending_count = None
     revisions: list[dict[str, Any]] = []
     last_undo: dict[str, Any] = {}
+    undo_summaries: list[str] = []
     for message in messages:
         if isinstance(message, ToolMessage) and message.name == "canvas_undo":
             undo_report = _parse_json_object(message.content) or {}
@@ -541,6 +542,7 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
                         "summary": undo_report["revision"].get("summary"),
                     }
                 )
+                undo_summaries.append(str(undo_report["revision"].get("summary") or "Undo"))
             continue
         if not isinstance(message, ToolMessage) or message.name not in {
             "canvas_apply",
@@ -592,11 +594,15 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
         ],
         "changes": parsed_final.get("changes")
         or [
-            f"{obj.get('object_type', 'object')}/{obj.get('name') or obj.get('object_uuid', '')}"
-            for obj in committed_objects
+            *(
+                f"{obj.get('object_type', 'object')}/{obj.get('name') or obj.get('object_uuid', '')}"
+                for obj in committed_objects
+            ),
+            *undo_summaries,
         ],
         "diagnostics": diagnostics,
-        "committed": bool(committed_objects),
+        # An undo saves a data model change too, though it commits no canvas objects.
+        "committed": bool(committed_objects or undo_summaries),
         "committed_objects": committed_objects,
         "pending_count": pending_count,
         "revisions": revisions,
@@ -637,7 +643,7 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
     if problems:
         commit_state = (
             "Some semantic changes were committed and were not rolled back. "
-            if committed_objects
+            if committed_objects or undo_summaries
             else "No successful commit was observed during this delegation. "
         )
         result["message"] = (
