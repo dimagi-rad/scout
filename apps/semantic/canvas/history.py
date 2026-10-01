@@ -581,20 +581,42 @@ def _rename_conflict(workspace, entry, before, after, removing: set[str], refs):
     return None
 
 
+def _after_undo(
+    expression: str, metadata: dict[str, Any], before: dict[str, Any], after: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """A field's SQL once undone: only the revision's changed keys go back, as in _undo_entry.
+
+    Later edits to other keys stay, so the live state is the starting point.
+    """
+    metadata = dict(metadata)
+    for key, (old, _new) in _changed_values(before, after).items():
+        if key == CURATED_KEY:
+            continue
+        if key.startswith("metadata."):
+            meta_key = key.removeprefix("metadata.")
+            if meta_key in (before.get("metadata") or {}):
+                metadata[meta_key] = old
+            else:
+                metadata.pop(meta_key, None)
+        elif key == "expression":
+            expression = old
+    return expression, metadata
+
+
 class _References:
     """The field SQL and joins the Cube build publishes, read once per undo on first use.
 
     The conflict pass writes nothing, so one read serves every entry. Hidden
     datasets and fields, and joins with a hidden endpoint, are skipped as in
     ``generate_cube_schema`` (and the commit gate), since they cannot break it.
-    Fields this revision edited are read as the undo will leave them (their
-    ``before`` SQL), so a reference the same undo reverts does not count.
+    Fields this revision edited are read as the undo will leave them, so a
+    reference the same undo reverts does not count.
     """
 
     def __init__(self, model, entries: list[dict[str, Any]]) -> None:
         self._model = model
         self._reverted = {
-            entry["object_uuid"]: entry["before"]
+            entry["object_uuid"]: (entry["before"], entry["after"])
             for entry in entries
             if entry["object_type"] == FIELD and entry.get("before") and entry.get("after")
         }
@@ -613,13 +635,10 @@ class _References:
             dataset__semantic_model=self._model, dataset__is_visible=True, is_visible=True
         ).select_related("dataset")
         for field in fields:
-            state = self._reverted.get(str(field.id)) or {
-                "metadata": field.metadata,
-                "expression": field.expression,
-            }
-            text = field_sql_text(
-                {**(state.get("metadata") or {}), "expression": state.get("expression")}
-            )
+            expression, metadata = field.expression, dict(field.metadata or {})
+            if reverted := self._reverted.get(str(field.id)):
+                expression, metadata = _after_undo(expression, metadata, *reverted)
+            text = field_sql_text({**metadata, "expression": expression})
             rows.append((str(field.id), field.dataset.name, field.name, text))
         return rows
 

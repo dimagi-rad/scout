@@ -1317,3 +1317,47 @@ def test_undo_of_a_field_created_and_wired_in_the_same_save_succeeds(
     fields = semantic_model.datasets.get(name="raw_visits").fields
     assert not fields.filter(name="other_total").exists()
     assert fields.get(name="ratio").metadata["cube_sql"] == "{total_amount} / 2"
+
+
+def test_undo_still_sees_a_later_reference_on_a_field_the_revision_also_edited(
+    canvas, semantic_model, workspace, user
+):
+    _commit(
+        canvas,
+        user,
+        [
+            _measure_op("total_amount", measure_type="sum", expression="amount"),
+            _measure_op("other_total", measure_type="sum", expression="amount"),
+        ],
+    )
+    _commit(
+        canvas, user, [_measure_op("ratio", measure_type="number", cube_sql="{other_total} / 2")]
+    )
+    _commit(
+        canvas,
+        user,
+        [
+            RENAME_TOTAL,
+            {"op": "set", "target": "field/raw_visits.ratio/label", "value": "Ratio"},
+        ],
+    )
+    renamed = SemanticModelRevision.objects.order_by("-created_at").first()
+    _commit(
+        canvas,
+        user,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.ratio/cube_sql",
+                "value": "{amount_total} / 2",
+            }
+        ],
+    )
+
+    refusal = undo_revision(workspace, renamed.id, user)["refused"]
+
+    assert refusal["code"] == "CONFLICT"
+    assert "raw_visits.ratio" in refusal["conflicts"][0]["message"]
+    assert (
+        semantic_model.datasets.get(name="raw_visits").fields.filter(name="amount_total").exists()
+    )
