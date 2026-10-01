@@ -8,6 +8,7 @@ them from overlapping.
 import asyncio
 import contextlib
 import json
+import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import connection
+from django.db.models.functions import Now
 from django.test import AsyncClient, override_settings
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
@@ -65,6 +67,25 @@ async def _lease_row(thread_id):
     )
 
 
+async def _take_over(thread_id):
+    """Hand the thread to another run in one statement.
+
+    Expiring and then re-acquiring in two steps races the heartbeat, which can
+    renew in between and keep the lease (the flake on main after #777).
+    """
+    taken = await Thread.objects.filter(id=thread_id).aupdate(
+        turn_lease_token=uuid.uuid4(), turn_lease_expires_at=Now() + turn_lease.TURN_LEASE_TTL
+    )
+    assert taken == 1
+
+
+async def _stall_until_cancelled():
+    """Block until the heartbeat cancels us. The timeout only turns a missed
+    cancellation into a prompt failure; nothing races it."""
+    async with asyncio.timeout(60):
+        await asyncio.Event().wait()
+
+
 async def _expire(thread_id):
     await Thread.objects.filter(id=thread_id).aupdate(
         turn_lease_expires_at=timezone.now() - timedelta(seconds=1)
@@ -106,12 +127,22 @@ class TestLease:
         await Thread.objects.filter(id=thread.id).aupdate(
             turn_lease_expires_at=timezone.now() + timedelta(seconds=1)
         )
+        renewed = asyncio.Event()
+        real_renew = lease.renew
+
+        async def recording_renew():
+            ok = await real_renew()
+            renewed.set()
+            return ok
+
         with (
             patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05),
+            patch.object(lease, "renew", recording_renew),
             pytest.raises(RuntimeError),
         ):
             async with lease.held():
-                await asyncio.sleep(0.2)
+                async with asyncio.timeout(60):
+                    await renewed.wait()
                 expires = (await _lease_row(thread.id))["turn_lease_expires_at"]
                 assert expires > timezone.now() + timedelta(seconds=30)
                 raise RuntimeError("turn failed")
@@ -125,9 +156,8 @@ class TestLease:
 
         async def run():
             async with lease.kept_alive():
-                await _expire(thread.id)
-                await atry_acquire_turn_lease(thread.id)
-                await asyncio.sleep(5)
+                await _take_over(thread.id)
+                await _stall_until_cancelled()
                 wrote_after_loss.append(True)
 
         with patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05):
@@ -143,7 +173,7 @@ class TestLease:
 
         async def run():
             async with lease.kept_alive():
-                await asyncio.sleep(5)
+                await _stall_until_cancelled()
 
         with (
             patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05),
@@ -191,7 +221,8 @@ class TestLease:
             await holder.release()
 
         releaser = asyncio.create_task(release_soon())
-        lease = await aacquire_turn_lease(thread.id, wait_seconds=2, poll_seconds=0.05)
+        # Generous: the wait returns as soon as the release lands.
+        lease = await aacquire_turn_lease(thread.id, wait_seconds=60, poll_seconds=0.05)
         await releaser
 
         assert lease is not None
@@ -295,9 +326,8 @@ class TestChatTurn:
         ws, thread, client = await _chat_member("chat-lost")
 
         async def lose_the_thread_then_stall(*_args, **_kwargs):
-            await _expire(thread.id)
-            await atry_acquire_turn_lease(thread.id)
-            await asyncio.sleep(5)
+            await _take_over(thread.id)
+            await _stall_until_cancelled()
 
         with (
             _agent_layer(build_agent=AsyncMock(side_effect=lose_the_thread_then_stall)),
@@ -565,9 +595,8 @@ class TestResumeDeadline:
         tj = await _resumable_job("resume-lost", 880014)
 
         async def lose_the_thread_then_stall(*_args, **_kwargs):
-            await _expire(tj.thread_id)
-            await atry_acquire_turn_lease(tj.thread_id)
-            await asyncio.sleep(5)
+            await _take_over(tj.thread_id)
+            await _stall_until_cancelled()
 
         agent = MagicMock(ainvoke=AsyncMock(side_effect=lose_the_thread_then_stall))
         persist = AsyncMock()
@@ -645,8 +674,11 @@ def test_the_in_flight_lookup_names_the_real_task():
 async def test_a_cancelled_stream_saves_its_partial_reply_only_while_it_owns_the_thread(
     owns, persisted
 ):
+    streaming = asyncio.Event()
+
     async def events(*_args, **_kwargs):
-        await asyncio.sleep(30)
+        streaming.set()
+        await asyncio.Event().wait()
         yield {}
 
     agent = MagicMock(astream_events=events, aupdate_state=AsyncMock())
@@ -658,7 +690,8 @@ async def test_a_cancelled_stream_saves_its_partial_reply_only_while_it_owns_the
             pass
 
     task = asyncio.create_task(consume())
-    await asyncio.sleep(0.05)
+    async with asyncio.timeout(60):
+        await streaming.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
