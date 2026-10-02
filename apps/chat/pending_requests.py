@@ -53,13 +53,14 @@ class PendingRequestTooLong(Exception):
 @dataclass(frozen=True)
 class ClaimedRequest:
     thread_id: str
+    request_id: uuid.UUID
     version: int
     text: str
     token: uuid.UUID
 
     @property
     def message_id(self) -> str:
-        return held_message_id(self.thread_id, self.version)
+        return held_message_id(self.request_id, self.version)
 
     @property
     def marker_id(self) -> str:
@@ -68,12 +69,15 @@ class ClaimedRequest:
 
 @dataclass(frozen=True)
 class _StaleClaim:
+    request_id: uuid.UUID
     version: int
     token: uuid.UUID
 
 
-def held_message_id(thread_id, version: int) -> str:
-    return f"pr-{thread_id}-{version}"
+def held_message_id(request_id, version: int) -> str:
+    # Per request, not per thread: a thread holds again after a send, and an id
+    # already in the checkpoint would replace that message rather than append.
+    return f"pr-{request_id}-{version}"
 
 
 def combined_text(parts: list[dict]) -> str:
@@ -212,29 +216,36 @@ def adiscard(thread_id, *, version: int) -> None:
 
 
 @sync_to_async
-def _claim(thread_id, lease_token: uuid.UUID) -> ClaimedRequest | _StaleClaim | None:
+def _claim(thread_id, lease_token: uuid.UUID, thread_job_id) -> ClaimedRequest | _StaleClaim | None:
     with transaction.atomic():
         if not Thread.objects.filter(id=thread_id, turn_lease_token=lease_token).exists():
             return None
         pending = PendingRequest.objects.select_for_update().filter(thread_id=thread_id).first()
         if pending is None or not pending.parts:
             return None
+        if thread_job_id is not None and pending.thread_job_id != thread_job_id:
+            return None
         if pending.state == PendingRequest.State.CLAIMED and pending.claim_token != lease_token:
-            return _StaleClaim(pending.version, pending.claim_token)
+            return _StaleClaim(pending.request_id, pending.version, pending.claim_token)
         pending.state = PendingRequest.State.CLAIMED
         pending.claim_token = lease_token
         pending.save(update_fields=["state", "claim_token", "updated_at"])
         return ClaimedRequest(
             thread_id=str(thread_id),
+            request_id=pending.request_id,
             version=pending.version,
             text=combined_text(pending.parts),
             token=lease_token,
         )
 
 
-async def aclaim(thread_id, lease_token: uuid.UUID) -> ClaimedRequest | None:
-    """Claim the thread's held request for the run holding lease ``lease_token``."""
-    outcome = await _claim(thread_id, lease_token)
+async def aclaim(thread_id, lease_token: uuid.UUID, *, thread_job_id=None) -> ClaimedRequest | None:
+    """Claim the thread's held request for the run holding lease ``lease_token``.
+
+    With ``thread_job_id`` (a load's resume), only a request held for that load: one
+    left over from an earlier load is the user's to send, and the chat offers it so.
+    """
+    outcome = await _claim(thread_id, lease_token, thread_job_id)
     if not isinstance(outcome, _StaleClaim):
         return outcome
     # The stale claimant's run is over (we hold the lease), so its checkpoint says
@@ -242,21 +253,30 @@ async def aclaim(thread_id, lease_token: uuid.UUID) -> ClaimedRequest | None:
     stale = PendingRequest.objects.filter(
         thread_id=thread_id, state=PendingRequest.State.CLAIMED, claim_token=outcome.token
     )
-    if await athread_has_message(thread_id, held_message_id(thread_id, outcome.version)):
+    if await athread_has_message(thread_id, held_message_id(outcome.request_id, outcome.version)):
         await stale.adelete()
         return None
     await stale.aupdate(state=PendingRequest.State.WAITING, claim_token=None)
-    outcome = await _claim(thread_id, lease_token)
+    outcome = await _claim(thread_id, lease_token, thread_job_id)
     return outcome if isinstance(outcome, ClaimedRequest) else None
+
+
+def _claimed_row(claimed: ClaimedRequest):
+    return PendingRequest.objects.filter(
+        thread_id=claimed.thread_id,
+        state=PendingRequest.State.CLAIMED,
+        claim_token=claimed.token,
+    )
 
 
 async def arelease(claimed: ClaimedRequest) -> None:
     """Return an unsent claim to waiting."""
-    await PendingRequest.objects.filter(
-        thread_id=claimed.thread_id,
-        state=PendingRequest.State.CLAIMED,
-        claim_token=claimed.token,
-    ).aupdate(state=PendingRequest.State.WAITING, claim_token=None)
+    await _claimed_row(claimed).aupdate(state=PendingRequest.State.WAITING, claim_token=None)
+
+
+def release_sync(claimed: ClaimedRequest) -> None:
+    """``arelease`` for sync callers, such as Django closing a response it never sent."""
+    _claimed_row(claimed).update(state=PendingRequest.State.WAITING, claim_token=None)
 
 
 async def asettle(claimed: ClaimedRequest) -> None:

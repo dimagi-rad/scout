@@ -180,6 +180,9 @@ class PendingRequest(models.Model):
         primary_key=True,
         related_name="pending_request",
     )
+    # Names the sent message (with the version), so a thread's next request never
+    # reuses a message id already in its checkpoint.
+    request_id = models.UUIDField(default=uuid.uuid4, editable=False)
     # Each part is {"id", "text", "added_at"}; they are sent joined, in order.
     parts = models.JSONField(default=list)
     # Bumped on every change, so an edit made against an older copy is refused.

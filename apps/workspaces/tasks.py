@@ -3345,7 +3345,7 @@ HELD_REQUEST_NOTE = "The user's request, written while data loaded, follows; ans
 
 async def _claim_held_request(tj: ThreadJob, lease: TurnLease):
     try:
-        return await pending_requests.aclaim(tj.thread_id, lease.token)
+        return await pending_requests.aclaim(tj.thread_id, lease.token, thread_job_id=tj.id)
     except Exception:
         # Left waiting, the request shows as unanswered and the user can send it.
         logger.exception("resume: could not claim the held request of thread %s", tj.thread_id)
