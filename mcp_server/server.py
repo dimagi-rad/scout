@@ -135,6 +135,10 @@ mcp = FastMCP("scout")
 
 MAX_WORKSPACE_DISCOVERY_LIMIT = 100
 MAX_DATASET_DISCOVERY_LIMIT = 100
+# Field lists multiply a page's size by each dataset's width; describe_dataset is
+# the full-detail path for one dataset.
+MAX_DATASET_DISCOVERY_LIMIT_WITH_FIELDS = 10
+FIELD_SUMMARY_DESCRIPTION_CHARS = 160
 
 
 _P = ParamSpec("_P")
@@ -705,15 +709,14 @@ async def list_workspaces(
 
 
 def _field_summary(field) -> dict:
+    description = field.description or ""
+    if len(description) > FIELD_SUMMARY_DESCRIPTION_CHARS:
+        description = description[: FIELD_SUMMARY_DESCRIPTION_CHARS - 1].rstrip() + "…"
     return {
         "name": field.name,
         "member": field.member_name,
-        "label": field.label or field.name,
-        "description": field.description,
         "type": field.field_type,
-        "data_type": field.data_type,
-        "measure_type": field.measure_type,
-        "metadata": field.metadata,
+        "description": description,
     }
 
 
@@ -758,7 +761,8 @@ async def list_datasets(
     """List semantic datasets in the active workspace, or in named workspaces, with pagination.
 
     Returns lightweight dataset summaries by default. Set include_fields=true
-    for member summaries, or call describe_dataset for a single dataset.
+    for each dataset's member names and kinds, or call describe_dataset for one
+    dataset's labels, data types, formats and relationships.
 
     Args:
         workspace_ids: Optional workspace UUIDs to list instead of the active workspace.
@@ -766,11 +770,12 @@ async def list_datasets(
             Pass ids from list_workspaces to look across other workspaces; their
             datasets cannot be queried from this chat. Without user_id, only the
             active workspace is allowed.
-        limit: Maximum datasets to return, clamped to 100.
+        limit: Maximum datasets to return, clamped to 100, or to 10 with include_fields.
         offset: Number of matching datasets to skip.
         search: Optional case-insensitive search over dataset/workspace text.
-        include_fields: Include each returned dataset's listed semantic fields. Tenant-constant
-            ids and raw JSON columns are left out but stay queryable by name.
+        include_fields: Include each returned dataset's listed semantic fields as
+            name, member, type and a shortened description. Tenant-constant ids and
+            raw JSON columns are left out but stay queryable by name.
         workspace_id: Active workspace UUID (injected server-side by the agent graph).
         user_id: Acting user UUID (injected server-side; used for access control).
         thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
@@ -780,7 +785,15 @@ async def list_datasets(
     unverified id in ``workspace_ids`` to have its access verified and its datasets
     listed.
     """
-    limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_DATASET_DISCOVERY_LIMIT)
+    limit, offset = _clamp_pagination(
+        limit,
+        offset,
+        max_limit=(
+            MAX_DATASET_DISCOVERY_LIMIT_WITH_FIELDS
+            if include_fields
+            else MAX_DATASET_DISCOVERY_LIMIT
+        ),
+    )
     async with tool_context(
         "list_datasets",
         workspace_id,

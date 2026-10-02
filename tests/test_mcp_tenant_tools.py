@@ -423,6 +423,48 @@ class TestWorkspaceAndDatasetDiscoveryTools:
             "active_visits",
         ]
 
+    async def test_list_datasets_with_fields_returns_a_short_page_of_short_fields(
+        self, workspace, user
+    ):
+        model = await SemanticModel.objects.acreate(workspace=workspace, name="m")
+        for i in range(12):
+            dataset = await SemanticDataset.objects.acreate(
+                workspace=workspace,
+                semantic_model=model,
+                name=f"ds_{i:02d}",
+                schema_name="s",
+                table_name=f"ds_{i:02d}",
+            )
+            await SemanticField.objects.acreate(
+                dataset=dataset,
+                name="count",
+                label="Count",
+                description="x" * 500,
+                field_type=SemanticField.FieldType.MEASURE,
+                data_type="integer",
+                expression="*",
+                measure_type=SemanticField.MeasureType.COUNT,
+                metadata={"format": "number_0", "cube_sql": "y" * 500},
+                is_visible=True,
+            )
+
+        result = await list_datasets(
+            workspace_id=str(workspace.id), user_id=str(user.id), limit=50, include_fields=True
+        )
+
+        data = result["data"]
+        assert data["limit"] == 10
+        assert len(data["datasets"]) == 10
+        assert data["has_more"] is True
+        field = data["datasets"][0]["fields"][0]
+        assert set(field) == {"name", "member", "type", "description"}
+        assert len(field["description"]) <= 160
+
+    async def test_list_datasets_without_fields_keeps_the_full_page_size(self, workspace, user):
+        result = await list_datasets(workspace_id=str(workspace.id), user_id=str(user.id), limit=50)
+
+        assert result["data"]["limit"] == 50
+
     async def test_list_datasets_requires_a_workspace(self, user):
         result = await list_datasets(user_id=str(user.id))
 
