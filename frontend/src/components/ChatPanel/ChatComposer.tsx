@@ -1,6 +1,6 @@
 import { useState } from "react"
 import type { FormEvent, KeyboardEvent } from "react"
-import { Send, Square } from "lucide-react"
+import { Plus, Send, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -15,6 +15,8 @@ interface ChatComposerProps {
   isStreaming?: boolean
   onStop?: () => void
   placeholder?: string
+  /** "add" while the chat's data loads: the text joins the held request instead. */
+  mode?: "send" | "add"
 }
 
 export function ChatComposer({
@@ -24,7 +26,9 @@ export function ChatComposer({
   isStreaming = false,
   onStop,
   placeholder = "Ask about your data...",
+  mode = "send",
 }: ChatComposerProps) {
+  const adding = mode === "add"
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
 
@@ -91,7 +95,7 @@ export function ChatComposer({
           setSlashMenuIndex(0)
         }}
         onKeyDown={handleKeyDown}
-        placeholder={placeholder}
+        placeholder={adding ? "Add to your request…" : placeholder}
         className="flex-1"
       />
       {isStreaming ? (
@@ -110,9 +114,14 @@ export function ChatComposer({
           type="submit"
           size="icon"
           disabled={!input.trim()}
-          aria-label="Send message"
+          aria-label={adding ? "Add to request" : "Send message"}
+          data-testid={adding ? "chat-add-to-request" : "chat-send"}
         >
-          <Send className="w-4 h-4" aria-hidden="true" />
+          {adding ? (
+            <Plus className="w-4 h-4" aria-hidden="true" />
+          ) : (
+            <Send className="w-4 h-4" aria-hidden="true" />
+          )}
         </Button>
       )}
     </form>

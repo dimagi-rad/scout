@@ -13,6 +13,11 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
     jobsByThreadId: {},
     recentlyCompletedThreadIds: [],
     recentTerminationsByToolCallId: {},
+    pendingByThreadId: {},
+    setPendingRequest: vi.fn(),
+    hidePendingRequest: vi.fn(),
+    forgetPendingRequest: vi.fn(),
+    refresh: vi.fn(),
     notifyJobLikelyStarted: vi.fn(),
   }),
 }))
@@ -62,7 +67,7 @@ function mockApi() {
         listCallsAfterTurn === 1 ? thread(QUESTION, "first_message") : thread(GENERATED, "generated"),
       ])
     }
-    if (url.endsWith("/messages/")) return Response.json([])
+    if (url.endsWith("/messages/?include=pending")) return Response.json([])
     if (url.endsWith("/viewed/")) return new Response(null, { status: 204 })
     throw new Error(`Unexpected request: ${url}`)
   }))

@@ -1,0 +1,170 @@
+import { useCallback, useState } from "react"
+
+import type { PendingRequest } from "@/api/jobs"
+import {
+  isPendingConflict,
+  pendingPhase,
+  pendingRequestApi,
+  type PendingPhase,
+} from "@/api/pendingRequests"
+import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
+
+export type AddOutcome = "added" | "send" | "failed"
+
+export interface HeldRequest {
+  /** The request to show: the held one, or the one just sent until its answer loads. */
+  pending: PendingRequest | null
+  phase: PendingPhase | null
+  /** Whether a new message joins the request instead of being sent. */
+  adding: boolean
+  /** Chat messages the server took into the request (a part's id is the id of the
+   *  message it came from); the card shows them instead, until messages reload. */
+  hiddenMessageIds: ReadonlySet<string>
+  onHeld: (pending: PendingRequest) => void
+  onMessagesLoaded: (pending: PendingRequest | null) => void
+  add: (text: string) => Promise<AddOutcome>
+  /** Hide the request before the client sends it itself; ``restore`` undoes it. */
+  takeForSend: () => PendingRequest | null
+  restore: () => void
+  discard: () => Promise<void>
+}
+
+function newPartId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `part-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+export function useHeldRequest(workspaceId: string | null, threadId: string): HeldRequest {
+  const { pendingByThreadId, setPendingRequest, forgetPendingRequest, refresh } =
+    useWorkspaceJobs()
+  const current = pendingByThreadId[threadId] ?? null
+  // What the last render saw, adjusted during render so a change never paints a
+  // frame without its card. A request the poll stopped reporting was sent: it
+  // shows as answering (``sent``) until the reloaded conversation carries it.
+  const [seen, setSeen] = useState<{
+    threadId: string
+    pending: PendingRequest | null
+    sent: PendingRequest | null
+    hiddenMessageIds: ReadonlySet<string>
+    // Set when this tab removed the request itself, which is not a send to wait on.
+    removedLocally: boolean
+  }>(() => ({
+    threadId,
+    pending: current,
+    sent: null,
+    hiddenMessageIds: new Set(),
+    removedLocally: false,
+  }))
+  if (seen.threadId !== threadId) {
+    setSeen({
+      threadId,
+      pending: current,
+      sent: null,
+      hiddenMessageIds: new Set(),
+      removedLocally: false,
+    })
+  } else if (seen.pending !== current) {
+    const sentNow =
+      seen.pending && !current && !seen.removedLocally
+        ? { ...seen.pending, state: "claimed" as const }
+        : null
+    setSeen({
+      ...seen,
+      pending: current,
+      sent: current ? null : (sentNow ?? seen.sent),
+      removedLocally: false,
+    })
+  }
+  const { sent, hiddenMessageIds } = seen
+  const pending = current ?? sent
+  const phase = pending ? (current ? pendingPhase(pending) : "answering") : null
+
+  const onHeld = useCallback(
+    (held: PendingRequest) => {
+      setPendingRequest(held.thread_id, held)
+      setSeen((prev) => ({
+        ...prev,
+        hiddenMessageIds: new Set([
+          ...prev.hiddenMessageIds,
+          ...held.parts.map((part) => part.id),
+        ]),
+      }))
+      void refresh()
+    },
+    [setPendingRequest, refresh],
+  )
+
+  const onMessagesLoaded = useCallback(
+    (loaded: PendingRequest | null) => {
+      setSeen((prev) =>
+        prev.sent === null && prev.hiddenMessageIds.size === 0
+          ? prev
+          : { ...prev, sent: null, hiddenMessageIds: new Set() },
+      )
+      if (loaded) setPendingRequest(loaded.thread_id, loaded)
+      else forgetPendingRequest(threadId)
+    },
+    [setPendingRequest, forgetPendingRequest, threadId],
+  )
+
+  const add = useCallback(
+    async (text: string): Promise<AddOutcome> => {
+      if (!workspaceId || !current) return "send"
+      const part = { id: newPartId(), text }
+      setPendingRequest(threadId, {
+        ...current,
+        version: current.version + 1,
+        parts: [...current.parts, { ...part, added_at: new Date().toISOString() }],
+      })
+      try {
+        const saved = await pendingRequestApi.addPart(workspaceId, threadId, part)
+        setPendingRequest(threadId, saved)
+        return "added"
+      } catch (error) {
+        forgetPendingRequest(threadId)
+        void refresh()
+        // Claimed or gone: it is being (or was) answered, so this is a new turn.
+        return isPendingConflict(error) ? "send" : "failed"
+      }
+    },
+    [workspaceId, threadId, current, setPendingRequest, forgetPendingRequest, refresh],
+  )
+
+  const takeForSend = useCallback(() => {
+    if (!current) return null
+    setSeen((prev) => ({ ...prev, removedLocally: true }))
+    setPendingRequest(threadId, null)
+    return current
+  }, [current, threadId, setPendingRequest])
+
+  const restore = useCallback(() => {
+    forgetPendingRequest(threadId)
+    void refresh()
+  }, [forgetPendingRequest, threadId, refresh])
+
+  const discard = useCallback(async () => {
+    if (!workspaceId || !current) return
+    setSeen((prev) => ({ ...prev, removedLocally: true }))
+    setPendingRequest(threadId, null)
+    try {
+      await pendingRequestApi.discard(workspaceId, threadId, current.version)
+    } catch {
+      forgetPendingRequest(threadId)
+      void refresh()
+    }
+  }, [workspaceId, threadId, current, setPendingRequest, forgetPendingRequest, refresh])
+
+  return {
+    pending,
+    phase,
+    adding: phase === "waiting",
+    hiddenMessageIds,
+    onHeld,
+    onMessagesLoaded,
+    add,
+    takeForSend,
+    restore,
+    discard,
+  }
+}

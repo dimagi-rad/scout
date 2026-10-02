@@ -1,5 +1,5 @@
 import { useChat } from "@ai-sdk/react"
-import { DefaultChatTransport, type UIMessage } from "ai"
+import { DefaultChatTransport, generateId, type UIMessage } from "ai"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useLocation } from "react-router-dom"
 import { getCsrfToken, api, ApiError } from "@/api/client"
@@ -13,6 +13,8 @@ import { useThreadDraft } from "@/hooks/useThreadDraft"
 import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
+import type { PendingRequest } from "@/api/jobs"
+import { PART_SEPARATOR, pendingRequestText } from "@/api/pendingRequests"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { ChatComposer } from "./ChatComposer"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
@@ -30,6 +32,9 @@ import {
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
 import { useGeneratedTitleRefresh, type TitleRefreshTrigger } from "./useGeneratedTitleRefresh"
+import { writeDraft } from "./draftStorage"
+import { PendingRequestCard } from "./PendingRequestCard"
+import { useHeldRequest } from "./useHeldRequest"
 import {
   busyRetryAfter,
   decideOverloadAction,
@@ -43,6 +48,20 @@ import {
   busyTracker,
 } from "@/api/busy"
 
+/** Drops the messages a held request took in, and the empty reply each held turn left. */
+function withoutHeldMessages(messages: UIMessage[], heldIds: ReadonlySet<string>): UIMessage[] {
+  return messages.filter((message, index) => {
+    if (heldIds.has(message.id)) return false
+    const previous = messages[index - 1]
+    return !(
+      message.role === "assistant" &&
+      previous !== undefined &&
+      heldIds.has(previous.id) &&
+      message.parts.every((part) => part.type === "step-start" || part.type.startsWith("data-"))
+    )
+  })
+}
+
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
@@ -54,6 +73,10 @@ export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const userId = useAppStore((s) => s.user?.id ?? null)
   const [input, setInput] = useThreadDraft(userId, activeDomainId, threadId)
+  // Read after an await, when the render-time value may be stale.
+  const inputRef = useRef(input)
+  inputRef.current = input
+  const [addFailed, setAddFailed] = useState(false)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const [threadPanelOpen, setThreadPanelOpen] = useState(false)
   const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")
@@ -147,6 +170,13 @@ export function ChatPanel() {
   const turnThreadRef = useRef<string | null>(null)
   const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
 
+  const held = useHeldRequest(activeDomainId, threadId)
+  // The user message that sends a held request itself ("Send now"), and the
+  // request version it showed; a retry of that message names the version too.
+  const heldSendRef = useRef<{ messageId: string; version: number } | null>(null)
+  const heldHandlerRef = useRef(held.onHeld)
+  heldHandlerRef.current = held.onHeld
+
   const [transport] = useState(
     () =>
       new DefaultChatTransport({
@@ -154,6 +184,14 @@ export function ChatPanel() {
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: contextRef.current }),
+        prepareSendMessagesRequest: ({ body, id, messages, trigger, messageId }) => {
+          const sending = heldSendRef.current
+          const data =
+            sending && messages.at(-1)?.id === sending.messageId
+              ? { ...contextRef.current, pendingRequestVersion: sending.version }
+              : contextRef.current
+          return { body: { ...body, data, id, messages, trigger, messageId } }
+        },
       }),
   )
 
@@ -162,12 +200,19 @@ export function ChatPanel() {
   } = useChat({
     transport,
     onData: (part) => {
+      if (part.type === "data-pending-request") {
+        heldHandlerRef.current(part.data as PendingRequest)
+        return
+      }
       const retryAfter = busyRetryAfter(part)
       if (retryAfter !== undefined) busyHitRef.current = { retryAfter }
       else if (isRetryableErrorPart(part)) hitRetryableRef.current = true
     },
   })
   const busyError = error !== undefined && isBusyChatError(error)
+  const visibleMessages = held.hiddenMessageIds.size
+    ? withoutHeldMessages(messages, held.hiddenMessageIds)
+    : messages
 
   const cancelBusyRetry = useCallback(() => {
     if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
@@ -250,11 +295,16 @@ export function ChatPanel() {
 
     async function loadMessages() {
       try {
-        const msgs = await api.get<UIMessage[]>(
-          `/api/workspaces/${activeDomainId}/threads/${threadId}/messages/`,
-        )
+        const response = await api.get<
+          UIMessage[] | { messages: UIMessage[]; pending_request: PendingRequest | null }
+        >(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`)
         if (cancelled) return
-        setMessages(msgs)
+        // A server from before held requests ignores ``include`` and sends the bare list.
+        const loaded = Array.isArray(response)
+          ? { messages: response, pending_request: null }
+          : response
+        setMessages(loaded.messages)
+        held.onMessagesLoaded(loaded.pending_request)
         if (activeDomainId && threadId) {
           writeSavedThreadId(activeDomainId, threadId)
         }
@@ -284,6 +334,7 @@ export function ChatPanel() {
     setThreadArtifactsStatus("idle")
     setThreadArtifactsError(null)
     setStoppedNotice(false)
+    setAddFailed(false)
     return () => {
       threadArtifactsRequestRef.current += 1
     }
@@ -407,11 +458,63 @@ export function ChatPanel() {
     }
   }, [messages])
 
-  function handleSend(text: string) {
+  // A held send that failed for good (not a busy retry) puts the request back.
+  useEffect(() => {
+    const sending = heldSendRef.current
+    if (status !== "error" || busyError || !sending) return
+    heldSendRef.current = null
+    setMessages((current) => current.filter((message) => message.id !== sending.messageId))
+    held.restore()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, busyError])
+
+  function sendText(text: string) {
     resetOverloadState()
     setStoppedNotice(false)
     turnThreadRef.current = threadId
-    sendMessage({ text })
+    void sendMessage({ text })
+  }
+
+  /** Send the held request as this turn, with ``extra`` after it. */
+  function sendHeld(pending: PendingRequest, extra?: string) {
+    const text = extra
+      ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
+      : pendingRequestText(pending)
+    const messageId = generateId()
+    heldSendRef.current = { messageId, version: pending.version }
+    resetOverloadState()
+    setStoppedNotice(false)
+    turnThreadRef.current = threadId
+    void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
+  }
+
+  async function handleSend(text: string) {
+    if (held.adding) {
+      const sentFrom = threadId
+      const outcome = await held.add(text)
+      if (outcome === "added") return
+      if (contextRef.current.threadId !== sentFrom) {
+        // The user moved on while it was refused; keep the text in that chat's draft.
+        if (activeDomainId && userId) {
+          writeDraft({ userId, workspaceId: activeDomainId, threadId: sentFrom }, text)
+        }
+        return
+      }
+      if (outcome === "failed") {
+        setInput(inputRef.current.trim() ? `${inputRef.current}\n${text}` : text)
+        setAddFailed(true)
+        return
+      }
+    }
+    setAddFailed(false)
+    const unanswered = held.phase === "unanswered" ? held.takeForSend() : null
+    if (unanswered) sendHeld(unanswered, text)
+    else sendText(text)
+  }
+
+  function handleSendHeldNow() {
+    const pending = held.takeForSend()
+    if (pending) sendHeld(pending)
   }
 
   function handleStop() {
@@ -452,7 +555,7 @@ export function ChatPanel() {
     )
   }
 
-  if (messages.length === 0) {
+  if (visibleMessages.length === 0 && !held.pending) {
     return (
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
@@ -482,11 +585,11 @@ export function ChatPanel() {
         />
         {/* Message list */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.map((msg: UIMessage, msgIdx: number) => (
+          {visibleMessages.map((msg: UIMessage, msgIdx: number) => (
             <ChatMessage
               key={msg.id}
               message={msg}
-              isActiveMessage={isStreaming && msgIdx === messages.length - 1}
+              isActiveMessage={isStreaming && msgIdx === visibleMessages.length - 1}
               workspaceId={activeDomainId ?? undefined}
               threadId={threadId}
               activeMaterializationJob={activeMaterializationJob}
@@ -494,6 +597,19 @@ export function ChatPanel() {
               onRetryDispatched={notifyJobLikelyStarted}
             />
           ))}
+          {held.pending && held.phase && (
+            <PendingRequestCard
+              pending={held.pending}
+              phase={held.phase}
+              onSendNow={handleSendHeldNow}
+              onDiscard={() => void held.discard()}
+            />
+          )}
+          {addFailed && (
+            <p className="text-sm text-destructive" data-testid="pending-request-add-failed">
+              Couldn&apos;t add that to your request. It&apos;s back in the message box.
+            </p>
+          )}
           {isStreaming && <ChatThinkingIndicator />}
           {stoppedNotice && <ChatStoppedNotice />}
           {error && !busyError && (
@@ -531,6 +647,7 @@ export function ChatPanel() {
             onSend={handleSend}
             isStreaming={isStreaming}
             onStop={handleStop}
+            mode={held.adding ? "add" : "send"}
           />
         </div>
       </div>

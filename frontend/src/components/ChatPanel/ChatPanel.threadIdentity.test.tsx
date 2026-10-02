@@ -15,6 +15,10 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
     jobsByThreadId: {},
     recentlyCompletedThreadIds: [],
     recentTerminationsByToolCallId: {},
+    pendingByThreadId: {},
+    setPendingRequest: vi.fn(),
+    forgetPendingRequest: vi.fn(),
+    refresh: vi.fn(),
     notifyJobLikelyStarted: vi.fn(),
   }),
 }))
@@ -82,7 +86,7 @@ function mockChatApi({ failFirst = false, saved = false } = {}) {
       savedThreads.set(key, history)
       return chatResponse()
     }
-    const threadRequest = url.match(/^\/api\/workspaces\/([^/]+)\/threads\/([^/]+)\/(messages|canvas|viewed)\/$/)
+    const threadRequest = url.match(/^\/api\/workspaces\/([^/]+)\/threads\/([^/]+)\/(messages|canvas|viewed)\/(?:\?include=pending)?$/)
     if (threadRequest) {
       const [, workspaceId, threadId, resource] = threadRequest
       if (resource === "messages") {

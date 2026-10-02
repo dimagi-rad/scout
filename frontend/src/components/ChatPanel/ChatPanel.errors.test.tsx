@@ -10,6 +10,11 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
     jobsByThreadId: {},
     recentlyCompletedThreadIds: [],
     recentTerminationsByToolCallId: {},
+    pendingByThreadId: {},
+    setPendingRequest: vi.fn(),
+    hidePendingRequest: vi.fn(),
+    forgetPendingRequest: vi.fn(),
+    refresh: vi.fn(),
     notifyJobLikelyStarted: vi.fn(),
   }),
 }))
@@ -55,7 +60,7 @@ function mockChat(answers: Array<() => Response>) {
       const answer = answers.shift() ?? replyResponse
       return answer()
     }
-    if (url.endsWith("/messages/")) {
+    if (url.endsWith("/messages/?include=pending")) {
       messageLoads.push(url)
       return Response.json(url.includes(OTHER_THREAD) ? OTHER_THREAD_MESSAGES : [])
     }

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   jobsApi,
   type ActiveJob,
+  type PendingRequest,
   type RecentTermination,
   type WorkspaceLoad,
 } from "@/api/jobs"
@@ -13,7 +14,14 @@ interface State {
   jobs: ActiveJob[]
   workspaceLoads: WorkspaceLoad[]
   recentTerminations: RecentTermination[]
+  pendingRequests: Record<string, PendingRequest>
   lastError: string | null
+}
+
+/** A local change to a held request the poll has not caught up with yet. */
+interface PendingOverride {
+  value: PendingRequest | null
+  seq: number
 }
 
 export interface UseWorkspaceJobs {
@@ -23,8 +31,9 @@ export interface UseWorkspaceJobs {
   workspaceLoads: WorkspaceLoad[]
   jobsByThreadId: Record<string, ActiveJob>
   /** Thread IDs whose job just transitioned to a terminal state on the most
-   *  recent poll (gone from the active list). Consumers should refetch
-   *  thread messages for these IDs. Resets to [] on the next poll cycle. */
+   *  recent poll (gone from the active list), or whose held request just went
+   *  out. Consumers should refetch thread messages for these IDs. Resets to []
+   *  on the next poll cycle. */
   recentlyCompletedThreadIds: string[]
   /** ThreadJobs that terminated within the server's recent-termination
    *  window (default 30 minutes). Used to render an inline failure card on
@@ -34,6 +43,14 @@ export interface UseWorkspaceJobs {
    *  specific run_materialization card in O(1). Failures with no
    *  tool_call_id (e.g. retry jobs not bound to a card) are excluded. */
   recentTerminationsByToolCallId: Record<string, RecentTermination>
+  /** Requests held while a chat's data loads, by thread id: the last poll,
+   *  overlaid with local changes it has not seen yet. */
+  pendingByThreadId: Record<string, PendingRequest>
+  /** Show a local change to a thread's held request (null: none) until a poll
+   *  that started after it reports the server's copy. */
+  setPendingRequest: (threadId: string, pending: PendingRequest | null) => void
+  /** Drop a local change, so the thread shows the server's copy again. */
+  forgetPendingRequest: (threadId: string) => void
   refresh: () => Promise<void>
   /** Force an immediate poll without waiting for the next tick (called when
    *  the user just fired a chat action that may have started a job). */
@@ -51,10 +68,14 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     workspaceId,
     workspaceLoads: [],
     recentTerminations: [],
+    pendingRequests: {},
     lastError: null,
   })
   const [recentlyCompletedThreadIds, setRecentlyCompletedThreadIds] = useState<string[]>([])
+  const [overrides, setOverrides] = useState<Record<string, PendingOverride>>({})
+  const overrideSeqRef = useRef(0)
   const prevThreadIdsRef = useRef<Set<string>>(new Set())
+  const prevPendingThreadIdsRef = useRef<Set<string>>(new Set())
   const workspaceIdRef = useRef(workspaceId)
   useEffect(() => {
     workspaceIdRef.current = workspaceId
@@ -62,27 +83,39 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
 
   const fetchOnce = useCallback(async () => {
     if (!workspaceId) return
+    // Local changes made after this poll left are newer than what it returns.
+    const seqAtStart = overrideSeqRef.current
     try {
       const data = await jobsApi.active(workspaceId)
       // A response for a workspace we have since left must not seed the new one's diff.
       if (workspaceIdRef.current !== workspaceId) return
       const currentThreadIds = new Set(data.jobs.map((j) => j.thread_id))
-      const justCompleted: string[] = []
+      const pendingRequests = data.pending_requests ?? {}
+      const currentPendingThreadIds = new Set(Object.keys(pendingRequests))
+      const justCompleted = new Set<string>()
       for (const prev of prevThreadIdsRef.current) {
-        if (!currentThreadIds.has(prev)) {
-          justCompleted.push(prev)
-        }
+        if (!currentThreadIds.has(prev)) justCompleted.add(prev)
+      }
+      // A held request leaves once its message is in the conversation.
+      for (const prev of prevPendingThreadIdsRef.current) {
+        if (!currentPendingThreadIds.has(prev)) justCompleted.add(prev)
       }
       prevThreadIdsRef.current = currentThreadIds
+      prevPendingThreadIdsRef.current = currentPendingThreadIds
       setState({
         jobs: data.jobs,
         workspaceId,
         workspaceLoads: data.workspace_loads ?? [],
         recentTerminations: data.recent_terminations ?? [],
+        pendingRequests,
         lastError: null,
       })
-      if (justCompleted.length > 0) {
-        setRecentlyCompletedThreadIds(justCompleted)
+      setOverrides((prev) => {
+        const kept = Object.entries(prev).filter(([, override]) => override.seq > seqAtStart)
+        return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept)
+      })
+      if (justCompleted.size > 0) {
+        setRecentlyCompletedThreadIds([...justCompleted])
       } else {
         // Functional updater so React skips the re-render when already empty;
         // otherwise every clean poll churns the ChatPanel reload effect.
@@ -98,7 +131,9 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     // Reset cross-workspace state, else the new workspace's first poll falsely
     // reports the previous workspace's thread ids as "just completed".
     prevThreadIdsRef.current = new Set()
+    prevPendingThreadIdsRef.current = new Set()
     setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
+    setOverrides((prev) => (Object.keys(prev).length === 0 ? prev : {}))
     let cancelled = false
     let interval: ReturnType<typeof setInterval> | null = null
 
@@ -138,6 +173,33 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     }
   }, [workspaceId, fetchOnce])
 
+  const setPendingRequest = useCallback((threadId: string, pending: PendingRequest | null) => {
+    overrideSeqRef.current += 1
+    const seq = overrideSeqRef.current
+    setOverrides((prev) => ({ ...prev, [threadId]: { value: pending, seq } }))
+  }, [])
+
+  const forgetPendingRequest = useCallback((threadId: string) => {
+    setOverrides((prev) => {
+      if (!(threadId in prev)) return prev
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
+  }, [])
+
+  const sameWorkspace = state.workspaceId === workspaceId
+  const pendingByThreadId = useMemo(() => {
+    const merged: Record<string, PendingRequest> = sameWorkspace
+      ? { ...state.pendingRequests }
+      : {}
+    for (const [threadId, override] of Object.entries(overrides)) {
+      if (override.value === null) delete merged[threadId]
+      else merged[threadId] = override.value
+    }
+    return merged
+  }, [sameWorkspace, state.pendingRequests, overrides])
+
   const jobsByThreadId = state.jobs.reduce<Record<string, ActiveJob>>((acc, j) => {
     acc[j.thread_id] = j
     return acc
@@ -153,11 +215,14 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
   return {
     jobs: state.jobs,
     // Else a switch shows the previous workspace's load until the first poll lands.
-    workspaceLoads: state.workspaceId === workspaceId ? state.workspaceLoads : [],
+    workspaceLoads: sameWorkspace ? state.workspaceLoads : [],
     jobsByThreadId,
     recentlyCompletedThreadIds,
     recentTerminations: state.recentTerminations,
     recentTerminationsByToolCallId,
+    pendingByThreadId,
+    setPendingRequest,
+    forgetPendingRequest,
     refresh: fetchOnce,
     notifyJobLikelyStarted: fetchOnce,
   }
