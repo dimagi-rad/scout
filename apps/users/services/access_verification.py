@@ -700,7 +700,8 @@ def _publish_verification_receipt(
             return PublicationReceipt(PublicationStatus.REJECTED)
         accepted_tenant_ids = frozenset()
         if result.outcome == VerificationOutcome.COMPLETE:
-            if current.upstream_denial_code:
+            # A scoped result that confirmed nothing proves nothing about the credential.
+            if current.upstream_denial_code and (result.tenant_ids or not result.scoped):
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
             # Claims match on the canonical provider, so publication must too or an

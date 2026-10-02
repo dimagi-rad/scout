@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier, Lock
@@ -827,8 +828,9 @@ async def test_connect_no_access_404_omits_that_opportunity_and_checks_the_rest(
         pytest.param(_response(payload={"id": 99}), id="needs-listing"),
     ],
 )
-async def test_connect_failure_after_a_404_keeps_the_revocation(settings, later):
+async def test_connect_failure_after_a_404_keeps_the_revocation(settings, later, caplog):
     settings.CONNECT_API_URL = "https://connect.example"
+    caplog.set_level(logging.INFO, logger="apps.users.services.access_verification_providers")
     result, requests = await _verify(
         _request("commcare_connect"),
         [_response(payload={"id": 3}), _connect_404(), later],
@@ -841,6 +843,10 @@ async def test_connect_failure_after_a_404_keeps_the_revocation(settings, later)
     assert result.external_ids == frozenset({"3"})
     assert result.scope == frozenset({"3", "7"})
     assert len(requests) == 3
+    # Logged as what it was, a partial result, never as an unavailable attempt.
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("light_settled_after_omission" in message for message in messages)
+    assert not any("verification unavailable" in message for message in messages)
 
 
 @pytest.mark.asyncio
