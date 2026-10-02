@@ -393,4 +393,35 @@ describe("a message sent while the chat's data loads", () => {
     expect(await screen.findByTestId("pending-request-card")).toHaveTextContent(QUESTION)
     consoleError.mockRestore()
   })
+
+  it("shows a refusal that lands after a switch in neither chat", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.tooLongHeldSend = true
+    let release: () => void = () => {}
+    server.heldSendGate = new Promise((resolve) => (release = resolve))
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    await type(FOLLOW_UP, "Send message")
+    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
+    server.messages = [
+      { id: "earlier", role: "user", parts: [{ type: "text", text: "Earlier question" }] },
+    ]
+    await act(async () => {
+      useAppStore.setState({ threadId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" })
+    })
+    await screen.findByText("Earlier question")
+    await act(async () => release())
+
+    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
+    await act(async () => {})
+    expect(screen.queryByTestId("chat-error")).toBeNull()
+    consoleError.mockRestore()
+  })
 })
