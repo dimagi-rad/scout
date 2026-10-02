@@ -313,17 +313,17 @@ def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age,
         return _fresh_history_tenants(current, request, history, now=now, max_age=max_age)
 
 
-def void_positive_proofs(actor_user_id, connection_id, tenant_ids) -> None:
-    """Withdraw the positive proofs a provider 401 has called into question.
+def void_positive_proofs(actor_user_id, connection_id) -> None:
+    """Withdraw every positive proof a provider 401 has called into question.
 
-    Archives nothing: the 401 may only mean a stale token, which the attempt goes on to
-    renew and retry. Until it settles, though, no proof of these tenants may stand in
-    for a fresh one, for this request or any other waiting on the same lease.
+    The whole connection's: a 401 rejects the credential, not one tenant, and other
+    requests on this connection may be checking other tenants. Archives nothing: the
+    401 may only mean a stale token, which the attempt goes on to renew and retry.
+    Until a check settles, though, no proof on this connection may stand in for a
+    fresh one.
     """
     UpstreamAccessProof.objects.filter(
-        connection_id=connection_id,
-        connection__user_id=actor_user_id,
-        tenant_id__in=list(tenant_ids),
+        connection_id=connection_id, connection__user_id=actor_user_id
     ).update(verified_at=None)
 
 

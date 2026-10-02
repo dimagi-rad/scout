@@ -202,8 +202,9 @@ async def test_property_2_timed_out_check_that_finds_revocation_blocks_next_requ
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_property_2_credential_rejected_in_background_blocks_next_request(
-    user, workspace, tenant, upstream_provider
+    user, workspace, tenant, upstream_provider, caplog
 ):
+    caplog.set_level(logging.INFO, logger="apps.workspaces.services.access_freshness")
     await _aage_proof(user, tenant, timedelta(minutes=10))
     _fail_first_call(upstream_provider, 503)
     upstream_provider.failure = 401
@@ -211,8 +212,13 @@ async def test_property_2_credential_rejected_in_background_blocks_next_request(
 
     await _drain_background()
     upstream_provider.failure = 503
+    caplog.clear()
 
-    assert not (await aresolve_workspace_access_ex(user, workspace.id)).granted
+    denied = await aresolve_workspace_access_ex(user, workspace.id)
+
+    assert not denied.granted
+    assert denied.denied_reason in {TENANT_ACCESS_LOST, UPSTREAM_ACCESS_LOST}
+    assert _grace_records(caplog) == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -401,6 +407,18 @@ async def test_an_unsettled_401_voids_the_proof_for_every_waiter(user, tenant):
         provider="commcare_connect", external_id="8", canonical_name="8"
     )
     await TenantMembership.objects.acreate(user=user, tenant=opp, connection=connection)
+    # Another workspace's tenant on the same connection, which a request waiting on
+    # the same lease could be checking.
+    sibling = await Tenant.objects.acreate(
+        provider="commcare_connect", external_id="9", canonical_name="9"
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=sibling, connection=connection)
+    await UpstreamAccessProof.objects.acreate(
+        connection=connection,
+        tenant=sibling,
+        credential_fingerprint="-",
+        verified_at=timezone.now(),
+    )
     answers = [
         ProviderVerificationResult.complete({"8"}),
         ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED),
@@ -431,5 +449,7 @@ async def test_an_unsettled_401_voids_the_proof_for_every_waiter(user, tenant):
     # Not archived: the 401 may only have been a stale token.
     assert await TenantMembership.objects.filter(user=user, tenant=opp).aexists()
     assert not await agrace_proof_tenant_ids(user.id, connection.id, {opp.id}, max_age=window)
+    sibling_proof = await UpstreamAccessProof.objects.aget(connection=connection, tenant=sibling)
+    assert sibling_proof.verified_at is None
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.last_attempt_error_code == VERIFICATION_UNAVAILABLE_AFTER_REJECTION

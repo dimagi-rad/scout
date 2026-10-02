@@ -658,9 +658,7 @@ async def _verify_and_publish_once(
                 with contextlib.suppress(TimeoutError):
                     await _await_until(
                         avoid_positive_proofs(
-                            claim.observation.user_id,
-                            claim.observation.connection_id,
-                            claim.requested_tenant_ids,
+                            claim.observation.user_id, claim.observation.connection_id
                         ),
                         deadline=deadline,
                         clock=clock,
