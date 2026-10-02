@@ -9,6 +9,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models.functions import Now
@@ -107,6 +108,11 @@ async def _member(ws, tenant, email, role=WorkspaceRole.READ_WRITE):
     client = AsyncClient()
     await client.alogin(email=email, password="x")
     return user, client
+
+
+async def _held_id(thread_id, version: int) -> str:
+    pending = await PendingRequest.objects.aget(thread_id=thread_id)
+    return pending_requests.held_message_id(pending.request_id, version)
 
 
 async def _post(client, ws, thread_id, text, *, message_id=None, **data):
@@ -266,7 +272,7 @@ class TestLiveTurnSendsTheHeldRequest:
         [state] = agent_layer.inputs
         message = state["messages"][-1]
         assert message.content == "visits?\n\nand by month"
-        assert message.id == f"pr-{thread_id}-1"
+        assert message.id == await _held_id(thread_id, 1)
         # The mocked stream never wrote the checkpoint, so the request waits again.
         pending = await PendingRequest.objects.aget(thread_id=thread_id)
         assert pending.state == PendingRequest.State.WAITING
@@ -276,7 +282,7 @@ class TestLiveTurnSendsTheHeldRequest:
         self, agent_layer, checkpoint
     ):
         ws, client, thread_id = await self._stranded("sendnow")
-        checkpoint.add(f"pr-{thread_id}-1")
+        checkpoint.add(await _held_id(thread_id, 1))
 
         await _events(await _post(client, ws, thread_id, "visits?", pendingRequestVersion=1))
 
@@ -296,6 +302,27 @@ class TestLiveTurnSendsTheHeldRequest:
         pending = await PendingRequest.objects.aget(thread_id=thread_id)
         assert pending.state == PendingRequest.State.WAITING
         assert await Thread.objects.filter(id=thread_id, turn_lease_token=None).aexists()
+
+    async def test_a_response_closed_unsent_returns_the_claim(self, agent_layer, checkpoint):
+        ws, client, thread_id = await self._stranded("closed-unsent")
+
+        response = await _post(client, ws, thread_id, "and by month")
+        await sync_to_async(response.close)()
+
+        pending = await PendingRequest.objects.aget(thread_id=thread_id)
+        assert pending.state == PendingRequest.State.WAITING
+        assert pending.claim_token is None
+
+    async def test_a_claim_failure_does_not_fail_the_turn(self, agent_layer, checkpoint):
+        ws, client, thread_id = await self._stranded("claim-broke")
+
+        with patch.object(
+            pending_requests, "aclaim", AsyncMock(side_effect=RuntimeError("db blip"))
+        ):
+            await _events(await _post(client, ws, thread_id, "and by month"))
+
+        [state] = agent_layer.inputs
+        assert state["messages"][-1].content == "and by month"
 
     async def test_send_now_after_it_was_sent_elsewhere_is_refused(self, agent_layer, checkpoint):
         ws, client, thread_id = await self._stranded("gone")
@@ -334,6 +361,39 @@ class TestClaim:
         assert exc.value.reason == "claimed"
         assert claimed.text == "first"
 
+    async def test_a_threads_next_request_gets_a_message_id_of_its_own(self, checkpoint):
+        thread, job = await self._held("next-request")
+        lease = await atry_acquire_turn_lease(thread.id)
+        first = await pending_requests.aclaim(thread.id, lease.token)
+        checkpoint.add(first.message_id)
+        await pending_requests.asettle(first)
+        await ThreadJob.objects.filter(id=job.id).aupdate(state=ThreadJob.State.COMPLETED)
+        await lease.release()
+        await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=987654
+        )
+        await pending_requests.ahold_message(thread.id, part_id="m9", text="again")
+        lease = await atry_acquire_turn_lease(thread.id)
+
+        second = await pending_requests.aclaim(thread.id, lease.token)
+
+        assert second.version == first.version
+        assert second.message_id != first.message_id
+        # The first request's message in the checkpoint must not settle the second.
+        await pending_requests.asettle(second)
+        assert await PendingRequest.objects.filter(thread=thread).aexists()
+
+    async def test_a_resume_claims_only_the_request_held_for_its_load(self, checkpoint):
+        thread, job = await self._held("other-load")
+        other = await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=123321
+        )
+        lease = await atry_acquire_turn_lease(thread.id)
+
+        assert await pending_requests.aclaim(thread.id, lease.token, thread_job_id=other.id) is None
+        claimed = await pending_requests.aclaim(thread.id, lease.token, thread_job_id=job.id)
+        assert claimed.text == "first"
+
     async def test_an_add_before_the_claim_goes_out_with_it(self, checkpoint):
         thread, _job = await self._held("add-before-claim")
         await pending_requests.aadd_part(thread.id, part_id="m2", text="second")
@@ -354,7 +414,7 @@ class TestClaim:
         await PendingRequest.objects.filter(thread=thread).aupdate(
             state=PendingRequest.State.CLAIMED, claim_token=uuid.uuid4()
         )
-        checkpoint.add(f"pr-{thread.id}-1")
+        checkpoint.add(await _held_id(thread.id, 1))
         lease = await atry_acquire_turn_lease(thread.id)
 
         assert await pending_requests.aclaim(thread.id, lease.token) is None
@@ -443,9 +503,10 @@ class TestResume:
         await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
         await pending_requests.aadd_part(thread.id, part_id="m2", text="by month")
         agent = _resume_agent()
+        held_id = await _held_id(thread.id, 2)
 
         async def lands(*_args, **_kwargs):
-            checkpoint.add(f"pr-{thread.id}-2")
+            checkpoint.add(held_id)
             return {"messages": []}
 
         agent.ainvoke.side_effect = lands
@@ -457,9 +518,9 @@ class TestResume:
         assert marker.content.startswith(SYSTEM_RESUME_MARKER)
         assert HELD_REQUEST_NOTE in marker.content
         assert "original request" not in marker.content
-        assert marker.id == f"pr-{thread.id}-2-sys"
+        assert marker.id == f"{held_id}-sys"
         assert request.content == "visits?\n\nby month"
-        assert request.id == f"pr-{thread.id}-2"
+        assert request.id == held_id
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
 
     async def test_a_failed_load_still_answers_the_request(self, checkpoint):

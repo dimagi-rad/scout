@@ -289,6 +289,9 @@ async def chat_view(request):
         await lease.release()
         raise
     if lease.lost or not isinstance(response, StreamingHttpResponse):
+        held_claim = getattr(response, "held_claim", None)
+        if held_claim is not None:
+            await pending_requests.arelease(held_claim)
         await lease.release()
         if lease.lost:
             return _thread_busy_response()
@@ -437,34 +440,6 @@ async def _start_turn(
     # inject synthetic ToolMessages before appending the new HumanMessage.
     dangling_tool_results = await repair_dangling_tool_calls(agent, config)
 
-    # A request still held for this thread goes out with this turn, so its text is
-    # never stranded behind a load that will not resume it.
-    claimed = await pending_requests.aclaim(thread_id, lease.token)
-    if claimed is None and pending_version is not None:
-        return _pending_conflict_response("gone")
-    human_message = HumanMessage(content=user_content)
-    if claimed is not None:
-        if pending_version is not None and pending_version != claimed.version:
-            await pending_requests.arelease(claimed)
-            return _pending_conflict_response("version")
-        # The client sends a held request it showed whole; otherwise the held text leads.
-        content = (
-            user_content
-            if pending_version is not None
-            else f"{claimed.text}{pending_requests.PART_SEPARATOR}{user_content}"
-        )
-        if len(content) > MAX_MESSAGE_LENGTH:
-            await pending_requests.arelease(claimed)
-            return _request_too_long_response()
-        human_message = HumanMessage(content=content, id=claimed.message_id)
-
-    input_state = {
-        "messages": [*dangling_tool_results, human_message],
-        "workspace_id": str(workspace.id),
-        "user_id": str(user.id),
-        "thread_id": str(thread_id),
-    }
-
     trace_metadata = {
         "workspace_id": str(workspace.id),
     }
@@ -482,7 +457,21 @@ async def _start_turn(
         metadata=trace_metadata,
     )
 
-    response = _TurnStreamingResponse(lease)
+    # Last before the response exists, so nothing between can strand the claim; an
+    # unsent response returns it to waiting on close.
+    claimed, human_message = await _claim_held_request(
+        thread_id, lease, user_content=user_content, pending_version=pending_version
+    )
+    if isinstance(human_message, JsonResponse):
+        return human_message
+    input_state = {
+        "messages": [*dangling_tool_results, human_message],
+        "workspace_id": str(workspace.id),
+        "user_id": str(user.id),
+        "thread_id": str(thread_id),
+    }
+
+    response = _TurnStreamingResponse(lease, held_claim=claimed)
 
     async def _traced_stream():
         response.turn_started = True
@@ -511,6 +500,41 @@ async def _start_turn(
     return response
 
 
+async def _claim_held_request(
+    thread_id: str, lease: TurnLease, *, user_content: str, pending_version: int | None
+) -> tuple[pending_requests.ClaimedRequest | None, HumanMessage | JsonResponse]:
+    """The turn's message, carrying any request still held for the thread.
+
+    A held request goes out with the next turn, so its text is never stranded
+    behind a load that will not resume it.
+    """
+    try:
+        claimed = await pending_requests.aclaim(thread_id, lease.token)
+    except Exception:
+        logger.exception("Could not claim the held request of thread %s", thread_id)
+        if pending_version is not None:
+            return None, _pending_conflict_response("unavailable")
+        # The request stays held and is offered again; this turn need not fail with it.
+        return None, HumanMessage(content=user_content)
+    if claimed is None:
+        if pending_version is not None:
+            return None, _pending_conflict_response("gone")
+        return None, HumanMessage(content=user_content)
+    if pending_version is not None and pending_version != claimed.version:
+        await pending_requests.arelease(claimed)
+        return None, _pending_conflict_response("version")
+    # The client sends a held request it showed whole; otherwise the held text leads.
+    content = (
+        user_content
+        if pending_version is not None
+        else f"{claimed.text}{pending_requests.PART_SEPARATOR}{user_content}"
+    )
+    if len(content) > MAX_MESSAGE_LENGTH:
+        await pending_requests.arelease(claimed)
+        return None, _request_too_long_response()
+    return claimed, HumanMessage(content=content, id=claimed.message_id)
+
+
 class _TurnStreamingResponse(StreamingHttpResponse):
     """The turn's SSE response; frees the thread if the server closes it unsent.
 
@@ -518,16 +542,22 @@ class _TurnStreamingResponse(StreamingHttpResponse):
     cleanup, so ``close`` must leave a started turn alone.
     """
 
-    def __init__(self, lease: TurnLease):
+    def __init__(
+        self, lease: TurnLease, *, held_claim: pending_requests.ClaimedRequest | None = None
+    ):
         super().__init__(content_type="text/event-stream; charset=utf-8")
         self["Cache-Control"] = "no-cache"
         self["X-Accel-Buffering"] = "no"
         self.lease = lease
+        self.held_claim = held_claim
         self.turn_started = False
 
     def close(self):
         try:
             if not self.turn_started:
+                # Before the lease, so no next holder sees this claim as stale.
+                if self.held_claim is not None:
+                    pending_requests.release_sync(self.held_claim)
                 self.lease.release_sync()
         except Exception:
             logger.warning(
