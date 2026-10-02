@@ -423,7 +423,7 @@ class TestClaim:
 
         with pytest.raises(pending_requests.PendingRequestTooLong) as exc:
             await pending_requests.aadd_part(thread.id, part_id="one-more", text="x")
-        assert str(exc.value) == pending_requests.TOO_MANY_PARTS_MESSAGE
+        assert exc.value.user_message == pending_requests.TOO_MANY_PARTS_MESSAGE
         with pytest.raises(pending_requests.PendingRequestTooLong):
             await pending_requests.ahold_message(thread.id, part_id="held-more", text="x")
 

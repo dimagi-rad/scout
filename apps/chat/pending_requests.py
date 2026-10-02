@@ -39,6 +39,13 @@ MAX_PART_ID_LENGTH = 128
 MAX_PARTS = 50
 REQUEST_TOO_LONG_MESSAGE = "Request too long — edit it"
 TOO_MANY_PARTS_MESSAGE = "That's as much as one request can hold — wait for your data"
+# Fixed text for each refusal, so nothing but these strings reaches a response.
+REFUSAL_MESSAGES = {
+    "too_long": REQUEST_TOO_LONG_MESSAGE,
+    "too_many_parts": TOO_MANY_PARTS_MESSAGE,
+    "empty": "The request can't be empty — discard it instead",
+    "first_part": "The first part can't be removed — edit it instead",
+}
 SETTLE_TIMEOUT_SECONDS = 15
 
 
@@ -50,7 +57,19 @@ class PendingRequestConflict(Exception):
         self.reason = reason
 
 
-class PendingRequestTooLong(Exception):
+class PendingRequestRefused(Exception):
+    """A change the user must make differently; ``code`` names which, for its message."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+    @property
+    def user_message(self) -> str:
+        return REFUSAL_MESSAGES[self.code]
+
+
+class PendingRequestTooLong(PendingRequestRefused):
     pass
 
 
@@ -90,9 +109,9 @@ def combined_text(parts: list[dict]) -> str:
 
 def _check_length(text: str, part_count: int = 1) -> None:
     if len(text) > MAX_MESSAGE_LENGTH:
-        raise PendingRequestTooLong(REQUEST_TOO_LONG_MESSAGE)
+        raise PendingRequestTooLong("too_long")
     if part_count > MAX_PARTS:
-        raise PendingRequestTooLong(TOO_MANY_PARTS_MESSAGE)
+        raise PendingRequestTooLong("too_many_parts")
 
 
 def _new_part(part_id: str, text: str) -> dict:
@@ -204,7 +223,7 @@ def aadd_part(thread_id, *, part_id: str, text: str) -> dict:
         return _serialize_locked(pending)
 
 
-class PendingRequestInvalidEdit(Exception):
+class PendingRequestInvalidEdit(PendingRequestRefused):
     pass
 
 
@@ -228,7 +247,7 @@ def aedit(
             raise PendingRequestConflict("version")
         if text is not None:
             if not text.strip():
-                raise PendingRequestInvalidEdit("The request can't be empty — discard it instead")
+                raise PendingRequestInvalidEdit("empty")
             _check_length(text)
             # One part now: the user rewrote the whole request.
             pending.parts = [_new_part(f"edit-{uuid.uuid4()}", text)]
@@ -239,7 +258,7 @@ def aedit(
             if index is None:
                 raise PendingRequestConflict("version")
             if index == 0:
-                raise PendingRequestInvalidEdit("The first part can't be removed — edit it instead")
+                raise PendingRequestInvalidEdit("first_part")
             pending.parts = [part for i, part in enumerate(pending.parts) if i != index]
         pending.version += 1
         pending.save(update_fields=["parts", "version", "updated_at"])

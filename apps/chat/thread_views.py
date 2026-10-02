@@ -309,7 +309,7 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     except pending_requests.PendingRequestTooLong as e:
         return JsonResponse(
             {
-                "error": str(e),
+                "error": e.user_message,
                 "reason": "pending_request_too_long",
             },
             status=400,
@@ -366,7 +366,11 @@ async def _edit_pending_request(thread, version: int, body: dict) -> JsonRespons
     except pending_requests.PendingRequestConflict as e:
         return _pending_conflict(e)
     except pending_requests.PendingRequestTooLong as e:
-        return JsonResponse({"error": str(e), "reason": "pending_request_too_long"}, status=400)
+        return JsonResponse(
+            {"error": e.user_message, "reason": "pending_request_too_long"}, status=400
+        )
     except pending_requests.PendingRequestInvalidEdit as e:
-        return JsonResponse({"error": str(e), "reason": "pending_request_invalid_edit"}, status=400)
+        return JsonResponse(
+            {"error": e.user_message, "reason": "pending_request_invalid_edit"}, status=400
+        )
     return JsonResponse(pending)
