@@ -369,6 +369,7 @@ export function ChatPanel() {
         }
         // New thread or transient fetch failure — start with empty.
         setMessages([])
+        resetResumeStreamRef.current()
       }
     }
 

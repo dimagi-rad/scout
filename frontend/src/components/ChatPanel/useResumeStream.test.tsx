@@ -98,12 +98,34 @@ describe("useResumeStream", () => {
       text: "x",
       done: false,
     }))
-    serve(page, [{ id: 501, run: "old", text: "", done: true }])
+    vi.spyOn(api, "get")
+      .mockResolvedValueOnce({ chunks: page, more: true })
+      .mockResolvedValueOnce({ chunks: [{ id: 501, run: "old", text: "", done: true }] })
+      .mockResolvedValue({ chunks: [] })
     const { result } = renderHook(() => useResumeStream("ws", "t", true))
 
     await waitFor(() => expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThanOrEqual(2))
     await act(async () => {})
 
     expect(result.current.text).toBe("")
+  })
+
+  it("reads the live run from its start again after a reload in the middle of it", async () => {
+    const spy = serve([{ id: 1, run: "r", text: "The first half", done: false }])
+    const { result } = renderHook(() => useResumeStream("ws", "t", true))
+    await waitFor(() => expect(result.current.text).toBe("The first half"))
+
+    spy.mockResolvedValueOnce({
+      chunks: [
+        { id: 1, run: "r", text: "The first half", done: false },
+        { id: 2, run: "r", text: " and the rest", done: false },
+      ],
+    })
+    act(() => result.current.reset())
+
+    await waitFor(() => expect(result.current.text).toBe("The first half and the rest"), {
+      timeout: 4000,
+    })
+    expect(spy.mock.calls.some(([url]) => String(url).endsWith("after=0"))).toBe(true)
   })
 })

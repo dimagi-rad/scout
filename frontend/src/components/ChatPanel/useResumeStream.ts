@@ -5,8 +5,6 @@ import { api } from "@/api/client"
 export const RESUME_STREAM_POLL_MS = 500
 // While nothing new arrives (a tool running, a queued resume), poll less often.
 export const RESUME_STREAM_IDLE_POLL_MS = 3000
-/** The server's page size: a full page means more rows wait behind it. */
-export const RESUME_STREAM_PAGE = 500
 
 interface StreamChunk {
   id: number
@@ -65,7 +63,7 @@ export function useResumeStream(
         return
       }
       try {
-        const { chunks } = await api.get<{ chunks: StreamChunk[] }>(
+        const { chunks, more } = await api.get<{ chunks: StreamChunk[]; more?: boolean }>(
           `/api/workspaces/${workspaceId}/threads/${threadId}/resume-stream/?after=${cursor.after}`,
         )
         if (cancelled || cursorRef.current !== cursor) return
@@ -73,7 +71,7 @@ export function useResumeStream(
         let read = chunks
         if (!cursor.caughtUp) {
           cursor.backlog.push(...chunks)
-          if (chunks.length >= RESUME_STREAM_PAGE) {
+          if (more) {
             // More to read before anything here can be judged; fetch it now.
             if (!cancelled) timer = setTimeout(poll, 0)
             return
@@ -106,6 +104,8 @@ export function useResumeStream(
         }
       } catch {
         // A missed poll is caught up by the next; the answer also lands on reload.
+        // One that keeps failing is retried less often.
+        delay = Math.min(delay * 2, RESUME_STREAM_IDLE_POLL_MS)
       }
       if (!cancelled) timer = setTimeout(poll, delay)
     }
@@ -118,6 +118,9 @@ export function useResumeStream(
   }, [active, workspaceId, threadId, scope])
 
   const reset = useCallback(() => {
+    // Read the live run from its start again: a reload in the middle of a run
+    // does not carry what it streamed so far. A run already finished is skipped.
+    cursorRef.current = { scope: cursorRef.current.scope, after: 0, caughtUp: false, backlog: [] }
     setState((prev) => (prev.text === "" && prev.run === null ? prev : { ...prev, run: null, text: "" }))
   }, [])
 
