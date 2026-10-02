@@ -45,6 +45,10 @@ _SECTION_SEPARATOR = "\n\n"
 # uncapped, one table spends the whole budget (#264).
 MAX_COLUMN_NOTES_PER_TABLE = 40
 
+# Learnings claim space first but are agent-written and unbounded in length, so
+# they must not in turn evict every curated entry and table.
+LEARNINGS_CHAR_CAP = KNOWLEDGE_CONTEXT_CHAR_BUDGET // 2
+
 
 def _without_dangling_headings(lines: list[str]) -> list[str]:
     """Drop trailing blanks, headings and labels; [] if no content line remains."""
@@ -105,8 +109,8 @@ class KnowledgeRetriever:
         When over budget, sections claim space in priority order — learnings,
         then knowledge entries, then table context — so a bulky table dump
         cannot crowd out the short, high-value learnings (#264). Display order
-        is unchanged, each table's column notes are capped, and each section is
-        cut only at a line boundary.
+        is unchanged, learnings take at most half the budget, each table's column
+        notes are capped, and each section is cut only at a line boundary.
         """
         sections = {
             "entries": await self._format_knowledge_entries(),
@@ -120,13 +124,20 @@ class KnowledgeRetriever:
         sections["tables"] = await self._format_table_knowledge(
             max_column_notes=MAX_COLUMN_NOTES_PER_TABLE
         )
+        combined = _SECTION_SEPARATOR.join(text for text in sections.values() if text)
+        if len(combined) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET:
+            return combined
+
         remaining = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
         fitted: dict[str, str] = {}
         for name in ("learnings", "entries", "tables"):
             if not sections[name]:
                 continue
             separator = len(_SECTION_SEPARATOR) if fitted else 0
-            kept = _fit_section(sections[name], remaining - separator)
+            limit = remaining - separator
+            if name == "learnings":
+                limit = min(limit, LEARNINGS_CHAR_CAP)
+            kept = _fit_section(sections[name], limit)
             if kept:
                 fitted[name] = kept
                 remaining -= len(kept) + separator
@@ -135,7 +146,7 @@ class KnowledgeRetriever:
 
     async def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""
-        entries = KnowledgeEntry.objects.filter(workspace=self.workspace).order_by("title")
+        entries = KnowledgeEntry.objects.filter(workspace=self.workspace).order_by("title", "pk")
 
         if not await entries.aexists():
             return ""
@@ -167,8 +178,7 @@ class KnowledgeRetriever:
 
             if table.column_notes:
                 lines.append("**Column Notes:**")
-                # jsonb keeps no insertion order, so sort for a stated, stable cut.
-                notes = sorted(table.column_notes.items())
+                notes = list(table.column_notes.items())
                 shown = notes if max_column_notes is None else notes[:max_column_notes]
                 for column, note in shown:
                     lines.append(f"- `{column}`: {_sanitize_prompt_content(str(note))}")
@@ -212,7 +222,7 @@ class KnowledgeRetriever:
         learnings = AgentLearning.objects.filter(
             workspace=self.workspace,
             is_active=True,
-        ).order_by("-confidence_score", "-times_applied")[: self.MAX_AGENT_LEARNINGS]
+        ).order_by("-confidence_score", "-times_applied", "pk")[: self.MAX_AGENT_LEARNINGS]
 
         if not await learnings.aexists():
             return ""

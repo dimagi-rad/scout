@@ -13,6 +13,7 @@ from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
 from apps.knowledge.services.retriever import (
     _TRUNCATION_NOTICE,
     KNOWLEDGE_CONTEXT_CHAR_BUDGET,
+    LEARNINGS_CHAR_CAP,
     MAX_COLUMN_NOTES_PER_TABLE,
     KnowledgeRetriever,
     _fit_section,
@@ -64,7 +65,7 @@ class TestKnowledgeBudget:
 
         # The rendered knowledge context must be bounded (with a small allowance
         # for the truncation notice).
-        assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET + 200
+        assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
 
     @pytest.mark.asyncio
     async def test_table_knowledge_counts_against_budget(self, workspace, user):
@@ -78,7 +79,7 @@ class TestKnowledgeBudget:
             )
         retriever = KnowledgeRetriever(workspace)
         result = await retriever.retrieve()
-        assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET + 200
+        assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
 
     @pytest.mark.asyncio
     async def test_small_knowledge_not_truncated(self, workspace, user):
@@ -166,7 +167,15 @@ class TestLearningsNotCrowdedOut:
             column_notes=_stg_visits_notes(549),
             updated_by=user,
         )
-        for i in range(30):
+        await TableKnowledge.objects.acreate(
+            workspace=workspace,
+            table_name="stg_visits_2",
+            description="More visits.",
+            column_notes=_stg_visits_notes(549),
+            updated_by=user,
+        )
+        await _add_learnings(workspace, user, 5)
+        for i in range(3):
             await KnowledgeEntry.objects.acreate(
                 workspace=workspace,
                 title=f"Entry {i}",
@@ -176,14 +185,20 @@ class TestLearningsNotCrowdedOut:
 
         retriever = KnowledgeRetriever(workspace)
         result = await retriever.retrieve()
+        capped_tables = await retriever._format_table_knowledge(
+            max_column_notes=MAX_COLUMN_NOTES_PER_TABLE
+        )
         full_lines = set(
             (await retriever._format_knowledge_entries()).splitlines()
-            + (await retriever._format_table_knowledge()).splitlines()
+            + capped_tables.splitlines()
+            + (await retriever._format_agent_learnings()).splitlines()
         )
 
         assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
         body = result.split("\n\n*(Knowledge context truncated")[0]
         assert body != result
+        assert "### stg_visits" in body
+        assert "### stg_visits_2" not in body
         assert all(line in full_lines for line in body.splitlines())
 
     @pytest.mark.asyncio
@@ -220,25 +235,72 @@ class TestLearningsNotCrowdedOut:
     @pytest.mark.asyncio
     async def test_section_filling_remaining_budget_exactly(self, workspace, user):
         """A later section must not slip through untrimmed when nothing is left."""
-        heading = "## Learned Corrections\n\n- "
-        target = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
+        learning_heading = "## Learned Corrections\n\n- "
         await AgentLearning.objects.acreate(
             workspace=workspace,
-            description="L" * (target - len(heading)),
+            description="L" * (LEARNINGS_CHAR_CAP - len(learning_heading)),
             category="type_mismatch",
             confidence_score=0.5,
             is_active=True,
             discovered_by_user=user,
         )
-        for i in range(30):
-            await KnowledgeEntry.objects.acreate(
-                workspace=workspace, title=f"Entry {i}", content="E" * 500, created_by=user
-            )
+        remaining = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE) - LEARNINGS_CHAR_CAP
+        entry_heading = "## Knowledge Base\n\n### E\n\n"
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace,
+            title="E",
+            content="E" * (remaining - len("\n\n") - len(entry_heading)),
+            created_by=user,
+        )
+        await TableKnowledge.objects.acreate(
+            workspace=workspace,
+            table_name="stg_visits",
+            description="Visits.",
+            column_notes=_stg_visits_notes(549),
+            updated_by=user,
+        )
 
         result = await KnowledgeRetriever(workspace).retrieve()
 
         assert len(result) == KNOWLEDGE_CONTEXT_CHAR_BUDGET
-        assert "## Knowledge Base" not in result
+        assert "## Table Context" not in result
+
+    @pytest.mark.asyncio
+    async def test_learnings_capped_so_entries_keep_space(self, workspace, user):
+        for i in range(20):
+            await AgentLearning.objects.acreate(
+                workspace=workspace,
+                description=f"Learning {i}: " + "x " * 200,
+                category="type_mismatch",
+                confidence_score=0.5,
+                is_active=True,
+                discovered_by_user=user,
+            )
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace, title="MRR", content="Monthly Recurring Revenue", created_by=user
+        )
+
+        result = await KnowledgeRetriever(workspace).retrieve()
+
+        assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
+        assert "Monthly Recurring Revenue" in result
+        learnings = result[result.index("## Learned Corrections") :].split("\n\n*(")[0]
+        assert len(learnings) <= LEARNINGS_CHAR_CAP
+
+    @pytest.mark.asyncio
+    async def test_no_truncation_notice_when_cap_alone_fits(self, workspace, user):
+        await TableKnowledge.objects.acreate(
+            workspace=workspace,
+            table_name="stg_visits",
+            description="Visits.",
+            column_notes=_stg_visits_notes(100),
+            updated_by=user,
+        )
+
+        result = await KnowledgeRetriever(workspace).retrieve()
+
+        assert result.count("- `question_") == MAX_COLUMN_NOTES_PER_TABLE
+        assert "truncated" not in result
 
 
 class TestFitSection:
