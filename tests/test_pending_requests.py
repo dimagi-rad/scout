@@ -985,10 +985,15 @@ class TestFlush:
         agent = _flush_agent(checkpoint)
 
         assert (await self._flush(ws, agent))["sent"] == 0
-        await ThreadJob.objects.filter(id=job.id).aupdate(state=ThreadJob.State.CANCELLED)
+        await ThreadJob.objects.filter(id=job.id).aupdate(
+            state=ThreadJob.State.CANCELLED, completed_at=timezone.now()
+        )
         assert (await self._flush(ws, agent))["sent"] == 0
 
-        await ThreadJob.objects.filter(id=job.id).aupdate(started_at=timezone.now())
+        # Stopped before it started: its resume never comes once the window passes.
+        await ThreadJob.objects.filter(id=job.id).aupdate(
+            completed_at=timezone.now() - pending_requests.CANCELLED_RESUME_WINDOW * 2
+        )
         assert (await self._flush(ws, agent))["sent"] == 1
 
     async def test_one_its_own_ended_load_left_stays_the_users_to_send(self, checkpoint):
@@ -1046,6 +1051,20 @@ class TestFlush:
         pending = await PendingRequest.objects.aget(thread=thread)
         assert pending.flush_attempts == 0
 
+    async def test_a_flush_sends_a_few_and_queues_the_rest(self, checkpoint):
+        ws, user, _client, thread = await _thread("flush-batch")
+        threads = [thread] + [
+            await Thread.objects.acreate(workspace=ws, user=user) for _ in range(tasks.FLUSH_BATCH)
+        ]
+        for each in threads:
+            await _hold_without_load(each)
+
+        with patch("apps.workspaces.tasks._defer_pending_flush", AsyncMock()) as defer:
+            result = await self._flush(ws, _flush_agent(checkpoint))
+
+        assert result["sent"] == tasks.FLUSH_BATCH
+        defer.assert_awaited_once_with(str(ws.id), 0)
+
     async def test_the_sweep_queues_a_flush_for_every_workspace_with_one(self, checkpoint):
         ws_a, _user, _client, thread_a = await _thread("sweep-a")
         ws_b, _user_b, _client_b, thread_b = await _thread("sweep-b")
@@ -1066,6 +1085,13 @@ class TestFlush:
         )
         lease = await tasks.atry_acquire_turn_lease(thread.id)
 
+        with patch.object(
+            pending_requests, "workspace_build_pending", MagicMock(return_value=True)
+        ):
+            # Still waiting on another load of the workspace: not this resume's.
+            assert (
+                await pending_requests.aclaim(thread.id, lease.token, thread_job_id=job.id)
+            ) is None
         claimed = await pending_requests.aclaim(thread.id, lease.token, thread_job_id=job.id)
 
         assert claimed.text == "visits?"

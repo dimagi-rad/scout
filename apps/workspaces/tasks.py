@@ -3977,14 +3977,21 @@ FLUSH_NOTE = (
 PENDING_FLUSH_DELAY_SECONDS = 5
 
 
-async def _defer_pending_flush(workspace_id) -> None:
+# A flush that finds a build still running (often one the ending load queued) looks again.
+PENDING_FLUSH_RECHECK_SECONDS = 15
+# Requests sent per flush run; the rest go in a run queued after it, so one run
+# never holds a worker for each request's full answer in turn.
+FLUSH_BATCH = 3
+
+
+async def _defer_pending_flush(workspace_id, delay: int = PENDING_FLUSH_DELAY_SECONDS) -> None:
     """Queue a flush of the workspace's held requests; never raises (the sweep is the backstop)."""
     if not workspace_id:
         return
     try:
         await flush_pending_requests.configure(
             queueing_lock=f"pending-flush:{workspace_id}",
-            schedule_in={"seconds": PENDING_FLUSH_DELAY_SECONDS},
+            schedule_in={"seconds": delay},
         ).defer_async(workspace_id=str(workspace_id))
     except AlreadyEnqueued:
         pass
@@ -4000,14 +4007,18 @@ async def flush_pending_requests(workspace_id: str) -> dict:
     still under way flushes them itself when it ends.
     """
     sent = 0
-    for thread_id in await pending_requests.aflushable_thread_ids(workspace_id):
+    thread_ids = await pending_requests.aflushable_thread_ids(workspace_id)
+    for thread_id in thread_ids[:FLUSH_BATCH]:
         # Per request: answering one takes minutes, and a load may start meanwhile.
         if await aworkspace_build_pending(workspace_id):
+            await _defer_pending_flush(workspace_id, PENDING_FLUSH_RECHECK_SECONDS)
             return {"status": "load_pending", "sent": sent}
         try:
             sent += await _flush_thread(thread_id)
         except Exception:
             logger.exception("flush: could not send the held request of thread %s", thread_id)
+    if len(thread_ids) > FLUSH_BATCH:
+        await _defer_pending_flush(workspace_id, 0)
     return {"status": "flushed", "sent": sent}
 
 
@@ -4026,27 +4037,38 @@ async def sweep_pending_requests(timestamp: int = 0) -> dict:
 
 
 async def _flush_thread(thread_id) -> int:
+    thread = await Thread.objects.select_related("workspace", "user").aget(id=thread_id)
     lease = await atry_acquire_turn_lease(thread_id)
     if lease is None:
         # Answering now: that turn takes the request with it.
         return 0
-    async with lease.held():
-        if not await pending_requests.acount_flush_attempt(thread_id):
-            return 0
-        held = await pending_requests.aclaim(thread_id, lease.token)
-        if held is None:
-            return 0
-        thread = await Thread.objects.select_related("workspace", "user").aget(id=thread_id)
-        try:
-            # The whole turn, setup included: the user's chat is busy until it ends.
-            async with asyncio.timeout(
-                settings.AGENT_RESUME_TIMEOUT_S + RESUME_SETUP_BUDGET_SECONDS
-            ):
-                await _answer_flushed_request(thread, held)
-        except TimeoutError:
-            logger.exception("flush: the held request of thread %s timed out", thread_id)
-        finally:
-            await pending_requests.asettle(held)
+    answered = False
+    try:
+        async with lease.held():
+            if not await pending_requests.acount_flush_attempt(thread_id):
+                return 0
+            held = await pending_requests.aclaim(thread_id, lease.token)
+            if held is None:
+                return 0
+            try:
+                # The whole turn, setup included: the user's chat is busy until it ends.
+                async with asyncio.timeout(
+                    settings.AGENT_RESUME_TIMEOUT_S + RESUME_SETUP_BUDGET_SECONDS
+                ):
+                    answered = await _answer_flushed_request(thread, held)
+            except TimeoutError:
+                logger.exception("flush: the held request of thread %s timed out", thread_id)
+            finally:
+                await pending_requests.asettle(held)
+    except asyncio.CancelledError:
+        # The heartbeat cancels the task when another run takes the thread; that
+        # ends this request (settled above), not the flush of the others.
+        if not lease.lost:
+            raise
+        asyncio.current_task().uncancel()
+        return 0
+    if not answered:
+        return 0
     try:
         await Thread.objects.filter(id=thread_id).aupdate(updated_at=timezone.now())
     except Exception:
@@ -4055,7 +4077,7 @@ async def _flush_thread(thread_id) -> int:
     return 1
 
 
-async def _answer_flushed_request(thread: Thread, held) -> None:
+async def _answer_flushed_request(thread: Thread, held) -> bool:
     workspace, user = thread.workspace, thread.user
     try:
         agent = await _build_agent_for_resume(workspace, user, conversation_id=str(thread.id))
@@ -4084,3 +4106,5 @@ async def _answer_flushed_request(thread: Thread, held) -> None:
     except Exception:
         # Settled after: unsent, it waits again (its one flush spent) for the user to send.
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)
+        return False
+    return True

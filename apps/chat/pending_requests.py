@@ -19,6 +19,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.db import transaction
@@ -123,7 +124,10 @@ def _new_part(part_id: str, text: str) -> dict:
     return {"id": part_id, "text": text, "added_at": timezone.now().isoformat()}
 
 
-ACTIVE_JOB_STATES = (ThreadJob.State.PENDING, ThreadJob.State.RUNNING)
+ACTIVE_JOB_STATES = ThreadJob.ACTIVE_STATES
+# How long a stopped load that never started may still resume its chat (it
+# resumes only if its queued job got as far as running); past that it never will.
+CANCELLED_RESUME_WINDOW = timedelta(minutes=10)
 
 
 def _job_active(job_id) -> bool:
@@ -301,7 +305,9 @@ def aedit(
                 raise PendingRequestInvalidEdit("first_part")
             pending.parts = [part for i, part in enumerate(pending.parts) if i != index]
         pending.version += 1
-        pending.flush_attempts = 0
+        if text is not None:
+            # A rewrite is a new request to try sending; a removal only shortens it.
+            pending.flush_attempts = 0
         pending.save(update_fields=["parts", "version", "flush_attempts", "updated_at"])
         return _serialize_locked(pending)
 
@@ -335,6 +341,14 @@ def _claim(thread_id, lease_token: uuid.UUID, thread_job_id) -> ClaimedRequest |
         # A load's resume also takes a request held for the workspace: its chat's
         # own load ending is the workspace load ending for it.
         if thread_job_id is not None and pending.thread_job_id not in (thread_job_id, None):
+            return None
+        # Not while it still waits on another load of the workspace: this resume
+        # (perhaps of a stopped load) would answer it without that data.
+        if (
+            thread_job_id is not None
+            and pending.thread_job_id is None
+            and workspace_build_pending(Thread.objects.get(id=thread_id).workspace_id)
+        ):
             return None
         if pending.state == PendingRequest.State.CLAIMED and pending.claim_token != lease_token:
             return _StaleClaim(pending.request_id, pending.version, pending.claim_token)
@@ -479,7 +493,12 @@ def _flushable():
     # A chat whose own load is under way, or stopped with its resume still to run
     # (CANCELLED, never started), is that resume's to answer: it takes these too.
     resume_coming = ThreadJob.objects.filter(
-        Q(state__in=ACTIVE_JOB_STATES) | Q(state=ThreadJob.State.CANCELLED, started_at__isnull=True)
+        Q(state__in=ACTIVE_JOB_STATES)
+        | Q(
+            state=ThreadJob.State.CANCELLED,
+            started_at__isnull=True,
+            completed_at__gt=timezone.now() - CANCELLED_RESUME_WINDOW,
+        )
     )
     return PendingRequest.objects.filter(
         thread_job__isnull=True, flush_attempts__lt=MAX_FLUSH_ATTEMPTS
