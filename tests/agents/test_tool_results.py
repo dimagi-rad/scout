@@ -224,3 +224,11 @@ def test_a_lone_surrogate_does_not_break_the_tool_node():
     content = compact_tool_message(message).content
 
     assert len(content.encode(errors="surrogatepass")) <= TOOL_RESULT_BUDGET_BYTES
+
+
+def test_a_string_that_grows_when_escaped_is_cut_only_as_far_as_needed():
+    payload = {"success": True, "data": {"log": '"\n' * 100_000}}
+
+    data = _compacted_payload("get_materialization_status", payload)["data"]
+
+    assert len(data["log"]) > 10_000

@@ -118,6 +118,18 @@ def _cut_lists(payload: dict, target: dict, limit: int, omitted: dict[str, int])
     return total
 
 
+def _longest_text_prefix_within(text: str, suffix: str, max_bytes: int) -> int:
+    """Measured serialized, since escaping can make a string several times its length."""
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _size(text[:mid] + suffix) <= max_bytes:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
 def _cut_strings(payload: dict, target: dict, limit: int, omitted: dict[str, int]) -> int:
     """Shorten the longest strings, so ids and statuses next to a huge log survive."""
     marker = "…[cut]"
@@ -128,11 +140,8 @@ def _cut_strings(payload: dict, target: dict, limit: int, omitted: dict[str, int
             break
         parent, key = max(candidates, key=lambda c: len(c[0][c[1]]))
         text = parent[key]
-        excess = total - limit + len(marker.encode())
-        kept = text.encode(errors="surrogatepass")[
-            : max(0, len(text.encode(errors="surrogatepass")) - excess)
-        ]
-        parent[key] = kept.decode(errors="ignore") + marker
+        keep = _longest_text_prefix_within(text, marker, _size(text) - (total - limit))
+        parent[key] = text[:keep] + marker
         omitted[str(key)] = omitted.get(str(key), 0) + 1
         total = _size(payload)
     return total
