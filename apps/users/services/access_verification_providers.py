@@ -102,7 +102,8 @@ def _names_invalid_token(response) -> bool:
     """Whether a 401 blames the token itself (RFC 6750 3.1), not the caller's access.
 
     A predicate so only a constant reaches the log: OCS answers 401 both for a dead
-    token and for a valid one whose user has left the team.
+    token and for a valid one whose user has left the team. Diagnostic only for now;
+    nothing decides on it until production shows which one OCS sends for which case.
     """
     return 'error="invalid_token"' in response.headers.get("www-authenticate", "")
 
@@ -255,8 +256,9 @@ async def verify_provider(
                 status_result = _status_result(response.status_code)
                 if response.status_code == 401:
                     logger.info(
-                        "Provider %s answered verification with HTTP 401 (%s)",
+                        "Provider %s answered verification for connection %s with HTTP 401 (%s)",
                         provider,
+                        snapshot.observation.connection_id,
                         "invalid_token" if _names_invalid_token(response) else "no token error",
                     )
                 if status_result is not None:
