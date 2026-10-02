@@ -42,6 +42,7 @@ import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { slugifyWorkspaceName, workspacePath } from "@/lib/workspacePath"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
+import { groupMissingTenantsByRemedy } from "@/lib/missingTenants"
 
 const DEFAULT_NEW_MEMBER_ROLE: WorkspaceMember["role"] = "read_write"
 
@@ -1108,9 +1109,15 @@ export function SettingsTab({
             Still needed:
           </p>
           <ul className="mt-1 space-y-1">
-            {missingTenants.map((t) => (
-              <li key={t.tenant_id} data-testid={`settings-missing-${t.tenant_id}`}>
-                <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
+            {groupMissingTenantsByRemedy(missingTenants).map(({ remedy, tenants }) => (
+              <li
+                key={tenants[0].tenant_id}
+                data-testid={`settings-missing-${tenants[0].tenant_id}`}
+              >
+                <span className="font-medium text-foreground">
+                  {tenants.map((t) => t.tenant_name).join(", ")}
+                </span>
+                : {remedy}
               </li>
             ))}
           </ul>

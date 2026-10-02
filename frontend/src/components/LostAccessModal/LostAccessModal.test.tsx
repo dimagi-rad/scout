@@ -244,6 +244,26 @@ describe("LostAccessModal with missing sources", () => {
     expect(screen.queryByText(/If you disconnected your account/)).not.toBeInTheDocument()
   })
 
+  it("names sources that share a remedy on one line", () => {
+    const ended =
+      "your access through Open Chat Studio ended: reconnect it in Connected Accounts"
+    const lost = (id: string, name: string) => ({
+      tenant_id: id,
+      tenant_name: name,
+      provider: "ocs",
+      recovery: "access_removed" as const,
+      remedy: ended,
+    })
+    useAppStore.setState({
+      domains: [{ ...partial, missing_tenants: [lost("a", "A"), lost("b", "B"), lost("c", "C")] }],
+    })
+    renderModal()
+
+    const items = screen.getByTestId("lost-access-missing").querySelectorAll("li")
+    expect(items).toHaveLength(1)
+    expect(items[0]).toHaveTextContent(`A, B, C: ${ended}`)
+  })
+
   it("leaves a retry's outcome to the source list, which already says what is needed", () => {
     useAppStore.setState({ accessRetryOutcome: "Still needed — 'Bot B': connect …" })
     renderModal()

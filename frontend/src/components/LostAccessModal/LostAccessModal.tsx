@@ -6,6 +6,7 @@ import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
+import { groupMissingTenantsByRemedy } from "@/lib/missingTenants"
 
 /** Distinct provider labels for a workspace, e.g. "CommCare" or "CommCare, Open Chat Studio". */
 function providerLabels(tenants: { provider: string }[]): string {
@@ -97,9 +98,15 @@ export function LostAccessModal() {
           <div className="text-sm text-muted-foreground">
             <p>This workspace needs access to every one of its data sources. Still needed:</p>
             <ul className="mt-2 space-y-1" data-testid="lost-access-missing">
-              {missing.map((t) => (
-                <li key={t.tenant_id} data-testid={`lost-access-missing-${t.tenant_id}`}>
-                  <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
+              {groupMissingTenantsByRemedy(missing).map(({ remedy, tenants }) => (
+                <li
+                  key={tenants[0].tenant_id}
+                  data-testid={`lost-access-missing-${tenants[0].tenant_id}`}
+                >
+                  <span className="font-medium text-foreground">
+                    {tenants.map((t) => t.tenant_name).join(", ")}
+                  </span>
+                  : {remedy}
                 </li>
               ))}
             </ul>
