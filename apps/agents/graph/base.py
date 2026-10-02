@@ -443,10 +443,8 @@ async def _fetch_semantic_model_context(
                         "A refresh is in progress outside the currently serving data. "
                         "You may query the "
                         "previously loaded data while it finishes; tell the user results do "
-                        "not include this refresh yet. Do NOT trigger another materialization. "
-                        "Nothing will resume this conversation when the refresh finishes; if "
-                        "the user wants refreshed results, tell them to ask again once it "
-                        "has, without naming a time.\n\n"
+                        "not include this refresh yet. Do NOT trigger another materialization."
+                        f"{await _refresh_follow_up(interactive, conversation_id)}\n\n"
                         f"{ready_context}"
                     )
         return await _load_in_progress_guidance(interactive, write_capable, conversation_id)
@@ -477,6 +475,19 @@ async def _fetch_semantic_model_context(
         if not every and unresolved:
             guidance = f"{guidance}\n\n{_partial_pipeline_note(unresolved)}"
         return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}" if multi else guidance
+
+
+async def _refresh_follow_up(interactive: bool, conversation_id: str | None) -> str:
+    # A chat that started this refresh keeps its PENDING ThreadJob while the old data
+    # still serves, so it must hear the same resume promise as the bound load path.
+    if not interactive:
+        return ""
+    if conversation_id and await athread_awaits_load(conversation_id):
+        return " This conversation will resume automatically when the refresh finishes."
+    return (
+        " Nothing will resume this conversation when the refresh finishes; if the user "
+        "wants refreshed results, tell them to ask again once it has, without naming a time."
+    )
 
 
 async def _load_in_progress_guidance(
