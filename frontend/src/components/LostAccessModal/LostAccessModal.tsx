@@ -6,6 +6,7 @@ import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
+import { groupMissingTenantsByRemedy, missingTenantNames } from "@/lib/missingTenants"
 
 /** Distinct provider labels for a workspace, e.g. "CommCare" or "CommCare, Open Chat Studio". */
 function providerLabels(tenants: { provider: string }[]): string {
@@ -30,7 +31,8 @@ export function LostAccessModal() {
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
-  const retryOutcome = useAppStore((s) => s.threadsAccessLostMessage)
+  const retryOutcome = useAppStore((s) => s.accessRetryOutcome)
+  const denialReason = useAppStore((s) => s.threadsAccessDenialReason)
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
 
   const active = domains.find((d) => d.id === activeDomainId)
@@ -81,10 +83,10 @@ export function LostAccessModal() {
           </span>
           <h2 id="lost-access-title" className="text-lg font-semibold">
             {noSources
-              ? `“${active.display_name}” has no data sources`
+              ? `“${active.name}” has no data sources`
               : missing.length > 0
-                ? `You can’t open “${active.display_name}” yet`
-                : `You’ve lost access to “${active.display_name}”`}
+                ? `You can’t open “${active.name}” yet`
+                : `You’ve lost access to “${active.name}”`}
           </h2>
         </div>
 
@@ -97,9 +99,15 @@ export function LostAccessModal() {
           <div className="text-sm text-muted-foreground">
             <p>This workspace needs access to every one of its data sources. Still needed:</p>
             <ul className="mt-2 space-y-1" data-testid="lost-access-missing">
-              {missing.map((t) => (
-                <li key={t.tenant_id} data-testid={`lost-access-missing-${t.tenant_id}`}>
-                  <span className="font-medium text-foreground">{t.tenant_name}</span>: {t.remedy}
+              {groupMissingTenantsByRemedy(missing).map(({ remedy, tenants }) => (
+                <li
+                  key={tenants[0].tenant_id}
+                  data-testid={`lost-access-missing-${tenants[0].tenant_id}`}
+                >
+                  <span className="font-medium text-foreground">
+                    {missingTenantNames(tenants)}
+                  </span>
+                  : {remedy}
                 </li>
               ))}
             </ul>
@@ -123,7 +131,10 @@ export function LostAccessModal() {
 
         {retryOutcome && !noSources && (
           <p className="mt-3 text-sm text-muted-foreground" data-testid="lost-access-retry-outcome">
-            {retryOutcome}
+            {/* Only tenant_access_lost's text repeats the source list; other reasons carry their own remedy. */}
+            {missing.length > 0 && denialReason === "tenant_access_lost"
+              ? "Verification ran, but the sources above are still needed."
+              : retryOutcome}
           </p>
         )}
 

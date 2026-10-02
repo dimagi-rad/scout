@@ -16,7 +16,13 @@ function thread(id: string, title: string): Thread {
 
 describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
   beforeEach(() => {
-    useAppStore.setState({ activeDomainId: "ws-1", threads: [], threadsStatus: "idle" })
+    useAppStore.setState({
+      activeDomainId: "ws-1",
+      threads: [],
+      threadsStatus: "idle",
+      threadsAccessDenialReason: null,
+      accessRetryOutcome: null,
+    })
   })
 
   afterEach(() => {
@@ -51,10 +57,10 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
     expect(useAppStore.getState().threadsStatus).toBe("loaded")
     expect(useAppStore.getState().threads).toEqual(fetched)
-    expect(useAppStore.getState().threadsAccessLostMessage).toBeNull()
+    expect(useAppStore.getState().threadsAccessDenialReason).toBeNull()
   })
 
-  it("surfaces the server message when upstream tenant access was lost", async () => {
+  it("keeps the reason when upstream tenant access was lost", async () => {
     const message =
       "You no longer have access to skelly: " +
       "not connected to your account — connect that account (Settings → Connections) " +
@@ -73,7 +79,9 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
     expect(useAppStore.getState().threadsStatus).toBe("error")
-    expect(useAppStore.getState().threadsAccessLostMessage).toBe(message)
+    expect(useAppStore.getState().threadsAccessDenialReason).toBe("tenant_access_lost")
+    // Only an explicit retry reports an outcome; the gate already lists the sources.
+    expect(useAppStore.getState().accessRetryOutcome).toBeNull()
   })
 
   it("surfaces a no-sources denial without offering a verification retry", async () => {
@@ -86,22 +94,28 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
-    expect(useAppStore.getState().threadsAccessLostMessage).toBe(message)
+    expect(useAppStore.getState().threadsAccessDenialReason).toBe("no_sources")
     expect(useAppStore.getState().threadsAccessRetryable).toBe(false)
   })
 
-  it("does not set an access-lost message for a generic outage", async () => {
+  it("does not set a denial reason for a generic outage", async () => {
     vi.spyOn(api, "get").mockRejectedValue(new Error("503 Service Unavailable"))
 
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
-    expect(useAppStore.getState().threadsAccessLostMessage).toBeNull()
+    expect(useAppStore.getState().threadsAccessDenialReason).toBeNull()
   })
 })
 
 describe("uiSlice upstream-verification denials", () => {
   beforeEach(() => {
-    useAppStore.setState({ activeDomainId: "ws-1", threads: [], threadsStatus: "idle" })
+    useAppStore.setState({
+      activeDomainId: "ws-1",
+      threads: [],
+      threadsStatus: "idle",
+      threadsAccessDenialReason: null,
+      accessRetryOutcome: null,
+    })
   })
 
   afterEach(() => {
@@ -121,7 +135,7 @@ describe("uiSlice upstream-verification denials", () => {
 
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
-    expect(useAppStore.getState().threadsAccessLostMessage).toBe(unavailable)
+    expect(useAppStore.getState().threadsAccessDenialReason).toBe("verification_unavailable")
     expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
   })
 
@@ -133,7 +147,7 @@ describe("uiSlice upstream-verification denials", () => {
 
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
-    expect(useAppStore.getState().threadsAccessLostMessage).toBe(expired)
+    expect(useAppStore.getState().threadsAccessDenialReason).toBe("credential_expired")
     expect(useAppStore.getState().threadsAccessRetryable).toBe(false)
   })
 
@@ -141,14 +155,19 @@ describe("uiSlice upstream-verification denials", () => {
     const post = vi.spyOn(api, "post").mockResolvedValue({ has_access: true } as never)
     const fetched = [thread("t3", "Recovered chat")]
     vi.spyOn(api, "get").mockResolvedValue(fetched as never)
-    useAppStore.setState({ threadsAccessRetryable: true, threadsAccessLostMessage: unavailable })
+    useAppStore.setState({
+      threadsAccessRetryable: true,
+      threadsAccessDenialReason: "verification_unavailable",
+      accessRetryOutcome: unavailable,
+    })
 
     await useAppStore.getState().uiActions.retryAccessVerification("ws-1")
 
     expect(post).toHaveBeenCalledWith("/api/workspaces/ws-1/access/verify/", {})
     expect(useAppStore.getState().threads).toEqual(fetched)
     expect(useAppStore.getState().threadsAccessRetryable).toBe(false)
-    expect(useAppStore.getState().threadsAccessLostMessage).toBeNull()
+    expect(useAppStore.getState().threadsAccessDenialReason).toBeNull()
+    expect(useAppStore.getState().accessRetryOutcome).toBeNull()
   })
 
   it("keeps a failed retry's denial without a second recheck", async () => {
@@ -164,8 +183,9 @@ describe("uiSlice upstream-verification denials", () => {
     await useAppStore.getState().uiActions.retryAccessVerification("ws-1")
 
     expect(get).not.toHaveBeenCalled()
-    expect(useAppStore.getState().threadsAccessLostMessage).toBe(unavailable)
+    expect(useAppStore.getState().threadsAccessDenialReason).toBe("verification_unavailable")
     expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
+    expect(useAppStore.getState().accessRetryOutcome).toBe(unavailable)
   })
 
   it("offers a recheck after upstream access was removed", async () => {
@@ -177,5 +197,77 @@ describe("uiSlice upstream-verification denials", () => {
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
     expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
+  })
+})
+
+describe("uiSlice.fetchThreads refreshes the workspace list on access loss", () => {
+  beforeEach(() => {
+    useAppStore.setState({ activeDomainId: "ws-1", threads: [], threadsStatus: "idle" })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function deny(reason: string) {
+    vi.spyOn(api, "get").mockRejectedValue(new ApiError(403, reason, { error: reason, reason }))
+  }
+
+  it.each(["tenant_access_lost", "upstream_access_lost", "credential_expired"])(
+    "refetches fresh so the lost-access gate opens now (%s)",
+    async (reason) => {
+      const revalidate = vi
+        .spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+        .mockResolvedValue("fetched")
+      deny(reason)
+
+      await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+      expect(revalidate).toHaveBeenCalledOnce()
+      expect(revalidate).toHaveBeenCalledWith({ fresh: true })
+    },
+  )
+
+  it.each(["credential_missing", "verification_unavailable", "verification_in_progress", "no_sources"])(
+    "leaves the list alone when access was not lost (%s)",
+    async (reason) => {
+      const revalidate = vi.spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+      deny(reason)
+
+      await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+      expect(revalidate).not.toHaveBeenCalled()
+    },
+  )
+
+  it("refetches the list fresh when a retry is still denied", async () => {
+    const revalidate = vi
+      .spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+      .mockResolvedValue("fetched")
+    vi.spyOn(api, "post").mockRejectedValue(
+      new ApiError(403, "Still needed", { error: "Still needed", reason: "tenant_access_lost" }),
+    )
+
+    await useAppStore.getState().uiActions.retryAccessVerification("ws-1")
+
+    expect(revalidate).toHaveBeenCalledWith({ fresh: true })
+  })
+
+  it("drops an earlier retry's outcome once threads are refetched", async () => {
+    useAppStore.setState({ accessRetryOutcome: "We couldn't verify your access right now." })
+    vi.spyOn(api, "get").mockRejectedValue(new Error("503 Service Unavailable"))
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().accessRetryOutcome).toBeNull()
+  })
+
+  it("leaves the list alone on an outage", async () => {
+    const revalidate = vi.spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+    vi.spyOn(api, "get").mockRejectedValue(new Error("503 Service Unavailable"))
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(revalidate).not.toHaveBeenCalled()
   })
 })

@@ -19,6 +19,19 @@ import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
 import { CONNECTIONS_PATH } from "@/lib/routes"
+import type { AccessDenialReason } from "@/store/uiSlice"
+
+// The server's message names every source and remedy, too long for the sidebar;
+// the lost-access modal and Connected Accounts carry the detail.
+const ACCESS_DENIAL_SUMMARY: Record<AccessDenialReason, string> = {
+  tenant_access_lost: "You don't have access to all of this workspace's sources.",
+  upstream_access_lost: "A provider removed your access to one of this workspace's sources.",
+  credential_missing: "One of this workspace's sources isn't connected.",
+  credential_expired: "Your sign-in for one of this workspace's sources expired.",
+  verification_unavailable: "Couldn't verify your access right now.",
+  verification_in_progress: "Your access is still being verified.",
+  no_sources: "This workspace has no data sources.",
+}
 
 // Focus and visibilitychange both fire on a tab switch, and alt-tabbing fires focus often.
 const DOMAIN_REVALIDATE_MIN_INTERVAL_MS = 15_000
@@ -43,7 +56,7 @@ export function Sidebar() {
   const threadId = useAppStore((s) => s.threadId)
   const threads = useAppStore((s) => s.threads)
   const threadsStatus = useAppStore((s) => s.threadsStatus)
-  const threadsAccessLostMessage = useAppStore((s) => s.threadsAccessLostMessage)
+  const threadsAccessDenialReason = useAppStore((s) => s.threadsAccessDenialReason)
   const threadsAccessRetryable = useAppStore((s) => s.threadsAccessRetryable)
   const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
   const [verifyingWorkspaceId, setVerifyingWorkspaceId] = useState<string | null>(null)
@@ -297,43 +310,49 @@ export function Sidebar() {
             </Button>
           </div>
           <div className="scout-sidebar-expanded-block flex-1 overflow-y-auto px-2 pb-2">
-            {threadsStatus === "error" && threadsAccessLostMessage && (
+            {threadsStatus === "error" && threadsAccessDenialReason && (
+              // The lost-access modal skips recovery pages and transient denials; this must not.
               <div
                 className="px-3 py-2 text-xs text-muted-foreground"
                 data-testid="sidebar-threads-access-lost"
               >
-                <p>{threadsAccessLostMessage}</p>
-                {threadsAccessRetryable && (
-                  <button
-                    type="button"
-                    disabled={retryingVerification}
-                    onClick={() => {
-                      if (!activeDomainId) return
-                      const workspaceId = activeDomainId
-                      setVerifyingWorkspaceId(workspaceId)
-                      void retryAccessVerification(workspaceId).finally(() =>
-                        setVerifyingWorkspaceId((current) =>
-                          current === workspaceId ? null : current,
-                        ),
-                      )
-                    }}
-                    className="mt-1 text-primary underline-offset-2 hover:underline disabled:opacity-50"
-                    data-testid="sidebar-threads-retry-verification"
-                  >
-                    {retryingVerification ? "Verifying…" : "Retry verification"}
-                  </button>
-                )}
-                <Link
-                  to={`${pathPrefix}/settings/connections`}
-                  onClick={collapseSidebar}
-                  className="mt-1 block text-primary underline-offset-2 hover:underline"
-                  data-testid="sidebar-threads-connected-accounts"
-                >
-                  Open Connected Accounts
-                </Link>
+                <p>{ACCESS_DENIAL_SUMMARY[threadsAccessDenialReason]}</p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {threadsAccessRetryable && (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      disabled={retryingVerification}
+                      onClick={() => {
+                        if (!activeDomainId) return
+                        const workspaceId = activeDomainId
+                        setVerifyingWorkspaceId(workspaceId)
+                        void retryAccessVerification(workspaceId).finally(() =>
+                          setVerifyingWorkspaceId((current) =>
+                            current === workspaceId ? null : current,
+                          ),
+                        )
+                      }}
+                      data-testid="sidebar-threads-retry-verification"
+                    >
+                      {retryingVerification ? "Verifying…" : "Retry verification"}
+                    </Button>
+                  )}
+                  {threadsAccessDenialReason !== "no_sources" && (
+                    <Button variant="outline" size="xs" asChild>
+                      <Link
+                        to={`${pathPrefix}/settings/connections`}
+                        onClick={collapseSidebar}
+                        data-testid="sidebar-threads-connected-accounts"
+                      >
+                        Connected Accounts
+                      </Link>
+                    </Button>
+                  )}
+                </div>
               </div>
             )}
-            {threadsStatus === "error" && !threadsAccessLostMessage && (
+            {threadsStatus === "error" && !threadsAccessDenialReason && (
               // 07#7: a load failure must not look like "no conversations". Show a
               // distinct error + retry so an outage is recoverable, not silent.
               <div

@@ -154,7 +154,7 @@ beforeEach(() => {
   useAppStore.setState({
     domains: [workspace(WS_A, "Workspace A"), workspace(WS_B, "Workspace B")],
     domainsStatus: "loaded", activeDomainId: WS_A, threadId: THREAD_A,
-    threads: [], threadsStatus: "loaded", threadsAccessLostMessage: null,
+    threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null, accessRetryOutcome: null,
   })
 })
 

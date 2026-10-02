@@ -70,6 +70,16 @@ describe("LostAccessModal", () => {
     expect(screen.queryByTestId("lost-access-goto-skelly")).toBeNull()
   })
 
+  it("titles the gate with the workspace name, not the source-count display name", () => {
+    useAppStore.setState({
+      domains: [{ ...ws("skelly", false), name: "ocs demo 2", display_name: "ocs demo 2 · 3 sources" }],
+      activeDomainId: "skelly",
+    })
+    renderModal()
+
+    expect(screen.getByRole("heading")).toHaveTextContent("You’ve lost access to “ocs demo 2”")
+  })
+
   it("points a workspace with no sources at deleting it, not at reconnecting (#381)", () => {
     useAppStore.setState({
       domains: [{ ...ws("empty", false), tenants: [] }, ws("live", true)],
@@ -188,10 +198,18 @@ describe("LostAccessModal upstream recheck", () => {
   it("shows the retry outcome inside the gate", () => {
     useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
     // Set after the switch: selecting a workspace resets the thread-denial state.
-    useAppStore.setState({ threadsAccessLostMessage: "We couldn't verify your access right now." })
+    useAppStore.setState({ accessRetryOutcome: "We couldn't verify your access right now." })
     renderModal()
 
     expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("couldn't verify")
+  })
+
+  it("does not repeat the threads denial as a retry outcome", () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    useAppStore.setState({ threadsStatus: "error", threadsAccessDenialReason: "tenant_access_lost" })
+    renderModal()
+
+    expect(screen.queryByTestId("lost-access-retry-outcome")).toBeNull()
   })
 })
 
@@ -224,6 +242,68 @@ describe("LostAccessModal with missing sources", () => {
       "Bot B: connect Open Chat Studio team 'Team B' in Connected Accounts",
     )
     expect(screen.queryByText(/If you disconnected your account/)).not.toBeInTheDocument()
+  })
+
+  it("names sources that share a remedy on one line", () => {
+    const ended =
+      "your access through Open Chat Studio ended: reconnect it in Connected Accounts"
+    const lost = (id: string, name: string) => ({
+      tenant_id: id,
+      tenant_name: name,
+      provider: "ocs",
+      recovery: "access_removed" as const,
+      remedy: ended,
+    })
+    useAppStore.setState({
+      domains: [{ ...partial, missing_tenants: [lost("a", "A"), lost("b", "B"), lost("c", "C")] }],
+    })
+    renderModal()
+
+    const items = screen.getByTestId("lost-access-missing").querySelectorAll("li")
+    expect(items).toHaveLength(1)
+    expect(items[0]).toHaveTextContent(`A, B, C: ${ended}`)
+  })
+
+  it("names a blank-named source by its provider", () => {
+    const tenant = { ...partial.missing_tenants[0], tenant_id: "t-blank", tenant_name: "" }
+    useAppStore.setState({ domains: [{ ...partial, missing_tenants: [tenant] }] })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-missing-t-blank")).toHaveTextContent(
+      /^Open Chat Studio: connect/,
+    )
+  })
+
+  it("confirms a denied retry without repeating the source list", () => {
+    useAppStore.setState({
+      threadsAccessDenialReason: "tenant_access_lost",
+      accessRetryOutcome: "Still needed — 'Bot B': connect …",
+    })
+    renderModal()
+
+    const outcome = screen.getByTestId("lost-access-retry-outcome")
+    expect(outcome).toHaveTextContent("sources above are still needed")
+    expect(outcome).not.toHaveTextContent("Bot B")
+  })
+
+  it("keeps the server remedy for an expired sign-in, even with sources listed", () => {
+    useAppStore.setState({
+      threadsAccessDenialReason: "credential_expired",
+      accessRetryOutcome: "Your sign-in for one of this workspace's sources has expired. Reconnect it under Connected Accounts.",
+    })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("Reconnect it under Connected Accounts")
+  })
+
+  it("shows a retry that could not verify, even with sources listed", () => {
+    useAppStore.setState({
+      threadsAccessDenialReason: "verification_unavailable",
+      accessRetryOutcome: "We couldn't verify your access right now.",
+    })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("couldn't verify")
   })
 
   it("links to Connected Accounts", async () => {

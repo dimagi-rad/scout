@@ -143,7 +143,7 @@ beforeEach(() => {
       member_count: 1, schema_status: "available", last_synced_at: null, created_at: "2026-01-01",
     }],
     domainsStatus: "loaded", activeDomainId: WS, threadId: THREAD,
-    threads: [], threadsStatus: "loaded", threadsAccessLostMessage: null,
+    threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null, accessRetryOutcome: null,
   })
 })
 
