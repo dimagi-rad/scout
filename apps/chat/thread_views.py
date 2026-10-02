@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from django.http import JsonResponse
 
-from apps.chat import pending_requests
+from apps.chat import pending_requests, resume_stream
 from apps.chat.artifact_links import (
     backfill_thread_artifact_links,
     latest_version_links,
@@ -374,3 +374,28 @@ async def _edit_pending_request(thread, version: int, body: dict) -> JsonRespons
             {"error": e.user_message, "reason": "pending_request_invalid_edit"}, status=400
         )
     return JsonResponse(pending)
+
+
+@async_login_required
+async def thread_resume_stream_view(request, workspace_id, thread_id):
+    """GET /api/workspaces/<workspace_id>/threads/<thread_id>/resume-stream/?after=<id>
+
+    The text a background resume of this thread has streamed since row ``after``:
+    ``{"chunks": [{id, run, text, done}]}``, oldest first. A chat tails it while
+    the resume runs and reloads the thread's messages once the run is done.
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    user = request._authenticated_user
+    _workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
+    if thread is None:
+        return JsonResponse({"chunks": []})
+    try:
+        after = max(int(request.GET.get("after", "0")), 0)
+    except ValueError:
+        return JsonResponse({"error": "after must be an integer"}, status=400)
+    chunks = await resume_stream.aread_after(thread.id, after)
+    return JsonResponse({"chunks": chunks, "more": len(chunks) >= resume_stream.READ_LIMIT})

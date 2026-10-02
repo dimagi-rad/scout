@@ -23,7 +23,7 @@ from langchain_core.messages import HumanMessage
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
-from apps.chat import pending_requests
+from apps.chat import pending_requests, resume_stream
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.tasks import aschedule_thread_title
@@ -3768,8 +3768,9 @@ async def _resume_claimed_job(
             workspace_id=str(workspace.id),
             status=status,
         ) as langfuse_span:
+            # Streamed, so a chat open on the thread shows the answer as it is written.
             result = await asyncio.wait_for(
-                agent.ainvoke(input_state, config),
+                resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
                 timeout=timeout_s,
             )
             if langfuse_span is not None:
@@ -4114,7 +4115,8 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
         await asyncio.wait_for(
-            agent.ainvoke(
+            resume_stream.arun_streamed(
+                agent,
                 {
                     "messages": [
                         HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
@@ -4125,6 +4127,7 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
                     "thread_id": str(thread.id),
                 },
                 config,
+                thread.id,
             ),
             timeout=settings.AGENT_RESUME_TIMEOUT_S,
         )
@@ -4133,3 +4136,10 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)
         return False
     return True
+
+
+@app.periodic(cron="*/15 * * * *")
+@app.task
+async def prune_resume_streams(timestamp: int = 0) -> dict:
+    """Drop streamed resume text old enough that no chat still tails it."""
+    return {"deleted": await resume_stream.aprune()}

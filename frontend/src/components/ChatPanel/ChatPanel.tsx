@@ -36,6 +36,7 @@ import { readDraft, writeDraft } from "./draftStorage"
 import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
+import { useResumeStream } from "./useResumeStream"
 import {
   busyRetryAfter,
   decideOverloadAction,
@@ -175,6 +176,13 @@ export function ChatPanel() {
   const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
 
   const held = useHeldRequest(activeDomainId, threadId)
+  // A background resume of this chat is answering: its held request is being
+  // sent, or its load's ThreadJob is RUNNING (the resume phase).
+  const resumeAnswering =
+    held.phase === "answering" || activeMaterializationJob?.state === "running"
+  const resumeStream = useResumeStream(activeDomainId, threadId, resumeAnswering)
+  const resetResumeStreamRef = useRef(resumeStream.reset)
+  resetResumeStreamRef.current = resumeStream.reset
   // The user message that sends a held request itself ("Send now"), and the
   // request version it showed; a retry of that message names the version too.
   const heldSendRef = useRef<{
@@ -345,6 +353,8 @@ export function ChatPanel() {
           : response
         setMessages(loaded.messages)
         held.onMessagesLoaded(loaded.pending_request)
+        // The reloaded conversation carries whatever the resume streamed.
+        resetResumeStreamRef.current()
         if (activeDomainId && threadId) {
           writeSavedThreadId(activeDomainId, threadId)
         }
@@ -359,6 +369,7 @@ export function ChatPanel() {
         }
         // New thread or transient fetch failure — start with empty.
         setMessages([])
+        resetResumeStreamRef.current()
       }
     }
 
@@ -496,7 +507,7 @@ export function ChatPanel() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [messages])
+  }, [messages, resumeStream.text])
 
   // A held send hides its request until the server stops reporting it; once the
   // send is over, the next poll shows the server's copy again (gone, or still
@@ -713,6 +724,20 @@ export function ChatPanel() {
               actionsDisabled={isStreaming}
               onDiscard={() => void held.discard()}
             />
+          )}
+          {resumeStream.text && (
+            <div data-testid="resume-stream">
+              <ChatMessage
+                message={{
+                  id: "resume-stream",
+                  role: "assistant",
+                  parts: [{ type: "text", text: resumeStream.text }],
+                }}
+                isActiveMessage
+                workspaceId={activeDomainId ?? undefined}
+                threadId={threadId}
+              />
+            </div>
           )}
           {addFailed && (
             <p className="text-sm text-destructive" data-testid="pending-request-add-failed">
