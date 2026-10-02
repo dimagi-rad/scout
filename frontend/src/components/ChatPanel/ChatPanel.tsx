@@ -179,6 +179,8 @@ export function ChatPanel() {
   const heldSendRef = useRef<{
     messageId: string
     version: number
+    requestId: string
+    workspaceId: string | null
     threadId: string
     /** What the user typed with it, which only this message carries. */
     extra?: string
@@ -192,7 +194,9 @@ export function ChatPanel() {
   const returnToComposerRef = useRef(returnToComposer)
   returnToComposerRef.current = returnToComposer
   // Leaving the chat drops useChat's view of a held send, so nothing would end its
-  // hiding; the next poll shows the server's copy instead.
+  // hiding; the next poll shows the server's copy instead. Its typed text is not
+  // returned here, unlike for an abandoned busy retry: the send's outcome is
+  // unknown, and a draft left after one that went out would be sent again.
   useEffect(() => () => {
     const sending = heldSendRef.current
     if (sending) settleSendRef.current(sending.threadId)
@@ -209,7 +213,11 @@ export function ChatPanel() {
           const sending = heldSendRef.current
           const data =
             sending && messages.at(-1)?.id === sending.messageId
-              ? { ...contextRef.current, pendingRequestVersion: sending.version }
+              ? {
+                  ...contextRef.current,
+                  pendingRequestVersion: sending.version,
+                  pendingRequestId: sending.requestId,
+                }
               : contextRef.current
           return { body: { ...body, data, id, messages, trigger, messageId } }
         },
@@ -263,7 +271,7 @@ export function ChatPanel() {
       heldSendRef.current = null
       settleSendRef.current(sending.threadId)
       if (!sending.streamed && sending.extra) {
-        returnToComposerRef.current(sending.threadId, sending.extra)
+        returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
       }
     }
     cancelBusyRetry()
@@ -500,12 +508,10 @@ export function ChatPanel() {
       sending.streamed = true
       return
     }
-    if (status === "error" && busyError) {
-      // Out of busy retries: Retry still resends it (naming its version), so keep
-      // the ref, but stop hiding a request that may be offered again.
-      if (busyNotice) held.settleSend(sending.threadId)
-      return
-    }
+    // Busy: it is retried, or offered as the notice's Retry (naming its version),
+    // so it stays hidden here rather than also offered as Send now; leaving the
+    // chat ends it (the thread-change cleanup).
+    if (status === "error" && busyError) return
     if (status !== "ready" && status !== "error") return
     heldSendRef.current = null
     const refused = status === "error" && !sending.streamed
@@ -515,9 +521,9 @@ export function ChatPanel() {
     }
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
     held.restore(sending.threadId)
-    if (sending.extra) returnToComposer(sending.threadId, sending.extra)
+    if (sending.extra) returnToComposer(sending.workspaceId, sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, busyError, busyNotice])
+  }, [status, busyError])
 
   function sendText(text: string) {
     resetOverloadState()
@@ -532,7 +538,15 @@ export function ChatPanel() {
       ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
       : pendingRequestText(pending)
     const messageId = generateId()
-    heldSendRef.current = { messageId, version: pending.version, threadId, extra, streamed: false }
+    heldSendRef.current = {
+      messageId,
+      version: pending.version,
+      requestId: pending.request_id,
+      workspaceId: activeDomainId,
+      threadId,
+      extra,
+      streamed: false,
+    }
     resetOverloadState()
     setStoppedNotice(false)
     turnThreadRef.current = threadId
@@ -540,13 +554,13 @@ export function ChatPanel() {
   }
 
   /** Puts text the composer had already cleared back, in the chat it was typed in. */
-  function returnToComposer(sentFrom: string, text: string) {
-    if (contextRef.current.threadId === sentFrom) {
+  function returnToComposer(workspaceId: string | null, sentFrom: string, text: string) {
+    if (contextRef.current.workspaceId === workspaceId && contextRef.current.threadId === sentFrom) {
       setInput(inputRef.current.trim() ? `${inputRef.current}\n${text}` : text)
       return
     }
-    if (!activeDomainId || !userId) return
-    const scope = { userId, workspaceId: activeDomainId, threadId: sentFrom }
+    if (!workspaceId || !userId) return
+    const scope = { userId, workspaceId, threadId: sentFrom }
     const draft = readDraft(scope)
     writeDraft(scope, draft.trim() ? `${draft}\n${text}` : text)
   }
@@ -561,11 +575,11 @@ export function ChatPanel() {
       }
       if (contextRef.current.threadId !== sentFrom) {
         // The user moved on meanwhile; keep the text in that chat's draft.
-        returnToComposer(sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text)
         return
       }
       if (outcome !== "send") {
-        returnToComposer(sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text)
         setAddFailed(outcome.failed)
         return
       }
@@ -666,6 +680,7 @@ export function ChatPanel() {
               pending={held.pending}
               phase={held.phase}
               onSendNow={handleSendHeldNow}
+              actionsDisabled={isStreaming}
               onDiscard={() => void held.discard()}
             />
           )}

@@ -6,6 +6,7 @@ import { useAppStore } from "@/store/store"
 import type { PendingRequest } from "@/api/jobs"
 import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
 import { ChatPanel } from "./ChatPanel"
+import { readDraft } from "./draftStorage"
 
 const WS = "11111111-1111-1111-1111-111111111111"
 const THREAD = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -23,6 +24,10 @@ interface Server {
   messageLoads: number
   /** Refuse a send that names a version, as when the request changed elsewhere. */
   refuseHeldSend: boolean
+  /** Holds a held send's answer until resolved, so the test can act meanwhile. */
+  heldSendGate: Promise<void> | null
+  /** Answer a held send with a reply that fails after it began. */
+  failHeldSendMidStream: boolean
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -64,6 +69,20 @@ function replyResponse(text: string) {
   })
 }
 
+function failingReplyResponse() {
+  return createUIMessageStreamResponse({
+    stream: createUIMessageStream({
+      execute: ({ writer }) => {
+        writer.write({ type: "start", messageId: crypto.randomUUID() })
+        writer.write({ type: "text-start", id: "reply" })
+        writer.write({ type: "text-delta", id: "reply", delta: "Sorry, something went wrong." })
+        writer.write({ type: "text-end", id: "reply" })
+        writer.write({ type: "error", errorText: "An error occurred. Ref: abc123" })
+      },
+    }),
+  })
+}
+
 function mockServer(): Server {
   const server: Server = {
     pending: null,
@@ -73,6 +92,8 @@ function mockServer(): Server {
     partStatus: 200,
     messageLoads: 0,
     refuseHeldSend: false,
+    heldSendGate: null,
+    failHeldSendMidStream: false,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -84,6 +105,10 @@ function mockServer(): Server {
       if (!body.data.pendingRequestVersion && server.pending === null && server.chatBodies.length === 1) {
         server.pending = request([{ id: last.id, text }], { thread_id: body.data.threadId })
         return heldResponse(server.pending)
+      }
+      if (body.data.pendingRequestVersion && server.heldSendGate) await server.heldSendGate
+      if (body.data.pendingRequestVersion && server.failHeldSendMidStream) {
+        return failingReplyResponse()
       }
       if (body.data.pendingRequestVersion && server.refuseHeldSend) {
         return Response.json(
@@ -140,8 +165,7 @@ async function type(text: string, button: string) {
   })
 }
 
-beforeEach(() => {
-  localStorage.clear()
+function seedStore() {
   useAppStore.setState({
     domains: [{
       id: WS, name: "W", display_name: "W", is_auto_created: false, role: "manage", tenants: [],
@@ -150,6 +174,11 @@ beforeEach(() => {
     domainsStatus: "loaded", activeDomainId: WS, threadId: THREAD,
     threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null, accessRetryOutcome: null,
   })
+}
+
+beforeEach(() => {
+  localStorage.clear()
+  seedStore()
 })
 
 afterEach(() => {
@@ -231,7 +260,10 @@ describe("a message sent while the chat's data loads", () => {
     })
 
     await screen.findByText(`echo: ${QUESTION}`)
-    expect(server.chatBodies.at(-1)?.data).toMatchObject({ pendingRequestVersion: 1 })
+    expect(server.chatBodies.at(-1)?.data).toMatchObject({
+      pendingRequestVersion: 1,
+      pendingRequestId: "r1",
+    })
   })
 
   it("puts the request and the text typed with it back when its send is refused", async () => {
@@ -252,6 +284,59 @@ describe("a message sent while the chat's data loads", () => {
     expect(server.chatBodies.at(-1)?.data).toMatchObject({ pendingRequestVersion: 1 })
     expect(await screen.findByTestId("pending-request-card")).toHaveTextContent(QUESTION)
     expect(screen.queryByText(`${QUESTION}\n\n${FOLLOW_UP}`)).toBeNull()
+    consoleError.mockRestore()
+  })
+
+  it("returns the typed text to its own chat's draft when refused after a switch", async () => {
+    const server = mockServer()
+    // Setting the user recreates the account's slices, so seed the workspace after it.
+    useAppStore.setState({
+      user: { id: "u1", email: "u@x", name: "U", is_staff: false, onboarding_complete: true },
+    })
+    seedStore()
+    const sentFrom = useAppStore.getState().threadId
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: sentFrom,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.refuseHeldSend = true
+    let release: () => void = () => {}
+    server.heldSendGate = new Promise((resolve) => (release = resolve))
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    await type(FOLLOW_UP, "Send message")
+    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
+    await act(async () => {
+      useAppStore.setState({ threadId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" })
+    })
+    await act(async () => release())
+
+    await waitFor(() =>
+      expect(readDraft({ userId: "u1", workspaceId: WS, threadId: sentFrom })).toBe(FOLLOW_UP),
+    )
+    consoleError.mockRestore()
+  })
+
+  it("keeps a held send whose reply failed after it began, and does not return its text", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.failHeldSendMidStream = true
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    await type(FOLLOW_UP, "Send message")
+
+    await screen.findByText("Sorry, something went wrong.")
+    expect(screen.getByText(`${QUESTION} ${FOLLOW_UP}`, { normalizer: (t) => t.replace(/\s+/g, " ").trim() })).toBeInTheDocument()
+    expect(screen.getByRole("textbox")).toHaveValue("")
     consoleError.mockRestore()
   })
 })

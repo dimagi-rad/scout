@@ -10,6 +10,8 @@ interface PendingRequestCardProps {
   phase: PendingPhase
   onSendNow?: () => void
   onDiscard?: () => void
+  /** While a turn is in flight, so a second send cannot overtake it. */
+  actionsDisabled?: boolean
 }
 
 const HEADINGS: Record<PendingPhase, string> = {
@@ -19,7 +21,13 @@ const HEADINGS: Record<PendingPhase, string> = {
 }
 
 /** The user's request held while their data loads, sent as one message once it can be answered. */
-export function PendingRequestCard({ pending, phase, onSendNow, onDiscard }: PendingRequestCardProps) {
+export function PendingRequestCard({
+  pending,
+  phase,
+  onSendNow,
+  onDiscard,
+  actionsDisabled = false,
+}: PendingRequestCardProps) {
   const Icon = phase === "answering" ? Loader2 : phase === "waiting" ? Clock : AlertCircle
   return (
     <div className="flex w-full justify-end">
@@ -62,6 +70,7 @@ export function PendingRequestCard({ pending, phase, onSendNow, onDiscard }: Pen
               type="button"
               size="sm"
               onClick={onSendNow}
+              disabled={actionsDisabled}
               data-testid="pending-request-send-now"
             >
               Send now
@@ -71,6 +80,7 @@ export function PendingRequestCard({ pending, phase, onSendNow, onDiscard }: Pen
               size="sm"
               variant="outline"
               onClick={onDiscard}
+              disabled={actionsDisabled}
               data-testid="pending-request-discard"
             >
               Discard

@@ -108,7 +108,9 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
   const pollSeqRef = useRef(0)
   const appliedPollRef = useRef(0)
   const prevThreadIdsRef = useRef<Set<string>>(new Set())
-  const prevPendingThreadIdsRef = useRef<Set<string>>(new Set())
+  // Thread id -> request id: a thread can send one request and hold the next
+  // between two polls, which must still count as a send.
+  const prevPendingRef = useRef<Map<string, string>>(new Map())
   const workspaceIdRef = useRef(workspaceId)
   useEffect(() => {
     workspaceIdRef.current = workspaceId
@@ -127,17 +129,19 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       appliedPollRef.current = poll
       const currentThreadIds = new Set(data.jobs.map((j) => j.thread_id))
       const pendingRequests = data.pending_requests ?? {}
-      const currentPendingThreadIds = new Set(Object.keys(pendingRequests))
+      const currentPending = new Map(
+        Object.entries(pendingRequests).map(([threadId, pending]) => [threadId, pending.request_id]),
+      )
       const justCompleted = new Set<string>()
       for (const prev of prevThreadIdsRef.current) {
         if (!currentThreadIds.has(prev)) justCompleted.add(prev)
       }
       // A held request leaves once its message is in the conversation.
-      for (const prev of prevPendingThreadIdsRef.current) {
-        if (!currentPendingThreadIds.has(prev)) justCompleted.add(prev)
+      for (const [threadId, requestId] of prevPendingRef.current) {
+        if (currentPending.get(threadId) !== requestId) justCompleted.add(threadId)
       }
       prevThreadIdsRef.current = currentThreadIds
-      prevPendingThreadIdsRef.current = currentPendingThreadIds
+      prevPendingRef.current = currentPending
       setState({
         jobs: data.jobs,
         workspaceId,
@@ -169,7 +173,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     // Reset cross-workspace state, else the new workspace's first poll falsely
     // reports the previous workspace's thread ids as "just completed".
     prevThreadIdsRef.current = new Set()
-    prevPendingThreadIdsRef.current = new Set()
+    prevPendingRef.current = new Map()
     setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
     setOverrides((prev) => (Object.keys(prev).length === 0 ? prev : {}))
     let cancelled = false
