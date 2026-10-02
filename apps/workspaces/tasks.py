@@ -3369,7 +3369,19 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str, lease: Turn
         return {"status": "already_claimed"}
     tj.started_at = resume_started_at
     held = await _claim_held_request(tj, lease)
+    try:
+        return await _resume_claimed_job(tj, thread_job_id, held)
+    except BaseException:
+        # Settled here too, so a failure before the agent ran leaves the request
+        # waiting (offered to send) rather than claimed by a run that is over.
+        if held is not None:
+            await pending_requests.asettle(held)
+        raise
 
+
+async def _resume_claimed_job(
+    tj: ThreadJob, thread_job_id: str, held: pending_requests.ClaimedRequest | None
+) -> dict:
     workspace = tj.thread.workspace
     user = tj.thread.user
 

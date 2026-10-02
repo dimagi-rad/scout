@@ -501,6 +501,23 @@ class TestResume:
         shown = await pending_requests.athread_pending_request(thread.id)
         assert shown["thread_job_state"] == ThreadJob.State.FAILED
 
+    async def test_a_resume_that_breaks_before_the_agent_leaves_it_waiting(self, checkpoint):
+        thread, tj = await self._loaded("resume-early-break")
+        await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
+
+        with (
+            patch(
+                "apps.workspaces.tasks._aggregate_materialization_state",
+                AsyncMock(side_effect=RuntimeError("db blip")),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await self._resume(tj, _resume_agent())
+
+        pending = await PendingRequest.objects.aget(thread=thread)
+        assert pending.state == PendingRequest.State.WAITING
+        assert pending.claim_token is None
+
     async def test_a_thread_with_nothing_held_resumes_as_before(self, checkpoint):
         _thread, tj = await self._loaded("resume-legacy")
         agent = _resume_agent()
