@@ -691,9 +691,10 @@ def _removed_pairs_queryset(unmembered):
 
 
 def _gaps_by_pair(readiness, removed_pairs) -> dict[tuple[int, str], MissingTenant]:
-    # Tombstone pair -> whether it is a pre-team OAuth row. An API key's rows may
-    # lack a slug but always record a team name; a disconnect nulls the connection,
-    # so the name is the only API-key marker left on a disconnected key's row.
+    # Tombstone pair -> whether it is a pre-team OAuth row. A key's rows may lack a
+    # slug, but every key added since team detection (ad56a659) records a team name,
+    # the only key marker left once a disconnect nulls the connection. Keys carried
+    # over by migration 0007 record neither, so a disconnected one reads as pre-team.
     removed = {
         (user_id, str(tenant_id)): not str(team_slug or "").strip()
         and not str(team_name or "").strip()
