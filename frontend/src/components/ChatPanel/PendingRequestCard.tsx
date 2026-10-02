@@ -33,8 +33,8 @@ const ICONS: Record<PendingPhase, typeof Clock> = {
   unanswered: AlertCircle,
 }
 
-const CONFLICT_NOTICE =
-  "Updated in another tab. Cancel and edit again to include the change; your text is still here."
+const CONFLICT_NOTICE = "Updated in another tab."
+const EDIT_CONFLICT_NOTICE = `${CONFLICT_NOTICE} Cancel and edit again to include the change; your text is still here.`
 const TOO_LATE_NOTICE = "Your request was already being sent."
 
 /** The user's request held while their data loads, sent as one message once it can be answered. */
@@ -91,8 +91,7 @@ export function PendingRequestCard({
       setDraft(null)
     } else if (outcome === "conflict") {
       // The card now shows the other tab's copy; the edit stays open to compare.
-      setNotice(CONFLICT_NOTICE)
-      if (!keepDraft) setDraft(null)
+      setNotice(keepDraft ? EDIT_CONFLICT_NOTICE : CONFLICT_NOTICE)
     } else if (outcome === "gone") {
       setNotice(keepDraft ? `${TOO_LATE_NOTICE} Your edit is in the message box.` : TOO_LATE_NOTICE)
       setDraft(null)
@@ -112,8 +111,14 @@ export function PendingRequestCard({
   }
 
   async function remove(partId: string) {
-    if (!onRemovePart) return
-    settle(await onRemovePart(partId), false)
+    // One change at a time: a second, sent before the first lands, names its version.
+    if (!onRemovePart || saving) return
+    setSaving(true)
+    try {
+      settle(await onRemovePart(partId), false)
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -172,6 +177,8 @@ export function PendingRequestCard({
                   setDraft(null)
                   setNotice(null)
                 }}
+                // The save is already sent; its outcome decides what happens to the text.
+                disabled={saving}
                 data-testid="pending-request-edit-cancel"
               >
                 Cancel
@@ -208,7 +215,7 @@ export function PendingRequestCard({
                       type="button"
                       className="mt-0.5 rounded p-0.5 text-muted-foreground hover:bg-primary/10 hover:text-foreground disabled:opacity-50"
                       onClick={() => void remove(part.id)}
-                      disabled={actionsDisabled}
+                      disabled={actionsDisabled || saving}
                       aria-label="Remove this part"
                       data-testid={`pending-request-remove-${part.id}`}
                     >

@@ -164,4 +164,39 @@ describe("PendingRequestCard", () => {
 
     expect(onAbandonEdit).toHaveBeenCalledWith("mine")
   })
+
+  it("holds other changes while one is on its way", async () => {
+    let finish: (outcome: "saved") => void = () => {}
+    const onRemovePart = vi.fn(() => new Promise<"saved">((resolve) => (finish = resolve)))
+    render(
+      <PendingRequestCard
+        pending={request(["visits?", "by month", "in Kenya"])}
+        phase="waiting"
+        onRemovePart={onRemovePart}
+        onEdit={vi.fn()}
+      />,
+    )
+
+    await act(async () => fireEvent.click(screen.getByTestId("pending-request-remove-p2")))
+    await act(async () => fireEvent.click(screen.getByTestId("pending-request-remove-p3")))
+
+    expect(onRemovePart).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId("pending-request-remove-p3")).toBeDisabled()
+    await act(async () => finish("saved"))
+    expect(screen.getByTestId("pending-request-remove-p3")).toBeEnabled()
+  })
+
+  it("keeps an edit open while its save is on its way", async () => {
+    let finish: (outcome: "conflict") => void = () => {}
+    const onEdit = vi.fn(() => new Promise<"conflict">((resolve) => (finish = resolve)))
+    render(<PendingRequestCard pending={request(["visits?"])} phase="waiting" onEdit={onEdit} />)
+    fireEvent.click(screen.getByTestId("pending-request-edit"))
+    fireEvent.change(screen.getByTestId("pending-request-edit-text"), { target: { value: "mine" } })
+
+    await act(async () => fireEvent.click(screen.getByTestId("pending-request-edit-save")))
+
+    expect(screen.getByTestId("pending-request-edit-cancel")).toBeDisabled()
+    await act(async () => finish("conflict"))
+    expect(screen.getByTestId("pending-request-edit-text")).toHaveValue("mine")
+  })
 })
