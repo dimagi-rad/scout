@@ -285,6 +285,30 @@ class TestLearningsNotCrowdedOut:
         assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
         assert "Monthly Recurring Revenue" in result
         learnings = result[result.index("## Learned Corrections") :].split("\n\n*(")[0]
+        # Entries leave most of the budget unused, so learnings get it back.
+        assert len(learnings) > LEARNINGS_CHAR_CAP
+
+    @pytest.mark.asyncio
+    async def test_learnings_cap_holds_when_entries_compete(self, workspace, user):
+        for i in range(20):
+            await AgentLearning.objects.acreate(
+                workspace=workspace,
+                description=f"Learning {i}: " + "x " * 200,
+                category="type_mismatch",
+                confidence_score=0.5,
+                is_active=True,
+                discovered_by_user=user,
+            )
+        for i in range(30):
+            await KnowledgeEntry.objects.acreate(
+                workspace=workspace, title=f"Entry {i}", content="E" * 500, created_by=user
+            )
+
+        result = await KnowledgeRetriever(workspace).retrieve()
+
+        assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
+        assert "### Entry 0" in result
+        learnings = result[result.index("## Learned Corrections") :].split("\n\n*(")[0]
         assert len(learnings) <= LEARNINGS_CHAR_CAP
 
     @pytest.mark.asyncio
@@ -322,8 +346,11 @@ class TestFitSection:
         assert fitted.endswith("…")
         assert fitted[:-1].split()[-1] in {f"w{i}" for i in range(100)}
 
-    def test_overlong_line_without_spaces_dropped(self):
-        assert _fit_section("## A\n\n" + "x" * 100, 50) == ""
+    def test_overlong_line_without_spaces_hard_cut(self):
+        fitted = _fit_section("## A\n\n### Blob\n\n" + "x" * 100, 50)
+        assert len(fitted) <= 50
+        assert fitted.startswith("## A\n\n### Blob\n\nxxx")
+        assert fitted.endswith("…")
 
     @pytest.mark.parametrize("limit", [0, -1, -2, -50])
     def test_non_positive_limit(self, limit):

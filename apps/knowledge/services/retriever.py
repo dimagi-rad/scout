@@ -46,8 +46,13 @@ _SECTION_SEPARATOR = "\n\n"
 MAX_COLUMN_NOTES_PER_TABLE = 40
 
 # Learnings claim space first but are agent-written and unbounded in length, so
-# they must not in turn evict every curated entry and table.
+# they must not in turn evict every curated entry and table. Space the others
+# leave unused is handed back to them.
 LEARNINGS_CHAR_CAP = KNOWLEDGE_CONTEXT_CHAR_BUDGET // 2
+
+
+# A cut line shorter than this carries no meaning (e.g. "- …"), so the section is dropped.
+_MIN_CUT_LINE_CHARS = 20
 
 
 def _without_dangling_headings(lines: list[str]) -> list[str]:
@@ -63,10 +68,11 @@ def _without_dangling_headings(lines: list[str]) -> list[str]:
 
 
 def _fit_section(text: str, limit: int) -> str:
-    """Trim *text* to at most *limit* chars at a line boundary.
+    """Trim *text* to at most *limit* chars, preferring a line boundary.
 
     Trailing headings and labels left without their content are dropped, and a
-    section reduced to nothing but headings is dropped entirely.
+    section reduced to nothing but headings is dropped entirely. Only when the
+    first content line alone overruns the limit is that line cut, ending in "…".
     """
     if limit <= 0:
         return ""
@@ -76,11 +82,18 @@ def _fit_section(text: str, limit: int) -> str:
     if lines:
         return "\n".join(lines)
     # Its first content line alone overruns the limit (e.g. a one-paragraph entry):
-    # cut that line at a word rather than lose the whole section.
+    # cut that line, at a word where there is one, rather than lose the section.
     head = text[: limit - 1]
     cut = head.rfind(" ")
-    lines = _without_dangling_headings(head[:cut].split("\n")) if cut > 0 else []
-    return "\n".join(lines) + "…" if lines else ""
+    for candidate in (head[:cut] if cut > 0 else "", head):
+        lines = _without_dangling_headings(candidate.split("\n"))
+        if lines and len(lines[-1].strip()) >= _MIN_CUT_LINE_CHARS:
+            return "\n".join(lines) + "…"
+    return ""
+
+
+def _joined_length(parts: list[str]) -> int:
+    return sum(map(len, parts)) + len(_SECTION_SEPARATOR) * max(0, len(parts) - 1)
 
 
 class KnowledgeRetriever:
@@ -110,11 +123,17 @@ class KnowledgeRetriever:
         then knowledge entries, then table context — so a bulky table dump
         cannot crowd out the short, high-value learnings (#264). Display order
         is unchanged, learnings take at most half the budget, each table's column
-        notes are capped, and each section is cut only at a line boundary.
+        notes are capped, and each section is cut at a line boundary where possible.
         """
+        table_rows = [
+            table
+            async for table in TableKnowledge.objects.filter(workspace=self.workspace).order_by(
+                "table_name"
+            )
+        ]
         sections = {
             "entries": await self._format_knowledge_entries(),
-            "tables": await self._format_table_knowledge(),
+            "tables": await self._format_table_knowledge(tables=table_rows),
             "learnings": await self._format_agent_learnings(),
         }
         combined = _SECTION_SEPARATOR.join(text for text in sections.values() if text)
@@ -122,25 +141,30 @@ class KnowledgeRetriever:
             return combined
 
         sections["tables"] = await self._format_table_knowledge(
-            max_column_notes=MAX_COLUMN_NOTES_PER_TABLE
+            max_column_notes=MAX_COLUMN_NOTES_PER_TABLE, tables=table_rows
         )
         combined = _SECTION_SEPARATOR.join(text for text in sections.values() if text)
         if len(combined) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET:
             return combined
 
-        remaining = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
+        available = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
         fitted: dict[str, str] = {}
         for name in ("learnings", "entries", "tables"):
             if not sections[name]:
                 continue
             separator = len(_SECTION_SEPARATOR) if fitted else 0
-            limit = remaining - separator
+            limit = available - _joined_length(list(fitted.values())) - separator
             if name == "learnings":
                 limit = min(limit, LEARNINGS_CHAR_CAP)
             kept = _fit_section(sections[name], limit)
             if kept:
                 fitted[name] = kept
-                remaining -= len(kept) + separator
+        if sections["learnings"] and fitted.get("learnings") != sections["learnings"]:
+            others = [text for name, text in fitted.items() if name != "learnings"]
+            spare = available - _joined_length(others) - (len(_SECTION_SEPARATOR) if others else 0)
+            kept = _fit_section(sections["learnings"], spare)
+            if kept:
+                fitted["learnings"] = kept
         kept_sections = [fitted[name] for name in sections if name in fitted]
         return _SECTION_SEPARATOR.join(kept_sections) + _TRUNCATION_NOTICE
 
@@ -161,16 +185,25 @@ class KnowledgeRetriever:
 
         return "\n".join(lines).rstrip()
 
-    async def _format_table_knowledge(self, max_column_notes: int | None = None) -> str:
+    async def _format_table_knowledge(
+        self,
+        max_column_notes: int | None = None,
+        tables: list[TableKnowledge] | None = None,
+    ) -> str:
         """Format table knowledge with column notes and data quality notes."""
-        tables = TableKnowledge.objects.filter(workspace=self.workspace).order_by("table_name")
-
-        if not await tables.aexists():
+        if tables is None:
+            tables = [
+                table
+                async for table in TableKnowledge.objects.filter(workspace=self.workspace).order_by(
+                    "table_name"
+                )
+            ]
+        if not tables:
             return ""
 
         lines: list[str] = ["## Table Context (beyond schema)", ""]
 
-        async for table in tables:
+        for table in tables:
             lines.append(f"### {table.table_name}")
             lines.append("")
             lines.append(_sanitize_prompt_content(table.description))
@@ -178,6 +211,8 @@ class KnowledgeRetriever:
 
             if table.column_notes:
                 lines.append("**Column Notes:**")
+                # jsonb orders keys by length then bytes, so the cap keeps the
+                # shortest column names; deterministic, which the cached prompt needs.
                 notes = list(table.column_notes.items())
                 shown = notes if max_column_notes is None else notes[:max_column_notes]
                 for column, note in shown:
@@ -185,7 +220,7 @@ class KnowledgeRetriever:
                 if len(notes) > len(shown):
                     lines.append(
                         f"- … notes for {len(notes) - len(shown)} more columns are left out "
-                        f"to fit the prompt; `describe_table` gives only their names and types."
+                        f"to fit the prompt; call `describe_table` for the remaining columns."
                     )
                 lines.append("")
 
