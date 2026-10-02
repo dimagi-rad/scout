@@ -137,9 +137,20 @@ with it on), access also
 needs proof from the provider, less than 5 minutes old, that the user still has
 the tenant. A stale proof is rechecked on the next request. If the provider
 confirms the user has lost access, the tenant membership is archived. If the
-provider can't be reached, the request is denied as retryable and nothing is
-archived. `POST /api/workspaces/<id>/access/verify/` lets a user retry the
+provider can't be reached, the request is denied as retryable (503) and nothing
+is archived. `POST /api/workspaces/<id>/access/verify/` lets a user retry the
 check.
+
+A narrow grace window (`UPSTREAM_ACCESS_GRACE_SECONDS`, 30 minutes by default)
+admits an interactive request whose recheck got no answer — timeout, network
+error, 5xx or 429, or a check still running — when every tenant it needs has a
+positive proof younger than the window, matching the current credential, with no
+denial recorded since. A 401, an omission, a no-access 404 or an indeterminate
+answer never qualifies. Each grace admission is logged at INFO as
+`upstream_access_grace` and starts a background recheck, whose proof restores
+freshness and whose revocation, if it finds one, denies the next request. To turn
+grace off, set `UPSTREAM_ACCESS_GRACE_SECONDS` to `0` in all three deploy files
+and redeploy.
 
 To roll back, set `UPSTREAM_ACCESS_FRESHNESS_ENFORCED` to `"False"` in all three
 deploy files (API, worker, MCP server) and redeploy.

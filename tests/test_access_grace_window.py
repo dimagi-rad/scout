@@ -29,6 +29,7 @@ from apps.users.services import access_verification_service
 from apps.users.services.access_verification import agrace_proof_tenant_ids
 from apps.users.services.access_verification_service import (
     VERIFICATION_IN_PROGRESS_AFTER_REJECTION,
+    VERIFICATION_UNAVAILABLE_AFTER_DENIAL,
     VERIFICATION_UNAVAILABLE_AFTER_REJECTION,
     verify_connection_access,
 )
@@ -343,6 +344,8 @@ async def test_background_budget_gets_no_grace(user, workspace, tenant, upstream
         (AccessVerificationStatus.IN_PROGRESS, "verification_in_progress", True),
         (AccessVerificationStatus.UNAVAILABLE, VERIFICATION_UNAVAILABLE_AFTER_REJECTION, False),
         (AccessVerificationStatus.IN_PROGRESS, VERIFICATION_IN_PROGRESS_AFTER_REJECTION, False),
+        (AccessVerificationStatus.UNAVAILABLE, VERIFICATION_UNAVAILABLE_AFTER_DENIAL, False),
+        (AccessVerificationStatus.IN_PROGRESS, "verification_in_progress_after_denial", False),
         (AccessVerificationStatus.UNAVAILABLE, ErrorCode.AUTH_TOKEN_EXPIRED, False),
         (AccessVerificationStatus.UNAVAILABLE, "verification_failed", False),
         (AccessVerificationStatus.INDETERMINATE, "verification_indeterminate", False),
@@ -453,3 +456,38 @@ async def test_an_unsettled_401_voids_the_proof_for_every_waiter(user, tenant):
     assert sibling_proof.verified_at is None
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.last_attempt_error_code == VERIFICATION_UNAVAILABLE_AFTER_REJECTION
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_denial_that_could_not_be_published_never_earns_grace(
+    user, tenant, workspace, monkeypatch
+):
+    """The provider said "access lost" but publishing it timed out: nothing is archived,
+    so the proof must not be left for grace to read as positive."""
+    membership = await TenantMembership.objects.select_related("connection").aget(
+        user=user, tenant=tenant
+    )
+    connection = membership.connection
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+
+    async def omits_the_tenant(*args, **kwargs):
+        return ProviderVerificationResult.complete(set())
+
+    async def publication_times_out(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(
+        access_verification_service, "apublish_verification_receipt", publication_times_out
+    )
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=omits_the_tenant
+    )
+    await _drain_background()
+
+    assert result.status == AccessVerificationStatus.UNAVAILABLE
+    assert result.error_code == VERIFICATION_UNAVAILABLE_AFTER_DENIAL
+    assert not access_freshness._grace_eligible(result)
+    window = timedelta(minutes=30)
+    assert not await agrace_proof_tenant_ids(user.id, connection.id, {tenant.id}, max_age=window)

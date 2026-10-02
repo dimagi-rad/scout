@@ -6,15 +6,17 @@ cancellation stays reachable during one, and dataset listings report workspaces
 whose access could not yet be confirmed.
 """
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.test import AsyncClient
+from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
 from apps.common.error_codes import ErrorCode
-from apps.users.models import TenantMembership
+from apps.users.models import TenantMembership, UpstreamAccessProof
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 from mcp_server.server import (
     cancel_materialization,
@@ -248,3 +250,22 @@ async def test_an_unbound_membership_is_inaccessible_not_unverified(
     assert result["data"]["inaccessible_workspace_ids"] == [str(workspace.id)]
     assert result["data"]["unverified_workspace_ids"] == []
     assert upstream_provider.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_requested_workspace_admitted_under_grace_is_listed(
+    workspace, tenant, user, upstream_provider, settings
+):
+    """The catalog agrees with the gate: a workspace graced on request is not
+    reported as unverified."""
+    settings.UPSTREAM_ACCESS_GRACE_SECONDS = 30 * 60
+    await UpstreamAccessProof.objects.filter(tenant=tenant).aupdate(
+        verified_at=timezone.now() - timedelta(minutes=10)
+    )
+    upstream_provider.failure = 503
+
+    result = await list_datasets(workspace_ids=[str(workspace.id)], user_id=str(user.id))
+
+    assert result["data"]["unverified_workspace_ids"] == []
+    assert result["data"]["inaccessible_workspace_ids"] == []

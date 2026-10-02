@@ -313,18 +313,22 @@ def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age,
         return _fresh_history_tenants(current, request, history, now=now, max_age=max_age)
 
 
-def void_positive_proofs(actor_user_id, connection_id) -> None:
-    """Withdraw every positive proof a provider 401 has called into question.
+def void_positive_proofs(actor_user_id, connection_id, *, tenant_ids=None, before=None):
+    """Withdraw positive proofs that an unsettled "access lost" answer calls into question.
 
-    The whole connection's: a 401 rejects the credential, not one tenant, and other
-    requests on this connection may be checking other tenants. Archives nothing: the
-    401 may only mean a stale token, which the attempt goes on to renew and retry.
-    Until a check settles, though, no proof on this connection may stand in for a
-    fresh one.
+    Archives nothing. ``tenant_ids`` None means the whole connection: a 401 rejects
+    the credential, not one tenant, and other requests on this connection may be
+    checking other tenants. ``before`` keeps a void that lands late from undoing a
+    proof published after the answer it is about.
     """
-    UpstreamAccessProof.objects.filter(
+    proofs = UpstreamAccessProof.objects.filter(
         connection_id=connection_id, connection__user_id=actor_user_id
-    ).update(verified_at=None)
+    )
+    if tenant_ids is not None:
+        proofs = proofs.filter(tenant_id__in=list(tenant_ids))
+    if before is not None:
+        proofs = proofs.filter(verified_at__lt=before)
+    proofs.update(verified_at=None)
 
 
 def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> bool:

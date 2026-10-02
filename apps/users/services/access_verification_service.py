@@ -62,6 +62,9 @@ _VERIFICATION_IN_PROGRESS = "verification_in_progress"
 # attempt saw a possible revocation it could not settle: never grounds for grace.
 VERIFICATION_UNAVAILABLE_AFTER_REJECTION = "verification_unavailable_after_rejection"
 VERIFICATION_IN_PROGRESS_AFTER_REJECTION = "verification_in_progress_after_rejection"
+# The provider denied access but the attempt could not publish it.
+VERIFICATION_UNAVAILABLE_AFTER_DENIAL = "verification_unavailable_after_denial"
+VERIFICATION_IN_PROGRESS_AFTER_DENIAL = "verification_in_progress_after_denial"
 _VERIFICATION_RETRY = "verification_retry"
 _UPSTREAM_ACCESS_LOST = "upstream_access_lost"
 _JITTER = random.SystemRandom()
@@ -610,17 +613,34 @@ class _Progress:
     """What a running verification has seen so far, for a caller that stops waiting."""
 
     rejected = False
+    # The provider answered "access lost" (a denial, or an answer short of the
+    # request); cleared only once that answer has been published.
+    denied = False
 
 
 async def _verify_and_publish(claim, requested, early_provider_result, *, progress, **kwargs):
     result = await _verify_and_publish_once(
         claim, requested, early_provider_result, progress=progress, **kwargs
     )
-    if (
-        progress.rejected
-        and result.status == AccessVerificationStatus.UNAVAILABLE
+    unsettled = (
+        result.status == AccessVerificationStatus.UNAVAILABLE
         and result.error_code == _VERIFICATION_UNAVAILABLE
-    ):
+    )
+    if unsettled and progress.denied:
+        # A denial that could not be published must not leave a proof that grace
+        # would read as positive, for this request or one waiting on the lease.
+        with contextlib.suppress(TimeoutError):
+            await _await_until(
+                avoid_positive_proofs(
+                    claim.observation.user_id,
+                    claim.observation.connection_id,
+                    tenant_ids=claim.requested_tenant_ids,
+                ),
+                deadline=time.monotonic() + _CLEANUP_WAIT_SECONDS,
+                clock=time.monotonic,
+            )
+        return replace(result, error_code=VERIFICATION_UNAVAILABLE_AFTER_DENIAL)
+    if unsettled and progress.rejected:
         return replace(result, error_code=VERIFICATION_UNAVAILABLE_AFTER_REJECTION)
     return result
 
@@ -658,7 +678,9 @@ async def _verify_and_publish_once(
                 with contextlib.suppress(TimeoutError):
                     await _await_until(
                         avoid_positive_proofs(
-                            claim.observation.user_id, claim.observation.connection_id
+                            claim.observation.user_id,
+                            claim.observation.connection_id,
+                            before=timezone.now(),
                         ),
                         deadline=deadline,
                         clock=clock,
@@ -699,6 +721,13 @@ async def _verify_and_publish_once(
             provider_result = ProviderVerificationResult.unavailable(
                 VERIFICATION_UNAVAILABLE_AFTER_REJECTION
             )
+        # Assume "access lost" for any answer until the mapping shows it covers the
+        # request; a positive answer that fails to publish is only an outage.
+        progress.denied = provider_result.outcome in {
+            VerificationOutcome.COMPLETE,
+            VerificationOutcome.TENANT_DENIED,
+            VerificationOutcome.CREDENTIAL_REJECTED,
+        }
         completed_at = timezone.now()
         try:
             mapped = await _await_until(
@@ -709,6 +738,8 @@ async def _verify_and_publish_once(
             return AccessVerificationResult(
                 AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_UNAVAILABLE
             )
+        if mapped.outcome == VerificationOutcome.COMPLETE and requested <= mapped.tenant_ids:
+            progress.denied = False
         if clock() >= deadline:
             await _release_claim(claim)
             return AccessVerificationResult(
@@ -864,12 +895,14 @@ async def verify_connection_access(
         raise
     if not done:
         _detach(verification, connection_id)
-        return AccessVerificationResult(
-            AccessVerificationStatus.IN_PROGRESS,
-            VERIFICATION_IN_PROGRESS_AFTER_REJECTION
-            if progress.rejected
-            else _VERIFICATION_IN_PROGRESS,
-        )
+        if progress.rejected:
+            code = VERIFICATION_IN_PROGRESS_AFTER_REJECTION
+        elif progress.denied:
+            # Answered "access lost", still publishing: never grounds for grace.
+            code = VERIFICATION_IN_PROGRESS_AFTER_DENIAL
+        else:
+            code = _VERIFICATION_IN_PROGRESS
+        return AccessVerificationResult(AccessVerificationStatus.IN_PROGRESS, code)
     return verification.result()
 
 
@@ -883,9 +916,16 @@ def schedule_background_verification(actor_user_id, connection_id, tenant_ids) -
     admission under grace into either a fresh proof or a recorded revocation.
     Returns whether a new check was started.
     """
-    key = (actor_user_id, connection_id, frozenset(tenant_ids))
-    running = _BACKGROUND_RECHECKS.get(key)
-    if running is not None and not running.done():
+    requested = frozenset(tenant_ids)
+    key = (actor_user_id, connection_id, requested)
+    # Several workspaces on one connection would otherwise each start a check that
+    # polls the same lease; one already covering these tenants suffices.
+    if any(
+        (user, connection) == (actor_user_id, connection_id)
+        and requested <= covered
+        and not task.done()
+        for (user, connection, covered), task in _BACKGROUND_RECHECKS.items()
+    ):
         return False
     task = _spawn_detachable(
         verify_connection_access(
