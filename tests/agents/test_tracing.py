@@ -124,6 +124,22 @@ def _observation_type(span):
 
 
 @pytest.mark.asyncio
+async def test_chat_turn_propagates_session_to_every_observation(langfuse_spans):
+    handler = get_langfuse_callback(session_id="thread-abc", user_id="user-123")
+    with langfuse_trace_context(
+        session_id="thread-abc", user_id="user-123", metadata={"workspace_id": "ws-1"}
+    ):
+        await _agent_like_chain().ainvoke("question", config={"callbacks": [handler]})
+
+    spans = langfuse_spans()
+    assert "generation" in {_observation_type(s) for s in spans}
+    for span in spans:
+        assert span.attributes.get("session.id") == "thread-abc", span.name
+        assert span.attributes.get("user.id") == "user-123", span.name
+        assert span.attributes.get("langfuse.trace.metadata.workspace_id") == "ws-1", span.name
+
+
+@pytest.mark.asyncio
 async def test_resume_span_is_root_and_propagates_session_to_generations(langfuse_spans):
     handler = get_langfuse_callback(session_id="thread-abc", user_id="user-123")
     with _resume_langfuse_span(
