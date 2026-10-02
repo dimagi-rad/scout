@@ -414,7 +414,7 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                _stamp_load_ended(run, pipeline, source_results)
+                _stamp_load_ended(run, pipeline, source_results, duration_s=_elapsed(run_started))
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
@@ -453,6 +453,7 @@ def run_pipeline(
                 pipeline,
                 source_results,
                 error={"error": _summarize_error(e), "error_code": code_of(e)},
+                duration_s=_elapsed(run_started),
             )
             raise
 
@@ -467,6 +468,7 @@ def run_pipeline(
                 "cancelled": True,
                 "pipeline": pipeline.name,
                 "sources": source_results,
+                "duration_s": _elapsed(run_started),
             },
         )
         logger.info("Run %s cancelled; in-flight source rolled back", run.id)
@@ -494,6 +496,7 @@ def run_pipeline(
                     "sources": source_results,
                     "error": _summarize_error(e),
                     "error_code": code_of(e),
+                    "duration_s": _elapsed(run_started),
                 },
             )
         if (
@@ -1224,7 +1227,14 @@ def _write_ocs_participants(
     return total
 
 
-def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None = None):
+def _stamp_load_ended(
+    run,
+    pipeline,
+    source_results: dict,
+    *,
+    error: dict | None = None,
+    duration_s: float | None = None,
+):
     """End a run whose load stopped early: PARTIAL if anything committed, else FAILED.
 
     A resumable source that advanced its cursor has committed rows even if it
@@ -1238,6 +1248,8 @@ def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None
     )
     run.completed_at = datetime.now(UTC)
     run.result = {"pipeline": pipeline.name, "sources": source_results, **(error or {})}
+    if duration_s is not None:
+        run.result["duration_s"] = duration_s
     run.save(update_fields=["state", "completed_at", "result"])
 
 

@@ -1411,6 +1411,7 @@ class TestConnectProgressAndTiming:
         entry = run.result["sources"]["completed_works"]
         assert entry["state"] == "failed"
         assert isinstance(entry["duration_s"], float)
+        assert isinstance(run.result["duration_s"], float)
 
 
 @pytest.mark.django_db
