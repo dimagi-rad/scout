@@ -31,6 +31,7 @@ from apps.chat.helpers import (
 from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
+from apps.chat.titles import short_thread_title
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
@@ -43,15 +44,6 @@ from apps.workspaces.services.thread_job_dispatch import (
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
 
 logger = logging.getLogger(__name__)
-
-THREAD_TITLE_PREVIEW_CHARS = 200
-
-
-def _short_thread_title(title: str) -> str:
-    clean = title.strip()
-    if len(clean) > THREAD_TITLE_PREVIEW_CHARS:
-        return f"{clean[:THREAD_TITLE_PREVIEW_CHARS].rstrip()}..."
-    return clean
 
 
 class ForeignThreadError(Exception):
@@ -77,8 +69,9 @@ async def _upsert_thread(thread_id, user, history_title: str = "", *, workspace)
         defaults={
             "user": user,
             "workspace": workspace,
-            "title": _short_thread_title(history_title),
+            "title": short_thread_title(history_title),
             "title_is_custom": False,
+            "title_source": Thread.TitleSource.FIRST_MESSAGE,
         },
     )
     if _is_foreign_thread(thread, user, workspace):

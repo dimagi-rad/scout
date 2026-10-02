@@ -17,13 +17,11 @@ from apps.chat.helpers import (
 )
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
+from apps.chat.titles import display_thread_title, short_thread_title
 from apps.common.http import parse_json_object
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
-
-
-THREAD_TITLE_PREVIEW_CHARS = 200
 
 
 async def _get_thread(thread_id, user, *, workspace_id=None):
@@ -44,65 +42,19 @@ async def _thread_id_taken(thread_id) -> bool:
     )
 
 
-def _thread_summary(thread, *, history_title: str | None = None):
-    display_title = _display_thread_title(thread)
+def _thread_summary(thread):
+    title = display_thread_title(thread)
     return {
         "id": str(thread.id),
-        "title": display_title or "Untitled",
-        "history_title": history_title or _history_thread_title(thread),
+        "title": title,
+        # Same value as title; kept for browser tabs loaded before titles were unified.
+        "history_title": title,
         "title_is_custom": thread.title_is_custom,
+        "title_source": thread.title_source,
         "created_at": thread.created_at.isoformat(),
         "updated_at": thread.updated_at.isoformat(),
         "last_viewed_at": thread.last_viewed_at.isoformat() if thread.last_viewed_at else None,
     }
-
-
-def _short_thread_title(title: str) -> str:
-    clean = title.strip()
-    if len(clean) > THREAD_TITLE_PREVIEW_CHARS:
-        return f"{clean[:THREAD_TITLE_PREVIEW_CHARS].rstrip()}..."
-    return clean
-
-
-def _display_thread_title(thread) -> str:
-    if not thread.title_is_custom:
-        return "Untitled"
-    return _short_thread_title(thread.title) or "Untitled"
-
-
-def _history_thread_title(thread) -> str:
-    if thread.title_is_custom:
-        return _display_thread_title(thread)
-    return _short_thread_title(thread.title) or "Untitled"
-
-
-async def _thread_summary_for_response(thread):
-    history_title = _history_thread_title(thread)
-    if not thread.title_is_custom and history_title == "Untitled":
-        history_title = await _first_user_message_title(thread.id) or history_title
-    return _thread_summary(thread, history_title=history_title)
-
-
-async def _first_user_message_title(thread_id) -> str:
-    try:
-        messages = await _load_thread_messages(thread_id)
-    except CheckpointerUnavailable:
-        return ""
-    for message in messages:
-        if message.get("role") != "user":
-            continue
-        content = str(message.get("content") or "").strip()
-        if content:
-            return _short_thread_title(content)
-        parts = message.get("parts") or []
-        text = " ".join(
-            str(part.get("text") or "").strip()
-            for part in parts
-            if part.get("type") == "text" and part.get("text")
-        ).strip()
-        if text:
-            return _short_thread_title(text)
-    return ""
 
 
 async def _list_threads(user, *, workspace_id):
@@ -116,11 +68,8 @@ async def _list_threads(user, *, workspace_id):
     if err is not None:
         return None, err
 
-    summaries = []
     queryset = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
-    async for thread in queryset:
-        summaries.append(await _thread_summary_for_response(thread))
-    return summaries, None
+    return [_thread_summary(thread) async for thread in queryset], None
 
 
 async def _load_thread_messages(thread_id) -> list[dict]:
@@ -179,13 +128,14 @@ async def thread_detail_view(request, workspace_id, thread_id):
     if request.method == "GET":
         if thread is None:
             return JsonResponse({"error": "Thread not found"}, status=404)
-        return JsonResponse(await _thread_summary_for_response(thread))
+        return JsonResponse(_thread_summary(thread))
 
     if request.method == "PATCH":
         body, err = parse_json_object(request)
         if err:
             return err
-        title = _short_thread_title(str(body.get("title", "")))
+        # Any rename, including clearing the title, is final: generation never overwrites it.
+        title = short_thread_title(str(body.get("title", "")))
         if thread is None:
             if await _thread_id_taken(thread_id):
                 return JsonResponse({"error": "Thread not found"}, status=404)
@@ -194,14 +144,18 @@ async def thread_detail_view(request, workspace_id, thread_id):
                 user=user,
                 workspace=workspace,
                 title=title,
-                title_is_custom=bool(title),
+                title_is_custom=True,
+                title_source=Thread.TitleSource.USER,
             )
             await thread.asave()
         else:
             thread.title = title
-            thread.title_is_custom = bool(title)
-            await thread.asave(update_fields=["title", "title_is_custom", "updated_at"])
-        return JsonResponse(await _thread_summary_for_response(thread))
+            thread.title_is_custom = True
+            thread.title_source = Thread.TitleSource.USER
+            await thread.asave(
+                update_fields=["title", "title_is_custom", "title_source", "updated_at"]
+            )
+        return JsonResponse(_thread_summary(thread))
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
