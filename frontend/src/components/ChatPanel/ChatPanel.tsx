@@ -464,21 +464,31 @@ export function ChatPanel() {
     }
   }, [messages])
 
-  // A held send that failed for good (not a busy retry) puts the request back.
+  // A held send hides its request until the server stops reporting it; once the
+  // send is over, the next poll shows the server's copy again (gone, or still
+  // there if it never went out). Only a send refused before any reply started is
+  // undone here: a reply that failed mid-stream already saved the message.
   useEffect(() => {
     const sending = heldSendRef.current
     if (!sending) return
-    if (status === "ready") {
-      heldSendRef.current = null
+    if (status === "error" && busyError) {
+      // Out of busy retries: Retry still resends it (naming its version), so keep
+      // the ref, but stop hiding a request that may be offered again.
+      if (busyNotice) held.settleSend(sending.threadId)
       return
     }
-    if (status !== "error" || busyError) return
+    if (status !== "ready" && status !== "error") return
     heldSendRef.current = null
+    const refused = status === "error" && messages.at(-1)?.id === sending.messageId
+    if (!refused) {
+      held.settleSend(sending.threadId)
+      return
+    }
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
-    held.restore()
+    held.restore(sending.threadId)
     if (sending.extra) returnToComposer(sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, busyError])
+  }, [status, busyError, busyNotice])
 
   function sendText(text: string) {
     resetOverloadState()

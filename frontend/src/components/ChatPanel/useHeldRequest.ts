@@ -29,7 +29,9 @@ export interface HeldRequest {
   add: (text: string) => Promise<AddOutcome>
   /** Hide the request before the client sends it itself; ``restore`` undoes it. */
   takeForSend: () => PendingRequest | null
-  restore: () => void
+  restore: (sendThreadId: string) => void
+  /** The held send in ``sendThreadId`` is over: show the server's copy from the next poll. */
+  settleSend: (sendThreadId: string) => void
   discard: () => Promise<void>
 }
 
@@ -166,10 +168,18 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     return current
   }, [current, threadId, hidePendingRequest])
 
-  const restore = useCallback(() => {
-    forgetPendingRequest(threadId)
-    void refresh()
-  }, [forgetPendingRequest, threadId, refresh])
+  const restore = useCallback(
+    (sendThreadId: string) => {
+      forgetPendingRequest(sendThreadId)
+      void refresh()
+    },
+    [forgetPendingRequest, refresh],
+  )
+
+  const settleSend = useCallback(
+    (sendThreadId: string) => setPendingRequest(sendThreadId, null),
+    [setPendingRequest],
+  )
 
   const discard = useCallback(async () => {
     if (!workspaceId || !current) return
@@ -194,6 +204,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     add,
     takeForSend,
     restore,
+    settleSend,
     discard,
   }
 }

@@ -21,6 +21,8 @@ interface Server {
   /** Status the next parts/ POST answers with. */
   partStatus: number
   messageLoads: number
+  /** Refuse a send that names a version, as when the request changed elsewhere. */
+  refuseHeldSend: boolean
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -70,6 +72,7 @@ function mockServer(): Server {
     partPosts: [],
     partStatus: 200,
     messageLoads: 0,
+    refuseHeldSend: false,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -81,6 +84,12 @@ function mockServer(): Server {
       if (!body.data.pendingRequestVersion && server.pending === null && server.chatBodies.length === 1) {
         server.pending = request([{ id: last.id, text }], { thread_id: body.data.threadId })
         return heldResponse(server.pending)
+      }
+      if (body.data.pendingRequestVersion && server.refuseHeldSend) {
+        return Response.json(
+          { error: "pending_request_conflict", reason: "version" },
+          { status: 409 },
+        )
       }
       server.pending = null
       return replyResponse(`echo: ${text}`)
@@ -223,5 +232,26 @@ describe("a message sent while the chat's data loads", () => {
 
     await screen.findByText(`echo: ${QUESTION}`)
     expect(server.chatBodies.at(-1)?.data).toMatchObject({ pendingRequestVersion: 1 })
+  })
+
+  it("puts the request and the text typed with it back when its send is refused", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.refuseHeldSend = true
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    await type(FOLLOW_UP, "Send message")
+
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(FOLLOW_UP))
+    expect(server.chatBodies.at(-1)?.data).toMatchObject({ pendingRequestVersion: 1 })
+    expect(await screen.findByTestId("pending-request-card")).toHaveTextContent(QUESTION)
+    expect(screen.queryByText(`${QUESTION}\n\n${FOLLOW_UP}`)).toBeNull()
+    consoleError.mockRestore()
   })
 })
