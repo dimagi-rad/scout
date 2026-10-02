@@ -10,6 +10,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 
 from allauth.socialaccount.models import SocialToken
+from asgiref.sync import sync_to_async
+from django.db import close_old_connections
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
@@ -538,7 +540,16 @@ def _spawn_detachable(coroutine) -> asyncio.Task:
     that call; anything still running afterwards would fail on its first query and
     never publish, or even release, its lease.
     """
-    return asyncio.get_running_loop().create_task(coroutine, context=contextvars.Context())
+    return asyncio.get_running_loop().create_task(
+        _with_fresh_connection(coroutine), context=contextvars.Context()
+    )
+
+
+async def _with_fresh_connection(coroutine):
+    # Outside a request, nothing recycles the shared executor thread's connection: no
+    # request signals fire for it, so a dropped one would fail every later check.
+    await sync_to_async(close_old_connections)()
+    return await coroutine
 
 
 class _Progress:
