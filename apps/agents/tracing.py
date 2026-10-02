@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_langfuse_settings() -> tuple[str, str, str]:
-    """Return (secret_key, public_key, host) from Django settings."""
+    """Return (secret_key, public_key, base_url) from Django settings."""
     return (
         getattr(settings, "LANGFUSE_SECRET_KEY", ""),
         getattr(settings, "LANGFUSE_PUBLIC_KEY", ""),
@@ -36,8 +36,8 @@ def get_langfuse_callback(
     Pair with langfuse_trace_context() (wrapping the astream_events call) to attach
     session_id/user_id. Returns None when Langfuse credentials are unconfigured.
     """
-    secret_key, public_key, host = _get_langfuse_settings()
-    if not all([secret_key, public_key, host]):
+    secret_key, public_key, base_url = _get_langfuse_settings()
+    if not all([secret_key, public_key, base_url]):
         return None
 
     try:
@@ -45,8 +45,10 @@ def get_langfuse_callback(
         from langfuse import Langfuse  # noqa: PLC0415
         from langfuse.langchain import CallbackHandler  # noqa: PLC0415
 
-        Langfuse(secret_key=secret_key, public_key=public_key, host=host)
-        return CallbackHandler()
+        Langfuse(secret_key=secret_key, public_key=public_key, base_url=base_url)
+        # Without public_key, get_client() hands back a disabled client as soon
+        # as a second Langfuse instance exists in the process.
+        return CallbackHandler(public_key=public_key)
     except Exception:
         logger.warning("Failed to initialize Langfuse CallbackHandler", exc_info=True)
         return None
@@ -62,8 +64,8 @@ def langfuse_trace_context(
     its scope. Wrap the astream_events call with it. Returns a no-op nullcontext
     when Langfuse is not configured.
     """
-    secret_key, public_key, host = _get_langfuse_settings()
-    if not all([secret_key, public_key, host]):
+    secret_key, public_key, base_url = _get_langfuse_settings()
+    if not all([secret_key, public_key, base_url]):
         return contextlib.nullcontext()
 
     try:

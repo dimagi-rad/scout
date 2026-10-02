@@ -2882,11 +2882,11 @@ def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
         return contextlib.nullcontext()
     secret_key = getattr(settings, "LANGFUSE_SECRET_KEY", "")
     public_key = getattr(settings, "LANGFUSE_PUBLIC_KEY", "")
-    host = getattr(settings, "LANGFUSE_BASE_URL", "")
-    if not all([secret_key, public_key, host]):
+    base_url = getattr(settings, "LANGFUSE_BASE_URL", "")
+    if not all([secret_key, public_key, base_url]):
         return contextlib.nullcontext()
     try:
-        client = Langfuse(secret_key=secret_key, public_key=public_key, host=host)
+        client = Langfuse(secret_key=secret_key, public_key=public_key, base_url=base_url)
         return client.start_as_current_observation(
             name="resume_thread_after_materialization",
             input={
