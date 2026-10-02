@@ -6,6 +6,7 @@ import { pendingPhase, pendingRequestText } from "./pendingRequests"
 function pending(state: PendingRequest["state"], jobState: JobState | null): PendingRequest {
   return {
     thread_id: "t",
+    request_id: "r",
     version: 2,
     parts: [
       { id: "a", text: "visits?", added_at: "" },

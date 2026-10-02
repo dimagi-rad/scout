@@ -111,6 +111,7 @@ def serialize(pending: PendingRequest, thread: Thread, job_state: str | None) ->
     """
     return {
         "thread_id": str(pending.thread_id),
+        "request_id": str(pending.request_id),
         "version": pending.version,
         "parts": pending.parts,
         "state": "claimed" if _claim_is_live(pending, thread) else "waiting",

@@ -36,6 +36,7 @@ describe("useWorkspaceJobsImpl workspaceLoads", () => {
 
 const held: PendingRequest = {
   thread_id: "thread-1",
+  request_id: "r1",
   version: 1,
   parts: [{ id: "p1", text: "How many visits?", added_at: "2026-10-02T00:00:00Z" }],
   state: "waiting",
@@ -91,5 +92,56 @@ describe("useWorkspaceJobsImpl held requests", () => {
 
     await act(() => result.current.refresh())
     expect(result.current.pendingByThreadId).toEqual({})
+  })
+
+  it("keeps a request this tab is sending hidden while the server still reports it", async () => {
+    polls(holding)
+    const { result } = renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await waitFor(() => expect(result.current.pendingByThreadId["thread-1"]).toEqual(held))
+
+    act(() => result.current.hidePendingRequest("thread-1", "r1"))
+    await act(() => result.current.refresh())
+    expect(result.current.pendingByThreadId).toEqual({})
+
+    // A different request on the thread is not the one being sent.
+    const next = { ...held, request_id: "r2" }
+    vi.mocked(jobsApi.active).mockResolvedValue({ ...empty, pending_requests: { "thread-1": next } })
+    await act(() => result.current.refresh())
+    expect(result.current.pendingByThreadId["thread-1"]).toEqual(next)
+  })
+
+  it("keeps an in-flight change through polls until the caller settles it", async () => {
+    polls(holding)
+    const { result } = renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await waitFor(() => expect(result.current.pendingByThreadId["thread-1"]).toEqual(held))
+
+    act(() => result.current.setPendingRequest("thread-1", null, "inFlight"))
+    await act(() => result.current.refresh())
+    expect(result.current.pendingByThreadId).toEqual({})
+
+    act(() => result.current.forgetPendingRequest("thread-1"))
+    expect(result.current.pendingByThreadId["thread-1"]).toEqual(held)
+  })
+
+  it("ignores a poll that lands after a newer one", async () => {
+    const spy = polls(empty)
+    const { result } = renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1))
+    await act(async () => {})
+
+    let answerOld: (response: ActiveJobsResponse) => void = () => {}
+    spy.mockImplementationOnce(() => new Promise((resolve) => (answerOld = resolve)))
+    spy.mockResolvedValueOnce(holding)
+    let old: Promise<void> = Promise.resolve()
+    act(() => {
+      old = result.current.refresh()
+    })
+    await act(() => result.current.refresh())
+    await act(async () => {
+      answerOld(empty)
+      await old
+    })
+
+    expect(result.current.pendingByThreadId["thread-1"]).toEqual(held)
   })
 })

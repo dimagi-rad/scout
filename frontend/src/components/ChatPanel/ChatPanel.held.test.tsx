@@ -26,6 +26,7 @@ interface Server {
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
   return {
     thread_id: THREAD,
+    request_id: "r1",
     version: parts.length,
     parts: parts.map((part) => ({ ...part, added_at: "2026-10-02T00:00:00Z" })),
     state: "waiting",

@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react"
 
 import type { PendingRequest } from "@/api/jobs"
+import { ApiError } from "@/api/client"
 import {
   isPendingConflict,
   pendingPhase,
@@ -9,7 +10,10 @@ import {
 } from "@/api/pendingRequests"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 
-export type AddOutcome = "added" | "send" | "failed"
+/** "send": the request was claimed or is gone, so the text is a new turn instead. */
+export type AddOutcome = "added" | "send" | { failed: string }
+
+const ADD_FAILED_MESSAGE = "Couldn't add that to your request. It's back in the message box."
 
 export interface HeldRequest {
   /** The request to show: the held one, or the one just sent until its answer loads. */
@@ -36,8 +40,13 @@ function newPartId(): string {
 }
 
 export function useHeldRequest(workspaceId: string | null, threadId: string): HeldRequest {
-  const { pendingByThreadId, setPendingRequest, forgetPendingRequest, refresh } =
-    useWorkspaceJobs()
+  const {
+    pendingByThreadId,
+    setPendingRequest,
+    hidePendingRequest,
+    forgetPendingRequest,
+    refresh,
+  } = useWorkspaceJobs()
   const current = pendingByThreadId[threadId] ?? null
   // What the last render saw, adjusted during render so a change never paints a
   // frame without its card. A request the poll stopped reporting was sent: it
@@ -119,11 +128,15 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
       const retry = failedPartRef.current
       const part = { id: retry?.text === text ? retry.id : newPartId(), text }
       failedPartRef.current = null
-      setPendingRequest(threadId, {
-        ...current,
-        version: current.version + 1,
-        parts: [...current.parts, { ...part, added_at: new Date().toISOString() }],
-      })
+      setPendingRequest(
+        threadId,
+        {
+          ...current,
+          version: current.version + 1,
+          parts: [...current.parts, { ...part, added_at: new Date().toISOString() }],
+        },
+        "inFlight",
+      )
       try {
         const saved = await pendingRequestApi.addPart(workspaceId, threadId, part)
         setPendingRequest(threadId, saved)
@@ -134,7 +147,13 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
         // Claimed or gone: it is being (or was) answered, so this is a new turn.
         if (isPendingConflict(error)) return "send"
         failedPartRef.current = part
-        return "failed"
+        // A 400 (the request would be too long) says what to do; it is not transient.
+        return {
+          failed:
+            error instanceof ApiError && error.status === 400
+              ? `${error.message}. It's back in the message box.`
+              : ADD_FAILED_MESSAGE,
+        }
       }
     },
     [workspaceId, threadId, current, setPendingRequest, forgetPendingRequest, refresh],
@@ -143,9 +162,9 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
   const takeForSend = useCallback(() => {
     if (!current) return null
     setSeen((prev) => ({ ...prev, removedLocally: true }))
-    setPendingRequest(threadId, null)
+    hidePendingRequest(threadId, current.request_id)
     return current
-  }, [current, threadId, setPendingRequest])
+  }, [current, threadId, hidePendingRequest])
 
   const restore = useCallback(() => {
     forgetPendingRequest(threadId)
@@ -155,9 +174,10 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
   const discard = useCallback(async () => {
     if (!workspaceId || !current) return
     setSeen((prev) => ({ ...prev, removedLocally: true }))
-    setPendingRequest(threadId, null)
+    setPendingRequest(threadId, null, "inFlight")
     try {
       await pendingRequestApi.discard(workspaceId, threadId, current.version)
+      setPendingRequest(threadId, null)
     } catch {
       forgetPendingRequest(threadId)
       void refresh()

@@ -19,6 +19,7 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
     recentTerminationsByToolCallId: {},
     pendingByThreadId: {},
     setPendingRequest: vi.fn(),
+    hidePendingRequest: vi.fn(),
     forgetPendingRequest: vi.fn(),
     refresh: vi.fn(),
     notifyJobLikelyStarted: vi.fn(),

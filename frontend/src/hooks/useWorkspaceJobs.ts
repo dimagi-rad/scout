@@ -22,6 +22,29 @@ interface State {
 interface PendingOverride {
   value: PendingRequest | null
   seq: number
+  /** How the override ends; see ``PendingOverrideMode``. */
+  mode: PendingOverrideMode
+  /** For "hide": the request hidden while the server still reports it. */
+  hides?: string
+}
+
+/**
+ * - "committed": the server already has the change, so a poll that started after
+ *   it shows it and the override ends there.
+ * - "inFlight": the request for it has not answered yet; only a later call ends it.
+ * - "hide": the request is being sent by this tab and is hidden until the server
+ *   stops reporting it (it stays, claimed, until that turn settles).
+ */
+export type PendingOverrideMode = "committed" | "inFlight" | "hide"
+
+function overrideHolds(
+  override: PendingOverride,
+  polled: PendingRequest | undefined,
+  seqAtStart: number,
+): boolean {
+  if (override.mode === "inFlight") return true
+  if (override.mode === "hide") return polled !== undefined && polled.request_id === override.hides
+  return override.seq > seqAtStart
 }
 
 export interface UseWorkspaceJobs {
@@ -46,9 +69,15 @@ export interface UseWorkspaceJobs {
   /** Requests held while a chat's data loads, by thread id: the last poll,
    *  overlaid with local changes it has not seen yet. */
   pendingByThreadId: Record<string, PendingRequest>
-  /** Show a local change to a thread's held request (null: none) until a poll
-   *  that started after it reports the server's copy. */
-  setPendingRequest: (threadId: string, pending: PendingRequest | null) => void
+  /** Show a local change to a thread's held request (null: none) over the poll;
+   *  ``mode`` says when the poll takes over again (default "committed"). */
+  setPendingRequest: (
+    threadId: string,
+    pending: PendingRequest | null,
+    mode?: Exclude<PendingOverrideMode, "hide">,
+  ) => void
+  /** Hide a request this tab is sending until the server stops reporting it. */
+  hidePendingRequest: (threadId: string, requestId: string) => void
   /** Drop a local change, so the thread shows the server's copy again. */
   forgetPendingRequest: (threadId: string) => void
   refresh: () => Promise<void>
@@ -74,6 +103,10 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
   const [recentlyCompletedThreadIds, setRecentlyCompletedThreadIds] = useState<string[]>([])
   const [overrides, setOverrides] = useState<Record<string, PendingOverride>>({})
   const overrideSeqRef = useRef(0)
+  // Polls overlap (the interval plus refreshes); an older one landing last must
+  // not overwrite a newer snapshot or the diff the next poll is taken against.
+  const pollSeqRef = useRef(0)
+  const appliedPollRef = useRef(0)
   const prevThreadIdsRef = useRef<Set<string>>(new Set())
   const prevPendingThreadIdsRef = useRef<Set<string>>(new Set())
   const workspaceIdRef = useRef(workspaceId)
@@ -85,10 +118,13 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     if (!workspaceId) return
     // Local changes made after this poll left are newer than what it returns.
     const seqAtStart = overrideSeqRef.current
+    const poll = ++pollSeqRef.current
     try {
       const data = await jobsApi.active(workspaceId)
       // A response for a workspace we have since left must not seed the new one's diff.
       if (workspaceIdRef.current !== workspaceId) return
+      if (poll < appliedPollRef.current) return
+      appliedPollRef.current = poll
       const currentThreadIds = new Set(data.jobs.map((j) => j.thread_id))
       const pendingRequests = data.pending_requests ?? {}
       const currentPendingThreadIds = new Set(Object.keys(pendingRequests))
@@ -111,7 +147,9 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
         lastError: null,
       })
       setOverrides((prev) => {
-        const kept = Object.entries(prev).filter(([, override]) => override.seq > seqAtStart)
+        const kept = Object.entries(prev).filter(([threadId, override]) =>
+          overrideHolds(override, pendingRequests[threadId], seqAtStart),
+        )
         return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept)
       })
       if (justCompleted.size > 0) {
@@ -173,10 +211,26 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     }
   }, [workspaceId, fetchOnce])
 
-  const setPendingRequest = useCallback((threadId: string, pending: PendingRequest | null) => {
+  const setPendingRequest = useCallback(
+    (
+      threadId: string,
+      pending: PendingRequest | null,
+      mode: Exclude<PendingOverrideMode, "hide"> = "committed",
+    ) => {
+      overrideSeqRef.current += 1
+      const seq = overrideSeqRef.current
+      setOverrides((prev) => ({ ...prev, [threadId]: { value: pending, seq, mode } }))
+    },
+    [],
+  )
+
+  const hidePendingRequest = useCallback((threadId: string, requestId: string) => {
     overrideSeqRef.current += 1
     const seq = overrideSeqRef.current
-    setOverrides((prev) => ({ ...prev, [threadId]: { value: pending, seq } }))
+    setOverrides((prev) => ({
+      ...prev,
+      [threadId]: { value: null, seq, mode: "hide", hides: requestId },
+    }))
   }, [])
 
   const forgetPendingRequest = useCallback((threadId: string) => {
@@ -222,6 +276,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     recentTerminationsByToolCallId,
     pendingByThreadId,
     setPendingRequest,
+    hidePendingRequest,
     forgetPendingRequest,
     refresh: fetchOnce,
     notifyJobLikelyStarted: fetchOnce,

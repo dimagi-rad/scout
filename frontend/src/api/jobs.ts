@@ -68,6 +68,8 @@ export interface PendingRequestPart {
  *  as one unsent message until the data can answer it. */
 export interface PendingRequest {
   thread_id: string
+  /** Names this request; a thread's next one, after this is sent, gets a new id. */
+  request_id: string
   /** Bumped on every change; a change sent against an older version is refused. */
   version: number
   parts: PendingRequestPart[]
