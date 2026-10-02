@@ -196,8 +196,10 @@ def test_resume_span_yields_none_when_not_configured(settings):
 def _trace_context_failing_on(phase):
     if phase == "enter":
         raise RuntimeError("langfuse enter failed")
-    yield
-    raise RuntimeError("langfuse exit failed")
+    try:
+        yield
+    finally:
+        raise RuntimeError("langfuse exit failed")
 
 
 def _open_resume_span():
