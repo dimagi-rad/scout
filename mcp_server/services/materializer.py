@@ -666,7 +666,9 @@ def _run_discover_phase(
 
 # Source name -> count field on the opportunity's ``/export/opp_org_program_list/``
 # entry. As of 2026-10 Connect sends only ``visit_count``; add a field here if it
-# starts sending counts for the other export endpoints.
+# starts sending counts for the other export endpoints. A resumable source also
+# needs its writer to add the already-loaded rows on resume, as visits does, or
+# a resumed bar starts from 0 against a whole-table total.
 _CONNECT_DISCOVERY_COUNT_FIELDS = {"visits": "visit_count"}
 
 
