@@ -728,6 +728,96 @@ class TestEndpoints:
         assert current.status_code == 200
         assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
+    async def _patch(self, client, base, **body):
+        return await client.patch(
+            f"{base}/pending-request/", data=json.dumps(body), content_type="application/json"
+        )
+
+    async def test_edit_rewrites_the_request_as_one_part(self, agent_layer):
+        _ws, client, thread_id, base = await self._held("ep-edit", agent_layer)
+        await pending_requests.aadd_part(thread_id, part_id="m2", text="by month")
+
+        response = await self._patch(client, base, version=2, text="visits by week")
+
+        assert response.status_code == 200
+        assert response.json()["version"] == 3
+        assert [p["text"] for p in response.json()["parts"]] == ["visits by week"]
+
+    async def test_remove_drops_a_later_part(self, agent_layer):
+        _ws, client, thread_id, base = await self._held("ep-remove", agent_layer)
+        await pending_requests.aadd_part(thread_id, part_id="m2", text="by month")
+        await pending_requests.aadd_part(thread_id, part_id="m3", text="in Kenya")
+
+        response = await self._patch(client, base, version=3, remove_part_id="m2")
+
+        assert response.status_code == 200
+        assert [p["text"] for p in response.json()["parts"]] == ["visits?", "in Kenya"]
+        assert response.json()["version"] == 4
+
+    async def test_the_first_part_is_edited_not_removed(self, agent_layer):
+        _ws, client, _thread_id, base = await self._held("ep-remove-first", agent_layer)
+
+        response = await self._patch(client, base, version=1, remove_part_id="m1")
+
+        assert response.status_code == 400
+        assert response.json()["reason"] == "pending_request_invalid_edit"
+
+    @pytest.mark.parametrize(
+        ("body", "reason"),
+        [
+            ({"version": 1, "text": "   "}, "pending_request_invalid_edit"),
+            ({"version": 1, "text": "x" * (MAX_MESSAGE_LENGTH + 1)}, "pending_request_too_long"),
+        ],
+    )
+    async def test_an_edit_that_cannot_be_sent_is_refused(self, agent_layer, body, reason):
+        _ws, client, thread_id, base = await self._held(f"ep-bad-{reason[-8:]}", agent_layer)
+
+        response = await self._patch(client, base, **body)
+
+        assert response.status_code == 400
+        assert response.json()["reason"] == reason
+        pending = await PendingRequest.objects.aget(thread_id=thread_id)
+        assert pending.version == 1
+
+    async def test_an_edit_against_another_version_is_a_conflict(self, agent_layer):
+        _ws, client, thread_id, base = await self._held("ep-edit-stale", agent_layer)
+        await pending_requests.aadd_part(thread_id, part_id="m2", text="by month")
+
+        edit = await self._patch(client, base, version=1, text="mine")
+        remove_gone_part = await self._patch(client, base, version=2, remove_part_id="nope")
+
+        assert edit.status_code == 409
+        assert edit.json()["reason"] == "version"
+        assert remove_gone_part.status_code == 409
+
+    async def test_an_edit_of_a_request_being_sent_is_a_conflict(self, agent_layer):
+        _ws, client, thread_id, base = await self._held("ep-edit-claimed", agent_layer)
+        lease = await atry_acquire_turn_lease(thread_id)
+        await pending_requests.aclaim(thread_id, lease.token)
+
+        response = await self._patch(client, base, version=1, text="mine")
+
+        assert response.status_code == 409
+        assert response.json()["reason"] == "claimed"
+
+    async def test_an_edit_names_exactly_one_change(self, agent_layer):
+        _ws, client, _thread_id, base = await self._held("ep-edit-both", agent_layer)
+
+        both = await self._patch(client, base, version=1, text="a", remove_part_id="m1")
+        neither = await self._patch(client, base, version=1)
+
+        assert both.status_code == 400
+        assert neither.status_code == 400
+
+    async def test_another_user_cannot_edit_it(self, agent_layer):
+        ws, _client, _thread_id, base = await self._held("ep-edit-foreign", agent_layer)
+        tenant = await Tenant.objects.aget(external_id="t-ep-edit-foreign")
+        _other, intruder = await _member(ws, tenant, "other-edit@b.c")
+
+        response = await self._patch(intruder, base, version=1, text="mine")
+
+        assert response.status_code == 404
+
     async def test_messages_and_the_jobs_poll_include_it(self, agent_layer):
         ws, client, thread_id, base = await self._held("ep-read", agent_layer)
 

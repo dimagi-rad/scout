@@ -319,12 +319,13 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
 
 @async_login_required
 async def thread_pending_request_view(request, workspace_id, thread_id):
-    """DELETE /api/workspaces/<workspace_id>/threads/<thread_id>/pending-request/
+    """PATCH/DELETE /api/workspaces/<workspace_id>/threads/<thread_id>/pending-request/
 
-    Discards the held request at ``{version}``; a 409 means it changed, was claimed
-    or is gone.
+    PATCH ``{version, text}`` rewrites the held request and ``{version,
+    remove_part_id}`` removes one of its later parts; DELETE ``{version}`` discards
+    it. A 409 means it changed, was claimed or is gone.
     """
-    if request.method != "DELETE":
+    if request.method not in ("PATCH", "DELETE"):
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
@@ -341,8 +342,31 @@ async def thread_pending_request_view(request, workspace_id, thread_id):
     version = body.get("version")
     if isinstance(version, bool) or not isinstance(version, int):
         return JsonResponse({"error": "version must be an integer"}, status=400)
+    if request.method == "PATCH":
+        return await _edit_pending_request(thread, version, body)
     try:
         await pending_requests.adiscard(thread.id, version=version)
     except pending_requests.PendingRequestConflict as e:
         return _pending_conflict(e)
     return JsonResponse({"status": "discarded"})
+
+
+async def _edit_pending_request(thread, version: int, body: dict) -> JsonResponse:
+    text, remove_part_id = body.get("text"), body.get("remove_part_id")
+    if (text is None) == (remove_part_id is None):
+        return JsonResponse({"error": "Send exactly one of text or remove_part_id"}, status=400)
+    if text is not None and not isinstance(text, str):
+        return JsonResponse({"error": "text must be a string"}, status=400)
+    if remove_part_id is not None and not isinstance(remove_part_id, str):
+        return JsonResponse({"error": "remove_part_id must be a string"}, status=400)
+    try:
+        pending = await pending_requests.aedit(
+            thread.id, version=version, text=text, remove_part_id=remove_part_id
+        )
+    except pending_requests.PendingRequestConflict as e:
+        return _pending_conflict(e)
+    except pending_requests.PendingRequestTooLong as e:
+        return JsonResponse({"error": str(e), "reason": "pending_request_too_long"}, status=400)
+    except pending_requests.PendingRequestInvalidEdit as e:
+        return JsonResponse({"error": str(e), "reason": "pending_request_invalid_edit"}, status=400)
+    return JsonResponse(pending)
