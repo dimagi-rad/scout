@@ -350,3 +350,36 @@ async def test_thread_title_patch_shortens_long_names(workspace, user):
     assert payload["title_is_custom"] is True
     thread = await Thread.objects.aget(id=thread_id)
     assert thread.title == f"{'a' * 200}..."
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_clearing_the_title_hands_it_back_to_the_automatic_flow(monkeypatch, workspace, user):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=user,
+        title="Q3 completion review",
+        title_is_custom=True,
+        title_source=Thread.TitleSource.USER,
+    )
+
+    async def first_message(thread_id):
+        assert str(thread_id) == str(thread.id)
+        return "What are module completion rates?"
+
+    monkeypatch.setattr("apps.chat.thread_views.afirst_user_message", first_message)
+    client = await _auth_client(user)
+
+    response = await client.patch(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/",
+        data=json.dumps({"title": "  "}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["title"] == "What are module completion rates?"
+    assert payload["title_source"] == "first_message"
+    await thread.arefresh_from_db()
+    assert thread.title_is_custom is False
+    assert thread.title_source == Thread.TitleSource.FIRST_MESSAGE

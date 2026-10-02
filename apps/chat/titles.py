@@ -65,7 +65,7 @@ def clean_generated_title(raw: str) -> str:
     return title.rstrip(".,;:!?- \u2013\u2014" + _WRAPPING_CHARS)
 
 
-async def _afirst_user_message(thread_id: str) -> str:
+async def afirst_user_message(thread_id: str) -> str:
     """The first user message from the checkpoint, for threads stored without a title."""
     try:
         checkpointer = await ensure_checkpointer()
@@ -128,7 +128,7 @@ async def agenerate_thread_title(thread_id: str) -> str:
     if thread.title_source != Thread.TitleSource.FIRST_MESSAGE or thread.title_is_custom:
         return "skipped"
 
-    first_message = thread.title.strip() or await _afirst_user_message(thread_id)
+    first_message = thread.title.strip() or await afirst_user_message(thread_id)
     if not first_message:
         return "no_message"
 

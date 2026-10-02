@@ -17,7 +17,7 @@ from apps.chat.helpers import (
 )
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
-from apps.chat.titles import short_thread_title
+from apps.chat.titles import afirst_user_message, short_thread_title
 from apps.common.http import parse_json_object
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -136,24 +136,25 @@ async def thread_detail_view(request, workspace_id, thread_id):
         body, err = parse_json_object(request)
         if err:
             return err
-        # Any rename, including clearing the title, is final: generation never overwrites it.
         title = short_thread_title(str(body.get("title", "")))
         if thread is None:
             if await _thread_id_taken(thread_id):
                 return JsonResponse({"error": "Thread not found"}, status=404)
-            thread = Thread(
-                id=thread_id,
-                user=user,
-                workspace=workspace,
-                title=title,
-                title_is_custom=True,
-                title_source=Thread.TitleSource.USER,
-            )
-            await thread.asave()
-        else:
+            thread = Thread(id=thread_id, user=user, workspace=workspace)
+        if title:
+            # A rename is final: generation never overwrites a USER title.
             thread.title = title
             thread.title_is_custom = True
             thread.title_source = Thread.TitleSource.USER
+        else:
+            # Clearing hands the title back to the automatic flow: the first message
+            # now, and a generated title after the next successful turn.
+            thread.title = short_thread_title(await afirst_user_message(thread.id))
+            thread.title_is_custom = False
+            thread.title_source = Thread.TitleSource.FIRST_MESSAGE
+        if thread._state.adding:
+            await thread.asave()
+        else:
             await thread.asave(
                 update_fields=["title", "title_is_custom", "title_source", "updated_at"]
             )

@@ -173,7 +173,7 @@ async def test_untitled_thread_falls_back_to_the_checkpoint(
 ):
     thread = await _thread(workspace, user, title="")
     monkeypatch.setattr(
-        titles, "_afirst_user_message", AsyncMock(return_value="Show visits by worker")
+        titles, "afirst_user_message", AsyncMock(return_value="Show visits by worker")
     )
 
     assert await agenerate_thread_title(str(thread.id)) == "generated"
