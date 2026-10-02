@@ -66,7 +66,12 @@ export function useResumeStream(
         const { chunks, more } = await api.get<{ chunks: StreamChunk[]; more?: boolean }>(
           `/api/workspaces/${workspaceId}/threads/${threadId}/resume-stream/?after=${cursor.after}`,
         )
-        if (cancelled || cursorRef.current !== cursor) return
+        if (cancelled) return
+        if (cursorRef.current !== cursor) {
+          // Reset while this read was out: read again from the new position.
+          timer = setTimeout(poll, 0)
+          return
+        }
         if (chunks.length) cursor.after = chunks[chunks.length - 1].id
         let read = chunks
         if (!cursor.caughtUp) {

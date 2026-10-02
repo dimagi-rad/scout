@@ -128,4 +128,19 @@ describe("useResumeStream", () => {
     })
     expect(spy.mock.calls.some(([url]) => String(url).endsWith("after=0"))).toBe(true)
   })
+
+  it("keeps reading when a reset lands while a read is out", async () => {
+    let answer: (value: { chunks: Chunk[] }) => void = () => {}
+    const spy = vi
+      .spyOn(api, "get")
+      .mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)))
+      .mockResolvedValue({ chunks: [{ id: 1, run: "r", text: "Still going", done: false }] })
+    const { result } = renderHook(() => useResumeStream("ws", "t", true))
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1))
+
+    act(() => result.current.reset())
+    await act(async () => answer({ chunks: [] }))
+
+    await waitFor(() => expect(result.current.text).toBe("Still going"))
+  })
 })
