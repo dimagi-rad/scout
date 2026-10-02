@@ -195,26 +195,37 @@ def _is_requested_opportunity(response, external_id: str) -> bool:
 
 
 async def _verify_connect_opportunities(
-    client, policy, listing_url, headers, ids, deadline, clock, *, log, unavailable
+    client, policy, listing_url, headers, ids, deadline, clock, *, connection_id, log, unavailable
 ):
     """Check each opportunity; None means fall back to the full listing.
 
-    A no-access 404 drops that opportunity, which publication then archives as an
-    omission, exactly as the listing would have; the rest are still checked.
+    A no-access 404 is an omission, which publication archives as the listing would
+    have. Once one is seen, a later failure ends the check with what was decided so
+    far rather than discarding that revocation.
     """
     # Keep part of the budget back, or the listing fallback could never finish.
     light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
     confirmed = []
+    omitted = False
+
+    def settle(index, failure):
+        """``failure`` is a thunk, so a settled attempt does not log as unavailable."""
+        if omitted:
+            log("light_settled_after_omission", outcome="partial")
+            return ProviderVerificationResult.complete(confirmed, scope=ids[:index])
+        return failure()
+
     for index, external_id in enumerate(ids):
         remaining = light_deadline - clock()
         if remaining <= 0:
-            return unavailable("light_deadline_before_request")
+            return settle(index, lambda: unavailable("light_deadline_before_request"))
         try:
             url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
         except UnsafeProviderURL:
-            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+            return settle(index, lambda: ProviderVerificationResult.indeterminate(_INDETERMINATE))
         # A share of what is left, so one slow opportunity cannot starve the rest,
-        # but never so small that an ordinary slow answer is cut off.
+        # but never so small that an ordinary slow answer is cut off. On the 10s
+        # interactive budget the floor wins, so allocation is effectively greedy.
         request_timeout = min(
             PER_REQUEST_TIMEOUT_SECONDS,
             remaining,
@@ -231,28 +242,47 @@ async def _verify_connect_opportunities(
                 timeout=request_timeout,
             )
         except TimeoutError:
-            return unavailable("light_request_timeout")
+            return settle(index, lambda: unavailable("light_request_timeout"))
         except httpx.RequestError as exc:
             # The class name only: str(exc) can carry the request URL.
-            return unavailable(f"light_request_error:{type(exc).__name__}")
+            cause = f"light_request_error:{type(exc).__name__}"
+            return settle(index, lambda cause=cause: unavailable(cause))
         if clock() >= deadline:
-            return unavailable("light_deadline_after_response", status=response.status_code)
+            status = response.status_code
+            return settle(
+                index,
+                lambda status=status: unavailable("light_deadline_after_response", status=status),
+            )
         if _is_connect_no_access_404(response):
+            omitted = True
             continue
         if response.status_code == 404:
             # Not DRF's answer, so likely the route itself is gone; the listing
             # can still decide, and must never read this as an omission.
-            return None
+            return settle(index, lambda: None)
         status_result = _status_result(response.status_code)
-        if status_result is not None:
-            if status_result.outcome == VerificationOutcome.UNAVAILABLE:
-                log("light_http_status", status=response.status_code)
+        if response.status_code == 401:
+            logger.info(
+                "Provider commcare_connect answered verification for connection %s "
+                "with HTTP 401 (%s)",
+                connection_id,
+                "invalid_token" if _names_invalid_token(response) else "no token error",
+            )
+            # Credential-level, so it outranks a per-opportunity omission.
             return status_result
+        if status_result is not None:
+
+            def failed(result=status_result, status=response.status_code):
+                if result.outcome == VerificationOutcome.UNAVAILABLE:
+                    log("light_http_status", status=status)
+                return result
+
+            return settle(index, failed)
         if not _is_requested_opportunity(response, external_id):
             # A changed response shape must cost a slow check, not every check.
-            return None
+            return settle(index, lambda: None)
         confirmed.append(external_id)
-    return ProviderVerificationResult.complete(confirmed, scoped=True)
+    return ProviderVerificationResult.complete(confirmed, scope=ids)
 
 
 def _names_invalid_token(response) -> bool:
@@ -423,6 +453,7 @@ async def verify_provider(
                     light_ids,
                     deadline,
                     clock,
+                    connection_id=snapshot.observation.connection_id,
                     log=log,
                     unavailable=unavailable,
                 )

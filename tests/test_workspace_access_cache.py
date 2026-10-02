@@ -363,7 +363,7 @@ def test_an_upstream_omission_drops_the_users_cached_decisions(
     claim = claim_verification(user.id, connection.id, {tenant.id})
 
     with django_capture_on_commit_callbacks() as callbacks:
-        publish_verification(claim, VerificationResult.complete(set(), scoped=True))
+        publish_verification(claim, VerificationResult.complete(set(), scope={tenant.id}))
     assert resolve_workspace_access_ex(user, workspace.id).granted
     for callback in callbacks:
         callback()
