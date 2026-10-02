@@ -31,6 +31,7 @@ from apps.chat.helpers import (
 from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
+from apps.chat.tasks import aschedule_thread_title
 from apps.chat.titles import short_thread_title
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
@@ -231,7 +232,7 @@ async def chat_view(request):
     # The Thread row is the only authorization for this checkpointer key, so a
     # failed upsert must propagate rather than fall through to the agent.
     try:
-        await _upsert_thread(thread_id, user, user_content, workspace=workspace)
+        thread = await _upsert_thread(thread_id, user, user_content, workspace=workspace)
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
 
@@ -247,7 +248,7 @@ async def chat_view(request):
                 user=user,
                 workspace=workspace,
                 access=access,
-                thread_id=thread_id,
+                thread=thread,
                 user_content=user_content,
             )
     except asyncio.CancelledError:
@@ -280,9 +281,10 @@ def _thread_busy_response() -> JsonResponse:
 
 
 async def _start_turn(
-    lease: TurnLease, *, user, workspace, access, thread_id: str, user_content: str
+    lease: TurnLease, *, user, workspace, access, thread: Thread, user_content: str
 ):
     """Build the agent and return the turn's stream, which owns ``lease`` from here."""
+    thread_id = str(thread.id)
     # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
@@ -383,7 +385,11 @@ async def _start_turn(
             with trace_ctx:
                 async with contextlib.aclosing(
                     langgraph_to_ui_stream(
-                        agent, input_state, config, owns_thread=lambda: not lease.lost
+                        agent,
+                        input_state,
+                        config,
+                        owns_thread=lambda: not lease.lost,
+                        on_success=lambda: aschedule_thread_title(thread),
                     )
                 ) as stream:
                     async for chunk in stream:

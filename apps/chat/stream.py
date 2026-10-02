@@ -31,7 +31,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 from anthropic import APIStatusError, InternalServerError, RateLimitError
@@ -263,12 +263,15 @@ async def langgraph_to_ui_stream(
     config: dict,
     *,
     owns_thread: Callable[[], bool] | None = None,
+    on_success: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream LangGraph agent events as UI Message Stream Protocol (SSE) chunks.
 
     ``owns_thread`` gates the stopped-reply write on cancellation: a run
     cancelled because it lost the thread's turn lease must not write to it.
+    ``on_success`` runs once the agent run ends without an error, before the
+    finish chunk, so its work is already queued when the client sees the turn end.
     """
     text_id = "text-0"
     text_started = False
@@ -289,6 +292,7 @@ async def langgraph_to_ui_stream(
     # the parent tool output is emitted.
     pending_subagent_events: list[dict[str, Any]] = []
     streamed_text: list[str] = []
+    succeeded = False
 
     yield _sse({"type": "start"})
     yield _sse({"type": "start-step"})
@@ -617,6 +621,8 @@ async def langgraph_to_ui_stream(
                     "errorText": f"An error occurred while processing your request. Ref: {ref}",
                 }
             )
+    else:
+        succeeded = True
     finally:
         if not parent_pump.done():
             parent_pump.cancel()
@@ -631,6 +637,12 @@ async def langgraph_to_ui_stream(
         yield _sse({"type": "reasoning-end", "id": reasoning_id})
     if text_started:
         yield _sse({"type": "text-end", "id": text_id})
+
+    if succeeded and on_success is not None:
+        try:
+            await on_success()
+        except Exception:
+            logger.warning("Post-turn hook failed", exc_info=True)
 
     yield _sse({"type": "finish-step"})
     yield _sse({"type": "finish", "finishReason": "stop"})
