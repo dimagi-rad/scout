@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import timedelta
 
 import pytest
+from asgiref.sync import sync_to_async
+from django.utils import timezone
 
 from apps.users.adapters import encrypt_credential
 from apps.users.models import (
@@ -20,6 +23,13 @@ from apps.users.services.access_verification_types import (
     AccessVerificationStatus,
     ProviderVerificationResult,
 )
+from apps.workspaces.services import access_freshness
+from apps.workspaces.services.access_freshness import (
+    VERIFICATION_IN_PROGRESS,
+    VerificationBudget,
+    admit_upstream,
+)
+from tests.upstream_proofs import amake_proof_stale
 
 
 @pytest.fixture
@@ -171,3 +181,26 @@ async def test_without_respond_by_the_deadline_still_cancels(user, tenant, api_c
     assert result.status == AccessVerificationStatus.UNAVAILABLE
     control = await VerificationControl.objects.aget(connection=api_connection)
     assert control.lease_token is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_sync_views_check_still_publishes_after_it_answers(
+    user, workspace, tenant, upstream_provider, monkeypatch
+):
+    """DRF views are sync: they reach the check through async_to_sync, whose
+    executor dies with the call. The continuing check must not depend on it."""
+    monkeypatch.setitem(access_freshness.BUDGET_SECONDS, VerificationBudget.INTERACTIVE, 0.5)
+    await amake_proof_stale(user, tenant)
+    upstream_provider.domains = [tenant.external_id]
+    upstream_provider.gate = asyncio.Event()
+
+    admission = await sync_to_async(admit_upstream)(
+        user.id, {tenant.id}, budget=VerificationBudget.INTERACTIVE
+    )
+
+    assert admission.reason == VERIFICATION_IN_PROGRESS
+    upstream_provider.gate.set()
+    await _drain_supervised()
+    proof = await UpstreamAccessProof.objects.aget(connection__user=user, tenant=tenant)
+    assert timezone.now() - proof.verified_at < timedelta(minutes=1)

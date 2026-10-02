@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import random
 import threading
@@ -516,6 +517,17 @@ def _attempt_matches_waiter_lineage(
     )
 
 
+def _spawn_detachable(coroutine) -> asyncio.Task:
+    """A task that may outlive its caller, so it must not run in the caller's context.
+
+    A sync (DRF) view reaches here through async_to_sync, whose context routes every
+    thread-sensitive sync_to_async call (all ORM work) to an executor that dies with
+    that call; anything still running afterwards would fail on its first query and
+    never publish, or even release, its lease.
+    """
+    return asyncio.get_running_loop().create_task(coroutine, context=contextvars.Context())
+
+
 async def _verify_and_publish(
     claim,
     requested,
@@ -703,7 +715,7 @@ async def verify_connection_access(
     except Exception:
         await asyncio.shield(_release_claim(claim))
         raise
-    verification = asyncio.ensure_future(
+    verification = _spawn_detachable(
         _verify_and_publish(
             claim,
             requested,
