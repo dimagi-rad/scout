@@ -14,6 +14,13 @@ current credential, refreshing it if needed, and only a complete provider listin
 un-archives the candidates it names. Rows archived for any other reason stay archived
 even if listed. A dead credential, a provider outage or a second 401 restores
 nothing, so a genuinely revoked user stays revoked. Idempotent.
+
+Known imprecision, bounded by the listing: a single-tenant 403 recorded outside the
+verifier (loaders, materializer) after the token denial restamps the timestamp but
+leaves no proof marker, and an alias tenant sharing a candidate's external id maps to
+the same listing entry. Either row can be restored, but only when the provider lists
+it for the current credential -- what an ordinary verification or rediscovery would
+also restore.
 """
 
 import logging
