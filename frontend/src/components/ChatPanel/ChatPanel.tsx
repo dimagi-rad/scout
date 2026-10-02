@@ -526,6 +526,16 @@ export function ChatPanel() {
   }, [status, busyError])
 
   function sendText(text: string) {
+    // A held send left behind its busy notice is replaced by this turn, which
+    // carries the held text itself; only the text typed with it would be lost.
+    const stale = heldSendRef.current
+    if (stale) {
+      heldSendRef.current = null
+      held.settleSend(stale.threadId)
+      if (!stale.streamed && stale.extra) {
+        returnToComposer(stale.workspaceId, stale.threadId, stale.extra)
+      }
+    }
     resetOverloadState()
     setStoppedNotice(false)
     turnThreadRef.current = threadId
