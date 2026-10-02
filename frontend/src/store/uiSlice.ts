@@ -152,6 +152,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
             threadsStatus: "error",
             threadsAccessDenialReason: denial?.reason ?? null,
             threadsAccessRetryable: denial?.retryable === true,
+            accessRetryOutcome: null,
           })
           // Can't loop: threads refetch on a workspace switch, not when the list changes.
           if (denial && ACCESS_LOSS_REASONS.has(denial.reason)) {
