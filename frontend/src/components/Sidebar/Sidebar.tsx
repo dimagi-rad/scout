@@ -240,6 +240,15 @@ export function Sidebar() {
               S
             </span>
             <span className="scout-sidebar-label min-w-0 truncate text-lg">Scout</span>
+            {user?.agent_model && (
+              <span
+                data-testid="app-model-label"
+                title={user.agent_model.id}
+                className="scout-sidebar-label min-w-0 shrink truncate pt-1 text-xs font-normal text-muted-foreground"
+              >
+                {user.agent_model.label}
+              </span>
+            )}
           </Link>
         </div>
 

@@ -10,6 +10,7 @@ export interface User {
   name: string
   is_staff: boolean
   onboarding_complete: boolean
+  agent_model?: { id: string; label: string }
 }
 
 export interface AuthSlice {
