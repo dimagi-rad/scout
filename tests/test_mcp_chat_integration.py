@@ -31,7 +31,7 @@ from apps.chat.stream import (
     _tool_content_to_str,
     langgraph_to_ui_stream,
 )
-from apps.workspaces.models import Workspace
+from apps.workspaces.models import SchemaState, TenantSchema, Workspace
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -63,8 +63,15 @@ def auth_async_client(async_client, user):
 
 @pytest.fixture
 def workspace_from_membership(tenant_membership):
-    """Return the Workspace auto-created for the tenant_membership."""
+    """Return the Workspace auto-created for the tenant_membership, serving data.
 
+    Served, so a chat answers at once instead of being held for a first load.
+    """
+    TenantSchema.objects.create(
+        tenant=tenant_membership.tenant,
+        schema_name=f"t_{tenant_membership.tenant.external_id}"[:60],
+        state=SchemaState.ACTIVE,
+    )
     return Workspace.objects.get(
         is_auto_created=True,
         workspace_tenants__tenant=tenant_membership.tenant,

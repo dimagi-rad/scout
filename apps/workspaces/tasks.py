@@ -23,6 +23,7 @@ from langchain_core.messages import HumanMessage
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
+from apps.chat import pending_requests
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.tasks import aschedule_thread_title
@@ -3257,7 +3258,7 @@ async def resume_thread_after_materialization(
     async with lease.held():
         try:
             async with deadline:
-                return await _resume_with_turn_lease(tj, thread_job_id)
+                return await _resume_with_turn_lease(tj, thread_job_id, lease)
         except TimeoutError:
             if not deadline.expired():
                 raise
@@ -3337,7 +3338,21 @@ async def _defer_resume_while_thread_busy(tj: ThreadJob, busy_attempt: int) -> d
     return {"status": "thread_busy_deferred", "retry_in_seconds": delay}
 
 
-async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
+# Sent as its own marker message: the converter hides marker messages, and the
+# request after it must show as the user's own bubble.
+HELD_REQUEST_NOTE = "The user's request, written while data loaded, follows; answer it."
+
+
+async def _claim_held_request(tj: ThreadJob, lease: TurnLease):
+    try:
+        return await pending_requests.aclaim(tj.thread_id, lease.token)
+    except Exception:
+        # Left waiting, the request shows as unanswered and the user can send it.
+        logger.exception("resume: could not claim the held request of thread %s", tj.thread_id)
+        return None
+
+
+async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str, lease: TurnLease) -> dict:
     # Excludes RUNNING: aupdate() counts rows MATCHED not changed, so including
     # RUNNING would let a concurrent invocation re-claim a running job and double
     # agent.ainvoke(). CANCELLED is included so the agent can still follow up.
@@ -3353,6 +3368,7 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
         logger.info("resume: ThreadJob %s already claimed; no-op", thread_job_id)
         return {"status": "already_claimed"}
     tj.started_at = resume_started_at
+    held = await _claim_held_request(tj, lease)
 
     workspace = tj.thread.workspace
     user = tj.thread.user
@@ -3567,10 +3583,14 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
             f"want to re-run it. Per-tenant: {summary}"
         )
     else:
+        follow_up = (
+            HELD_REQUEST_NOTE
+            if held is not None
+            else "Please continue with the user's original request using the now-loaded data."
+        )
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization just completed "
-            f"(status={status}). Please continue with the user's original request "
-            f"using the now-loaded data. Per-tenant: {summary}"
+            f"(status={status}). {follow_up} Per-tenant: {summary}"
         )
 
     refresh_coverage_user_note = ""
@@ -3614,6 +3634,16 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
             f"succeeds. Disclose this if it affects your answer."
         )
 
+    if held is not None:
+        if HELD_REQUEST_NOTE not in body:
+            body += f" {HELD_REQUEST_NOTE}"
+        resume_messages = [
+            HumanMessage(content=body, id=held.marker_id),
+            HumanMessage(content=held.text, id=held.message_id),
+        ]
+    else:
+        resume_messages = [HumanMessage(content=body)]
+
     timeout_s = settings.AGENT_RESUME_TIMEOUT_S
     sentry_sdk.add_breadcrumb(
         category="resume",
@@ -3632,7 +3662,7 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
     try:
         agent = await _build_agent_for_resume(workspace, user, conversation_id=str(tj.thread.id))
         input_state = {
-            "messages": [HumanMessage(content=body)],
+            "messages": resume_messages,
             "workspace_id": str(workspace.id),
             "user_id": str(user.id),
             "thread_id": str(tj.thread.id),
@@ -3710,6 +3740,8 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
             thread_job_id,
             elapsed,
         )
+        if held is not None:
+            await pending_requests.asettle(held)
     sentry_sdk.add_breadcrumb(
         category="resume",
         message="ainvoke_complete",

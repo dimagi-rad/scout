@@ -158,3 +158,44 @@ class ThreadJob(models.Model):
 
     def __str__(self):
         return f"{self.job_type}({self.state}) for thread {self.thread_id}"
+
+
+class PendingRequest(models.Model):
+    """What a user typed while their chat's first data load ran: one unsent turn.
+
+    Its text reaches the checkpoint only when the data can answer it, as a single
+    HumanMessage; the row is deleted once that message is in the checkpoint. See
+    apps/chat/pending_requests.py.
+    """
+
+    class State(models.TextChoices):
+        WAITING = "waiting", "Waiting"
+        # A run holding the thread's turn lease is sending it. A claim whose token is
+        # no longer the thread's live lease token is stale: its run ended unsettled.
+        CLAIMED = "claimed", "Claimed"
+
+    thread = models.OneToOneField(
+        "chat.Thread",
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name="pending_request",
+    )
+    # Each part is {"id", "text", "added_at"}; they are sent joined, in order.
+    parts = models.JSONField(default=list)
+    # Bumped on every change, so an edit made against an older copy is refused.
+    version = models.PositiveIntegerField(default=1)
+    state = models.CharField(max_length=16, choices=State.choices, default=State.WAITING)
+    # The load whose resume answers it.
+    thread_job = models.ForeignKey(
+        "chat.ThreadJob",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    claim_token = models.UUIDField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"PendingRequest({self.state}, v{self.version}) for thread {self.thread_id}"
