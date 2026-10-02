@@ -2885,39 +2885,59 @@ def _resume_langfuse_span(
     land in the same Langfuse session (and session cost) as the chat turn.
 
     Yields the span, or None when Langfuse is not configured so worker boots
-    without LANGFUSE_* env vars stay quiet."""
-    if Langfuse is None:
-        yield None
-        return
+    without LANGFUSE_* env vars stay quiet. Tracing is best-effort: an error
+    entering or exiting it is logged, never raised, because the caller would
+    otherwise mark a resume that already answered as agent_failed."""
+    stack = contextlib.ExitStack()
+    span = None
     secret_key = getattr(settings, "LANGFUSE_SECRET_KEY", "")
     public_key = getattr(settings, "LANGFUSE_PUBLIC_KEY", "")
     base_url = getattr(settings, "LANGFUSE_BASE_URL", "")
-    if not all([secret_key, public_key, base_url]):
-        yield None
-        return
+    if Langfuse is not None and all([secret_key, public_key, base_url]):
+        try:
+            client = Langfuse(secret_key=secret_key, public_key=public_key, base_url=base_url)
+            span = stack.enter_context(
+                client.start_as_current_observation(
+                    name="resume_thread_after_materialization",
+                    input={
+                        "thread_job_id": thread_job_id,
+                        "thread_id": thread_id,
+                        "status": status,
+                    },
+                )
+            )
+            stack.enter_context(
+                langfuse_trace_context(
+                    session_id=thread_id,
+                    user_id=user_id,
+                    metadata={"workspace_id": workspace_id},
+                )
+            )
+        except Exception:
+            logger.warning("resume: failed to open Langfuse span", exc_info=True)
+            _close_langfuse_stack(stack, None)
+            stack = contextlib.ExitStack()
+            span = None
     try:
-        client = Langfuse(secret_key=secret_key, public_key=public_key, base_url=base_url)
-        span_cm = client.start_as_current_observation(
-            name="resume_thread_after_materialization",
-            input={
-                "thread_job_id": thread_job_id,
-                "thread_id": thread_id,
-                "status": status,
-            },
-        )
-    except Exception:
-        logger.warning("resume: failed to open Langfuse span", exc_info=True)
-        yield None
-        return
-    with (
-        span_cm as span,
-        langfuse_trace_context(
-            session_id=thread_id,
-            user_id=user_id,
-            metadata={"workspace_id": workspace_id},
-        ),
-    ):
         yield span
+    except BaseException as exc:
+        _close_langfuse_stack(stack, exc)
+        raise
+    _close_langfuse_stack(stack, None)
+
+
+def _close_langfuse_stack(stack: contextlib.ExitStack, exc: BaseException | None) -> None:
+    try:
+        if exc is None:
+            stack.close()
+        else:
+            stack.__exit__(type(exc), exc, exc.__traceback__)
+    except BaseException as close_exc:
+        if close_exc is exc:
+            return
+        if not isinstance(close_exc, Exception):
+            raise
+        logger.warning("resume: failed to close Langfuse span", exc_info=True)
 
 
 def _final_message_content(result) -> object:

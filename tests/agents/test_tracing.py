@@ -1,7 +1,9 @@
 """Tests for Langfuse tracing helper."""
 
 import contextlib
+import functools
 import uuid
+from unittest.mock import patch
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -188,3 +190,43 @@ def test_resume_span_yields_none_when_not_configured(settings):
         status="completed",
     ) as span:
         assert span is None
+
+
+@contextlib.contextmanager
+def _trace_context_failing_on(phase):
+    if phase == "enter":
+        raise RuntimeError("langfuse enter failed")
+    yield
+    raise RuntimeError("langfuse exit failed")
+
+
+def _open_resume_span():
+    return _resume_langfuse_span(
+        thread_job_id="tj-1",
+        thread_id="thread-abc",
+        user_id="user-123",
+        workspace_id="ws-1",
+        status="completed",
+    )
+
+
+@pytest.mark.parametrize("phase", ["enter", "exit"])
+def test_resume_span_swallows_tracing_errors_after_a_successful_body(langfuse_spans, phase):
+    failing = functools.partial(_trace_context_failing_on, phase)
+    with (
+        patch("apps.workspaces.tasks.langfuse_trace_context", lambda **_: failing()),
+        _open_resume_span() as span,
+    ):
+        pass
+
+    assert (span is None) == (phase == "enter")
+
+
+def test_resume_span_reraises_the_body_error_not_the_tracing_error(langfuse_spans):
+    failing = functools.partial(_trace_context_failing_on, "exit")
+    with (
+        patch("apps.workspaces.tasks.langfuse_trace_context", lambda **_: failing()),
+        pytest.raises(TimeoutError),
+        _open_resume_span(),
+    ):
+        raise TimeoutError
