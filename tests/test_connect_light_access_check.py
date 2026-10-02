@@ -168,8 +168,7 @@ async def test_connect_404_for_every_opportunity_archives_the_first_and_denies(u
 
     assert result.status == AccessVerificationStatus.DENIED
     assert not await _is_live(user, opp_7)
-    # Never checked: the next request that needs it finds its own answer.
-    assert await _is_live(user, opp_8)
+    assert not await _is_live(user, opp_8)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -304,8 +303,8 @@ async def test_connect_no_access_404_is_recorded_even_if_a_later_check_would_fai
         {OPP_7: _json(404, {"detail": "Not found."}, OPP_7), OPP_8: down},
     )
 
-    # The revocation is published at once; 8 is neither checked nor touched.
-    assert urls == [OPP_7]
+    # The revocation is published; 8 had no answer, so it is left as it was.
+    assert urls == [OPP_7, OPP_8]
     assert result.status == AccessVerificationStatus.DENIED
     assert not await _is_live(user, opp_7)
     assert await _is_live(user, opp_8)

@@ -199,20 +199,28 @@ async def _verify_connect_opportunities(
 ):
     """Check each opportunity; None means fall back to the full listing.
 
-    A no-access 404 ends the check: the result covers the opportunities checked so
-    far, and publication archives that one as an omission, as the listing would have.
+    A no-access 404 is an omission, which publication archives as the listing would
+    have. Once one is seen, a later failure ends the check with what was decided so
+    far rather than discarding that revocation.
     """
     # Keep part of the budget back, or the listing fallback could never finish.
     light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
     confirmed = []
+    omitted = False
+
+    def settle(index, failure):
+        if omitted:
+            return ProviderVerificationResult.complete(confirmed, scope=ids[:index])
+        return failure
+
     for index, external_id in enumerate(ids):
         remaining = light_deadline - clock()
         if remaining <= 0:
-            return unavailable("light_deadline_before_request")
+            return settle(index, unavailable("light_deadline_before_request"))
         try:
             url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
         except UnsafeProviderURL:
-            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+            return settle(index, ProviderVerificationResult.indeterminate(_INDETERMINATE))
         # A share of what is left, so one slow opportunity cannot starve the rest,
         # but never so small that an ordinary slow answer is cut off.
         request_timeout = min(
@@ -231,20 +239,21 @@ async def _verify_connect_opportunities(
                 timeout=request_timeout,
             )
         except TimeoutError:
-            return unavailable("light_request_timeout")
+            return settle(index, unavailable("light_request_timeout"))
         except httpx.RequestError as exc:
             # The class name only: str(exc) can carry the request URL.
-            return unavailable(f"light_request_error:{type(exc).__name__}")
+            return settle(index, unavailable(f"light_request_error:{type(exc).__name__}"))
         if clock() >= deadline:
-            return unavailable("light_deadline_after_response", status=response.status_code)
+            return settle(
+                index, unavailable("light_deadline_after_response", status=response.status_code)
+            )
         if _is_connect_no_access_404(response):
-            # Decided: publish it now, for what was checked, rather than let a later
-            # timeout discard a revocation already seen. The request is denied anyway.
-            return ProviderVerificationResult.complete(confirmed, scope=ids[: index + 1])
+            omitted = True
+            continue
         if response.status_code == 404:
             # Not DRF's answer, so likely the route itself is gone; the listing
             # can still decide, and must never read this as an omission.
-            return None
+            return settle(index, None)
         status_result = _status_result(response.status_code)
         if response.status_code == 401:
             logger.info(
@@ -253,13 +262,15 @@ async def _verify_connect_opportunities(
                 connection_id,
                 "invalid_token" if _names_invalid_token(response) else "no token error",
             )
+            # Credential-level, so it outranks a per-opportunity omission.
+            return status_result
         if status_result is not None:
             if status_result.outcome == VerificationOutcome.UNAVAILABLE:
                 log("light_http_status", status=response.status_code)
-            return status_result
+            return settle(index, status_result)
         if not _is_requested_opportunity(response, external_id):
             # A changed response shape must cost a slow check, not every check.
-            return None
+            return settle(index, None)
         confirmed.append(external_id)
     return ProviderVerificationResult.complete(confirmed, scope=ids)
 

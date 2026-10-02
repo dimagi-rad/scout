@@ -802,7 +802,7 @@ async def test_connect_checks_only_the_requested_opportunities(settings):
 
 
 @pytest.mark.asyncio
-async def test_connect_no_access_404_ends_the_check_scoped_to_what_was_checked(settings):
+async def test_connect_no_access_404_omits_that_opportunity_and_checks_the_rest(settings):
     settings.CONNECT_API_URL = "https://connect.example"
     result, requests = await _verify(
         _request("commcare_connect"),
@@ -811,13 +811,49 @@ async def test_connect_no_access_404_ends_the_check_scoped_to_what_was_checked(s
         external_ids={"3", "7", "9"},
     )
 
-    # An omission of 7, as the full listing would report it, published at once: no
-    # later failure can discard it. 9 was never checked, so the result says nothing
-    # about it.
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.external_ids == frozenset({"3", "9"})
+    assert result.scope == frozenset({"3", "7", "9"})
+    assert len(requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "later",
+    [
+        pytest.param(_response(503), id="5xx"),
+        pytest.param(httpx.ConnectError("down"), id="network"),
+        pytest.param(_response(403), id="indeterminate"),
+        pytest.param(_response(payload={"id": 99}), id="needs-listing"),
+    ],
+)
+async def test_connect_failure_after_a_404_keeps_the_revocation(settings, later):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, requests = await _verify(
+        _request("commcare_connect"),
+        [_response(payload={"id": 3}), _connect_404(), later],
+        settings=settings,
+        external_ids={"3", "7", "9"},
+    )
+
+    # What was decided stands, scoped to it; 9 was not answered, so is not covered.
     assert result.outcome == VerificationOutcome.COMPLETE
     assert result.external_ids == frozenset({"3"})
     assert result.scope == frozenset({"3", "7"})
-    assert len(requests) == 2
+    assert len(requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_connect_401_after_a_404_is_still_a_credential_rejection(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, _requests = await _verify(
+        _request("commcare_connect"),
+        [_connect_404(), _response(401)],
+        settings=settings,
+        external_ids={"7", "9"},
+    )
+
+    assert result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
 
 
 @pytest.mark.asyncio
