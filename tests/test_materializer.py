@@ -1054,8 +1054,8 @@ class TestResumableMaterialization:
                     pipeline,
                     progress_updater=progress_updater,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                invocations["error"] = exc
             return run, invocations
 
     def test_resumes_from_cursor_when_prior_run_partial(self):
@@ -1327,6 +1327,11 @@ class TestConnectProgressAndTiming:
         return loader_cls
 
     @staticmethod
+    def _result(invocations):
+        assert "result" in invocations, f"run_pipeline raised {invocations.get('error')!r}"
+        return invocations["result"]
+
+    @staticmethod
     def _source_updates(calls, source):
         return [c for c in calls if c["source"] == source and c["rows_loaded"]]
 
@@ -1367,7 +1372,7 @@ class TestConnectProgressAndTiming:
         assert updates[-1]["rows_loaded"] == 902
         assert updates[-1]["rows_total"] == 1000
         # The stored row count stays this run's inserts, not the table size.
-        assert invocations["result"]["sources"]["visits"]["rows"] == 2
+        assert self._result(invocations)["sources"]["visits"]["rows"] == 2
 
     def test_source_without_discovery_count_stays_indeterminate(self):
         users_loader = MagicMock()
@@ -1395,7 +1400,7 @@ class TestConnectProgressAndTiming:
                 sources=[SourceConfig(name="visits", resumable=True)],
                 loader_mocks={"visits": self._visits_loader([1, 2])},
             )
-        result = invocations["result"]
+        result = self._result(invocations)
         assert result["sources"]["visits"]["duration_s"] == 2.5
         assert result["duration_s"] == 25.0
         assert "Loaded 2 rows into dimagi.visits in 2.5s" in caplog.text
