@@ -87,9 +87,10 @@ def _fit_section(text: str, limit: int) -> str:
     cut = head.rfind(" ")
     at_word = _without_dangling_headings(head[:cut].split("\n")) if cut > 0 else []
     hard = _without_dangling_headings(head.split("\n"))
-    if not hard or len(hard[-1].strip()) < _MIN_CUT_LINE_CHARS:
-        return ""
-    return "\n".join(at_word or hard) + "…"
+    for lines in (at_word, hard):
+        if lines and len(lines[-1].strip()) >= _MIN_CUT_LINE_CHARS:
+            return "\n".join(lines) + "…"
+    return ""
 
 
 def _joined_length(parts: list[str]) -> int:

@@ -289,7 +289,7 @@ class TestLearningsNotCrowdedOut:
         assert len(learnings) > LEARNINGS_CHAR_CAP
 
     @pytest.mark.asyncio
-    async def test_learnings_cap_holds_when_entries_compete(self, workspace, user):
+    async def test_entries_not_evicted_when_learnings_compete(self, workspace, user):
         for i in range(20):
             await AgentLearning.objects.acreate(
                 workspace=workspace,
@@ -352,6 +352,12 @@ class TestFitSection:
             assert fitted.endswith("…")
             assert fitted[:-1].split()[-1] in {f"w{i}" for i in range(100)}
             assert len(fitted) <= limit
+
+    def test_stub_word_cut_falls_back_to_hard_cut(self):
+        fitted = _fit_section("## L\n\n- a " + "x" * 100, 40)
+        assert fitted.startswith("## L\n\n- a xxx")
+        assert fitted.endswith("x…")
+        assert len(fitted) <= 40
 
     def test_overlong_line_without_spaces_hard_cut(self):
         fitted = _fit_section("## A\n\n### Blob\n\n" + "x" * 100, 50)
