@@ -8,6 +8,7 @@ import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
 import { workspaceApi } from "@/api/workspaces"
 import { SourceFreshness } from "@/components/SourceFreshness"
 import { StaleDataBanner } from "@/components/StaleDataBanner"
+import { useThreadDraft } from "@/hooks/useThreadDraft"
 import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
@@ -49,7 +50,7 @@ export function ChatPanel() {
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const [input, setInput] = useState("")
+  const [input, setInput] = useThreadDraft(activeDomainId, threadId)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const [threadPanelOpen, setThreadPanelOpen] = useState(false)
   const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")

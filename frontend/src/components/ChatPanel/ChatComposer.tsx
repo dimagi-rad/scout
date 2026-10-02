@@ -93,7 +93,6 @@ export function ChatComposer({
         }}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
-        disabled={isStreaming}
         className="flex-1"
       />
       {isStreaming ? (
@@ -103,6 +102,7 @@ export function ChatComposer({
           size="icon"
           onClick={onStop}
           aria-label="Stop response"
+          data-testid="chat-stop"
         >
           <Square className="w-4 h-4" aria-hidden="true" />
         </Button>

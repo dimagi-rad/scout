@@ -24,6 +24,39 @@ describe("ChatComposer", () => {
     expect(setInput).toHaveBeenCalledWith("")
   })
 
+  it("stays typeable and does not send on Enter while streaming", () => {
+    const onSend = vi.fn()
+    const setInput = vi.fn()
+    render(
+      <ChatComposer
+        input="queued thought"
+        setInput={setInput}
+        onSend={onSend}
+        isStreaming
+        onStop={vi.fn()}
+      />,
+    )
+    const field = screen.getByTestId("chat-input")
+    expect(field).not.toBeDisabled()
+
+    fireEvent.change(field, { target: { value: "queued thoughts" } })
+    expect(setInput).toHaveBeenCalledWith("queued thoughts")
+    setInput.mockClear()
+
+    fireEvent.keyDown(field, { key: "Enter" })
+    expect(onSend).not.toHaveBeenCalled()
+    expect(setInput).not.toHaveBeenCalled()
+  })
+
+  it("keeps Stop working while streaming", () => {
+    const onStop = vi.fn()
+    render(
+      <ChatComposer input="" setInput={vi.fn()} onSend={vi.fn()} isStreaming onStop={onStop} />,
+    )
+    fireEvent.click(screen.getByTestId("chat-stop"))
+    expect(onStop).toHaveBeenCalledTimes(1)
+  })
+
   it("keeps Shift+Enter from submitting", () => {
     const onSend = vi.fn()
     render(
