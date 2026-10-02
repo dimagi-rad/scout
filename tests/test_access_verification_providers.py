@@ -266,6 +266,28 @@ async def test_401_is_credential_rejection_and_collection_403_is_indeterminate(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("header", "logged"),
+    [
+        ('Bearer realm="api",error="invalid_token"', "(invalid_token)"),
+        ('Bearer realm="api"', "(no token error)"),
+    ],
+)
+async def test_401_logs_whether_the_provider_blamed_the_token(settings, caplog, header, logged):
+    settings.OCS_URL = "https://ocs.example"
+    response = httpx.Response(
+        401,
+        headers={"WWW-Authenticate": header},
+        request=httpx.Request("GET", "https://ocs.example/api/experiments/"),
+    )
+    with caplog.at_level("INFO", logger="apps.users.services.access_verification_providers"):
+        result, _ = await _verify(_request("ocs"), [response], settings=settings)
+
+    assert result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
+    assert any(logged in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "payload",
     [
         {},
