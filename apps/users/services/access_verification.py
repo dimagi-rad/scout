@@ -817,9 +817,11 @@ def _publish_verification_receipt(
                 control.lease_expires_at = None
                 control.save(update_fields=["lease_token", "lease_expires_at"])
                 return PublicationReceipt(PublicationStatus.REJECTED)
+            # Like an omission: the denied tenant's older proof must not stay reusable.
             UpstreamAccessProof.objects.filter(
                 connection=current, tenant_id=result.denied_tenant_id
             ).update(
+                verified_at=None,
                 last_attempt_result=result.outcome.value,
                 last_error_code=result.error_code,
             )

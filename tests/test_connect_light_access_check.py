@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from functools import partial
 
 import httpx
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
+from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership, UpstreamAccessProof
 from apps.users.services.access_verification_providers import verify_provider
@@ -144,3 +146,86 @@ async def test_connect_checks_each_requested_opportunity(user, connect_setup):
     assert result.status == AccessVerificationStatus.VERIFIED
     assert sorted(urls) == [OPP_7, OPP_8]
     assert LISTING not in urls
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_connect_200_restores_only_its_own_archived_membership(user, connect_setup):
+    connection, opp_7, opp_8 = connect_setup
+    await TenantMembership.all_objects.filter(user=user).aupdate(archived_at=timezone.now())
+
+    result, urls = await _verify(
+        user, connection, {opp_7.id}, {OPP_7: _json(200, {"id": 7}, OPP_7)}
+    )
+
+    assert result.status == AccessVerificationStatus.VERIFIED
+    assert urls == [OPP_7]
+    assert await _is_live(user, opp_7)
+    assert not await _is_live(user, opp_8)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_connect_denial_clears_the_denied_proof(user, connect_setup):
+    connection, opp_7, _opp_8 = connect_setup
+    await _verify(user, connection, {opp_7.id}, {OPP_7: _json(200, {"id": 7}, OPP_7)})
+    # Let the proof go stale so the next call rechecks upstream.
+    await UpstreamAccessProof.objects.filter(connection=connection).aupdate(
+        verified_at=timezone.now() - timedelta(hours=1)
+    )
+
+    result, _urls = await _verify(
+        user, connection, {opp_7.id}, {OPP_7: _json(404, {"detail": "Not found."}, OPP_7)}
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    proof = await UpstreamAccessProof.objects.aget(connection=connection, tenant=opp_7)
+    assert proof.verified_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_connect_one_denied_opportunity_denies_the_request(user, connect_setup):
+    connection, opp_7, opp_8 = connect_setup
+
+    result, _urls = await _verify(
+        user,
+        connection,
+        {opp_7.id, opp_8.id},
+        {
+            OPP_7: _json(200, {"id": 7}, OPP_7),
+            OPP_8: _json(404, {"detail": "Not found."}, OPP_8),
+        },
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    assert await _is_live(user, opp_7)
+    assert not await _is_live(user, opp_8)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_connect_many_opportunities_use_the_listing_and_archive_omissions(
+    user, connect_setup
+):
+    connection, opp_7, opp_8 = connect_setup
+    extra = []
+    for external_id in ("101", "102", "103", "104", "105"):
+        tenant = await Tenant.objects.acreate(
+            provider="commcare_connect", external_id=external_id, canonical_name=external_id
+        )
+        await TenantMembership.objects.acreate(user=user, tenant=tenant, connection=connection)
+        extra.append(tenant)
+    listed = [{"id": int(t.external_id), "name": t.external_id} for t in [opp_7, *extra]]
+
+    result, urls = await _verify(
+        user,
+        connection,
+        {opp_7.id, *(t.id for t in extra)},
+        {LISTING: _json(200, {"opportunities": listed}, LISTING)},
+    )
+
+    assert result.status == AccessVerificationStatus.VERIFIED
+    assert urls == [LISTING]
+    # The full listing is authoritative for the whole connection, so 8 is archived.
+    assert not await _is_live(user, opp_8)

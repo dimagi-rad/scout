@@ -129,7 +129,8 @@ def _is_connect_no_access_404(response) -> bool:
     """
     if response.status_code != 404:
         return False
-    if not response.headers.get("content-type", "").startswith("application/json"):
+    media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media_type != "application/json":
         return False
     try:
         payload = response.json()
@@ -157,16 +158,22 @@ def _is_requested_opportunity(response, external_id: str) -> bool:
     )
 
 
-async def _verify_connect_opportunities(client, base_url, headers, external_ids, deadline, clock):
+async def _verify_connect_opportunities(
+    client, policy, base_url, headers, external_ids, deadline, clock
+):
     for external_id in external_ids:
         remaining = deadline - clock()
         if remaining <= 0:
             return ProviderVerificationResult.unavailable(_UNAVAILABLE)
         try:
+            url = policy.resolve(f"{base_url}/export/opportunity/{external_id}/")
+        except UnsafeProviderURL:
+            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+        try:
             request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
             response = await asyncio.wait_for(
                 client.get(
-                    f"{base_url}/export/opportunity/{external_id}/",
+                    url,
                     headers=headers,
                     follow_redirects=False,
                     timeout=request_timeout,
@@ -321,6 +328,7 @@ async def verify_provider(
             if light_ids is not None:
                 return await _verify_connect_opportunities(
                     client,
+                    policy,
                     settings.CONNECT_API_URL.rstrip("/"),
                     headers,
                     light_ids,
