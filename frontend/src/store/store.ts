@@ -42,8 +42,9 @@ export function createAppStore() {
   store.subscribe((state, previous) => {
     if (state.user?.id === previous.user?.id) return
     if (session) session.snapshot = previous
-    // First load (null -> user) must keep drafts; only a real account change drops them.
-    if (previous.user && state.user) clearAllDrafts()
+    // First load (null -> user) keeps drafts; leaving an identity (logout, session
+    // expiry, or an account switch, which passes through null) drops them.
+    if (previous.user) clearAllDrafts()
     // Recreate the slices so even A → logout → A cannot revive old responses.
     // Seed account-owned fields only after setting the identity.
     store.setState(accountState(store.setState, store.getState, store))

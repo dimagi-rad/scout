@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import { pruneDrafts, readDraft, writeDraft } from "@/components/ChatPanel/draftStorage"
+import { draftGeneration, pruneDrafts, readDraft, writeDraft } from "@/components/ChatPanel/draftStorage"
 
 export const DRAFT_DEBOUNCE_MS = 300
 
@@ -31,7 +31,12 @@ export function useThreadDraft(
     scope,
     value: load(workspaceId, threadId),
   }))
-  const pendingRef = useRef<{ workspaceId: string; threadId: string; value: string } | null>(null)
+  const pendingRef = useRef<{
+    workspaceId: string
+    threadId: string
+    value: string
+    generation: number
+  } | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Adjust state during render so the new thread never paints the old thread's text.
@@ -44,7 +49,7 @@ export function useThreadDraft(
     timerRef.current = null
     const pending = pendingRef.current
     pendingRef.current = null
-    if (pending) writeDraft(pending.workspaceId, pending.threadId, pending.value)
+    if (pending) writeDraft(pending.workspaceId, pending.threadId, pending.value, pending.generation)
   }, [])
 
   useEffect(() => {
@@ -71,7 +76,7 @@ export function useThreadDraft(
         writeDraft(workspaceId, threadId, "")
         return
       }
-      pendingRef.current = { workspaceId, threadId, value }
+      pendingRef.current = { workspaceId, threadId, value, generation: draftGeneration() }
       timerRef.current = setTimeout(flush, DRAFT_DEBOUNCE_MS)
     },
     [scope, workspaceId, threadId, flush],

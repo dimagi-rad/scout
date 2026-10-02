@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
 
+import { clearAllDrafts } from "@/components/ChatPanel/draftStorage"
 import { DRAFT_DEBOUNCE_MS, useThreadDraft } from "./useThreadDraft"
 
 describe("useThreadDraft", () => {
@@ -98,5 +99,17 @@ describe("useThreadDraft", () => {
     )
     renderHook(() => useThreadDraft("ws", "t1"))
     expect(localStorage.getItem("scout:draft:ws:ancient")).toBeNull()
+  })
+
+  it("does not resurrect a pending edit after drafts are cleared (logout)", () => {
+    const { result, unmount } = renderHook(() => useThreadDraft("ws", "t1"))
+    act(() => result.current[1]("typed before logout"))
+    clearAllDrafts()
+    unmount()
+    window.dispatchEvent(new Event("pagehide"))
+    act(() => {
+      vi.advanceTimersByTime(DRAFT_DEBOUNCE_MS * 2)
+    })
+    expect(localStorage.getItem("scout:draft:ws:t1")).toBeNull()
   })
 })
