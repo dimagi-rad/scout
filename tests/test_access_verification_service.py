@@ -820,6 +820,8 @@ async def test_cancellation_releases_only_owned_lease(user, tenant, api_connecti
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    # The release waits only briefly inline and finishes under supervision.
+    await _drain_overdue_work()
 
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.lease_token is None
