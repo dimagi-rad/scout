@@ -32,6 +32,9 @@ export function ChatThreadHeader({
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
   const inputRef = useRef<HTMLInputElement>(null)
   const draftRef = useRef(displayTitle)
+  // The title when editing began: a generated title can arrive mid-edit, and an
+  // untouched draft must not save the stale provisional title over it.
+  const editStartTitleRef = useRef(displayTitle)
 
   useEffect(() => {
     if (!editing) {
@@ -51,7 +54,7 @@ export function ChatThreadHeader({
     setEditing(false)
     // An unchanged draft is not a rename: saving it would pin the provisional
     // title and stop the generated one from replacing it.
-    if (cleanDraft === displayTitle || (!cleanDraft && isUntitledFallback)) return
+    if (cleanDraft === editStartTitleRef.current || (!cleanDraft && isUntitledFallback)) return
     setSaveState("saving")
     try {
       await onTitleChange(cleanDraft)
@@ -100,7 +103,10 @@ export function ChatThreadHeader({
         ) : (
           <button
             type="button"
-            onClick={() => setEditing(true)}
+            onClick={() => {
+              editStartTitleRef.current = displayTitle
+              setEditing(true)
+            }}
             className="group flex min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-accent"
             aria-label="Rename thread"
             data-testid="chat-thread-rename"
