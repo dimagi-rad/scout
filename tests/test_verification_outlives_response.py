@@ -7,7 +7,7 @@ import time
 from datetime import timedelta
 
 import pytest
-from asgiref.sync import sync_to_async
+from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from django.utils import timezone
 
 from apps.users.adapters import encrypt_credential
@@ -195,9 +195,11 @@ async def test_a_sync_views_check_still_publishes_after_it_answers(
     upstream_provider.domains = [tenant.external_id]
     upstream_provider.gate = asyncio.Event()
 
-    admission = await sync_to_async(admit_upstream)(
-        user.id, {tenant.id}, budget=VerificationBudget.INTERACTIVE
-    )
+    # As Django's ASGI handler runs a sync view: in its own thread-sensitive context.
+    async with ThreadSensitiveContext():
+        admission = await sync_to_async(admit_upstream)(
+            user.id, {tenant.id}, budget=VerificationBudget.INTERACTIVE
+        )
 
     assert admission.reason == VERIFICATION_IN_PROGRESS
     upstream_provider.gate.set()
