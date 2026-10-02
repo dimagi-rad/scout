@@ -213,7 +213,7 @@ describe("uiSlice.fetchThreads refreshes the workspace list on access loss", () 
     vi.spyOn(api, "get").mockRejectedValue(new ApiError(403, reason, { error: reason, reason }))
   }
 
-  it.each(["tenant_access_lost", "upstream_access_lost", "credential_missing", "credential_expired"])(
+  it.each(["tenant_access_lost", "upstream_access_lost", "credential_expired"])(
     "refetches fresh so the lost-access gate opens now (%s)",
     async (reason) => {
       const revalidate = vi
@@ -228,7 +228,7 @@ describe("uiSlice.fetchThreads refreshes the workspace list on access loss", () 
     },
   )
 
-  it.each(["verification_unavailable", "verification_in_progress", "no_sources"])(
+  it.each(["credential_missing", "verification_unavailable", "verification_in_progress", "no_sources"])(
     "leaves the list alone when access was not lost (%s)",
     async (reason) => {
       const revalidate = vi.spyOn(useAppStore.getState().domainActions, "revalidateDomains")

@@ -39,12 +39,12 @@ const RECHECKABLE_REASONS: ReadonlySet<AccessDenialReason> = new Set([
   "verification_in_progress",
 ])
 
-// The threads fetch is what notices these upstream and archives the membership; the
-// workspace list's has_access, which gates the lost-access modal, lags until refetched.
+// Denials that mean coverage was archived, which flips the workspace list's has_access
+// (the lost-access gate) only once refetched. credential_missing is a freshness denial
+// with coverage still granted, so a refetch could never open the gate.
 export const ACCESS_LOSS_REASONS: ReadonlySet<AccessDenialReason> = new Set([
   "tenant_access_lost",
   "upstream_access_lost",
-  "credential_missing",
   "credential_expired",
 ])
 
