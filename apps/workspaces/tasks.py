@@ -3637,7 +3637,11 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
                 timeout=timeout_s,
             )
             if langfuse_span is not None:
-                langfuse_span.update(output=_final_message_content(result))
+                # The resume already succeeded; a tracing error must not mark it agent_failed.
+                try:
+                    langfuse_span.update(output=_final_message_content(result))
+                except Exception:
+                    logger.warning("resume: failed to record Langfuse output", exc_info=True)
     except TimeoutError:
         elapsed = time.monotonic() - start
         logger.exception(
