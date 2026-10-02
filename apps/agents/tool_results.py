@@ -128,10 +128,9 @@ def _cut_lists(payload: dict, target: dict, limit: int, omitted: dict[str, int])
         items = parent[key]
         keep = _longest_prefix_within(items, _size(items) - (total - limit))
         parent[key] = items[:keep]
-        if key != "rows":
-            # The hint names only a few paths and has_more speaks only for a page, so a
-            # cut list, such as one table's columns, must say itself that it is short.
-            # Cut rows already carry truncated and an updated row_count.
+        if not (key == "rows" and parent is target):
+            # The hint names only a few paths, so every cut list says itself that it is
+            # short, except the result's own rows: truncated and row_count report those.
             parent[f"{key}_truncated"] = True
         label = ".".join(path)
         omitted[label] = omitted.get(label, 0) + len(items) - keep

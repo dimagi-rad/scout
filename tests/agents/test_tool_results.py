@@ -194,6 +194,7 @@ def test_cut_sql_rows_keep_row_count_in_step_and_columns_whole():
     data = _compacted_payload("query", payload)["data"]
 
     assert data["row_count"] == len(data["rows"]) < 500
+    assert "rows_truncated" not in data
     assert data["truncation"]["original_row_count"] == 500
     assert data["columns"] == ["id", "note"] * 200
 
@@ -342,4 +343,13 @@ def test_a_cut_top_level_list_without_paging_says_so_itself():
     data = _compacted_payload("get_lineage", payload)["data"]
 
     assert data["tables_truncated"] is True
-    assert "rows_truncated" not in data
+
+
+def test_nested_rows_that_were_cut_say_so_themselves():
+    rows = [[i, "x" * 1_000] for i in range(100)]
+    payload = {"success": True, "data": {"preview": {"rows": rows, "row_count": 100}}}
+
+    preview = _compacted_payload("get_lineage", payload)["data"]["preview"]
+
+    assert preview["rows_truncated"] is True
+    assert 0 < len(preview["rows"]) < 100
