@@ -42,6 +42,7 @@ from apps.users.services.oauth_scope import (
 )
 from apps.users.services.token_refresh import credential_fingerprint
 from apps.users.services.upstream_denial import record_validated_upstream_denial
+from apps.workspaces import access_cache
 
 PROOF_MAX_AGE = timedelta(minutes=5)
 LEASE_DURATION = timedelta(seconds=30)
@@ -754,9 +755,12 @@ def _publish_verification_receipt(
                 )
             )
             _configure_transaction_deadline(deadline, clock)
-            omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
+            if omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
                 archived_at=decision_now
-            )
+            ):
+                # As for a recorded denial: no grant cached before this may outlive it.
+                user_id = current.user_id
+                transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
             # Legacy discovery can restore a tombstone without our lease; it must
             # not revive an older positive proof after authoritative omission.
             _configure_transaction_deadline(deadline, clock)

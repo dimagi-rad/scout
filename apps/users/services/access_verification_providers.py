@@ -194,6 +194,10 @@ async def _verify_connect_opportunities(client, policy, listing_url, headers, id
             return ProviderVerificationResult.unavailable(_UNAVAILABLE)
         if _is_connect_no_access_404(response):
             continue
+        if response.status_code == 404:
+            # Not DRF's answer, so likely the route itself is gone; the listing
+            # can still decide, and must never read this as an omission.
+            return None
         status_result = _status_result(response.status_code)
         if status_result is not None:
             return status_result

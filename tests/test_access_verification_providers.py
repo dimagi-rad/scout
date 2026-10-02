@@ -630,10 +630,6 @@ async def test_connect_no_access_404_omits_that_opportunity_and_checks_the_rest(
 @pytest.mark.parametrize(
     "response",
     [
-        pytest.param(_connect_404(json_body=False), id="routing-404-html"),
-        pytest.param(_response(404), id="404-empty-body"),
-        pytest.param(_response(404, payload={"detail": "x", "code": "y"}), id="404-other-json"),
-        pytest.param(_response(404, payload=["Not found."]), id="404-json-list"),
         pytest.param(_response(403, payload={"detail": "scope"}), id="403-missing-scope"),
         pytest.param(_response(302), id="redirect"),
     ],
@@ -653,9 +649,13 @@ async def test_connect_unrecognized_answer_is_indeterminate_not_denial(settings,
         pytest.param(_response(payload={"id": 8}), id="200-other-opportunity"),
         pytest.param(_response(payload={"name": "no id"}), id="200-no-id"),
         pytest.param(_response(payload=[{"id": 7}]), id="200-list"),
+        pytest.param(_connect_404(json_body=False), id="routing-404-html"),
+        pytest.param(_response(404), id="404-empty-body"),
+        pytest.param(_response(404, payload={"detail": "x", "code": "y"}), id="404-other-json"),
+        pytest.param(_response(404, payload=["Not found."]), id="404-json-list"),
     ],
 )
-async def test_connect_unrecognized_200_falls_back_to_the_listing(settings, response):
+async def test_connect_unrecognized_answer_falls_back_to_the_listing(settings, response):
     settings.CONNECT_API_URL = "https://connect.example"
     result, requests = await _verify(
         _request("commcare_connect"),
@@ -670,6 +670,28 @@ async def test_connect_unrecognized_200_falls_back_to_the_listing(settings, resp
         "https://connect.example/export/opportunity/7/",
         "https://connect.example/export/opp_org_program_list/",
     ]
+
+
+@pytest.mark.asyncio
+async def test_connect_fallback_discards_partial_light_results(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, requests = await _verify(
+        _request("commcare_connect"),
+        [
+            _response(payload={"id": 3}),
+            _response(payload={"id": 99}),
+            _response(payload={"opportunities": [{"id": 3, "name": "Three"}]}),
+        ],
+        settings=settings,
+        external_ids={"3", "7"},
+    )
+
+    # The listing is authoritative for the whole connection, so its answer alone
+    # stands: 7 is omitted there, whatever the light check saw first.
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.scoped is False
+    assert result.external_ids == frozenset({"3"})
+    assert len(requests) == 3
 
 
 @pytest.mark.asyncio

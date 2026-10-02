@@ -138,12 +138,37 @@ async def test_connect_routing_404_revokes_nothing(user, connect_setup):
         headers={"content-type": "text/html; charset=utf-8"},
         request=httpx.Request("GET", OPP_7),
     )
+    listing_down = httpx.Response(503, request=httpx.Request("GET", LISTING))
 
-    result, _urls = await _verify(user, connection, {opp_7.id}, {OPP_7: html_404})
+    result, urls = await _verify(
+        user, connection, {opp_7.id}, {OPP_7: html_404, LISTING: listing_down}
+    )
 
-    assert result.status == AccessVerificationStatus.INDETERMINATE
+    # Falls back to the listing, which is down: nothing decided, nothing revoked.
+    assert urls == [OPP_7, LISTING]
+    assert result.status == AccessVerificationStatus.UNAVAILABLE
     assert await _is_live(user, opp_7)
     assert await _is_live(user, opp_8)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_connect_all_requested_404_archives_them_all(user, connect_setup):
+    connection, opp_7, opp_8 = connect_setup
+
+    result, _urls = await _verify(
+        user,
+        connection,
+        {opp_7.id, opp_8.id},
+        {
+            OPP_7: _json(404, {"detail": "Not found."}, OPP_7),
+            OPP_8: _json(404, {"detail": "Not found."}, OPP_8),
+        },
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    assert not await _is_live(user, opp_7)
+    assert not await _is_live(user, opp_8)
 
 
 @pytest.mark.django_db(transaction=True)
