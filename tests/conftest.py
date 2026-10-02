@@ -20,6 +20,22 @@ from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_
 from tests.upstream_proofs import ProviderStub
 
 
+@pytest.fixture(autouse=True)
+def resume_runs_through_ainvoke(request, monkeypatch):
+    """Background resumes stream via ``agent.astream``; most tests fake only ``ainvoke``.
+
+    Route the streamed run to the agent's ``ainvoke`` unless a test is marked
+    ``real_resume_stream``, which exercises apps/chat/resume_stream.py itself.
+    """
+    if request.node.get_closest_marker("real_resume_stream"):
+        return
+
+    async def via_ainvoke(agent, input_state, config, _thread_id):
+        return await agent.ainvoke(input_state, config)
+
+    monkeypatch.setattr("apps.workspaces.tasks.arun_streamed", via_ainvoke)
+
+
 @pytest.fixture
 def production_settings(monkeypatch):
     """Production settings loaded with the MCP secret their startup check requires."""

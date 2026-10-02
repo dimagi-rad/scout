@@ -13,6 +13,7 @@ from apps.chat.thread_views import (
     thread_messages_view,
     thread_pending_request_parts_view,
     thread_pending_request_view,
+    thread_resume_stream_view,
     thread_viewed_view,
 )
 from apps.chat.views import chat_view
@@ -26,6 +27,11 @@ workspace_thread_urlpatterns = [
     path("<uuid:thread_id>/artifacts/", thread_artifacts_view, name="thread_artifacts"),
     path("<uuid:thread_id>/messages/", thread_messages_view, name="thread_messages"),
     path("<uuid:thread_id>/viewed/", thread_viewed_view, name="thread_viewed"),
+    path(
+        "<uuid:thread_id>/resume-stream/",
+        thread_resume_stream_view,
+        name="thread_resume_stream",
+    ),
     path(
         "<uuid:thread_id>/pending-request/",
         thread_pending_request_view,

@@ -31,6 +31,7 @@ EXPECTED_SIGNATURES = {
         "only_unserved: bool = False, notify_thread: bool = True) -> dict"
     ),
     "prune_old_procrastinate_jobs": "(timestamp: int = 0) -> dict",
+    "prune_resume_streams": "(timestamp: int = 0) -> dict",
     "rebuild_workspace_semantic_model": "(workspace_id: str) -> dict",
     "rebuild_workspace_view_schema": "(workspace_id: str, revive_retired: bool = False) -> dict",
     "reconcile_refresh_candidates": "(timestamp: int = 0) -> dict",
@@ -54,6 +55,7 @@ EXPECTED_CRONS = {
     "expire_stale_thread_jobs": "*/15 * * * *",
     "expire_stale_workspace_data_recoveries": "*/15 * * * *",
     "prune_old_procrastinate_jobs": "17 3 * * *",
+    "prune_resume_streams": "*/15 * * * *",
     "reconcile_refresh_candidates": "*/15 * * * *",
     "reconcile_stale_materialization_runs": "*/15 * * * *",
     "sweep_pending_requests": "* * * * *",

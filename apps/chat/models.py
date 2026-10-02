@@ -206,3 +206,25 @@ class PendingRequest(models.Model):
 
     def __str__(self):
         return f"PendingRequest({self.state}, v{self.version}) for thread {self.thread_id}"
+
+
+class ResumeStreamChunk(models.Model):
+    """Text a background resume streamed, for an open chat to show as it is written.
+
+    The answer's record is still the checkpoint; these rows only let a chat tail
+    a run it did not start, and are pruned soon after. See apps/chat/resume_stream.py.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    thread = models.ForeignKey("chat.Thread", on_delete=models.CASCADE, related_name="+")
+    run = models.UUIDField()
+    text = models.TextField(blank=True, default="")
+    # The run's last row: nothing follows it.
+    done = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["thread", "id"], name="chat_resumestream_thread_id")]
+
+    def __str__(self):
+        return f"ResumeStreamChunk({self.run}, {self.id}) for thread {self.thread_id}"
