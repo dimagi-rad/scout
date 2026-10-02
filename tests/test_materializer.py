@@ -1314,7 +1314,8 @@ class TestResumableMaterialization:
 
 
 class TestConnectProgressAndTiming:
-    """Discovery totals reach the progress bar, on fresh and resumed loads."""
+    """Discovery totals reach the progress bar (fresh and resumed), and each
+    source and the run record how long they took."""
 
     _harness = TestResumableMaterialization()
 
@@ -1383,6 +1384,33 @@ class TestConnectProgressAndTiming:
         updates = self._source_updates(calls, "users")
         assert updates
         assert all(c["rows_total"] is None for c in updates)
+
+    def test_records_per_source_and_run_durations(self, caplog):
+        with (
+            caplog.at_level("INFO", logger="mcp_server.services.materializer"),
+            patch("mcp_server.services.materializer.time") as mock_time,
+        ):
+            mock_time.monotonic.side_effect = [100.0, 110.0, 112.5, 125.0]
+            _, invocations = self._harness._run_connect_pipeline(
+                sources=[SourceConfig(name="visits", resumable=True)],
+                loader_mocks={"visits": self._visits_loader([1, 2])},
+            )
+        result = invocations["result"]
+        assert result["sources"]["visits"]["duration_s"] == 2.5
+        assert result["duration_s"] == 25.0
+        assert "Loaded 2 rows into dimagi.visits in 2.5s" in caplog.text
+        assert "2 rows in 25.0s" in caplog.text
+
+    def test_failed_source_records_duration(self):
+        cw_loader = MagicMock()
+        run, _ = self._harness._run_connect_pipeline(
+            sources=[SourceConfig(name="completed_works", resumable=False)],
+            loader_mocks={"completed_works": cw_loader},
+            completed_works_side_effect=RuntimeError("Connect 500"),
+        )
+        entry = run.result["sources"]["completed_works"]
+        assert entry["state"] == "failed"
+        assert isinstance(entry["duration_s"], float)
 
 
 @pytest.mark.django_db
