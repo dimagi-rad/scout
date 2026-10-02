@@ -48,6 +48,7 @@ from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
+from apps.agents.tool_results import compact_tool_results
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
@@ -900,7 +901,10 @@ def _make_injecting_tool_node(
 
         token = set_subagent_event_queue(event_queue)
         try:
-            result = await base_tool_node.ainvoke({"messages": messages}, config=config)
+            result = compact_tool_results(
+                await base_tool_node.ainvoke({"messages": messages}, config=config),
+                MCP_TOOL_NAMES,
+            )
             if (
                 "persistable_msg" in locals()
                 and persistable_changed
