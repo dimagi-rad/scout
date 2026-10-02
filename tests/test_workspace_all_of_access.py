@@ -165,6 +165,21 @@ def test_removed_access_is_distinguished_from_never_having_it(user, two_sources)
 
 
 @pytest.mark.django_db
+def test_denial_names_sources_sharing_a_remedy_in_one_clause(user, two_sources):
+    t1, t2 = two_sources
+    t3 = _tenant("t3", "Source Three")
+    ws = _workspace(user, t1, t2, t3)
+    _join(ws, user)
+
+    body = access_denied_body(resolve_workspace_access_ex(user, ws.id))
+
+    remedy = body["missing_tenants"][0]["remedy"]
+    assert {t["remedy"] for t in body["missing_tenants"]} == {remedy}
+    assert f"'Source One', 'Source Three', 'Source Two': {remedy}." in body["error"]
+    assert body["error"].count(remedy) == 1
+
+
+@pytest.mark.django_db
 def test_ocs_team_gaps_name_the_team_to_connect(user):
     """Wrong-team and unknown-legacy-team OCS rows get distinct, team-specific
     guidance — they are fixed by connecting a team, not by asking for access."""
