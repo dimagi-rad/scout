@@ -19,7 +19,6 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.db import transaction
@@ -124,6 +123,16 @@ def _new_part(part_id: str, text: str) -> dict:
     return {"id": part_id, "text": text, "added_at": timezone.now().isoformat()}
 
 
+ACTIVE_JOB_STATES = (ThreadJob.State.PENDING, ThreadJob.State.RUNNING)
+
+
+def _job_active(job_id) -> bool:
+    return (
+        job_id is not None
+        and ThreadJob.objects.filter(id=job_id, state__in=ACTIVE_JOB_STATES).exists()
+    )
+
+
 def _claim_is_live(pending: PendingRequest, thread: Thread) -> bool:
     return (
         pending.state == PendingRequest.State.CLAIMED
@@ -222,8 +231,10 @@ def ahold_message(
             _check_length(combined_text(parts), len(parts))
             pending.parts = parts
             pending.version += 1
-            # A workspace-load hold leaves the request's own load (if any) in charge.
-            pending.thread_job = job or pending.thread_job
+            # A workspace-load hold leaves a load of the chat's own in charge while
+            # it runs; one that ended hands the request to the workspace load.
+            if job is not None or not _job_active(pending.thread_job_id):
+                pending.thread_job = job
             # New text is a new request to try sending.
             pending.flush_attempts = 0
             pending.save(
@@ -321,7 +332,9 @@ def _claim(thread_id, lease_token: uuid.UUID, thread_job_id) -> ClaimedRequest |
         pending = PendingRequest.objects.select_for_update().filter(thread_id=thread_id).first()
         if pending is None or not pending.parts:
             return None
-        if thread_job_id is not None and pending.thread_job_id != thread_job_id:
+        # A load's resume also takes a request held for the workspace: its chat's
+        # own load ending is the workspace load ending for it.
+        if thread_job_id is not None and pending.thread_job_id not in (thread_job_id, None):
             return None
         if pending.state == PendingRequest.State.CLAIMED and pending.claim_token != lease_token:
             return _StaleClaim(pending.request_id, pending.version, pending.claim_token)
@@ -455,21 +468,16 @@ async def aworkspace_pending_requests(workspace, user) -> dict[str, dict]:
 
 
 MAX_FLUSH_ATTEMPTS = 1
-ACTIVE_JOB_STATES = (ThreadJob.State.PENDING, ThreadJob.State.RUNNING)
-# A stopped load still resumes its chat and sends the request (CANCELLED is a
-# state the resume claims from), so the flush leaves it that long first.
-CANCELLED_RESUME_GRACE = timedelta(minutes=2)
 
 
 def _flushable():
-    """Held requests no load of their own will send: none, or one that has ended."""
-    return (
-        PendingRequest.objects.filter(flush_attempts__lt=MAX_FLUSH_ATTEMPTS)
-        .exclude(thread_job__state__in=ACTIVE_JOB_STATES)
-        .exclude(
-            thread_job__state=ThreadJob.State.CANCELLED,
-            thread_job__completed_at__gt=timezone.now() - CANCELLED_RESUME_GRACE,
-        )
+    """Requests held for a workspace load, which no load of their chat sends.
+
+    One left after its own load ended is not among them: the chat offers it to
+    the user to send, and that load's resume may still be coming.
+    """
+    return PendingRequest.objects.filter(
+        thread_job__isnull=True, flush_attempts__lt=MAX_FLUSH_ATTEMPTS
     )
 
 

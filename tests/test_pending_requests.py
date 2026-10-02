@@ -6,7 +6,6 @@ claims the held request under the thread's turn lease and sends it as one messag
 
 import json
 import uuid
-from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,7 +14,6 @@ from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models.functions import Now
 from django.test import AsyncClient
-from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
 from procrastinate.exceptions import AlreadyEnqueued
@@ -933,7 +931,7 @@ class TestHoldForWorkspaceLoad:
 class TestFlush:
     async def _flush(self, ws, agent):
         with (
-            patch("apps.workspaces.tasks.aworkspace_load_pending", AsyncMock(return_value=False)),
+            patch("apps.workspaces.tasks.aworkspace_build_pending", AsyncMock(return_value=False)),
             patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
             patch("apps.workspaces.tasks.aschedule_thread_title", AsyncMock()),
         ):
@@ -949,7 +947,7 @@ class TestFlush:
         assert result == {"status": "flushed", "sent": 1}
         marker, request = agent.ainvoke.await_args.args[0]["messages"]
         assert marker.content.startswith(SYSTEM_RESUME_MARKER)
-        assert "workspace data load finished" in marker.content
+        assert marker.content == tasks.FLUSH_NOTE
         assert request.content == "visits?"
         assert marker.id == f"{request.id}-sys"
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
@@ -959,10 +957,10 @@ class TestFlush:
         await _hold_without_load(thread)
         agent = _flush_agent(checkpoint)
 
-        with patch("apps.workspaces.tasks.aworkspace_load_pending", AsyncMock(return_value=True)):
+        with patch("apps.workspaces.tasks.aworkspace_build_pending", AsyncMock(return_value=True)):
             result = await tasks.flush_pending_requests(str(ws.id))
 
-        assert result == {"status": "load_pending"}
+        assert result == {"status": "load_pending", "sent": 0}
         agent.ainvoke.assert_not_awaited()
         assert await PendingRequest.objects.filter(thread=thread).aexists()
 
@@ -977,23 +975,32 @@ class TestFlush:
         assert (await self._flush(ws, agent))["sent"] == 0
         agent.ainvoke.assert_not_awaited()
 
-    async def test_a_just_stopped_load_keeps_its_request_for_its_resume(self, checkpoint):
-        ws, _user, _client, thread = await _thread("flush-stopped")
+    async def test_one_its_own_ended_load_left_stays_the_users_to_send(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-ended")
         job = await ThreadJob.objects.acreate(
             thread=thread, job_type="materialization", procrastinate_job_id=616161
         )
         await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
-        await ThreadJob.objects.filter(id=job.id).aupdate(
-            state=ThreadJob.State.CANCELLED, completed_at=timezone.now()
-        )
+        await ThreadJob.objects.filter(id=job.id).aupdate(state=ThreadJob.State.CANCELLED)
         agent = _flush_agent(checkpoint)
 
         assert (await self._flush(ws, agent))["sent"] == 0
+        agent.ainvoke.assert_not_awaited()
 
-        await ThreadJob.objects.filter(id=job.id).aupdate(
-            completed_at=timezone.now() - timedelta(minutes=5)
+    async def test_holding_it_for_a_workspace_load_hands_it_to_the_flush(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-handed")
+        job = await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=717171
         )
+        await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
+        await ThreadJob.objects.filter(id=job.id).aupdate(state=ThreadJob.State.FAILED)
+
+        await _hold_without_load(thread, "by month")
+        agent = _flush_agent(checkpoint)
+
         assert (await self._flush(ws, agent))["sent"] == 1
+        _marker, request = agent.ainvoke.await_args.args[0]["messages"]
+        assert request.content == "visits?\n\nby month"
 
     async def test_one_that_failed_is_not_retried_until_it_changes(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-fail")
@@ -1023,24 +1030,30 @@ class TestFlush:
         pending = await PendingRequest.objects.aget(thread=thread)
         assert pending.flush_attempts == 0
 
-    async def test_the_sweep_flushes_every_workspace_with_one(self, checkpoint):
-        _ws_a, _user, _client, thread_a = await _thread("sweep-a")
-        _ws_b, _user_b, _client_b, thread_b = await _thread("sweep-b")
+    async def test_the_sweep_queues_a_flush_for_every_workspace_with_one(self, checkpoint):
+        ws_a, _user, _client, thread_a = await _thread("sweep-a")
+        ws_b, _user_b, _client_b, thread_b = await _thread("sweep-b")
         await _hold_without_load(thread_a)
         await _hold_without_load(thread_b)
-        agent = _flush_agent(checkpoint)
 
-        with (
-            patch("apps.workspaces.tasks.aworkspace_load_pending", AsyncMock(return_value=False)),
-            patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
-            patch("apps.workspaces.tasks.aschedule_thread_title", AsyncMock()),
-        ):
+        with patch("apps.workspaces.tasks._defer_pending_flush", AsyncMock()) as defer:
             result = await tasks.sweep_pending_requests()
 
-        assert result == {"sent": 2}
-        assert not await PendingRequest.objects.filter(
-            thread_id__in=[thread_a.id, thread_b.id]
-        ).aexists()
+        assert result == {"queued": 2}
+        assert {call.args[0] for call in defer.await_args_list} == {ws_a.id, ws_b.id}
+
+    async def test_the_chats_own_resume_takes_a_request_held_for_the_workspace(self, checkpoint):
+        _ws, _user, _client, thread = await _thread("flush-adopted")
+        await _hold_without_load(thread)
+        job = await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=818181
+        )
+        lease = await tasks.atry_acquire_turn_lease(thread.id)
+
+        claimed = await pending_requests.aclaim(thread.id, lease.token, thread_job_id=job.id)
+
+        assert claimed.text == "visits?"
+        await lease.release()
 
 
 @pytest.mark.asyncio

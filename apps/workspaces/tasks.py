@@ -92,7 +92,7 @@ from apps.workspaces.services.failure_guidance import credential_guidance
 from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
 from apps.workspaces.services.load_activity import (
     active_runs_for_workspaces,
-    aworkspace_load_pending,
+    aworkspace_build_pending,
 )
 from apps.workspaces.services.load_candidates import (
     Promotion,
@@ -2306,12 +2306,21 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
     try:
         return await _recover_workspace_data(context, recovery_id)
     finally:
+        await _defer_flush_after_recovery(recovery_id)
+
+
+async def _defer_flush_after_recovery(recovery_id: str) -> None:
+    try:
         workspace_id = (
             await WorkspaceDataRecovery.objects.filter(id=recovery_id)
             .values_list("workspace_id", flat=True)
             .afirst()
         )
-        await _defer_pending_flush(workspace_id)
+    except Exception:
+        # From the task's finally: never replace its outcome; the sweep is the backstop.
+        logger.exception("Could not find the workspace of recovery %s", recovery_id)
+        return
+    await _defer_pending_flush(workspace_id)
 
 
 async def _recover_workspace_data(context, recovery_id: str) -> dict:
@@ -3961,7 +3970,8 @@ async def _resume_claimed_job(
 # Sent ahead of a request the workspace flush sends: one no load of its chat
 # resumes (held for another member's load, or left after its own load ended).
 FLUSH_NOTE = (
-    f"{SYSTEM_RESUME_MARKER} A workspace data load finished while this message waited; answer it."
+    f"{SYSTEM_RESUME_MARKER} A workspace data load ended while this message waited; "
+    "answer it from the data now available, and say so if what it needs did not load."
 )
 # Lets the load that queued the flush finish, so the flush does not see it pending.
 PENDING_FLUSH_DELAY_SECONDS = 5
@@ -3989,10 +3999,11 @@ async def flush_pending_requests(workspace_id: str) -> dict:
     Runs when a load of the workspace ends, and from the minute sweep. A load
     still under way flushes them itself when it ends.
     """
-    if await aworkspace_load_pending(workspace_id):
-        return {"status": "load_pending"}
     sent = 0
     for thread_id in await pending_requests.aflushable_thread_ids(workspace_id):
+        # Per request: answering one takes minutes, and a load may start meanwhile.
+        if await aworkspace_build_pending(workspace_id):
+            return {"status": "load_pending", "sent": sent}
         try:
             sent += await _flush_thread(thread_id)
         except Exception:
@@ -4003,12 +4014,15 @@ async def flush_pending_requests(workspace_id: str) -> dict:
 @app.periodic(cron="* * * * *")
 @app.task
 async def sweep_pending_requests(timestamp: int = 0) -> dict:
-    """Backstop for a flush that never ran: a lost defer, or a hold racing a load's end."""
-    flushed = 0
-    for workspace_id in await pending_requests.aflushable_workspace_ids():
-        result = await flush_pending_requests(str(workspace_id))
-        flushed += result.get("sent", 0)
-    return {"sent": flushed}
+    """Backstop for a flush that never ran: a lost defer, or a hold racing a load's end.
+
+    Queues a flush per workspace rather than running them, so one slow answer
+    never holds a worker across workspaces; the queueing lock dedupes them.
+    """
+    workspace_ids = await pending_requests.aflushable_workspace_ids()
+    for workspace_id in workspace_ids:
+        await _defer_pending_flush(workspace_id)
+    return {"queued": len(workspace_ids)}
 
 
 async def _flush_thread(thread_id) -> int:
@@ -4024,7 +4038,13 @@ async def _flush_thread(thread_id) -> int:
             return 0
         thread = await Thread.objects.select_related("workspace", "user").aget(id=thread_id)
         try:
-            await _answer_flushed_request(thread, held)
+            # The whole turn, setup included: the user's chat is busy until it ends.
+            async with asyncio.timeout(
+                settings.AGENT_RESUME_TIMEOUT_S + RESUME_SETUP_BUDGET_SECONDS
+            ):
+                await _answer_flushed_request(thread, held)
+        except TimeoutError:
+            logger.exception("flush: the held request of thread %s timed out", thread_id)
         finally:
             await pending_requests.asettle(held)
     try:
