@@ -298,7 +298,7 @@ async def verify_provider(
                 status_result = _status_result(response.status_code)
                 if status_result is not None:
                     if status_result.outcome == VerificationOutcome.UNAVAILABLE:
-                        return unavailable("http_status", page=page, status=response.status_code)
+                        log("http_status", page=page, status=response.status_code)
                     return status_result
                 try:
                     next_reference, page_rows = _parse_page(provider, response.json(), seen_rows)

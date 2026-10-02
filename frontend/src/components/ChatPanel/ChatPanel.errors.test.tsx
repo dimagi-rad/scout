@@ -21,7 +21,7 @@ const OTHER_THREAD_MESSAGES = [
   { id: "u1", role: "user", parts: [{ type: "text", text: "Earlier question" }] },
   { id: "a1", role: "assistant", parts: [{ type: "text", text: "Earlier answer" }] },
 ]
-const QUESTION ="How many visits last week?"
+const QUESTION = "How many visits last week?"
 const REPLY = "Here are your visits."
 
 const UNAVAILABLE_BODY = {
@@ -151,9 +151,9 @@ describe("a failed turn's notice after switching threads", () => {
 
 describe("a turn that fails after the user switched threads", () => {
   it("shows no notice in the new thread and resends nothing", async () => {
-    let reject!: () => void
+    let deny!: () => void
     const pending = new Promise<Response>((resolve) => {
-      reject = () => resolve(Response.json(UNAVAILABLE_BODY, { status: 403 }))
+      deny = () => resolve(Response.json(UNAVAILABLE_BODY, { status: 403 }))
     })
     const api = mockChat([() => pending as unknown as Response])
     await renderAndSend(api)
@@ -164,7 +164,7 @@ describe("a turn that fails after the user switched threads", () => {
     await screen.findByText("Earlier answer")
 
     await act(async () => {
-      reject()
+      deny()
       await pending
     })
     await act(async () => {})
