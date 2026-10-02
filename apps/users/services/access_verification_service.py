@@ -516,78 +516,26 @@ def _attempt_matches_waiter_lineage(
     )
 
 
-async def verify_connection_access(
-    actor_user_id,
-    connection_id,
-    tenant_ids: Iterable,
+async def _verify_and_publish(
+    claim,
+    requested,
+    early_provider_result,
     *,
-    deadline: float | None = None,
-    provider_verifier: Callable[..., Awaitable[ProviderVerificationResult]] = verify_provider,
-    clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    limiter: asyncio.Semaphore = NETWORK_LIMITER,
+    refreshed,
+    deadline,
+    clock,
+    provider_verifier,
+    sleep,
+    limiter,
 ) -> AccessVerificationResult:
-    """Verify one connection once and publish only its known membership history."""
-    requested = frozenset(tenant_ids)
-    if not requested:
-        return AccessVerificationResult(
-            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
-        )
-    deadline = min(
-        deadline if deadline is not None else float("inf"),
-        clock() + PROVIDER_BUDGET_SECONDS,
-    )
-    claim = await _claim_with_cancellation_cleanup(
-        actor_user_id,
-        connection_id,
-        requested,
-        deadline=deadline,
-        clock=clock,
-    )
-    if claim.status == ClaimStatus.FRESH:
-        return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
-    if claim.status == ClaimStatus.DENIED:
-        return AccessVerificationResult(
-            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
-        )
-    if claim.status == ClaimStatus.DEADLINE:
-        return AccessVerificationResult(
-            AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_UNAVAILABLE
-        )
-    if claim.status == ClaimStatus.IN_PROGRESS:
-        claim = await _wait_for_claim(
-            actor_user_id,
-            connection_id,
-            requested,
-            claim,
-            deadline=deadline,
-            clock=clock,
-            sleep=sleep,
-        )
-        if claim is None:
-            return AccessVerificationResult(
-                AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
-            )
-        if isinstance(claim, AccessVerificationResult):
-            return claim
-        if claim.status == ClaimStatus.FRESH:
-            return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
-        if claim.status == ClaimStatus.DENIED:
-            return AccessVerificationResult(
-                AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
-            )
+    """Ask the provider (unless refresh already decided), then publish under ``claim``.
+
+    Owns the lease from here on: whatever happens, the lease ends published or
+    released, so this can outlive a caller that stopped waiting for it.
+    """
     try:
-        claimed = claim
-        claim, early_result = await _refresh_claim_if_needed(
-            claim, deadline=deadline, clock=clock, limiter=limiter
-        )
-        if claim is None:
-            return early_result
-        if isinstance(early_result, AccessVerificationResult):
-            await _release_claim(claim)
-            return early_result
-        if isinstance(early_result, ProviderVerificationResult):
-            provider_result = early_result
+        if early_provider_result is not None:
+            provider_result = early_provider_result
         else:
             provider_result = await _call_provider(
                 provider_verifier, claim, deadline=deadline, clock=clock
@@ -598,7 +546,7 @@ async def verify_connection_access(
             ):
                 claim, early_result = await _renew_after_rejection(
                     claim,
-                    refreshed=claim is not claimed,
+                    refreshed=refreshed,
                     deadline=deadline,
                     clock=clock,
                     limiter=limiter,
@@ -669,3 +617,119 @@ async def verify_connection_access(
     except Exception:
         await asyncio.shield(_release_claim(claim))
         raise
+
+
+async def verify_connection_access(
+    actor_user_id,
+    connection_id,
+    tenant_ids: Iterable,
+    *,
+    deadline: float | None = None,
+    respond_by: float | None = None,
+    provider_verifier: Callable[..., Awaitable[ProviderVerificationResult]] = verify_provider,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    limiter: asyncio.Semaphore = NETWORK_LIMITER,
+) -> AccessVerificationResult:
+    """Verify one connection once and publish only its known membership history.
+
+    ``deadline`` bounds the whole verification. ``respond_by`` (default: the
+    deadline) is when the caller needs an answer: a provider check still running
+    then keeps going in the background and publishes its proof, holding the lease
+    so concurrent callers coalesce on it, and this call answers IN_PROGRESS.
+    """
+    requested = frozenset(tenant_ids)
+    if not requested:
+        return AccessVerificationResult(
+            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
+        )
+    deadline = min(
+        deadline if deadline is not None else float("inf"),
+        clock() + PROVIDER_BUDGET_SECONDS,
+    )
+    respond_by = min(respond_by if respond_by is not None else deadline, deadline)
+    claim = await _claim_with_cancellation_cleanup(
+        actor_user_id,
+        connection_id,
+        requested,
+        deadline=respond_by,
+        clock=clock,
+    )
+    if claim.status == ClaimStatus.FRESH:
+        return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
+    if claim.status == ClaimStatus.DENIED:
+        return AccessVerificationResult(
+            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
+        )
+    if claim.status == ClaimStatus.DEADLINE:
+        return AccessVerificationResult(
+            AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_UNAVAILABLE
+        )
+    if claim.status == ClaimStatus.IN_PROGRESS:
+        claim = await _wait_for_claim(
+            actor_user_id,
+            connection_id,
+            requested,
+            claim,
+            deadline=respond_by,
+            clock=clock,
+            sleep=sleep,
+        )
+        if claim is None:
+            return AccessVerificationResult(
+                AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
+            )
+        if isinstance(claim, AccessVerificationResult):
+            return claim
+        if claim.status == ClaimStatus.FRESH:
+            return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
+        if claim.status == ClaimStatus.DENIED:
+            return AccessVerificationResult(
+                AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
+            )
+    try:
+        claimed = claim
+        claim, early_result = await _refresh_claim_if_needed(
+            claim, deadline=respond_by, clock=clock, limiter=limiter
+        )
+        if claim is None:
+            return early_result
+        if isinstance(early_result, AccessVerificationResult):
+            await _release_claim(claim)
+            return early_result
+    except asyncio.CancelledError:
+        await asyncio.shield(_release_claim(claim))
+        raise
+    except Exception:
+        await asyncio.shield(_release_claim(claim))
+        raise
+    verification = asyncio.ensure_future(
+        _verify_and_publish(
+            claim,
+            requested,
+            early_result,
+            refreshed=claim is not claimed,
+            deadline=deadline,
+            clock=clock,
+            provider_verifier=provider_verifier,
+            sleep=sleep,
+            limiter=limiter,
+        )
+    )
+    if respond_by >= deadline:
+        # Bounded by the deadline itself; a cancelled caller cancels it, and waits
+        # for it to release the lease.
+        return await verification
+    try:
+        done, _pending = await asyncio.wait({verification}, timeout=max(0, respond_by - clock()))
+    except asyncio.CancelledError:
+        # The verification owns the lease and stays bounded by ``deadline``; a
+        # caller going away must not throw away a provider answer already paid for.
+        _supervise(verification)
+        raise
+    if not done:
+        _supervise(verification)
+        return AccessVerificationResult(
+            AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
+        )
+    return verification.result()

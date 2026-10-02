@@ -48,9 +48,9 @@ class VerificationBudget(StrEnum):
     BACKGROUND = "background"
 
 
-# An interactive caller is a person waiting on a response; a worker can afford the
-# provider adapter's full budget. Either way the deadline is end-to-end across every
-# connection being rechecked, never multiplied per connection.
+# How long a caller waits for an answer: an interactive caller is a person waiting on
+# a response; a worker can afford the provider adapter's full budget. Either way it is
+# end-to-end across every connection being rechecked, never multiplied per connection.
 BUDGET_SECONDS = {
     VerificationBudget.INTERACTIVE: 10.0,
     VerificationBudget.BACKGROUND: PROVIDER_BUDGET_SECONDS,
@@ -218,10 +218,15 @@ def most_severe(reasons) -> str | None:
 
 async def _averify_stale(user_id, stale: dict, budget: VerificationBudget) -> list:
     started = time.monotonic()
-    deadline = started + BUDGET_SECONDS[budget]
+    # The provider check always gets the full background budget; an interactive
+    # caller stops waiting earlier and the check finishes and publishes behind it.
+    deadline = started + PROVIDER_BUDGET_SECONDS
+    respond_by = started + BUDGET_SECONDS[budget]
     results = await asyncio.gather(
         *(
-            verify_connection_access(user_id, connection_id, tenant_ids, deadline=deadline)
+            verify_connection_access(
+                user_id, connection_id, tenant_ids, deadline=deadline, respond_by=respond_by
+            )
             for connection_id, tenant_ids in stale.items()
         ),
         return_exceptions=True,
