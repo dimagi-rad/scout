@@ -122,6 +122,24 @@ def test_apply_restores_only_what_the_provider_lists_and_is_idempotent(denied, m
 
 
 @pytest.mark.django_db(transaction=True)
+def test_a_scoped_listing_stays_scoped_through_the_trim(denied, monkeypatch):
+    """A per-tenant check (Connect's light path) is authoritative only for what it
+    asked about: rebuilt unscoped, it would archive every live row it never checked."""
+    _connection, bots, memberships = denied
+    listed, omitted, _archived_earlier, still_live = memberships
+    _provider(
+        monkeypatch,
+        lambda: ProviderVerificationResult.complete({bots[0].external_id}, scoped=True),
+    )
+
+    _run("--apply")
+
+    assert _live(listed)
+    assert not _live(omitted)
+    assert _live(still_live)
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("respond", "revoked"),
     [

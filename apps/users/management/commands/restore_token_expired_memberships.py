@@ -120,7 +120,11 @@ def _restricted_verifier(user_id, connection_id, candidate_ids):
             .exclude(tenant_id__in=candidate_ids)
             .values_list("tenant__external_id", flat=True)
         }
-        return ProviderVerificationResult.complete(result.external_ids - (drop - keep))
+        # A scoped result must stay scoped, or publication would archive every live
+        # row the per-tenant check never asked about.
+        return ProviderVerificationResult.complete(
+            result.external_ids - (drop - keep), scoped=result.scoped
+        )
 
     return verifier
 

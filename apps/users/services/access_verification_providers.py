@@ -195,7 +195,7 @@ def _is_requested_opportunity(response, external_id: str) -> bool:
 
 
 async def _verify_connect_opportunities(
-    client, policy, listing_url, headers, ids, deadline, clock, *, log, unavailable
+    client, policy, listing_url, headers, ids, deadline, clock, *, connection_id, log, unavailable
 ):
     """Check each opportunity; None means fall back to the full listing.
 
@@ -244,6 +244,13 @@ async def _verify_connect_opportunities(
             # can still decide, and must never read this as an omission.
             return None
         status_result = _status_result(response.status_code)
+        if response.status_code == 401:
+            logger.info(
+                "Provider commcare_connect answered verification for connection %s "
+                "with HTTP 401 (%s)",
+                connection_id,
+                "invalid_token" if _names_invalid_token(response) else "no token error",
+            )
         if status_result is not None:
             if status_result.outcome == VerificationOutcome.UNAVAILABLE:
                 log("light_http_status", status=response.status_code)
@@ -423,6 +430,7 @@ async def verify_provider(
                     light_ids,
                     deadline,
                     clock,
+                    connection_id=snapshot.observation.connection_id,
                     log=log,
                     unavailable=unavailable,
                 )
