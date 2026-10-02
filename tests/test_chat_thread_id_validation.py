@@ -69,6 +69,9 @@ def checkpointer():
         patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock, return_value=saver),
         patch("apps.chat.views.build_agent_graph", side_effect=build),
+        # These workspaces serve no data yet, so a first message would be held for
+        # the load it starts; these tests are about the turn that answers it.
+        patch("apps.chat.views._hold_while_loading", new_callable=AsyncMock, return_value=None),
     ):
         yield saver
 
