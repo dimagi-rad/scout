@@ -35,14 +35,17 @@ function isStaleThreadError(error: Error): boolean {
 
 /**
  * Only an in-app path; anything absolute or protocol-relative falls back. Browsers
- * read a backslash as a slash, so "/\evil.example" would be protocol-relative too.
+ * read a backslash as a slash and strip tabs and newlines, so "/\evil.example" and
+ * "/\t/evil.example" would be protocol-relative too.
  */
 function safeRecoveryPath(value: unknown): string {
   if (
     typeof value === "string" &&
     value.startsWith("/") &&
     !value.startsWith("//") &&
-    !value.includes("\\")
+    !value.includes("\\") &&
+    // eslint-disable-next-line no-control-regex -- rejecting control characters is the point
+    !/[\u0000-\u001F\u007F]/.test(value)
   ) {
     return value
   }

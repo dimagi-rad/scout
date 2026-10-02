@@ -62,7 +62,7 @@ describe("classifyChatError", () => {
   )
 
   it("falls back to Connected Accounts for a missing or off-site recovery_url", () => {
-    for (const recovery_url of [undefined, "https://evil.example/", "//evil.example/", "/\\evil.example/", 42]) {
+    for (const recovery_url of [undefined, "https://evil.example/", "//evil.example/", "/\\evil.example/", "/\t/evil.example/", "/\n/evil.example/", 42]) {
       const error = bodyError({ error: RECONNECT_TEXT, reason: "credential_expired", recovery_url })
       expect(classifyChatError(error)).toMatchObject({ recoveryPath: "/settings/connections" })
     }
