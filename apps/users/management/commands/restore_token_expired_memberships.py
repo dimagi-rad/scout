@@ -16,7 +16,8 @@ even if listed. A dead credential, a provider outage or a second 401 restores
 nothing, so a genuinely revoked user stays revoked. Idempotent.
 
 Known imprecision, bounded by the listing: a single-tenant 403 recorded outside the
-verifier (loaders, materializer) after the token denial restamps the timestamp but
+verifier (loaders, materializer), or by the verifier on a tenant with no proof row
+yet, after the token denial restamps the timestamp but
 leaves no proof marker, and an alias tenant sharing a candidate's external id maps to
 the same listing entry. Either row can be restored, but only when the provider lists
 it for the current credential -- what an ordinary verification or rediscovery would
@@ -48,8 +49,9 @@ logger = logging.getLogger(__name__)
 def _candidates(*, user_ids, connection_ids) -> tuple[dict, list]:
     """``({(user_id, connection_id): {tenant_id, ...}}, unmatched_connection_ids)``.
 
-    Unmatched connections still carry the token-expiry denial but no row archived at
-    its timestamp -- a later denial moved it -- so an operator has to look at them.
+    Unmatched connections still carry the token-expiry denial but no eligible row: a
+    later denial moved the timestamp, or every row there is another team's or carries
+    a 403 marker. An operator has to look at them.
     """
     connections = TenantConnection.objects.filter(
         credential_type=TenantConnection.OAUTH,
@@ -77,7 +79,8 @@ def _candidates(*, user_ids, connection_ids) -> tuple[dict, list]:
                 | Q(provider_metadata__team_slug="")
             )
         # A later single-tenant 403 restamps upstream_denied_at without changing the
-        # code, so its row would match; the verifier marks the 403'd tenant's proof.
+        # code, so its row would match; the verifier marks the 403'd tenant's proof
+        # when one exists.
         archived = archived.exclude(
             tenant_id__in=UpstreamAccessProof.objects.filter(
                 connection=connection, last_error_code=ErrorCode.AUTH_ACCESS_DENIED
@@ -166,7 +169,7 @@ class Command(BaseCommand):
         for (user_id, connection_id), tenant_ids in candidates.items():
             self._log(f"  user {user_id} connection {connection_id}: {len(tenant_ids)}")
         if unmatched:
-            self._log("Token-expiry connections with no row archived at their denial (skipped):")
+            self._log("Token-expiry connections with no eligible archived row (skipped):")
             for connection_id in unmatched:
                 self._log(f"  connection {connection_id}")
         if not apply:

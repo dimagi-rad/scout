@@ -44,6 +44,7 @@ def denied(user):
     account = SocialAccount.objects.create(
         user=user, provider="ocs", uid="identity#acme", extra_data={"team": "acme"}
     )
+    # No refresh token or app, so a 401 retries the same credential instead of refreshing.
     SocialToken.objects.create(
         account=account, token="access", expires_at=timezone.now() + timedelta(hours=1)
     )
