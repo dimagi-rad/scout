@@ -8,6 +8,7 @@ from datetime import timedelta
 
 import pytest
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
+from django.db import connection
 from django.utils import timezone
 
 from apps.users.adapters import encrypt_credential
@@ -206,3 +207,21 @@ async def test_a_sync_views_check_still_publishes_after_it_answers(
     await _drain_supervised()
     proof = await UpstreamAccessProof.objects.aget(connection__user=user, tenant=tenant)
     assert timezone.now() - proof.verified_at < timedelta(minutes=1)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_detached_orm_threads_close_their_connection_after_each_call():
+    executor = access_verification_service._RecyclingExecutor(max_workers=1)
+
+    def query():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        return connection
+
+    try:
+        used = executor.submit(query).result(timeout=10)
+    finally:
+        executor.shutdown(wait=True)
+
+    # With CONN_MAX_AGE at 0 the connection is obsolete once the call returns.
+    assert used.connection is None
