@@ -33,8 +33,9 @@ def get_langfuse_callback(
 ):
     """Create a Langfuse CallbackHandler for LangGraph's config["callbacks"].
 
-    Pair with langfuse_trace_context() (wrapping the astream_events call) to attach
-    session_id/user_id. Returns None when Langfuse credentials are unconfigured.
+    The handler carries no attribution: session_id, user_id and metadata are ignored
+    here and reach Langfuse only through langfuse_trace_context(), which must wrap
+    the call. Returns None when Langfuse credentials are unconfigured.
     """
     secret_key, public_key, base_url = _get_langfuse_settings()
     if not all([secret_key, public_key, base_url]):
