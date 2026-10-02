@@ -32,7 +32,7 @@ import {
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
 import { useGeneratedTitleRefresh, type TitleRefreshTrigger } from "./useGeneratedTitleRefresh"
-import { writeDraft } from "./draftStorage"
+import { readDraft, writeDraft } from "./draftStorage"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest } from "./useHeldRequest"
 import {
@@ -76,7 +76,7 @@ export function ChatPanel() {
   // Read after an await, when the render-time value may be stale.
   const inputRef = useRef(input)
   inputRef.current = input
-  const [addFailed, setAddFailed] = useState(false)
+  const [addFailed, setAddFailed] = useState<string | null>(null)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const [threadPanelOpen, setThreadPanelOpen] = useState(false)
   const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")
@@ -173,7 +173,13 @@ export function ChatPanel() {
   const held = useHeldRequest(activeDomainId, threadId)
   // The user message that sends a held request itself ("Send now"), and the
   // request version it showed; a retry of that message names the version too.
-  const heldSendRef = useRef<{ messageId: string; version: number } | null>(null)
+  const heldSendRef = useRef<{
+    messageId: string
+    version: number
+    threadId: string
+    /** What the user typed with it, which only this message carries. */
+    extra?: string
+  } | null>(null)
   const heldHandlerRef = useRef(held.onHeld)
   heldHandlerRef.current = held.onHeld
 
@@ -334,7 +340,7 @@ export function ChatPanel() {
     setThreadArtifactsStatus("idle")
     setThreadArtifactsError(null)
     setStoppedNotice(false)
-    setAddFailed(false)
+    setAddFailed(null)
     return () => {
       threadArtifactsRequestRef.current += 1
     }
@@ -470,6 +476,7 @@ export function ChatPanel() {
     heldSendRef.current = null
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
     held.restore()
+    if (sending.extra) returnToComposer(sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, busyError])
 
@@ -486,32 +493,45 @@ export function ChatPanel() {
       ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
       : pendingRequestText(pending)
     const messageId = generateId()
-    heldSendRef.current = { messageId, version: pending.version }
+    heldSendRef.current = { messageId, version: pending.version, threadId, extra }
     resetOverloadState()
     setStoppedNotice(false)
     turnThreadRef.current = threadId
     void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
   }
 
+  /** Puts text the composer had already cleared back, in the chat it was typed in. */
+  function returnToComposer(sentFrom: string, text: string) {
+    if (contextRef.current.threadId === sentFrom) {
+      setInput(inputRef.current.trim() ? `${inputRef.current}\n${text}` : text)
+      return
+    }
+    if (!activeDomainId || !userId) return
+    const scope = { userId, workspaceId: activeDomainId, threadId: sentFrom }
+    const draft = readDraft(scope)
+    writeDraft(scope, draft.trim() ? `${draft}\n${text}` : text)
+  }
+
   async function handleSend(text: string) {
     if (held.adding) {
       const sentFrom = threadId
       const outcome = await held.add(text)
-      if (outcome === "added") return
-      if (contextRef.current.threadId !== sentFrom) {
-        // The user moved on while it was refused; keep the text in that chat's draft.
-        if (activeDomainId && userId) {
-          writeDraft({ userId, workspaceId: activeDomainId, threadId: sentFrom }, text)
-        }
+      if (outcome === "added") {
+        setAddFailed(null)
         return
       }
-      if (outcome === "failed") {
-        setInput(inputRef.current.trim() ? `${inputRef.current}\n${text}` : text)
-        setAddFailed(true)
+      if (contextRef.current.threadId !== sentFrom) {
+        // The user moved on meanwhile; keep the text in that chat's draft.
+        returnToComposer(sentFrom, text)
+        return
+      }
+      if (outcome !== "send") {
+        returnToComposer(sentFrom, text)
+        setAddFailed(outcome.failed)
         return
       }
     }
-    setAddFailed(false)
+    setAddFailed(null)
     const unanswered = held.phase === "unanswered" ? held.takeForSend() : null
     if (unanswered) sendHeld(unanswered, text)
     else sendText(text)
@@ -612,7 +632,7 @@ export function ChatPanel() {
           )}
           {addFailed && (
             <p className="text-sm text-destructive" data-testid="pending-request-add-failed">
-              Couldn&apos;t add that to your request. It&apos;s back in the message box.
+              {addFailed}
             </p>
           )}
           {isStreaming && <ChatThinkingIndicator />}
