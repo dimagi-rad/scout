@@ -98,6 +98,7 @@ from apps.workspaces.services.pipeline_resolver import (
     aresolve_pipeline_config,
 )
 from apps.workspaces.services.query_state import synced_runs, workspace_query_surface
+from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD, staleness_anchor
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.source_freshness import aworkspace_source_freshness
 from apps.workspaces.services.tenant_coverage import coverage_complete
@@ -1703,6 +1704,15 @@ async def run_materialization(
             job_type=ThreadJob.JobType.MATERIALIZATION,
             state__in=list(ThreadJob.ACTIVE_STATES),
         ).afirst()
+        # A RUNNING row older than the janitor window belongs to a dead resume worker, so a
+        # fresh turn must be able to start a load instead of being blocked until the sweep.
+        if (
+            existing is not None
+            and existing.state == ThreadJob.State.RUNNING
+            and (anchor := staleness_anchor(existing)) is not None
+            and datetime.now(UTC) - anchor >= STALE_JOB_THRESHOLD
+        ):
+            existing = None
         if existing is not None:
             # A RUNNING job is the resume turn itself (matching athread_awaits_load), so it
             # must not promise a resume, but it must still block re-dispatching its own load.
@@ -1713,8 +1723,8 @@ async def run_materialization(
                 )
             else:
                 message = (
-                    "The load this conversation started has already finished and this turn is "
-                    "its follow-up. Do not start another load. Nothing will resume this "
+                    "The load this conversation started has already ended (finished or was "
+                    "cancelled) and this turn is its follow-up. Do not start another load. Nothing will resume this "
                     "conversation; if the user wants a retry, tell them to ask again."
                 )
             tc["result"] = success_response(

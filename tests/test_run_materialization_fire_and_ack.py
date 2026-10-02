@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
@@ -16,6 +17,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD
 from mcp_server.server import _THIS_CONVERSATION_RESUMES, run_materialization
 from tests.tenant_access import ausable_connection
 
@@ -381,6 +383,26 @@ async def test_a_running_resume_job_blocks_redispatch_without_promising_a_resume
         )
     assert result["data"]["status"] == "already_in_progress"
     assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
-    assert "already finished" in result["data"]["message"]
+    assert "already ended" in result["data"]["message"]
     assert "Nothing will resume this conversation" in result["data"]["message"]
     dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_abandoned_running_resume_job_does_not_block_a_new_load(workspace, user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=11_114,
+        tool_call_id="tc-abandoned",
+        state=ThreadJob.State.RUNNING,
+        started_at=datetime.now(UTC) - STALE_JOB_THRESHOLD - timedelta(minutes=1),
+    )
+    with patch(DISPATCH, new=AsyncMock(return_value=AsyncMock(id="tj-new"))) as dispatch:
+        result = await run_materialization(
+            workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
+        )
+    assert result["data"]["status"] == "started"
+    dispatch.assert_awaited_once()
