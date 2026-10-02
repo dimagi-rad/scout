@@ -29,6 +29,8 @@ interface Server {
   /** Answer a held send with a reply that fails after it began. */
   failHeldSendMidStream: boolean
   discards: number
+  /** Refuse a held send as too long, as the server does past MAX_MESSAGE_LENGTH. */
+  tooLongHeldSend: boolean
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -96,6 +98,7 @@ function mockServer(): Server {
     heldSendGate: null,
     failHeldSendMidStream: false,
     discards: 0,
+    tooLongHeldSend: false,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -111,6 +114,12 @@ function mockServer(): Server {
       if (body.data.pendingRequestVersion && server.heldSendGate) await server.heldSendGate
       if (body.data.pendingRequestVersion && server.failHeldSendMidStream) {
         return failingReplyResponse()
+      }
+      if (body.data.pendingRequestVersion && server.tooLongHeldSend) {
+        return Response.json(
+          { error: "Request too long — edit it", reason: "pending_request_too_long" },
+          { status: 400 },
+        )
       }
       if (body.data.pendingRequestVersion && server.refuseHeldSend) {
         return Response.json(
@@ -363,5 +372,27 @@ describe("a message sent while the chat's data loads", () => {
 
     await waitFor(() => expect(screen.queryByTestId("pending-request-card")).toBeNull())
     expect(server.discards).toBe(1)
+  })
+
+  it("says why a held send was refused when resending cannot help", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.tooLongHeldSend = true
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    await type(FOLLOW_UP, "Send message")
+
+    expect(await screen.findByTestId("pending-request-add-failed")).toHaveTextContent(
+      "Request too long — edit it",
+    )
+    expect(screen.getByRole("textbox")).toHaveValue(FOLLOW_UP)
+    expect(screen.queryByTestId("chat-error")).toBeNull()
+    consoleError.mockRestore()
   })
 })

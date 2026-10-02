@@ -33,6 +33,7 @@ import {
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
 import { useGeneratedTitleRefresh, type TitleRefreshTrigger } from "./useGeneratedTitleRefresh"
 import { readDraft, writeDraft } from "./draftStorage"
+import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest } from "./useHeldRequest"
 import {
@@ -521,7 +522,14 @@ export function ChatPanel() {
     }
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
     // The card is the way on; the error notice's Retry would resend another turn.
+    // A refusal that resending cannot fix (too long) still says why, by the card.
+    const refusal = error ? classifyChatError(error) : null
     clearError()
+    if (refusal?.kind === "final" && sending.threadId === contextRef.current.threadId) {
+      setAddFailed(
+        sending.extra ? `${refusal.message} Your text is back in the message box.` : refusal.message,
+      )
+    }
     held.restore(sending.threadId)
     if (sending.extra) returnToComposer(sending.workspaceId, sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
