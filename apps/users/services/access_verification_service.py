@@ -19,6 +19,7 @@ from django.utils import timezone
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.users.services.access_verification import (
+    ANSWERS_SHORT_OF_ACCESS,
     PROOF_MAX_AGE,
     ClaimStatus,
     PublicationStatus,
@@ -610,17 +611,15 @@ def _detach(verification, connection_id) -> None:
     _supervise(verification)
 
 
-_ANSWERS_SHORT_OF_ACCESS = frozenset(
-    {
-        VerificationOutcome.TENANT_DENIED,
-        VerificationOutcome.CREDENTIAL_REJECTED,
-        VerificationOutcome.INDETERMINATE,
-    }
-)
-
-
 async def _withdraw_proofs(
-    claim, tenant_ids, *, before, deadline, clock, except_tenant_ids=frozenset()
+    claim,
+    tenant_ids,
+    *,
+    before,
+    deadline,
+    clock,
+    except_tenant_ids=frozenset(),
+    unsettled_by=None,
 ) -> None:
     """Void the positive proofs an answer short of access calls into question.
 
@@ -635,6 +634,7 @@ async def _withdraw_proofs(
                 tenant_ids=tenant_ids,
                 except_tenant_ids=except_tenant_ids,
                 before=before,
+                unsettled_by=unsettled_by,
             ),
             deadline=deadline,
             clock=clock,
@@ -754,9 +754,9 @@ async def _verify_and_publish_once(
         )
         progress.denied = dead_grant or provider_result.outcome in {
             VerificationOutcome.COMPLETE,
-            *_ANSWERS_SHORT_OF_ACCESS,
+            *ANSWERS_SHORT_OF_ACCESS,
         }
-        if dead_grant or provider_result.outcome in _ANSWERS_SHORT_OF_ACCESS:
+        if dead_grant or provider_result.outcome in ANSWERS_SHORT_OF_ACCESS:
             indeterminate = provider_result.outcome == VerificationOutcome.INDETERMINATE
             await _withdraw_proofs(
                 claim,
@@ -766,6 +766,7 @@ async def _verify_and_publish_once(
                 # An indeterminate answer denies nothing: withdraw only the stale proofs
                 # grace could otherwise stand on, not the fresh ones of sibling tenants.
                 before=completed_at - PROOF_MAX_AGE if indeterminate else completed_at,
+                unsettled_by=provider_result.outcome if indeterminate else None,
                 deadline=deadline,
                 clock=clock,
             )
@@ -777,7 +778,7 @@ async def _verify_and_publish_once(
             if provider_result.outcome == VerificationOutcome.COMPLETE:
                 await _withdraw_proofs(
                     claim,
-                    claim.requested_tenant_ids,
+                    claim.requested_tenant_ids if provider_result.scoped else None,
                     before=completed_at,
                     deadline=time.monotonic() + _CLEANUP_WAIT_SECONDS,
                     clock=time.monotonic,

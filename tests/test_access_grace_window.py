@@ -695,3 +695,33 @@ async def test_an_unpublished_omission_keeps_the_proofs_the_listing_confirmed(
     confirmed = await UpstreamAccessProof.objects.aget(connection=connection, tenant=sibling)
     assert omitted.verified_at is None
     assert confirmed.verified_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unpublished_indeterminate_answer_still_keeps_grace_off(
+    user, tenant, workspace, monkeypatch
+):
+    connection, sibling = await _with_sibling(user, tenant, sibling_age=timedelta(minutes=1))
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+
+    async def indeterminate(*args, **kwargs):
+        return ProviderVerificationResult.indeterminate("verification_indeterminate")
+
+    async def publication_times_out(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(
+        access_verification_service, "apublish_verification_receipt", publication_times_out
+    )
+
+    await verify_connection_access(
+        user.id, connection.id, {tenant.id, sibling.id}, provider_verifier=indeterminate
+    )
+    await _drain_background()
+    await UpstreamAccessProof.objects.filter(connection=connection, tenant=sibling).aupdate(
+        verified_at=timezone.now() - timedelta(minutes=10)
+    )
+
+    window = timedelta(minutes=30)
+    assert not await agrace_proof_tenant_ids(user.id, connection.id, {sibling.id}, max_age=window)

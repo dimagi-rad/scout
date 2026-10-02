@@ -246,15 +246,16 @@ def _owned_history(actor_user_id, current, requested) -> list[tuple]:
     ]
 
 
-# Answers that leave a proof standing but must keep grace from standing on it until a
-# COMPLETE settles the tenant again.
-_UNSETTLED_ATTEMPTS = frozenset(
+# Answers short of access: grace may not stand on a proof any of them called into
+# question until a COMPLETE settles the tenant again.
+ANSWERS_SHORT_OF_ACCESS = frozenset(
     {
-        VerificationOutcome.INDETERMINATE.value,
-        VerificationOutcome.TENANT_DENIED.value,
-        VerificationOutcome.CREDENTIAL_REJECTED.value,
+        VerificationOutcome.TENANT_DENIED,
+        VerificationOutcome.CREDENTIAL_REJECTED,
+        VerificationOutcome.INDETERMINATE,
     }
 )
+_UNSETTLED_ATTEMPTS = frozenset(outcome.value for outcome in ANSWERS_SHORT_OF_ACCESS)
 
 
 def _fresh_history_tenants(
@@ -332,14 +333,20 @@ def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age,
 
 
 def void_positive_proofs(
-    actor_user_id, connection_id, *, tenant_ids=None, except_tenant_ids=(), before=None
+    actor_user_id,
+    connection_id,
+    *,
+    tenant_ids=None,
+    except_tenant_ids=(),
+    before=None,
+    unsettled_by=None,
 ):
     """Withdraw positive proofs that an unsettled "access lost" answer calls into question.
 
     Archives nothing. ``tenant_ids`` None means the whole connection: a 401 rejects
     the credential, not one tenant, and other requests on this connection may be
     checking other tenants. ``except_tenant_ids`` are tenants the same answer
-    confirmed. ``before`` keeps a void that lands late from undoing a proof published
+    confirmed. ``unsettled_by`` marks every proof in scope with that outcome. ``before`` keeps a void that lands late from undoing a proof published
     after the answer it is about.
     """
     proofs = UpstreamAccessProof.objects.filter(
@@ -349,6 +356,10 @@ def void_positive_proofs(
         proofs = proofs.filter(tenant_id__in=list(tenant_ids))
     if except_tenant_ids:
         proofs = proofs.exclude(tenant_id__in=list(except_tenant_ids))
+    if unsettled_by is not None:
+        # The proofs left standing are marked too, as publication would, so grace
+        # cannot stand on them later even if that publication never lands.
+        proofs.update(last_attempt_result=unsettled_by.value)
     if before is not None:
         proofs = proofs.filter(verified_at__lt=before)
     proofs.update(verified_at=None)
