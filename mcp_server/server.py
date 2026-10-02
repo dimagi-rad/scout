@@ -139,6 +139,9 @@ MAX_DATASET_DISCOVERY_LIMIT = 100
 # the full-detail path for one dataset.
 MAX_DATASET_DISCOVERY_LIMIT_WITH_FIELDS = 10
 FIELD_SUMMARY_DESCRIPTION_CHARS = 160
+# Users with hundreds of memberships produced hundreds of denied ids and model
+# errors per listing; the agent needs the count and a sample, not every id.
+MAX_LISTED_WORKSPACE_ISSUES = 10
 
 
 _P = ParamSpec("_P")
@@ -482,6 +485,36 @@ async def get_lineage(
         return tc["result"]
 
 
+def _capped_workspace_issues(
+    issues: list, active_workspace_id: str, *, workspace_id_of=str
+) -> tuple[list, int]:
+    """A sample of per-workspace issues, the active workspace's first, and the full count."""
+    active = str(active_workspace_id or "")
+    ordered = sorted(issues, key=lambda issue: workspace_id_of(issue) != active)
+    return ordered[:MAX_LISTED_WORKSPACE_ISSUES], len(issues)
+
+
+def _issue_listing(
+    workspace_id: str,
+    *,
+    inaccessible: list[str],
+    unverified: list[str],
+    errors: list[dict] | None = None,
+) -> dict:
+    listing = {}
+    if errors is not None:
+        listing["workspace_errors"], listing["workspace_error_count"] = _capped_workspace_issues(
+            errors, workspace_id, workspace_id_of=lambda error: error["workspace_id"]
+        )
+    listing["inaccessible_workspace_ids"], listing["inaccessible_workspace_count"] = (
+        _capped_workspace_issues(inaccessible, workspace_id)
+    )
+    listing["unverified_workspace_ids"], listing["unverified_workspace_count"] = (
+        _capped_workspace_issues(unverified, workspace_id)
+    )
+    return listing
+
+
 def _clamp_pagination(limit: int, offset: int, *, max_limit: int) -> tuple[int, int]:
     try:
         parsed_limit = int(limit)
@@ -633,9 +666,11 @@ async def list_workspaces(
 
     Only workspaces the user can currently read are listed. The response names the
     rest in ``inaccessible_workspace_ids`` (access denied) and, separately,
-    ``unverified_workspace_ids`` (access not yet confirmed upstream). Only the active
-    workspace is rechecked here; to verify another, pass its id to ``list_datasets``
-    in ``workspace_ids``.
+    ``unverified_workspace_ids`` (access not yet confirmed upstream), each capped at
+    10 ids with the full number in ``inaccessible_workspace_count`` and
+    ``unverified_workspace_count``; narrow with ``search`` to find a specific one.
+    Only the active workspace is rechecked here; to verify another, pass its id to
+    ``list_datasets`` in ``workspace_ids``.
     """
     limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_WORKSPACE_DISCOVERY_LIMIT)
     async with tool_context(
@@ -699,8 +734,11 @@ async def list_workspaces(
                 "limit": limit,
                 "offset": offset,
                 "has_more": offset + len(items) < total,
-                "inaccessible_workspace_ids": inaccessible_workspace_ids,
-                "unverified_workspace_ids": unverified_workspace_ids,
+                **_issue_listing(
+                    workspace_id,
+                    inaccessible=inaccessible_workspace_ids,
+                    unverified=unverified_workspace_ids,
+                ),
             },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
@@ -783,7 +821,8 @@ async def list_datasets(
     The response lists ``inaccessible_workspace_ids`` (access denied) and, separately,
     ``unverified_workspace_ids`` (access not yet confirmed upstream). Pass an
     unverified id in ``workspace_ids`` to have its access verified and its datasets
-    listed.
+    listed. These lists and ``workspace_errors`` hold at most 10 entries each; the
+    ``*_count`` fields give the full numbers.
     """
     limit, offset = _clamp_pagination(
         limit,
@@ -925,9 +964,12 @@ async def list_datasets(
                 "limit": limit,
                 "offset": offset,
                 "has_more": offset + len(datasets) < total,
-                "workspace_errors": workspace_errors,
-                "inaccessible_workspace_ids": inaccessible_workspace_ids,
-                "unverified_workspace_ids": unverified_workspace_ids,
+                **_issue_listing(
+                    workspace_id,
+                    inaccessible=inaccessible_workspace_ids,
+                    unverified=unverified_workspace_ids,
+                    errors=workspace_errors,
+                ),
             },
             schema="semantic",
             timing_ms=tc["timer"].elapsed_ms,

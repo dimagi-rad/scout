@@ -160,3 +160,25 @@ async def test_datasets_listing_names_each_workspace_without_a_queryable_model()
     ]
     assert {e["schema_status"] for e in errors} == {"unavailable"}
     assert {e["error"] for e in errors} == {"No active semantic model is available."}
+
+
+async def test_issue_lists_are_capped_with_full_counts(upstream_provider):
+    user = await _member_of(60)
+    upstream_provider.failure = 503
+    ids_by_name = {w.name: str(w.id) async for w in Workspace.objects.filter(created_by=user)}
+    active = ids_by_name["Workspace 055"]
+
+    workspaces = await server.list_workspaces(user_id=str(user.id), workspace_id=active)
+    datasets = await server.list_datasets(
+        workspace_ids=list(ids_by_name.values()), workspace_id=active, user_id=str(user.id)
+    )
+
+    for data in (workspaces["data"], datasets["data"]):
+        assert data["inaccessible_workspace_count"] == 12
+        assert len(data["inaccessible_workspace_ids"]) == server.MAX_LISTED_WORKSPACE_ISSUES
+        assert data["inaccessible_workspace_ids"][0] == active
+        assert data["unverified_workspace_count"] == 12
+        assert len(data["unverified_workspace_ids"]) == server.MAX_LISTED_WORKSPACE_ISSUES
+    errors = datasets["data"]["workspace_errors"]
+    assert datasets["data"]["workspace_error_count"] == 36
+    assert len(errors) == server.MAX_LISTED_WORKSPACE_ISSUES
