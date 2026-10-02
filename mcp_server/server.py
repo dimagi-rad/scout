@@ -1706,19 +1706,22 @@ async def run_materialization(
         if existing is not None:
             # A RUNNING job is the resume turn itself (matching athread_awaits_load), so it
             # must not promise a resume, but it must still block re-dispatching its own load.
-            promises_resume = existing.state == ThreadJob.State.PENDING
-            follow_up = (
-                _THIS_CONVERSATION_RESUMES
-                if promises_resume
-                else "Nothing will resume this conversation; do not start another load."
-            )
+            if existing.state == ThreadJob.State.PENDING:
+                message = (
+                    "A materialization started by this conversation is already running. "
+                    f"{_THIS_CONVERSATION_RESUMES}"
+                )
+            else:
+                message = (
+                    "The load this conversation started has already finished and this turn is "
+                    "its follow-up. Do not start another load. Nothing will resume this "
+                    "conversation; if the user wants a retry, tell them to ask again."
+                )
             tc["result"] = success_response(
                 {
                     "status": "already_in_progress",
                     "thread_job_id": str(existing.id),
-                    "message": (
-                        f"A materialization started by this conversation is already running. {follow_up}"
-                    ),
+                    "message": message,
                 },
                 schema="",
                 timing_ms=tc["timer"].elapsed_ms,

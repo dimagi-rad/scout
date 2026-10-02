@@ -381,5 +381,6 @@ async def test_a_running_resume_job_blocks_redispatch_without_promising_a_resume
         )
     assert result["data"]["status"] == "already_in_progress"
     assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
+    assert "already finished" in result["data"]["message"]
     assert "Nothing will resume this conversation" in result["data"]["message"]
     dispatch.assert_not_awaited()
