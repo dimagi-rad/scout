@@ -629,3 +629,69 @@ async def test_an_unpublished_full_omission_withdraws_sibling_proofs(
 
     window = timedelta(minutes=30)
     assert not await agrace_proof_tenant_ids(user.id, connection.id, {sibling.id}, max_age=window)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_indeterminate_answer_keeps_grace_off_until_a_complete_settles_it(
+    user, tenant, workspace
+):
+    """A proof fresh when the indeterminate answer came is kept, but grace may not
+    stand on it later, through any outage, until a positive answer settles it."""
+    connection, sibling = await _with_sibling(user, tenant, sibling_age=timedelta(minutes=1))
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+    answers = [
+        ProviderVerificationResult.indeterminate("verification_indeterminate"),
+        ProviderVerificationResult.unavailable("verification_unavailable"),
+        ProviderVerificationResult.complete({tenant.external_id, sibling.external_id}),
+    ]
+
+    async def provider(*args, **kwargs):
+        return answers.pop(0)
+
+    async def verify():
+        await UpstreamAccessProof.objects.filter(connection=connection).aupdate(
+            verified_at=timezone.now() - timedelta(minutes=10)
+        )
+        return await verify_connection_access(
+            user.id, connection.id, {tenant.id, sibling.id}, provider_verifier=provider
+        )
+
+    window = timedelta(minutes=30)
+    await verify_connection_access(
+        user.id, connection.id, {tenant.id, sibling.id}, provider_verifier=provider
+    )
+    await verify()  # an outage: must not wash out the indeterminate answer
+    assert not await agrace_proof_tenant_ids(user.id, connection.id, {sibling.id}, max_age=window)
+
+    await verify()  # a positive answer settles it
+    assert await agrace_proof_tenant_ids(user.id, connection.id, {sibling.id}, max_age=window)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unpublished_omission_keeps_the_proofs_the_listing_confirmed(
+    user, tenant, workspace, monkeypatch
+):
+    connection, sibling = await _with_sibling(user, tenant, sibling_age=timedelta(minutes=10))
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+
+    async def lists_only_the_sibling(*args, **kwargs):
+        return ProviderVerificationResult.complete({sibling.external_id})
+
+    async def publication_times_out(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(
+        access_verification_service, "apublish_verification_receipt", publication_times_out
+    )
+
+    await verify_connection_access(
+        user.id, connection.id, {tenant.id, sibling.id}, provider_verifier=lists_only_the_sibling
+    )
+    await _drain_background()
+
+    omitted = await UpstreamAccessProof.objects.aget(connection=connection, tenant=tenant)
+    confirmed = await UpstreamAccessProof.objects.aget(connection=connection, tenant=sibling)
+    assert omitted.verified_at is None
+    assert confirmed.verified_at is not None

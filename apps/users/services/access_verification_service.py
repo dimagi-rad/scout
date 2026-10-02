@@ -619,7 +619,9 @@ _ANSWERS_SHORT_OF_ACCESS = frozenset(
 )
 
 
-async def _withdraw_proofs(claim, tenant_ids, *, before, deadline, clock) -> None:
+async def _withdraw_proofs(
+    claim, tenant_ids, *, before, deadline, clock, except_tenant_ids=frozenset()
+) -> None:
     """Void the positive proofs an answer short of access calls into question.
 
     ``tenant_ids`` None means the whole connection. Overdue, the update finishes under
@@ -631,6 +633,7 @@ async def _withdraw_proofs(claim, tenant_ids, *, before, deadline, clock) -> Non
                 claim.observation.user_id,
                 claim.observation.connection_id,
                 tenant_ids=tenant_ids,
+                except_tenant_ids=except_tenant_ids,
                 before=before,
             ),
             deadline=deadline,
@@ -790,6 +793,7 @@ async def _verify_and_publish_once(
                 await _withdraw_proofs(
                     claim,
                     short if mapped.scoped else None,
+                    except_tenant_ids=mapped.tenant_ids,
                     before=completed_at,
                     deadline=deadline,
                     clock=clock,

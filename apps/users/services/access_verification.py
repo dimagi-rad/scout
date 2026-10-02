@@ -246,10 +246,25 @@ def _owned_history(actor_user_id, current, requested) -> list[tuple]:
     ]
 
 
+# Answers that leave a proof standing but must keep grace from standing on it until a
+# COMPLETE settles the tenant again.
+_UNSETTLED_ATTEMPTS = frozenset(
+    {
+        VerificationOutcome.INDETERMINATE.value,
+        VerificationOutcome.TENANT_DENIED.value,
+        VerificationOutcome.CREDENTIAL_REJECTED.value,
+    }
+)
+
+
 def _fresh_history_tenants(
-    current, request, history, *, now=None, max_age=PROOF_MAX_AGE
+    current, request, history, *, now=None, max_age=PROOF_MAX_AGE, settled_only=False
 ) -> frozenset:
-    """Tenants in ``history`` whose every row is live and whose proof is fresh."""
+    """Tenants in ``history`` whose every row is live and whose proof is fresh.
+
+    ``settled_only`` also requires that no attempt since the proof answered short of
+    access, for grace, which stands on an old proof rather than a fresh one.
+    """
     archived = {tenant_id for tenant_id, archived_at in history if archived_at is not None}
     live = {tenant_id for tenant_id, _archived_at in history} - archived
     if not live:
@@ -264,6 +279,7 @@ def _fresh_history_tenants(
         for tenant_id in live
         if tenant_id in proofs
         and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now, max_age=max_age)
+        and not (settled_only and proofs[tenant_id].last_attempt_result in _UNSETTLED_ATTEMPTS)
     )
 
 
@@ -310,22 +326,29 @@ def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age,
         except (TenantConnection.DoesNotExist, ValueError):
             return frozenset()
         history = _owned_history(actor_user_id, current, requested)
-        return _fresh_history_tenants(current, request, history, now=now, max_age=max_age)
+        return _fresh_history_tenants(
+            current, request, history, now=now, max_age=max_age, settled_only=True
+        )
 
 
-def void_positive_proofs(actor_user_id, connection_id, *, tenant_ids=None, before=None):
+def void_positive_proofs(
+    actor_user_id, connection_id, *, tenant_ids=None, except_tenant_ids=(), before=None
+):
     """Withdraw positive proofs that an unsettled "access lost" answer calls into question.
 
     Archives nothing. ``tenant_ids`` None means the whole connection: a 401 rejects
     the credential, not one tenant, and other requests on this connection may be
-    checking other tenants. ``before`` keeps a void that lands late from undoing a
-    proof published after the answer it is about.
+    checking other tenants. ``except_tenant_ids`` are tenants the same answer
+    confirmed. ``before`` keeps a void that lands late from undoing a proof published
+    after the answer it is about.
     """
     proofs = UpstreamAccessProof.objects.filter(
         connection_id=connection_id, connection__user_id=actor_user_id
     )
     if tenant_ids is not None:
         proofs = proofs.filter(tenant_id__in=list(tenant_ids))
+    if except_tenant_ids:
+        proofs = proofs.exclude(tenant_id__in=list(except_tenant_ids))
     if before is not None:
         proofs = proofs.filter(verified_at__lt=before)
     proofs.update(verified_at=None)
@@ -850,9 +873,15 @@ def _publish_verification_receipt(
                         "observed_denied_at": request.observation.upstream_denied_at,
                     },
                 )
-                proof.last_attempt_result = result.outcome.value
-                proof.last_error_code = result.error_code
-                proof.save(update_fields=["last_attempt_result", "last_error_code"])
+                # An outage says nothing new, so it must not wash out an earlier
+                # unsettled answer that keeps grace off this tenant.
+                if not (
+                    result.outcome == VerificationOutcome.UNAVAILABLE
+                    and proof.last_attempt_result in _UNSETTLED_ATTEMPTS
+                ):
+                    proof.last_attempt_result = result.outcome.value
+                    proof.last_error_code = result.error_code
+                    proof.save(update_fields=["last_attempt_result", "last_error_code"])
         elif result.outcome == VerificationOutcome.TENANT_DENIED:
             denial_count = record_validated_upstream_denial(
                 current,
