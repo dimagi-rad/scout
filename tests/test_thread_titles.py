@@ -9,7 +9,7 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.db import connection
 from django.test import AsyncClient
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.chat import stream, titles
@@ -233,6 +233,10 @@ class _Agent:
         async def _gen():
             if exc is not None:
                 raise exc
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="Visits rose 12%.")},
+            }
             yield {"event": "on_chain_end", "name": "agent", "data": {}}
 
         return _gen()
@@ -248,10 +252,13 @@ async def test_stream_runs_on_success_before_finish():
     async for chunk in stream.langgraph_to_ui_stream(
         _Agent(), {}, {"configurable": {}}, on_success=on_success
     ):
+        if '"text-end"' in chunk:
+            order.append("text-end")
         if '"finish"' in chunk:
             order.append("finish")
 
-    assert order == ["hook", "finish"]
+    # Before every trailing chunk, so a client that leaves at the last one cannot skip it.
+    assert order == ["hook", "text-end", "finish"]
 
 
 @pytest.mark.asyncio

@@ -633,16 +633,17 @@ async def langgraph_to_ui_stream(
         with contextlib.suppress(Exception):
             await event_stream.aclose()
 
-    if reasoning_started:
-        yield _sse({"type": "reasoning-end", "id": reasoning_id})
-    if text_started:
-        yield _sse({"type": "text-end", "id": text_id})
-
+    # Before any further yield: a client that disconnects at one would skip the hook.
     if succeeded and on_success is not None:
         try:
             await on_success()
         except Exception:
             logger.warning("Post-turn hook failed", exc_info=True)
+
+    if reasoning_started:
+        yield _sse({"type": "reasoning-end", "id": reasoning_id})
+    if text_started:
+        yield _sse({"type": "text-end", "id": text_id})
 
     yield _sse({"type": "finish-step"})
     yield _sse({"type": "finish", "finishReason": "stop"})
