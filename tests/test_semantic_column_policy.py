@@ -182,7 +182,9 @@ def test_default_sample_skips_hidden_columns(monkeypatch, workspace):
 async def test_discovery_tools_omit_hidden_columns(monkeypatch, workspace, user):
     await sync_to_async(_build)(monkeypatch, workspace, [_connect_visits()])
 
-    listed = await list_datasets(user_id=str(user.id), include_fields=True)
+    listed = await list_datasets(
+        workspace_id=str(workspace.id), user_id=str(user.id), include_fields=True
+    )
     described = await describe_dataset(
         "raw_visits", workspace_id=str(workspace.id), user_id=str(user.id)
     )

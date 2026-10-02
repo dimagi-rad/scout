@@ -244,6 +244,6 @@ async def test_sql_tools_report_unloaded_data_by_its_own_code(workspace, user):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_list_datasets_names_the_code_of_a_workspace_without_a_model(workspace, user):
-    result = await server.list_datasets(user_id=str(user.id))
+    result = await server.list_datasets(workspace_id=str(workspace.id), user_id=str(user.id))
     errors = result["data"]["workspace_errors"]
     assert [e["code"] for e in errors] == [SEMANTIC_MODEL_UNAVAILABLE]

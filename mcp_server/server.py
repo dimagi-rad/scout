@@ -755,15 +755,17 @@ async def list_datasets(
     user_id: str = "",
     thread_id: str = "",
 ) -> dict:
-    """List semantic datasets across accessible workspaces with pagination.
+    """List semantic datasets in the active workspace, or in named workspaces, with pagination.
 
     Returns lightweight dataset summaries by default. Set include_fields=true
     for member summaries, or call describe_dataset for a single dataset.
 
     Args:
-        workspace_ids: Optional workspace UUIDs to filter. Omit to page across all
-            workspaces accessible to user_id; without user_id, only the active
-            injected workspace_id is allowed.
+        workspace_ids: Optional workspace UUIDs to list instead of the active workspace.
+            Omit to list only the active workspace, the one every query tool reads.
+            Pass ids from list_workspaces to look across other workspaces; their
+            datasets cannot be queried from this chat. Without user_id, only the
+            active workspace is allowed.
         limit: Maximum datasets to return, clamped to 100.
         offset: Number of matching datasets to skip.
         search: Optional case-insensitive search over dataset/workspace text.
@@ -794,6 +796,20 @@ async def list_datasets(
             requested_workspace_ids = _normalize_workspace_ids(workspace_ids)
         except ValueError as exc:
             tc["result"] = error_response(VALIDATION_ERROR, str(exc))
+            return tc["result"]
+
+        if not requested_workspace_ids and workspace_id:
+            # The query tools only read the active workspace, so listing every
+            # membership by default showed datasets the agent could not query.
+            try:
+                requested_workspace_ids = _normalize_workspace_ids([workspace_id])
+            except ValueError as exc:
+                tc["result"] = error_response(VALIDATION_ERROR, str(exc))
+                return tc["result"]
+        if not requested_workspace_ids:
+            tc["result"] = error_response(
+                VALIDATION_ERROR, "workspace_ids or workspace_id is required"
+            )
             return tc["result"]
 
         workspace_roles: dict[str, str] = {}

@@ -346,7 +346,7 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
 
-    async def test_list_datasets_pages_across_accessible_workspaces(self, workspace, user):
+    async def test_list_datasets_lists_the_active_workspace(self, workspace, user):
 
         model = await SemanticModel.objects.acreate(
             workspace=workspace,
@@ -375,6 +375,7 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         )
 
         result = await list_datasets(
+            workspace_id=str(workspace.id),
             user_id=str(user.id),
             limit=10,
             offset=0,
@@ -390,6 +391,43 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         assert item["row_count"] == 10
         assert item["row_count_verified"] is False
         assert item["fields"][0]["member"] == "raw_users.count"
+
+    async def test_list_datasets_leaves_other_workspaces_out_unless_requested(
+        self, workspace, user, tenant
+    ):
+        sibling = await Workspace.objects.acreate(name="AAA sibling", created_by=user)
+        await WorkspaceTenant.objects.acreate(workspace=sibling, tenant=tenant)
+        await WorkspaceMembership.objects.acreate(
+            workspace=sibling, user=user, role=WorkspaceRole.READ
+        )
+        for ws, name in ((workspace, "active_visits"), (sibling, "sibling_visits")):
+            model = await SemanticModel.objects.acreate(workspace=ws, name="m")
+            await SemanticDataset.objects.acreate(
+                workspace=ws,
+                semantic_model=model,
+                name=name,
+                schema_name="s",
+                table_name=name,
+            )
+
+        default = await list_datasets(workspace_id=str(workspace.id), user_id=str(user.id))
+        both = await list_datasets(
+            workspace_ids=[str(workspace.id), str(sibling.id)],
+            workspace_id=str(workspace.id),
+            user_id=str(user.id),
+        )
+
+        assert [d["name"] for d in default["data"]["datasets"]] == ["active_visits"]
+        assert [d["name"] for d in both["data"]["datasets"]] == [
+            "sibling_visits",
+            "active_visits",
+        ]
+
+    async def test_list_datasets_requires_a_workspace(self, user):
+        result = await list_datasets(user_id=str(user.id))
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
 
     async def test_list_datasets_filters_inaccessible_requested_workspaces(
         self, workspace, user, other_user, tenant

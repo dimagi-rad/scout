@@ -19,6 +19,7 @@ from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 from mcp_server.server import (
     cancel_materialization,
     list_datasets,
+    list_workspaces,
     query,
 )
 from tests.upstream_proofs import amake_proof_stale
@@ -107,7 +108,7 @@ async def test_unrequested_workspaces_that_cannot_be_verified_are_still_reported
     await amake_proof_stale(user, tenant)
     upstream_provider.failure = 503
 
-    result = await list_datasets(user_id=str(user.id))
+    result = await list_workspaces(user_id=str(user.id))
 
     assert result["data"]["unverified_workspace_ids"] == [str(workspace.id)]
     assert upstream_provider.requests == []
@@ -242,7 +243,7 @@ async def test_an_unbound_membership_is_inaccessible_not_unverified(
 ):
     await TenantMembership.objects.filter(user=user, tenant=tenant).aupdate(connection=None)
 
-    result = await list_datasets(user_id=str(user.id))
+    result = await list_datasets(workspace_ids=[str(workspace.id)], user_id=str(user.id))
 
     assert result["data"]["inaccessible_workspace_ids"] == [str(workspace.id)]
     assert result["data"]["unverified_workspace_ids"] == []

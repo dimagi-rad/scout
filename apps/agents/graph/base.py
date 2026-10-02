@@ -404,7 +404,9 @@ async def _semantic_catalog_context(workspace) -> str:
     return (
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
-        "to page through dataset summaries, `describe_dataset` for one dataset's "
+        "to page through this workspace's dataset summaries (pass `workspace_ids` "
+        "only to look at other workspaces, whose data this chat cannot query), "
+        "`describe_dataset` for one dataset's "
         "members, and `semantic_query` for analysis. When the semantic model "
         "cannot express the question, fall back to `list_tables`, "
         "`describe_table`, and read-only `query` SQL."
@@ -1408,7 +1410,8 @@ pipelines, and dataset lists are runtime data; do not assume they are present
 in the system prompt.
 
 Use dataset tools by intent:
-- Discover available data: `list_workspaces` and `list_datasets`.
+- Discover available data: `list_datasets` lists this workspace's datasets;
+  `list_workspaces` lists the others. The query tools only read this workspace.
 - Inspect one dataset's fields, labels, descriptions, formats, and
   relationships: `describe_dataset`.
 - Answer analytical questions: `semantic_query` over semantic members.

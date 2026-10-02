@@ -60,15 +60,29 @@ def _count_queries(tool, **kwargs):
     return len(captured.captured_queries)
 
 
+async def _listing_kwargs(tool, user):
+    kwargs = {"user_id": str(user.id), "limit": 10}
+    if tool is server.list_datasets:
+        # list_datasets only spans the workspaces it is asked for.
+        kwargs["workspace_ids"] = [
+            str(ws_id)
+            async for ws_id in WorkspaceMembership.objects.filter(user=user).values_list(
+                "workspace_id", flat=True
+            )
+        ]
+    return kwargs
+
+
 @pytest.mark.parametrize("tool", [server.list_workspaces, server.list_datasets])
 async def test_listing_cost_does_not_grow_with_memberships(tool, upstream_provider):
     few, many = await _member_of(5), await _member_of(50)
 
-    few_queries = await sync_to_async(_count_queries)(tool, user_id=str(few.id), limit=10)
-    many_queries = await sync_to_async(_count_queries)(tool, user_id=str(many.id), limit=10)
+    few_queries = await sync_to_async(_count_queries)(tool, **await _listing_kwargs(tool, few))
+    many_queries = await sync_to_async(_count_queries)(tool, **await _listing_kwargs(tool, many))
 
     assert many_queries == few_queries
-    assert upstream_provider.requests == []
+    if tool is server.list_workspaces:
+        assert upstream_provider.requests == []
 
 
 async def test_each_workspace_keeps_its_own_verdict():
@@ -135,7 +149,9 @@ async def test_datasets_listing_names_each_workspace_without_a_queryable_model()
         workspace=workspaces["Draft"], name="m", status=SemanticModel.Status.DRAFT
     )
 
-    result = await server.list_datasets(user_id=str(user.id))
+    result = await server.list_datasets(
+        workspace_ids=[str(ws.id) for ws in workspaces.values()], user_id=str(user.id)
+    )
 
     errors = result["data"]["workspace_errors"]
     assert [e["workspace_id"] for e in errors] == [
