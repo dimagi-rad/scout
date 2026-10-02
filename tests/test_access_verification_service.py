@@ -394,9 +394,10 @@ async def test_oauth_refresh_rebases_claim_to_persisted_token_before_provider(
     ("provider_outcome", "rotate_before_waiter", "expected_calls"),
     [
         # A COMPLETE receipt excludes the tenant it omitted, so this waiter
-        # re-verifies; a rejected credential is connection-wide and is reused.
+        # re-verifies; a rejected credential is connection-wide and is reused. The
+        # winner retries its 401 once, so rejection costs it two calls, the waiter none.
         ("complete", False, 2),
-        ("credential_rejected", False, 1),
+        ("credential_rejected", False, 2),
         ("complete", True, 2),
     ],
 )
@@ -1516,3 +1517,220 @@ async def test_superseded_refresh_that_kept_the_dead_credential_does_not_archive
     refreshed_connection = await TenantConnection.objects.aget(pk=connection.pk)
     assert refreshed_connection.upstream_denied_at is None
     assert not refreshed_connection.upstream_denial_code
+
+
+async def _oauth_connection(user, tenant, *, access, refresh, expires_in):
+    app = await SocialApp.objects.acreate(
+        provider="commcare", name="CommCare", client_id="client", secret="secret"
+    )
+    account = await SocialAccount.objects.acreate(user=user, provider="commcare", uid="identity")
+    token = await SocialToken.objects.acreate(
+        account=account,
+        app=app,
+        token=access,
+        token_secret=refresh,
+        expires_at=timezone.now() + expires_in,
+    )
+    connection = await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.OAUTH,
+        social_account=account,
+    )
+    membership = await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=connection
+    )
+    return token, connection, membership
+
+
+def _token_endpoint(httpx_mock, access, refresh):
+    httpx_mock.add_response(
+        url="https://www.commcarehq.org/oauth/token/",
+        method="POST",
+        json={"access_token": access, "refresh_token": refresh, "expires_in": 900},
+    )
+
+
+async def _assert_not_archived(connection, membership):
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is None
+    refreshed_connection = await TenantConnection.objects.aget(pk=connection.pk)
+    assert refreshed_connection.upstream_denied_at is None
+    assert not refreshed_connection.upstream_denial_code
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_401_from_a_token_rotated_mid_call_retries_with_the_stored_token(user, tenant):
+    """The race: a sibling request refreshes while our provider call is in flight.
+
+    Rotation revokes the access token we sent, so the 401 is about that stale token,
+    not about access. The retry must use what is stored now and archive nothing.
+    """
+    token, connection, membership = await _oauth_connection(
+        user, tenant, access="stale-access", refresh="stale-refresh", expires_in=timedelta(hours=1)
+    )
+    sent = []
+
+    async def provider(snapshot, **kwargs):
+        sent.append(snapshot.credential)
+        if snapshot.credential == "stale-access":
+            await SocialToken.objects.filter(pk=token.pk).aupdate(
+                token="rotated-access", token_secret="rotated-refresh"
+            )
+            return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+        return ProviderVerificationResult.complete({tenant.external_id})
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider
+    )
+
+    assert result.status == AccessVerificationStatus.VERIFIED
+    assert sent == ["stale-access", "rotated-access"]
+    await _assert_not_archived(connection, membership)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_401_right_after_our_refresh_is_retried_once_before_deciding(
+    user, tenant, httpx_mock
+):
+    """The incident: the verifier refreshes, and the new token's first call gets a 401."""
+    _token, connection, membership = await _oauth_connection(
+        user, tenant, access="old-access", refresh="old-refresh", expires_in=-timedelta(minutes=1)
+    )
+    _token_endpoint(httpx_mock, "new-access", "new-refresh")
+    sent = []
+    pauses = []
+
+    async def provider(snapshot, **kwargs):
+        sent.append(snapshot.credential)
+        if len(sent) == 1:
+            return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+        return ProviderVerificationResult.complete({tenant.external_id})
+
+    async def sleep(seconds):
+        pauses.append(seconds)
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=sleep
+    )
+
+    assert result.status == AccessVerificationStatus.VERIFIED
+    assert sent == ["new-access", "new-access"]
+    assert len(pauses) == 1
+    assert len(httpx_mock.get_requests()) == 1
+    await _assert_not_archived(connection, membership)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_401_on_an_unexpired_token_refreshes_before_deciding(user, tenant, httpx_mock):
+    _token, connection, membership = await _oauth_connection(
+        user, tenant, access="old-access", refresh="old-refresh", expires_in=timedelta(hours=1)
+    )
+    _token_endpoint(httpx_mock, "new-access", "new-refresh")
+    sent = []
+
+    async def provider(snapshot, **kwargs):
+        sent.append(snapshot.credential)
+        if snapshot.credential == "old-access":
+            return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+        return ProviderVerificationResult.complete({tenant.external_id})
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider
+    )
+
+    assert result.status == AccessVerificationStatus.VERIFIED
+    assert sent == ["old-access", "new-access"]
+    await _assert_not_archived(connection, membership)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True])
+async def test_fresh_token_rejected_again_still_archives(user, tenant, httpx_mock, expired):
+    """Fail closed: a credential that is current upstream and still gets a 401 is revocation."""
+    _token, connection, membership = await _oauth_connection(
+        user,
+        tenant,
+        access="old-access",
+        refresh="old-refresh",
+        expires_in=-timedelta(minutes=1) if expired else timedelta(hours=1),
+    )
+    _token_endpoint(httpx_mock, "new-access", "new-refresh")
+    sent = []
+
+    async def provider(snapshot, **kwargs):
+        sent.append(snapshot.credential)
+        return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    async def sleep(_seconds):
+        pass
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=sleep
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    assert result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert sent == (["new-access", "new-access"] if expired else ["old-access", "new-access"])
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is not None
+    refreshed_connection = await TenantConnection.objects.aget(pk=connection.pk)
+    assert refreshed_connection.upstream_denied_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_401_then_a_dead_refresh_grant_requires_reconnect_without_archiving(
+    user, tenant, httpx_mock
+):
+    _token, connection, membership = await _oauth_connection(
+        user, tenant, access="old-access", refresh="dead-refresh", expires_in=timedelta(hours=1)
+    )
+    httpx_mock.add_response(
+        url="https://www.commcarehq.org/oauth/token/",
+        method="POST",
+        status_code=400,
+        json={"error": "invalid_grant"},
+    )
+    calls = 0
+
+    async def provider(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider
+    )
+
+    assert calls == 1
+    assert result.status != AccessVerificationStatus.DENIED
+    assert result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    await _assert_not_archived(connection, membership)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_401_from_an_expired_unrenewable_token_does_not_archive(user, tenant):
+    _token, connection, membership = await _oauth_connection(
+        user, tenant, access="old-access", refresh="", expires_in=-timedelta(minutes=1)
+    )
+    calls = 0
+
+    async def provider(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider
+    )
+
+    assert calls == 1
+    assert result.status != AccessVerificationStatus.DENIED
+    assert result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    await _assert_not_archived(connection, membership)

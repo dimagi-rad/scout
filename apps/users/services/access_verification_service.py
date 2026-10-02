@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import threading
 import time
@@ -38,6 +39,7 @@ from apps.users.services.access_verification_types import (
 )
 from apps.users.services.oauth_scope import amemberships_on_provider
 from apps.users.services.token_refresh import (
+    PersistedTokenSnapshot,
     TokenRefreshError,
     TokenRefreshRejected,
     TokenRefreshUnavailable,
@@ -54,6 +56,8 @@ _VERIFICATION_RETRY = "verification_retry"
 _UPSTREAM_ACCESS_LOST = "upstream_access_lost"
 _JITTER = random.SystemRandom()
 _CLEANUP_WAIT_SECONDS = 0.075
+_REJECTION_RETRY_PAUSE_SECONDS = 0.5
+logger = logging.getLogger(__name__)
 _SUPERVISED_OPERATIONS: set[asyncio.Task] = set()
 
 
@@ -135,9 +139,10 @@ async def _claim_with_cancellation_cleanup(
         raise
 
 
-async def _load_claim_token(claim):
-    token_id, refresh_token, app_id = claim.request.token_snapshot
-    token = (
+async def _load_stored_token(claim):
+    """The claim's token row as stored now, whatever credential it holds."""
+    token_id, _refresh_token, app_id = claim.request.token_snapshot
+    return (
         await SocialToken.objects.filter(
             pk=token_id,
             account_id=int(claim.observation.account_identity),
@@ -146,14 +151,25 @@ async def _load_claim_token(claim):
         .select_related("app")
         .afirst()
     )
-    if (
-        token is None
-        or not claim.request.credential
-        or token.token != claim.request.credential
-        or token.token_secret != refresh_token
-    ):
-        return None
-    return token
+
+
+def _holds_claim_credential(token, claim) -> bool:
+    return bool(
+        token is not None
+        and claim.request.credential
+        and token.token == claim.request.credential
+        and token.token_secret == claim.request.token_snapshot[1]
+    )
+
+
+async def _load_claim_token(claim):
+    token = await _load_stored_token(claim)
+    return token if _holds_claim_credential(token, claim) else None
+
+
+def _refresh_url(claim, token) -> str | None:
+    token_url = get_token_url(claim.observation.provider, claim.observation.scope_key)
+    return token_url if token_url and token.token_secret and token.app else None
 
 
 async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
@@ -168,10 +184,15 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
     if token is None:
         await _release_claim(claim)
         return None, AccessVerificationResult(AccessVerificationStatus.RETRY, _VERIFICATION_RETRY)
-    token_url = get_token_url(claim.observation.provider, claim.observation.scope_key)
-    can_refresh = bool(token_url and token.token_secret and token.app)
-    if not can_refresh or not token_needs_refresh(token.expires_at, can_refresh=True):
+    token_url = _refresh_url(claim, token)
+    if not token_url or not token_needs_refresh(token.expires_at, can_refresh=True):
         return claim, None
+    return await _refresh_and_rebase(
+        claim, token, token_url, deadline=deadline, clock=clock, limiter=limiter
+    )
+
+
+async def _refresh_and_rebase(claim, token, token_url, *, deadline, clock, limiter):
     remaining = deadline - clock()
     if remaining <= 0:
         return claim, AccessVerificationResult(
@@ -226,9 +247,13 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
             limiter.release()
     if clock() >= deadline:
         return claim, ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)
+    return await _rebase_claim(claim, refreshed.snapshot, deadline=deadline, clock=clock)
+
+
+async def _rebase_claim(claim, snapshot, *, deadline, clock):
     try:
         rebased = await _await_until(
-            arebase_verification_claim(claim, refreshed.snapshot, deadline=deadline, clock=clock),
+            arebase_verification_claim(claim, snapshot, deadline=deadline, clock=clock),
             deadline=deadline,
             clock=clock,
         )
@@ -241,6 +266,72 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
         await _release_claim(claim)
         return None, AccessVerificationResult(AccessVerificationStatus.RETRY, _VERIFICATION_RETRY)
     return rebased, None
+
+
+async def _renew_after_rejection(claim, *, refreshed, deadline, clock, limiter, sleep):
+    """Put a current OAuth credential on the claim before retrying a provider 401 once.
+
+    A 401 against a stale or expired access token says nothing about access, so it
+    must not reach publication, which archives every membership on the connection.
+    Only a credential that is current at the provider -- rotated by a concurrent
+    refresh, refreshed here, or the one this attempt just refreshed -- earns the
+    retry whose 401 is authoritative. Returns ``(claim, early_result)`` like
+    :func:`_refresh_claim_if_needed`; ``early_result`` None means retry the provider.
+    """
+    try:
+        token = await _await_until(_load_stored_token(claim), deadline=deadline, clock=clock)
+    except TimeoutError:
+        return claim, ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)
+    if token is None or not token.token:
+        await _release_claim(claim)
+        return None, AccessVerificationResult(AccessVerificationStatus.RETRY, _VERIFICATION_RETRY)
+    if not _holds_claim_credential(token, claim):
+        logger.info(
+            "Retrying upstream verification for connection %s with a concurrently "
+            "rotated credential after HTTP 401",
+            claim.observation.connection_id,
+        )
+        return await _rebase_claim(
+            claim,
+            PersistedTokenSnapshot(
+                token_id=token.pk,
+                account_id=token.account_id,
+                app_id=token.app_id,
+                access_token=token.token,
+                refresh_token=token.token_secret,
+                expires_at=token.expires_at,
+            ),
+            deadline=deadline,
+            clock=clock,
+        )
+    token_url = _refresh_url(claim, token)
+    if not refreshed and token_url:
+        logger.info(
+            "Refreshing the credential for connection %s after HTTP 401 before deciding access",
+            claim.observation.connection_id,
+        )
+        return await _refresh_and_rebase(
+            claim, token, token_url, deadline=deadline, clock=clock, limiter=limiter
+        )
+    if not refreshed and token.expires_at is not None and token.expires_at <= timezone.now():
+        # Expired and unrenewable: only a reconnect helps, and it proves nothing about access.
+        return claim, ProviderVerificationResult.unavailable(ErrorCode.AUTH_TOKEN_EXPIRED)
+    # The credential is already the newest one we can get. A provider can briefly
+    # reject a token it has only just issued, so pause before the one retry.
+    await sleep(min(_REJECTION_RETRY_PAUSE_SECONDS, max(0, deadline - clock())))
+    return claim, None
+
+
+async def _call_provider(provider_verifier, claim, *, deadline, clock):
+    if clock() >= deadline:
+        return ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)
+    try:
+        return await asyncio.wait_for(
+            provider_verifier(claim.request, deadline=deadline),
+            timeout=max(0, deadline - clock()),
+        )
+    except TimeoutError:
+        return ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)
 
 
 async def _map_provider_result(claim, result):
@@ -464,6 +555,7 @@ async def verify_connection_access(
                 AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
             )
     try:
+        claimed = claim
         claim, early_result = await _refresh_claim_if_needed(
             claim, deadline=deadline, clock=clock, limiter=limiter
         )
@@ -475,18 +567,38 @@ async def verify_connection_access(
         if isinstance(early_result, ProviderVerificationResult):
             provider_result = early_result
         else:
-            if clock() >= deadline:
-                provider_result = ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)
-            else:
-                try:
-                    provider_result = await asyncio.wait_for(
-                        provider_verifier(claim.request, deadline=deadline),
-                        timeout=max(0, deadline - clock()),
+            provider_result = await _call_provider(
+                provider_verifier, claim, deadline=deadline, clock=clock
+            )
+            if (
+                provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
+                and claim.request.token_snapshot is not None
+            ):
+                claim, early_result = await _renew_after_rejection(
+                    claim,
+                    refreshed=claim is not claimed,
+                    deadline=deadline,
+                    clock=clock,
+                    limiter=limiter,
+                    sleep=sleep,
+                )
+                if claim is None:
+                    return early_result
+                if isinstance(early_result, AccessVerificationResult):
+                    await _release_claim(claim)
+                    return early_result
+                if isinstance(early_result, ProviderVerificationResult):
+                    provider_result = early_result
+                else:
+                    provider_result = await _call_provider(
+                        provider_verifier, claim, deadline=deadline, clock=clock
                     )
-                except TimeoutError:
-                    provider_result = ProviderVerificationResult.unavailable(
-                        _VERIFICATION_UNAVAILABLE
-                    )
+                    if provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED:
+                        logger.warning(
+                            "Provider rejected the current credential for connection %s twice; "
+                            "recording the denial",
+                            claim.observation.connection_id,
+                        )
         completed_at = timezone.now()
         try:
             mapped = await _await_until(
