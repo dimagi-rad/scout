@@ -182,6 +182,7 @@ describe("PendingRequestCard", () => {
 
     expect(onRemovePart).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId("pending-request-remove-p3")).toBeDisabled()
+    expect(screen.getByTestId("pending-request-edit")).toBeDisabled()
     await act(async () => finish("saved"))
     expect(screen.getByTestId("pending-request-remove-p3")).toBeEnabled()
   })

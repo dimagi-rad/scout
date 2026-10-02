@@ -151,7 +151,7 @@ export function PendingRequestCard({
                 setDraftBase(pending.version)
                 setDraft(pendingRequestText(pending))
               }}
-              disabled={actionsDisabled}
+              disabled={actionsDisabled || saving}
               data-testid="pending-request-edit"
             >
               <Pencil className="h-3 w-3" aria-hidden="true" />
