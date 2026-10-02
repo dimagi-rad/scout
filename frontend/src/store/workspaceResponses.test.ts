@@ -13,7 +13,7 @@ let store = createAppStore()
 const state = () => store.getState()
 const switchTo = (id: string) => state().domainActions.setActiveDomain(id)
 const artifact = (title: string) => ({ id: "same-id", title, description: "", artifact_type: "html" as const, version: 1, has_live_queries: false, created_at: "", updated_at: "" })
-const thread = (title: string) => ({ id: "same-id", title, title_is_custom: false, created_at: "", updated_at: "", last_viewed_at: null })
+const thread = (title: string) => ({ id: "same-id", title, title_is_custom: false, title_source: "first_message" as const, created_at: "", updated_at: "", last_viewed_at: null })
 
 beforeEach(() => {
   store = createAppStore()

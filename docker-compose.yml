@@ -89,6 +89,7 @@ services:
       - DB_CREDENTIAL_KEY=${DB_CREDENTIAL_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-claude-opus-5-5}
+      - THREAD_TITLE_LLM_MODEL=${THREAD_TITLE_LLM_MODEL:-claude-haiku-4-5-20251001}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
       - MCP_SERVER_URL=http://mcp-server:8100/mcp
       # Must match the mcp-server's value above so the API can authenticate.

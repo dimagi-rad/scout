@@ -208,21 +208,29 @@ async def _verify_connect_opportunities(
     confirmed = []
     omitted = False
 
-    def settle(index, failure):
+    def settle(index, failure, *, cause, status=None):
         """``failure`` is a thunk, so a settled attempt does not log as unavailable."""
         if omitted:
-            log("light_settled_after_omission", outcome="partial")
+            log(f"settled_after_omission:{cause}", status=status, outcome="partial")
             return ProviderVerificationResult.complete(confirmed, scope=ids[:index])
         return failure()
 
     for index, external_id in enumerate(ids):
         remaining = light_deadline - clock()
         if remaining <= 0:
-            return settle(index, lambda: unavailable("light_deadline_before_request"))
+            return settle(
+                index,
+                lambda: unavailable("light_deadline_before_request"),
+                cause="light_deadline_before_request",
+            )
         try:
             url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
         except UnsafeProviderURL:
-            return settle(index, lambda: ProviderVerificationResult.indeterminate(_INDETERMINATE))
+            return settle(
+                index,
+                lambda: ProviderVerificationResult.indeterminate(_INDETERMINATE),
+                cause="unsafe_url",
+            )
         # A share of what is left, so one slow opportunity cannot starve the rest,
         # but never so small that an ordinary slow answer is cut off. On the 10s
         # interactive budget the floor wins, so allocation is effectively greedy.
@@ -242,16 +250,20 @@ async def _verify_connect_opportunities(
                 timeout=request_timeout,
             )
         except TimeoutError:
-            return settle(index, lambda: unavailable("light_request_timeout"))
+            return settle(
+                index, lambda: unavailable("light_request_timeout"), cause="light_request_timeout"
+            )
         except httpx.RequestError as exc:
             # The class name only: str(exc) can carry the request URL.
             cause = f"light_request_error:{type(exc).__name__}"
-            return settle(index, lambda cause=cause: unavailable(cause))
+            return settle(index, lambda cause=cause: unavailable(cause), cause=cause)
         if clock() >= deadline:
             status = response.status_code
             return settle(
                 index,
                 lambda status=status: unavailable("light_deadline_after_response", status=status),
+                cause="light_deadline_after_response",
+                status=status,
             )
         if _is_connect_no_access_404(response):
             omitted = True
@@ -259,7 +271,7 @@ async def _verify_connect_opportunities(
         if response.status_code == 404:
             # Not DRF's answer, so likely the route itself is gone; the listing
             # can still decide, and must never read this as an omission.
-            return settle(index, lambda: None)
+            return settle(index, lambda: None, cause="route_404", status=404)
         status_result = _status_result(response.status_code)
         if response.status_code == 401:
             logger.info(
@@ -277,10 +289,12 @@ async def _verify_connect_opportunities(
                     log("light_http_status", status=status)
                 return result
 
-            return settle(index, failed)
+            return settle(index, failed, cause="light_http_status", status=response.status_code)
         if not _is_requested_opportunity(response, external_id):
             # A changed response shape must cost a slow check, not every check.
-            return settle(index, lambda: None)
+            return settle(
+                index, lambda: None, cause="unrecognized_answer", status=response.status_code
+            )
         confirmed.append(external_id)
     return ProviderVerificationResult.complete(confirmed, scope=ids)
 

@@ -242,7 +242,7 @@ async def test_thread_title_patch_creates_untitled_thread_row(workspace, user):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_thread_detail_hides_legacy_auto_title_until_user_renames(workspace, user):
+async def test_thread_detail_shows_provisional_first_message_title(workspace, user):
     thread = await Thread.objects.acreate(
         workspace=workspace,
         user=user,
@@ -255,73 +255,122 @@ async def test_thread_detail_hides_legacy_auto_title_until_user_renames(workspac
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["title"] == "Untitled"
-    assert payload["history_title"] == "What are module completion rates?"
+    assert payload["title"] == "What are module completion rates?"
+    assert payload["history_title"] == payload["title"]
     assert payload["title_is_custom"] is False
+    assert payload["title_source"] == "first_message"
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_thread_list_returns_history_title_for_non_custom_threads(workspace, user):
-    thread = await Thread.objects.acreate(
+async def test_thread_list_returns_one_title_per_thread(workspace, user):
+    generated = await Thread.objects.acreate(
+        workspace=workspace,
+        user=user,
+        title="Module completion rates",
+        title_source=Thread.TitleSource.GENERATED,
+    )
+    provisional = await Thread.objects.acreate(
         workspace=workspace,
         user=user,
         title="What are module completion rates?",
-        title_is_custom=False,
     )
     client = await _auth_client(user)
 
     response = await client.get(f"/api/workspaces/{workspace.id}/threads/")
 
     assert response.status_code == 200
-    payload = response.json()
-    assert payload[0]["id"] == str(thread.id)
-    assert payload[0]["title"] == "Untitled"
-    assert payload[0]["history_title"] == "What are module completion rates?"
-    assert payload[0]["title_is_custom"] is False
+    by_id = {item["id"]: item for item in response.json()}
+    assert by_id[str(generated.id)]["title"] == "Module completion rates"
+    assert by_id[str(generated.id)]["title_source"] == "generated"
+    assert by_id[str(provisional.id)]["title"] == "What are module completion rates?"
+    assert all(item["history_title"] == item["title"] for item in by_id.values())
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_thread_list_uses_first_user_message_when_history_title_is_blank(
-    monkeypatch,
-    workspace,
-    user,
-):
-    thread = await Thread.objects.acreate(
-        workspace=workspace,
-        user=user,
-        title="",
-        title_is_custom=False,
-    )
+async def test_thread_list_never_reads_checkpoints(monkeypatch, workspace, user):
+    for title in ("What are module completion rates?", "Visits by worker", ""):
+        await Thread.objects.acreate(workspace=workspace, user=user, title=title)
 
-    async def fake_load_thread_messages(thread_id):
-        assert thread_id == thread.id
-        return [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "type": "text",
-                        "text": "Build an artifact from example queries",
-                    }
-                ],
-            }
-        ]
+    async def fail_checkpoint_read(*args, **kwargs):
+        raise AssertionError("the thread list must not read checkpoints")
 
-    monkeypatch.setattr(
-        "apps.chat.thread_views._load_thread_messages",
-        fake_load_thread_messages,
-    )
+    monkeypatch.setattr("apps.chat.thread_views.ensure_checkpointer", fail_checkpoint_read)
+    monkeypatch.setattr("apps.chat.thread_views._load_thread_messages", fail_checkpoint_read)
+    reads = []
+
+    async def record_read(thread_id):
+        reads.append(thread_id)
+        return ""
+
+    monkeypatch.setattr("apps.chat.titles._aread_first_user_message", record_read)
 
     client = await _auth_client(user)
     response = await client.get(f"/api/workspaces/{workspace.id}/threads/")
 
     assert response.status_code == 200
-    payload = response.json()
-    assert payload[0]["id"] == str(thread.id)
-    assert payload[0]["title"] == "Untitled"
-    assert payload[0]["history_title"] == "Build an artifact from example queries"
+    # The blank row has no conversation yet, so it stays blank without a read.
+    assert sorted(item["title"] for item in response.json()) == [
+        "",
+        "Visits by worker",
+        "What are module completion rates?",
+    ]
+    assert reads == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_thread_list_titles_a_legacy_blank_row_once(monkeypatch, workspace, user):
+    # A canvas shell chatted in before this PR: a conversation but no stored title.
+    thread = await Thread.objects.acreate(workspace=workspace, user=user, title="")
+    reads = []
+
+    async def with_state(thread_ids):
+        return {str(thread_id) for thread_id in thread_ids}
+
+    async def first_message(thread_id):
+        reads.append(str(thread_id))
+        return "What are module completion rates?"
+
+    monkeypatch.setattr("apps.chat.titles.athreads_with_checkpoints", with_state)
+    monkeypatch.setattr("apps.chat.titles._aread_first_user_message", first_message)
+    client = await _auth_client(user)
+
+    for _ in range(2):
+        response = await client.get(f"/api/workspaces/{workspace.id}/threads/")
+        assert response.status_code == 200
+        assert response.json()[0]["title"] == "What are module completion rates?"
+
+    assert reads == [str(thread.id)]
+    await thread.arefresh_from_db()
+    assert thread.title == "What are module completion rates?"
+    assert thread.title_source == Thread.TitleSource.FIRST_MESSAGE
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_thread_title_patch_marks_title_as_user_owned(workspace, user):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=user,
+        title="Module completion rates",
+        title_source=Thread.TitleSource.GENERATED,
+    )
+    client = await _auth_client(user)
+
+    response = await client.patch(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/",
+        data=json.dumps({"title": "Q3 completion review"}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title_source"] == "user"
+    await thread.arefresh_from_db()
+    assert thread.title == "Q3 completion review"
+    assert thread.title_is_custom is True
+    assert thread.title_source == Thread.TitleSource.USER
 
 
 @pytest.mark.django_db(transaction=True)
@@ -343,3 +392,36 @@ async def test_thread_title_patch_shortens_long_names(workspace, user):
     assert payload["title_is_custom"] is True
     thread = await Thread.objects.aget(id=thread_id)
     assert thread.title == f"{'a' * 200}..."
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_clearing_the_title_hands_it_back_to_the_automatic_flow(monkeypatch, workspace, user):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=user,
+        title="Q3 completion review",
+        title_is_custom=True,
+        title_source=Thread.TitleSource.USER,
+    )
+
+    async def first_message(thread_id):
+        assert str(thread_id) == str(thread.id)
+        return "What are module completion rates?"
+
+    monkeypatch.setattr("apps.chat.thread_views.afirst_user_message", first_message)
+    client = await _auth_client(user)
+
+    response = await client.patch(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/",
+        data=json.dumps({"title": "  "}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["title"] == "What are module completion rates?"
+    assert payload["title_source"] == "first_message"
+    await thread.arefresh_from_db()
+    assert thread.title_is_custom is False
+    assert thread.title_source == Thread.TitleSource.FIRST_MESSAGE

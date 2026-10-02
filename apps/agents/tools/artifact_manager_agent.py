@@ -40,6 +40,7 @@ from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
+from apps.agents.tool_results import compact_tool_results
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.semantic.services.date_context import agent_date_context
 
@@ -573,7 +574,10 @@ def _make_nested_tool_node(base_tool_node: ToolNode):
                 modified_calls.append(tc)
             modified_msg.tool_calls = modified_calls
             messages = [*messages[:-1], modified_msg]
-        return await base_tool_node.ainvoke({"messages": messages}, config=config)
+        return compact_tool_results(
+            await base_tool_node.ainvoke({"messages": messages}, config=config),
+            NESTED_MCP_TOOL_NAMES,
+        )
 
     injecting_node.__annotations__["config"] = RunnableConfig | None
     return injecting_node

@@ -159,3 +159,22 @@ def thread_has_checkpoint(thread_id) -> bool:
 async def athread_has_checkpoint(thread_id) -> bool:
     # Django has no async raw-SQL cursor.
     return await sync_to_async(thread_has_checkpoint)(thread_id)
+
+
+def threads_with_checkpoints(thread_ids) -> set[str]:
+    """The ids among ``thread_ids`` that hold checkpointer state, in one query."""
+    ids = [str(thread_id) for thread_id in thread_ids]
+    if not ids:
+        return set()
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass('checkpoints') IS NOT NULL")
+        if not cursor.fetchone()[0]:
+            return set()
+        cursor.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id = ANY(%s)", [ids]
+        )
+        return {row[0] for row in cursor.fetchall()}
+
+
+async def athreads_with_checkpoints(thread_ids) -> set[str]:
+    return await sync_to_async(threads_with_checkpoints)(list(thread_ids))

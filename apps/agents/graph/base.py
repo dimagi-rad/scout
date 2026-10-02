@@ -48,6 +48,7 @@ from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
+from apps.agents.tool_results import compact_tool_results
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
@@ -404,7 +405,9 @@ async def _semantic_catalog_context(workspace) -> str:
     return (
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
-        "to page through dataset summaries, `describe_dataset` for one dataset's "
+        "to page through this workspace's dataset summaries (pass `workspace_ids` "
+        "only to look at other workspaces, whose data this chat cannot query), "
+        "`describe_dataset` for one dataset's "
         "members, and `semantic_query` for analysis. When the semantic model "
         "cannot express the question, fall back to `list_tables`, "
         "`describe_table`, and read-only `query` SQL."
@@ -443,8 +446,8 @@ async def _fetch_semantic_model_context(
                         "A refresh is in progress outside the currently serving data. "
                         "You may query the "
                         "previously loaded data while it finishes; tell the user results do "
-                        "not include this refresh yet. Do NOT trigger another materialization. "
-                        "Do not promise an automatic follow-up based on this status.\n\n"
+                        "not include this refresh yet. Do NOT trigger another materialization."
+                        f"{await _refresh_follow_up(interactive, conversation_id)}\n\n"
                         f"{ready_context}"
                     )
         return await _load_in_progress_guidance(interactive, write_capable, conversation_id)
@@ -475,6 +478,19 @@ async def _fetch_semantic_model_context(
         if not every and unresolved:
             guidance = f"{guidance}\n\n{_partial_pipeline_note(unresolved)}"
         return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{guidance}" if multi else guidance
+
+
+async def _refresh_follow_up(interactive: bool, conversation_id: str | None) -> str:
+    # A chat that started this refresh keeps its PENDING ThreadJob while the old data
+    # still serves, so it must hear the same resume promise as the bound load path.
+    if not interactive:
+        return ""
+    if conversation_id and await athread_awaits_load(conversation_id):
+        return " This conversation will resume automatically when the refresh finishes."
+    return (
+        " Nothing will resume this conversation when the refresh finishes; if the user "
+        "wants refreshed results, tell them to ask again once it has, without naming a time."
+    )
 
 
 async def _load_in_progress_guidance(
@@ -583,10 +599,11 @@ _INTERACTIVE_MATERIALIZE_GUIDANCE = (
     "No data has been loaded yet, and no load is running. Call `run_materialization` "
     "yourself to start "
     "loading; do not ask the user to start it. This tool returns IMMEDIATELY "
-    "with `status: started` — do NOT call other data tools in the same turn. "
-    "Acknowledge to the user "
-    "in ONE sentence and end your turn. The system will resume the "
-    "conversation automatically when materialization completes."
+    "— do NOT call other data tools in the same turn. Tell the user in ONE "
+    "sentence what its result says and end your turn. Say you will continue "
+    "only if that result says this conversation will resume automatically; "
+    "otherwise nothing will resume it, so tell the user to ask again once "
+    "loading finishes, without naming a time."
 )
 
 _SQL_MEANWHILE = (
@@ -598,8 +615,10 @@ _SEMANTIC_REBUILDING_GUIDANCE = (
     "Data is loaded, and its data model (the semantic datasets) is being rebuilt "
     "automatically in the background. The rebuild reloads nothing and needs no "
     "approval. Do NOT call `run_materialization` for it and do NOT ask the user to "
-    "approve a reload. Tell the user the data model is being rebuilt and to check "
-    f"back in a few minutes for `list_datasets` and `semantic_query`. {_SQL_MEANWHILE} "
+    "approve a reload. Tell the user the data model is being rebuilt. Nothing will "
+    "resume this conversation when it finishes, so tell them to ask again once it "
+    "has, without naming a time, for answers that need `list_datasets` or "
+    f"`semantic_query`. {_SQL_MEANWHILE} "
     "If the user asks for a data refresh meanwhile, `run_materialization` reports this "
     "rebuild as already running: tell them to ask again once it has finished."
 )
@@ -638,16 +657,20 @@ _LOAD_STARTED_FOR_THIS_CHAT_GUIDANCE = (
     "for this conversation. Do NOT call `run_materialization` or other data "
     "tools, and do NOT ask the user to start a load. Tell the user in one "
     "sentence that their data is loading and that you will continue with their "
-    "request when it finishes, then end your turn. The system resumes this "
-    "conversation automatically when loading completes."
+    "request when it finishes, then end your turn. This conversation will "
+    "resume automatically when loading completes."
 )
 
-# Any other chat gets no completion callback for someone else's load.
+# Any other chat gets no completion callback for someone else's load. Stating the
+# fact rather than "do not promise a follow-up" matters: with only the prohibition,
+# the agent still told prod users it would pick their question up.
 _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
-    "A materialization is already in progress in the background. Do NOT "
-    "trigger another one and do NOT call other data tools. Briefly tell "
-    "the user it's still loading and ask them to check back once loading finishes. "
-    "End your turn. Do not promise an automatic follow-up based on this status."
+    "A data load is already in progress in the background, and it was not started "
+    "for this conversation. Do NOT trigger another one and do NOT call other data "
+    "tools. Nothing will resume this conversation when loading finishes: the user "
+    "must ask again. Tell them plainly that their data is still loading and to ask "
+    "their question again once it has finished, without naming a time. Then end "
+    "your turn."
 )
 
 
@@ -691,7 +714,8 @@ _READ_ONLY_MATERIALIZE_GUIDANCE = (
 _READ_ONLY_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
     "A data load is already in progress for this workspace. This user's workspace "
     "role is read-only, so they cannot start or wait through another load. Report that "
-    "the data is still loading and suggest checking back later."
+    "the data is still loading. Nothing will resume this conversation when it "
+    "finishes, so tell them to ask again once it has, without naming a time."
 )
 
 
@@ -898,7 +922,10 @@ def _make_injecting_tool_node(
 
         token = set_subagent_event_queue(event_queue)
         try:
-            result = await base_tool_node.ainvoke({"messages": messages}, config=config)
+            result = compact_tool_results(
+                await base_tool_node.ainvoke({"messages": messages}, config=config),
+                MCP_TOOL_NAMES,
+            )
             if (
                 "persistable_msg" in locals()
                 and persistable_changed
@@ -1408,7 +1435,8 @@ pipelines, and dataset lists are runtime data; do not assume they are present
 in the system prompt.
 
 Use dataset tools by intent:
-- Discover available data: `list_workspaces` and `list_datasets`.
+- Discover available data: `list_datasets` lists this workspace's datasets;
+  `list_workspaces` lists the others. The query tools only read this workspace.
 - Inspect one dataset's fields, labels, descriptions, formats, and
   relationships: `describe_dataset`.
 - Answer analytical questions: `semantic_query` over semantic members.

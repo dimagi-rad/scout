@@ -98,6 +98,7 @@ from apps.workspaces.services.pipeline_resolver import (
     aresolve_pipeline_config,
 )
 from apps.workspaces.services.query_state import synced_runs, workspace_query_surface
+from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD, staleness_anchor
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.source_freshness import aworkspace_source_freshness
 from apps.workspaces.services.tenant_coverage import coverage_complete
@@ -135,6 +136,15 @@ mcp = FastMCP("scout")
 
 MAX_WORKSPACE_DISCOVERY_LIMIT = 100
 MAX_DATASET_DISCOVERY_LIMIT = 100
+# Field lists multiply a page's size by each dataset's width; describe_dataset is
+# the full-detail path for one dataset.
+MAX_DATASET_DISCOVERY_LIMIT_WITH_FIELDS = 10
+FIELD_SUMMARY_DESCRIPTION_CHARS = 160
+# Users with hundreds of memberships produced hundreds of denied ids and model
+# errors per listing; the agent needs the count and a sample, not every id.
+MAX_LISTED_WORKSPACE_ISSUES = 10
+# Each requested workspace is rechecked upstream, so one call must not fan out to hundreds.
+MAX_REQUESTED_DATASET_WORKSPACES = 20
 
 
 _P = ParamSpec("_P")
@@ -478,6 +488,36 @@ async def get_lineage(
         return tc["result"]
 
 
+def _capped_workspace_issues(
+    issues: list, active_workspace_id: str, *, workspace_id_of=str
+) -> tuple[list, int]:
+    """A sample of per-workspace issues, the active workspace's first, and the full count."""
+    active = str(active_workspace_id or "")
+    ordered = sorted(issues, key=lambda issue: workspace_id_of(issue) != active)
+    return ordered[:MAX_LISTED_WORKSPACE_ISSUES], len(issues)
+
+
+def _issue_listing(
+    workspace_id: str,
+    *,
+    inaccessible: list[str],
+    unverified: list[str],
+    errors: list[dict] | None = None,
+) -> dict:
+    listing = {}
+    if errors is not None:
+        listing["workspace_errors"], listing["workspace_error_count"] = _capped_workspace_issues(
+            errors, workspace_id, workspace_id_of=lambda error: error["workspace_id"]
+        )
+    listing["inaccessible_workspace_ids"], listing["inaccessible_workspace_count"] = (
+        _capped_workspace_issues(inaccessible, workspace_id)
+    )
+    listing["unverified_workspace_ids"], listing["unverified_workspace_count"] = (
+        _capped_workspace_issues(unverified, workspace_id)
+    )
+    return listing
+
+
 def _clamp_pagination(limit: int, offset: int, *, max_limit: int) -> tuple[int, int]:
     try:
         parsed_limit = int(limit)
@@ -629,9 +669,11 @@ async def list_workspaces(
 
     Only workspaces the user can currently read are listed. The response names the
     rest in ``inaccessible_workspace_ids`` (access denied) and, separately,
-    ``unverified_workspace_ids`` (access not yet confirmed upstream). Only the active
-    workspace is rechecked here; to verify another, pass its id to ``list_datasets``
-    in ``workspace_ids``.
+    ``unverified_workspace_ids`` (access not yet confirmed upstream), each capped at
+    10 ids with the full number in ``inaccessible_workspace_count`` and
+    ``unverified_workspace_count``; narrow with ``search`` to find a specific one.
+    Only the active workspace is rechecked here; to verify another, pass its id to
+    ``list_datasets`` in ``workspace_ids``.
     """
     limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_WORKSPACE_DISCOVERY_LIMIT)
     async with tool_context(
@@ -695,8 +737,11 @@ async def list_workspaces(
                 "limit": limit,
                 "offset": offset,
                 "has_more": offset + len(items) < total,
-                "inaccessible_workspace_ids": inaccessible_workspace_ids,
-                "unverified_workspace_ids": unverified_workspace_ids,
+                **_issue_listing(
+                    workspace_id,
+                    inaccessible=inaccessible_workspace_ids,
+                    unverified=unverified_workspace_ids,
+                ),
             },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
@@ -705,15 +750,14 @@ async def list_workspaces(
 
 
 def _field_summary(field) -> dict:
+    description = field.description or ""
+    if len(description) > FIELD_SUMMARY_DESCRIPTION_CHARS:
+        description = description[: FIELD_SUMMARY_DESCRIPTION_CHARS - 1].rstrip() + "…"
     return {
         "name": field.name,
         "member": field.member_name,
-        "label": field.label or field.name,
-        "description": field.description,
         "type": field.field_type,
-        "data_type": field.data_type,
-        "measure_type": field.measure_type,
-        "metadata": field.metadata,
+        "description": description,
     }
 
 
@@ -755,20 +799,24 @@ async def list_datasets(
     user_id: str = "",
     thread_id: str = "",
 ) -> dict:
-    """List semantic datasets across accessible workspaces with pagination.
+    """List semantic datasets in the active workspace, or in named workspaces, with pagination.
 
     Returns lightweight dataset summaries by default. Set include_fields=true
-    for member summaries, or call describe_dataset for a single dataset.
+    for each dataset's member names and kinds, or call describe_dataset for one
+    dataset's labels, data types, formats and relationships.
 
     Args:
-        workspace_ids: Optional workspace UUIDs to filter. Omit to page across all
-            workspaces accessible to user_id; without user_id, only the active
-            injected workspace_id is allowed.
-        limit: Maximum datasets to return, clamped to 100.
+        workspace_ids: Optional workspace UUIDs to list instead of the active workspace.
+            Omit to list only the active workspace, the one every query tool reads.
+            Pass ids from list_workspaces to look across other workspaces; their
+            datasets cannot be queried from this chat. At most 20 per call. Without
+            user_id, only the active workspace is allowed.
+        limit: Maximum datasets to return, clamped to 100, or to 10 with include_fields.
         offset: Number of matching datasets to skip.
         search: Optional case-insensitive search over dataset/workspace text.
-        include_fields: Include each returned dataset's listed semantic fields. Tenant-constant
-            ids and raw JSON columns are left out but stay queryable by name.
+        include_fields: Include each returned dataset's listed semantic fields as
+            name, member, type and a shortened description. Tenant-constant ids and
+            raw JSON columns are left out but stay queryable by name.
         workspace_id: Active workspace UUID (injected server-side by the agent graph).
         user_id: Acting user UUID (injected server-side; used for access control).
         thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
@@ -776,9 +824,18 @@ async def list_datasets(
     The response lists ``inaccessible_workspace_ids`` (access denied) and, separately,
     ``unverified_workspace_ids`` (access not yet confirmed upstream). Pass an
     unverified id in ``workspace_ids`` to have its access verified and its datasets
-    listed.
+    listed. These lists and ``workspace_errors`` hold at most 10 entries each; the
+    ``*_count`` fields give the full numbers.
     """
-    limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_DATASET_DISCOVERY_LIMIT)
+    limit, offset = _clamp_pagination(
+        limit,
+        offset,
+        max_limit=(
+            MAX_DATASET_DISCOVERY_LIMIT_WITH_FIELDS
+            if include_fields
+            else MAX_DATASET_DISCOVERY_LIMIT
+        ),
+    )
     async with tool_context(
         "list_datasets",
         workspace_id,
@@ -791,9 +848,29 @@ async def list_datasets(
         include_fields=include_fields,
     ) as tc:
         try:
-            requested_workspace_ids = _normalize_workspace_ids(workspace_ids)
+            requested_workspace_ids = list(dict.fromkeys(_normalize_workspace_ids(workspace_ids)))
         except ValueError as exc:
             tc["result"] = error_response(VALIDATION_ERROR, str(exc))
+            return tc["result"]
+        if len(requested_workspace_ids) > MAX_REQUESTED_DATASET_WORKSPACES:
+            tc["result"] = error_response(
+                VALIDATION_ERROR,
+                f"Pass at most {MAX_REQUESTED_DATASET_WORKSPACES} workspace_ids per call.",
+            )
+            return tc["result"]
+
+        if not requested_workspace_ids and workspace_id:
+            # The query tools only read the active workspace, so listing every
+            # membership by default showed datasets the agent could not query.
+            try:
+                requested_workspace_ids = _normalize_workspace_ids([workspace_id])
+            except ValueError as exc:
+                tc["result"] = error_response(VALIDATION_ERROR, str(exc))
+                return tc["result"]
+        if not requested_workspace_ids:
+            tc["result"] = error_response(
+                VALIDATION_ERROR, "workspace_ids or workspace_id is required"
+            )
             return tc["result"]
 
         workspace_roles: dict[str, str] = {}
@@ -896,9 +973,12 @@ async def list_datasets(
                 "limit": limit,
                 "offset": offset,
                 "has_more": offset + len(datasets) < total,
-                "workspace_errors": workspace_errors,
-                "inaccessible_workspace_ids": inaccessible_workspace_ids,
-                "unverified_workspace_ids": unverified_workspace_ids,
+                **_issue_listing(
+                    workspace_id,
+                    inaccessible=inaccessible_workspace_ids,
+                    unverified=unverified_workspace_ids,
+                    errors=workspace_errors,
+                ),
             },
             schema="semantic",
             timing_ms=tc["timer"].elapsed_ms,
@@ -1537,6 +1617,11 @@ async def _run_belongs_to_workspace(run, workspace_id) -> bool:
     ).aexists()
 
 
+# Only results backed by a ThreadJob bound to the calling thread may say this; the
+# agent prompt allows promising a follow-up only after a tool result that does.
+_THIS_CONVERSATION_RESUMES = "This conversation will resume automatically when it finishes."
+
+
 @mcp.tool()
 async def run_materialization(
     workspace_id: str = "",
@@ -1550,9 +1635,9 @@ async def run_materialization(
     Defers the work to the procrastinate ``materialize_workspace`` task and
     creates a ThreadJob row tying that procrastinate job to the calling chat
     thread. Returns ``status: started`` right away — the chat agent should
-    acknowledge briefly to the user and end its turn. When materialization
-    finishes, a chained ``resume_thread_after_materialization`` task injects
-    completion into the conversation via the LangGraph checkpointer.
+    relay the result's message briefly and end its turn. Only a result whose
+    message says this conversation will resume is backed by a chained
+    ``resume_thread_after_materialization`` task; any other result resumes nothing.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -1611,6 +1696,48 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
+        # Each chat needs its own ThreadJob for automatic follow-up. Checked before
+        # recovery: a load this chat started may run under a recovery row, and this
+        # chat must still hear that it resumes.
+        existing = await ThreadJob.objects.filter(
+            thread_id=thread_id,
+            job_type=ThreadJob.JobType.MATERIALIZATION,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+        ).afirst()
+        # A RUNNING row older than the janitor window belongs to a dead resume worker, so a
+        # fresh turn must be able to start a load instead of being blocked until the sweep.
+        if (
+            existing is not None
+            and existing.state == ThreadJob.State.RUNNING
+            and (anchor := staleness_anchor(existing)) is not None
+            and datetime.now(UTC) - anchor >= STALE_JOB_THRESHOLD
+        ):
+            existing = None
+        if existing is not None:
+            # A RUNNING job is the resume turn itself (matching athread_awaits_load), so it
+            # must not promise a resume, but it must still block re-dispatching its own load.
+            if existing.state == ThreadJob.State.PENDING:
+                message = (
+                    "A materialization started by this conversation is already running. "
+                    f"{_THIS_CONVERSATION_RESUMES}"
+                )
+            else:
+                message = (
+                    "The load this conversation started has already ended (finished or was "
+                    "cancelled) and this turn is its follow-up. Do not start another load. Nothing will resume this "
+                    "conversation; if the user wants a retry, tell them to ask again."
+                )
+            tc["result"] = success_response(
+                {
+                    "status": "already_in_progress",
+                    "thread_job_id": str(existing.id),
+                    "message": message,
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
+            return tc["result"]
+
         recovery = await WorkspaceDataRecovery.objects.filter(
             workspace_id=workspace_id,
             state__in=WorkspaceDataRecovery.ACTIVE_STATES,
@@ -1621,31 +1748,10 @@ async def run_materialization(
                     "status": "already_in_progress",
                     "workspace_recovery_id": str(recovery.id),
                     "message": (
-                        "Artifact data recovery is already running for this workspace. "
-                        "Do not start another load. Check get_schema_status for completion; "
-                        "this operation has no automatic chat follow-up."
-                    ),
-                },
-                schema="",
-                timing_ms=tc["timer"].elapsed_ms,
-            )
-            return tc["result"]
-
-        # Each chat needs its own ThreadJob for automatic follow-up. The worker
-        # serializes data operations through Cube publication for this workspace.
-        existing = await ThreadJob.objects.filter(
-            thread_id=thread_id,
-            job_type=ThreadJob.JobType.MATERIALIZATION,
-            state__in=list(ThreadJob.ACTIVE_STATES),
-        ).afirst()
-        if existing is not None:
-            tc["result"] = success_response(
-                {
-                    "status": "already_in_progress",
-                    "thread_job_id": str(existing.id),
-                    "message": (
-                        "A materialization is already running in this chat. "
-                        "I'll continue once it finishes."
+                        "A data recovery is already running for this workspace. "
+                        "Do not start another load. Nothing will resume this conversation "
+                        "when it finishes; tell the user to ask again once it has finished. "
+                        "Check get_schema_status for completion."
                     ),
                 },
                 schema="",
@@ -1677,9 +1783,7 @@ async def run_materialization(
             {
                 "status": "started",
                 "thread_job_id": str(tj.id),
-                "message": (
-                    "Materialization started in background. I'll continue when it finishes."
-                ),
+                "message": f"Materialization started in background. {_THIS_CONVERSATION_RESUMES}",
             },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
