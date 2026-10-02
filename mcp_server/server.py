@@ -1695,23 +1695,29 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
-        # Each chat needs its own ThreadJob for automatic follow-up. Only PENDING counts
-        # (a RUNNING one is the resume itself, matching athread_awaits_load). Checked before
+        # Each chat needs its own ThreadJob for automatic follow-up. Checked before
         # recovery: a load this chat started may run under a recovery row, and this
         # chat must still hear that it resumes.
         existing = await ThreadJob.objects.filter(
             thread_id=thread_id,
             job_type=ThreadJob.JobType.MATERIALIZATION,
-            state=ThreadJob.State.PENDING,
+            state__in=list(ThreadJob.ACTIVE_STATES),
         ).afirst()
         if existing is not None:
+            # A RUNNING job is the resume turn itself (matching athread_awaits_load), so it
+            # must not promise a resume, but it must still block re-dispatching its own load.
+            promises_resume = existing.state == ThreadJob.State.PENDING
+            follow_up = (
+                _THIS_CONVERSATION_RESUMES
+                if promises_resume
+                else "Nothing will resume this conversation; do not start another load."
+            )
             tc["result"] = success_response(
                 {
                     "status": "already_in_progress",
                     "thread_job_id": str(existing.id),
                     "message": (
-                        "A materialization started by this conversation is already running. "
-                        f"{_THIS_CONVERSATION_RESUMES}"
+                        f"A materialization started by this conversation is already running. {follow_up}"
                     ),
                 },
                 schema="",

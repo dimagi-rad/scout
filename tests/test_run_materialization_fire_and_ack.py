@@ -366,7 +366,7 @@ async def test_run_materialization_queues_nothing_when_its_threadjob_cannot_be_s
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_a_running_resume_job_is_not_reported_as_a_pending_load(workspace, user):
+async def test_a_running_resume_job_blocks_redispatch_without_promising_a_resume(workspace, user):
     thread = await Thread.objects.acreate(workspace=workspace, user=user)
     await ThreadJob.objects.acreate(
         thread=thread,
@@ -375,9 +375,11 @@ async def test_a_running_resume_job_is_not_reported_as_a_pending_load(workspace,
         tool_call_id="tc-running",
         state=ThreadJob.State.RUNNING,
     )
-    with patch(DISPATCH, new=AsyncMock(return_value=AsyncMock(id="tj-new"))) as dispatch:
+    with patch(DISPATCH, new=AsyncMock()) as dispatch:
         result = await run_materialization(
             workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
         )
-    assert result["data"]["status"] == "started"
-    dispatch.assert_awaited_once()
+    assert result["data"]["status"] == "already_in_progress"
+    assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
+    assert "Nothing will resume this conversation" in result["data"]["message"]
+    dispatch.assert_not_awaited()
