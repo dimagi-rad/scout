@@ -19,6 +19,7 @@ from django.utils import timezone
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.users.services.access_verification import (
+    PROOF_MAX_AGE,
     ClaimStatus,
     PublicationStatus,
     VerificationClaim,
@@ -753,12 +754,15 @@ async def _verify_and_publish_once(
             *_ANSWERS_SHORT_OF_ACCESS,
         }
         if dead_grant or provider_result.outcome in _ANSWERS_SHORT_OF_ACCESS:
+            indeterminate = provider_result.outcome == VerificationOutcome.INDETERMINATE
             await _withdraw_proofs(
                 claim,
                 None
                 if dead_grant or provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
                 else claim.requested_tenant_ids,
-                before=completed_at,
+                # An indeterminate answer denies nothing: withdraw only the stale proofs
+                # grace could otherwise stand on, not the fresh ones of sibling tenants.
+                before=completed_at - PROOF_MAX_AGE if indeterminate else completed_at,
                 deadline=deadline,
                 clock=clock,
             )
@@ -781,8 +785,14 @@ async def _verify_and_publish_once(
             )
         if mapped.outcome == VerificationOutcome.COMPLETE:
             if short := requested - mapped.tenant_ids:
+                # An unscoped listing speaks for the whole connection, as publication's
+                # omission does; a scoped one only for what it asked about.
                 await _withdraw_proofs(
-                    claim, short, before=completed_at, deadline=deadline, clock=clock
+                    claim,
+                    short if mapped.scoped else None,
+                    before=completed_at,
+                    deadline=deadline,
+                    clock=clock,
                 )
             else:
                 progress.denied = False

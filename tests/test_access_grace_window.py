@@ -557,3 +557,75 @@ async def test_a_dead_refresh_grant_withdraws_the_connections_proofs(user, tenan
     # Nothing archived: reconnecting fixes it. But a later outage finds no proof to grace.
     assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
     assert not await agrace_proof_tenant_ids(user.id, connection.id, {tenant.id}, max_age=window)
+
+
+async def _with_sibling(user, tenant, *, sibling_age):
+    """The tenant's connection plus a second tenant on it with a proof ``sibling_age`` old."""
+    membership = await TenantMembership.objects.select_related("connection").aget(
+        user=user, tenant=tenant
+    )
+    connection = membership.connection
+    sibling = await Tenant.objects.acreate(
+        provider=tenant.provider, external_id="sibling", canonical_name="Sibling"
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=sibling, connection=connection)
+    proof = await UpstreamAccessProof.objects.aget(connection=connection, tenant=tenant)
+    await UpstreamAccessProof.objects.aupdate_or_create(
+        connection=connection,
+        tenant=sibling,
+        defaults={
+            "credential_fingerprint": proof.credential_fingerprint,
+            "account_identity": proof.account_identity,
+            "scope_key": proof.scope_key,
+            "observed_denied_at": proof.observed_denied_at,
+            "verified_at": timezone.now() - sibling_age,
+        },
+    )
+    return connection, sibling
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_indeterminate_answer_leaves_fresh_sibling_proofs(user, tenant, workspace):
+    connection, sibling = await _with_sibling(user, tenant, sibling_age=timedelta(minutes=1))
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+
+    async def indeterminate(*args, **kwargs):
+        return ProviderVerificationResult.indeterminate("verification_indeterminate")
+
+    await verify_connection_access(
+        user.id, connection.id, {tenant.id, sibling.id}, provider_verifier=indeterminate
+    )
+
+    stale = await UpstreamAccessProof.objects.aget(connection=connection, tenant=tenant)
+    fresh = await UpstreamAccessProof.objects.aget(connection=connection, tenant=sibling)
+    assert stale.verified_at is None
+    assert fresh.verified_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unpublished_full_omission_withdraws_sibling_proofs(
+    user, tenant, workspace, monkeypatch
+):
+    """An unscoped listing speaks for the whole connection, published or not."""
+    connection, sibling = await _with_sibling(user, tenant, sibling_age=timedelta(minutes=10))
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+
+    async def lists_nothing(*args, **kwargs):
+        return ProviderVerificationResult.complete(set())
+
+    async def publication_times_out(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(
+        access_verification_service, "apublish_verification_receipt", publication_times_out
+    )
+
+    await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=lists_nothing
+    )
+    await _drain_background()
+
+    window = timedelta(minutes=30)
+    assert not await agrace_proof_tenant_ids(user.id, connection.id, {sibling.id}, max_age=window)
