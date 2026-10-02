@@ -25,6 +25,7 @@ EXPECTED_SIGNATURES = {
     "expire_inactive_schemas": "(timestamp: int = 0) -> None",
     "expire_stale_thread_jobs": "(timestamp: int = 0) -> dict",
     "expire_stale_workspace_data_recoveries": "(timestamp: int = 0) -> dict",
+    "flush_pending_requests": "(workspace_id: str) -> dict",
     "materialize_workspace": (
         "(context, workspace_id: str, user_id: str = '', load_intent: dict | None = None, "
         "only_unserved: bool = False, notify_thread: bool = True) -> dict"
@@ -42,6 +43,7 @@ EXPECTED_SIGNATURES = {
     "resume_thread_after_materialization": (
         "(context, thread_job_id: str, busy_attempt: int = 0) -> dict"
     ),
+    "sweep_pending_requests": "(timestamp: int = 0) -> dict",
     "sweep_workspace_load_candidates": "(timestamp: int = 0) -> dict",
     "teardown_schema": "(schema_id: str, attempt: int = 0) -> None",
     "teardown_view_schema_task": "(view_schema_id: str) -> None",
@@ -54,6 +56,7 @@ EXPECTED_CRONS = {
     "prune_old_procrastinate_jobs": "17 3 * * *",
     "reconcile_refresh_candidates": "*/15 * * * *",
     "reconcile_stale_materialization_runs": "*/15 * * * *",
+    "sweep_pending_requests": "* * * * *",
     "sweep_workspace_load_candidates": "7,22,37,52 * * * *",
 }
 

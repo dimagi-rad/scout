@@ -197,6 +197,10 @@ class PendingRequest(models.Model):
         related_name="+",
     )
     claim_token = models.UUIDField(null=True, blank=True)
+    # Sends tried by the workspace flush, which answers a request no load of its
+    # own will resume; capped so one that keeps failing stays the user's to send.
+    # db_default too: pods still on the previous release insert rows without it.
+    flush_attempts = models.PositiveSmallIntegerField(default=0, db_default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

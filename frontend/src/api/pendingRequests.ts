@@ -49,5 +49,6 @@ export function pendingPhase(pending: PendingRequest): PendingPhase {
   // and the resume (which holds the thread) refuses a Send now it already served.
   if (pending.state === "claimed" || pending.thread_job_state === "running") return "answering"
   if (pending.thread_job_state === "pending") return "waiting"
+  if (pending.thread_job_id === null && pending.workspace_load_pending) return "waiting"
   return "unanswered"
 }

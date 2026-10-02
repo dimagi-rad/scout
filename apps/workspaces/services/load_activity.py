@@ -28,6 +28,9 @@ REBUILD_VIEW_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_view_schema"
 # A view rebuild queued on its own (a source added to a serving workspace) is a
 # build in flight too, so the status counts it; the chat auto-load does not wait on it.
 _STATUS_TASK_NAMES = (MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME)
+REBUILD_SEMANTIC_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_semantic_model"
+# Everything that must finish before a held request can be answered from the data.
+_BUILD_TASK_NAMES = (*_STATUS_TASK_NAMES, REBUILD_SEMANTIC_TASK_NAME)
 _QUEUED_OR_RUNNING = ("todo", "doing", "aborting")
 _STARTED = ("doing", "aborting")
 # Matches MATERIALIZATION_STALLED_HEARTBEAT_SECONDS in reconciliation: a started job whose
@@ -113,9 +116,31 @@ def _pending_loads(workspace_ids, task_names=(MATERIALIZE_TASK_NAME,)):
     return runs, recoveries, jobs
 
 
+def workspace_build_pending(workspace_id) -> bool:
+    """``aworkspace_build_pending`` for sync callers."""
+    return any(pending.exists() for pending in _pending_loads([workspace_id], _BUILD_TASK_NAMES))
+
+
 async def aworkspace_load_pending(workspace_id) -> bool:
     """Whether a load covering this workspace is queued or running."""
     return await _aany_pending(_pending_loads([workspace_id]))
+
+
+async def aworkspace_own_load_pending(workspace) -> bool:
+    """Whether a load of this workspace itself is queued or running.
+
+    Unlike ``aworkspace_load_pending``, a sibling workspace's run on a shared
+    tenant does not count: it builds that workspace's catalog, not this one's,
+    and its end flushes nothing here. The workspace's own runs (a refresh, a
+    recipe's inline load) do.
+    """
+    runs, recoveries, jobs = _pending_loads([workspace.id])
+    return await _aany_pending([runs.filter(owned_run_q(workspace)), recoveries, jobs])
+
+
+async def aworkspace_build_pending(workspace_id) -> bool:
+    """Whether a load, or a view or semantic-model rebuild after one, is queued or running."""
+    return await _aany_pending(_pending_loads([workspace_id], _BUILD_TASK_NAMES))
 
 
 async def _aany_pending(querysets) -> bool:

@@ -25,7 +25,7 @@ from procrastinate.exceptions import AlreadyEnqueued
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat import pending_requests
 from apps.chat.constants import SYSTEM_RESUME_MARKER
-from apps.chat.models import Thread, ThreadJob
+from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.tasks import aschedule_thread_title
 from apps.chat.turn_lease import TurnLease, atry_acquire_turn_lease
 from apps.common.capacity import CapacityExhausted, classify_capacity_error
@@ -90,7 +90,10 @@ from apps.workspaces.services.data_recovery import (
 )
 from apps.workspaces.services.failure_guidance import credential_guidance
 from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
-from apps.workspaces.services.load_activity import active_runs_for_workspaces
+from apps.workspaces.services.load_activity import (
+    active_runs_for_workspaces,
+    aworkspace_build_pending,
+)
 from apps.workspaces.services.load_candidates import (
     Promotion,
     abandoned_workspace_candidates,
@@ -134,6 +137,9 @@ from apps.workspaces.services.reconciliation import (
 )
 from apps.workspaces.services.reconciliation import (
     persist_synthetic_failure_message as _persist_synthetic_failure_message,
+)
+from apps.workspaces.services.reconciliation import (
+    persist_synthetic_thread_message as _persist_synthetic_thread_message,
 )
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
@@ -207,6 +213,26 @@ def _unreachable_tenant_error(tenant) -> str:
 
 @app.task(pass_context=True)
 async def refresh_tenant_schema(
+    context,
+    schema_id: str,
+    membership_id: str,
+    actor_user_id: str = "",
+    workspace_id: str = "",
+) -> dict:
+    """See ``_refresh_tenant_schema``; a held request waiting on it is flushed after."""
+    try:
+        return await _refresh_tenant_schema(
+            context,
+            schema_id,
+            membership_id,
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+        )
+    finally:
+        await _defer_pending_flush(workspace_id)
+
+
+async def _refresh_tenant_schema(
     context,
     schema_id: str,
     membership_id: str,
@@ -1306,6 +1332,7 @@ async def materialize_workspace(
                 logger.exception("Could not queue the view rebuild for workspace %s", workspace_id)
         if notify_thread:
             await _defer_resume_for_job(job_id, preflight_failures)
+        await _defer_pending_flush(workspace_id)
 
 
 def _resume_records(result: dict) -> list[dict]:
@@ -2278,6 +2305,28 @@ async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
 
 @app.task(pass_context=True)
 async def recover_workspace_data(context, recovery_id: str) -> dict:
+    """See ``_recover_workspace_data``; a held request waiting on it is flushed after."""
+    try:
+        return await _recover_workspace_data(context, recovery_id)
+    finally:
+        await _defer_flush_after_recovery(recovery_id)
+
+
+async def _defer_flush_after_recovery(recovery_id: str) -> None:
+    try:
+        workspace_id = (
+            await WorkspaceDataRecovery.objects.filter(id=recovery_id)
+            .values_list("workspace_id", flat=True)
+            .afirst()
+        )
+    except Exception:
+        # From the task's finally: never replace its outcome; the sweep is the backstop.
+        logger.exception("Could not find the workspace of recovery %s", recovery_id)
+        return
+    await _defer_pending_flush(workspace_id)
+
+
+async def _recover_workspace_data(context, recovery_id: str) -> dict:
     """Repair the least healthy layer of a workspace's artifact query surface.
 
     The requested recovery type captures why the job was created. The task
@@ -3347,6 +3396,10 @@ HELD_REQUEST_NOTE = "The user's request, written while data loaded, follows; ans
 NO_REQUEST_NOTE = (
     "The user has no question waiting; tell them briefly that their data is ready to ask about."
 )
+REQUEST_STILL_WAITING_NOTE = (
+    "The user's question is still waiting on the rest of the workspace's data and will be "
+    "answered when it loads; tell them briefly that this load finished."
+)
 
 
 async def _thread_has_user_turn(thread_id) -> bool:
@@ -3611,6 +3664,11 @@ async def _resume_claimed_job(
     else:
         if held is not None:
             follow_up = HELD_REQUEST_NOTE
+        elif await PendingRequest.objects.filter(
+            thread_id=tj.thread_id, thread_job__isnull=True
+        ).aexists():
+            # Held for the rest of the workspace's data: the flush sends it after.
+            follow_up = REQUEST_STILL_WAITING_NOTE
         elif await _thread_has_user_turn(tj.thread_id):
             follow_up = (
                 "Please continue with the user's original request using the now-loaded data."
@@ -3919,3 +3977,159 @@ async def _resume_claimed_job(
         )
         return {"status": "resumed", "terminal_state": actual_state or terminal}
     return {"status": "resumed", "terminal_state": terminal}
+
+
+# Sent ahead of a request the workspace flush sends: one held for a workspace
+# load (another member's, or one a read-only member could not start).
+FLUSH_NOTE = (
+    f"{SYSTEM_RESUME_MARKER} A workspace data load ended while this message waited; "
+    "answer it from the data now available, and say so if what it needs did not load."
+)
+FLUSH_FAILED_MESSAGE = "I couldn't finish answering this after your data loaded. Please ask again."
+# Lets the load that queued the flush finish, so the flush does not see it pending.
+PENDING_FLUSH_DELAY_SECONDS = 5
+
+
+# A flush that finds a build still running (often one the ending load queued) looks again.
+PENDING_FLUSH_RECHECK_SECONDS = 15
+# Requests sent per flush run; the rest go in a run queued after it, so one run
+# never holds a worker for each request's full answer in turn.
+FLUSH_BATCH = 3
+
+
+async def _defer_pending_flush(workspace_id, delay: int = PENDING_FLUSH_DELAY_SECONDS) -> None:
+    """Queue a flush of the workspace's held requests; never raises (the sweep is the backstop)."""
+    if not workspace_id:
+        return
+    try:
+        await flush_pending_requests.configure(
+            queueing_lock=f"pending-flush:{workspace_id}",
+            schedule_in={"seconds": delay},
+        ).defer_async(workspace_id=str(workspace_id))
+    except AlreadyEnqueued:
+        pass
+    except Exception:
+        logger.exception("Could not queue the held-request flush for workspace %s", workspace_id)
+
+
+@app.task
+async def flush_pending_requests(workspace_id: str) -> dict:
+    """Send the workspace's held requests that no load of their own will send.
+
+    Runs when a load of the workspace ends, and from the minute sweep. A load
+    still under way flushes them itself when it ends.
+    """
+    sent = 0
+    thread_ids = await pending_requests.aflushable_thread_ids(workspace_id)
+    for thread_id in thread_ids[:FLUSH_BATCH]:
+        # Per request: answering one takes minutes, and a load may start meanwhile.
+        if await aworkspace_build_pending(workspace_id):
+            await _defer_pending_flush(workspace_id, PENDING_FLUSH_RECHECK_SECONDS)
+            return {"status": "load_pending", "sent": sent}
+        try:
+            sent += await _flush_thread(thread_id)
+        except Exception:
+            logger.exception("flush: could not send the held request of thread %s", thread_id)
+    if len(thread_ids) > FLUSH_BATCH:
+        await _defer_pending_flush(workspace_id)
+    return {"status": "flushed", "sent": sent}
+
+
+@app.periodic(cron="* * * * *")
+@app.task
+async def sweep_pending_requests(timestamp: int = 0) -> dict:
+    """Backstop for a flush that never ran: a lost defer, or a hold racing a load's end.
+
+    Queues a flush per workspace rather than running them, so one slow answer
+    never holds a worker across workspaces; the queueing lock dedupes them.
+    """
+    workspace_ids = await pending_requests.aflushable_workspace_ids()
+    for workspace_id in workspace_ids:
+        await _defer_pending_flush(workspace_id)
+    return {"queued": len(workspace_ids)}
+
+
+async def _flush_thread(thread_id) -> int:
+    thread = await Thread.objects.select_related("workspace", "user").aget(id=thread_id)
+    lease = await atry_acquire_turn_lease(thread_id)
+    if lease is None:
+        # Answering now: that turn takes the request with it.
+        return 0
+    answered = False
+    try:
+        async with lease.held():
+            if not await pending_requests.acount_flush_attempt(thread_id):
+                return 0
+            held = await pending_requests.aclaim(thread_id, lease.token)
+            if held is None:
+                return 0
+            try:
+                # The whole turn, setup included: the user's chat is busy until it ends.
+                async with asyncio.timeout(
+                    settings.AGENT_RESUME_TIMEOUT_S + RESUME_SETUP_BUDGET_SECONDS
+                ):
+                    answered = await _answer_flushed_request(thread, held)
+            except TimeoutError:
+                logger.exception("flush: the held request of thread %s timed out", thread_id)
+            finally:
+                await pending_requests.asettle(held)
+            # The run saves the user's message before the model answers, so a run
+            # that failed after that leaves the message sent, with no reply.
+            try:
+                async with asyncio.timeout(pending_requests.SETTLE_TIMEOUT_SECONDS):
+                    landed = await pending_requests.athread_has_message(thread_id, held.message_id)
+            except Exception:
+                # Unknown: say nothing rather than claim a reply failed.
+                logger.warning("flush: could not read thread %s", thread_id, exc_info=True)
+                landed = False
+            if landed and not answered:
+                await _persist_synthetic_thread_message(thread, FLUSH_FAILED_MESSAGE)
+            answered = answered or landed
+    except asyncio.CancelledError:
+        # The heartbeat cancels the task when another run takes the thread; that
+        # ends this request (settled above), not the flush of the others.
+        if not lease.lost:
+            raise
+        asyncio.current_task().uncancel()
+        return 0
+    if not answered:
+        return 0
+    try:
+        await Thread.objects.filter(id=thread_id).aupdate(updated_at=timezone.now())
+    except Exception:
+        logger.warning("flush: Thread.updated_at bump failed for %s", thread_id, exc_info=True)
+    await aschedule_thread_title(thread)
+    return 1
+
+
+async def _answer_flushed_request(thread: Thread, held) -> bool:
+    workspace, user = thread.workspace, thread.user
+    try:
+        agent = await _build_agent_for_resume(workspace, user, conversation_id=str(thread.id))
+        config = {
+            "configurable": {"thread_id": str(thread.id)},
+            "recursion_limit": settings.AGENT_RESUME_RECURSION_LIMIT,
+        }
+        langfuse_handler = get_langfuse_callback(session_id=str(thread.id), user_id=str(user.id))
+        if langfuse_handler is not None:
+            config["callbacks"] = [langfuse_handler]
+        await asyncio.wait_for(
+            agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
+                        HumanMessage(content=held.text, id=held.message_id),
+                    ],
+                    "workspace_id": str(workspace.id),
+                    "user_id": str(user.id),
+                    "thread_id": str(thread.id),
+                },
+                config,
+            ),
+            timeout=settings.AGENT_RESUME_TIMEOUT_S,
+        )
+    except Exception:
+        # Settled after: unsent, it waits again (its one flush spent) for the user to send.
+        logger.exception("flush: agent failed for the held request of thread %s", thread.id)
+        return False
+    return True

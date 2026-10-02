@@ -42,6 +42,7 @@ from apps.workspaces.access import access_denied_response, role_satisfies
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.services.load_activity import (
     athread_awaits_load,
+    aworkspace_own_load_pending,
     aworkspace_serves_nothing,
 )
 from apps.workspaces.services.thread_job_dispatch import (
@@ -317,12 +318,15 @@ async def _hold_while_loading(workspace, thread_id: str, message: dict, text: st
     """Hold the message for the load this chat awaits, or None to answer it now.
 
     Only while the workspace serves no data: a refresh over served data answers
-    from what is there. A chat with no load to wait on gets a normal turn, whose
-    agent explains why nothing can load.
+    from what is there. The load is this chat's own, or else another load of
+    this workspace (a teammate's, or one a read-only member cannot start), whose
+    end flushes it; a sibling workspace's load of a shared source is not one. A chat with no load to wait on gets a normal turn, whose agent
+    explains why nothing can load.
     """
-    if not await athread_awaits_load(thread_id):
-        return None
     if not await aworkspace_serves_nothing(workspace.id):
+        return None
+    own_load = await athread_awaits_load(thread_id)
+    if not own_load and not await aworkspace_own_load_pending(workspace):
         return None
     part_id = message.get("id")
     if (
@@ -331,7 +335,9 @@ async def _hold_while_loading(workspace, thread_id: str, message: dict, text: st
         or len(part_id) > pending_requests.MAX_PART_ID_LENGTH
     ):
         part_id = str(uuid.uuid4())
-    return await pending_requests.ahold_message(thread_id, part_id=part_id, text=text)
+    return await pending_requests.ahold_message(
+        thread_id, part_id=part_id, text=text, for_workspace_load=not own_load
+    )
 
 
 def _held_response(pending: dict) -> StreamingHttpResponse:

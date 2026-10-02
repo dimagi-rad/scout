@@ -78,6 +78,8 @@ export interface PendingRequest {
   thread_job_id: string | null
   /** The state of the load that will send it, or null when it has none. */
   thread_job_state: JobState | null
+  /** With no load of its own: whether a workspace load is under way, whose end sends it. */
+  workspace_load_pending?: boolean
 }
 
 export interface ActiveJobsResponse {
