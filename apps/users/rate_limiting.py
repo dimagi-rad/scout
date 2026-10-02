@@ -6,13 +6,19 @@ AUTH_MAX_ATTEMPTS = 5
 AUTH_LOCKOUT_SECONDS = 300
 
 
+def _attempts_key(username: str) -> str:
+    # allauth's backend matches the email case-insensitively, so every casing of
+    # one address must share a counter or changing case resets the limit.
+    return f"auth_attempts:{username.strip().lower()}"
+
+
 def check_rate_limit(username: str) -> bool:
     """Return True if rate-limited (should block)."""
-    return cache.get(f"auth_attempts:{username}", 0) >= AUTH_MAX_ATTEMPTS
+    return cache.get(_attempts_key(username), 0) >= AUTH_MAX_ATTEMPTS
 
 
 def record_attempt(username: str, success: bool) -> None:
-    key = f"auth_attempts:{username}"
+    key = _attempts_key(username)
     if success:
         cache.delete(key)
     else:
