@@ -79,6 +79,15 @@ async def _upsert_thread(thread_id, user, history_title: str = "", *, workspace)
         raise ForeignThreadError(thread)
     if not created:
         await Thread.objects.filter(pk=thread.pk).aupdate(updated_at=timezone.now())
+        # A row made before the first message (the canvas creates one) has no title yet;
+        # the list endpoint reads only the row, so give it the provisional title now.
+        # Conditional so a rename that lands after the read above still wins.
+        if thread.title_source == Thread.TitleSource.FIRST_MESSAGE and not thread.title:
+            title = short_thread_title(history_title)
+            if await Thread.objects.filter(
+                pk=thread.pk, title_source=Thread.TitleSource.FIRST_MESSAGE, title=""
+            ).aupdate(title=title):
+                thread.title = title
     return thread
 
 

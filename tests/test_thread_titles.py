@@ -333,3 +333,41 @@ async def test_a_successful_chat_turn_queues_title_generation(workspace, user, q
         assert not await ProcrastinateJob.objects.filter(
             task_name=generate_thread_title.name, args={"thread_id": thread_id}
         ).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_first_turn_titles_a_row_created_before_any_message(workspace, user, queued_jobs):
+    # The canvas creates the row before the first chat message, with no title.
+    shell = await Thread.objects.acreate(workspace=workspace, user=user)
+    client = AsyncClient()
+    await sync_to_async(client.force_login)(user)
+
+    with (
+        patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock, return_value=[]),
+        patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock),
+        patch("apps.chat.views.build_agent_graph", new_callable=AsyncMock),
+        patch("apps.chat.views.astart_chat_load", new_callable=AsyncMock, return_value=object()),
+        patch("apps.chat.views.touch_workspace_schemas", new_callable=AsyncMock),
+        patch(
+            "apps.chat.views.repair_dangling_tool_calls", new_callable=AsyncMock, return_value=[]
+        ),
+        patch("apps.chat.views.langgraph_to_ui_stream", side_effect=_succeeding_stream),
+    ):
+        response = await client.post(
+            "/api/chat/",
+            data=json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Visits by worker last month"}],
+                    "workspaceId": str(workspace.id),
+                    "threadId": str(shell.id),
+                }
+            ),
+            content_type="application/json",
+        )
+        assert response.status_code == 200, response.content
+        _ = [chunk async for chunk in response.streaming_content]
+
+    await shell.arefresh_from_db()
+    assert shell.title == "Visits by worker last month"
+    assert shell.title_source == Thread.TitleSource.FIRST_MESSAGE
