@@ -126,15 +126,16 @@ async def aworkspace_load_pending(workspace_id) -> bool:
     return await _aany_pending(_pending_loads([workspace_id]))
 
 
-async def aworkspace_own_load_pending(workspace_id) -> bool:
+async def aworkspace_own_load_pending(workspace) -> bool:
     """Whether a load of this workspace itself is queued or running.
 
     Unlike ``aworkspace_load_pending``, a sibling workspace's run on a shared
     tenant does not count: it builds that workspace's catalog, not this one's,
-    and its end flushes nothing here.
+    and its end flushes nothing here. The workspace's own runs (a refresh, a
+    recipe's inline load) do.
     """
-    _runs, recoveries, jobs = _pending_loads([workspace_id])
-    return await _aany_pending([recoveries, jobs])
+    runs, recoveries, jobs = _pending_loads([workspace.id])
+    return await _aany_pending([runs.filter(owned_run_q(workspace)), recoveries, jobs])
 
 
 async def aworkspace_build_pending(workspace_id) -> bool:

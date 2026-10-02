@@ -37,7 +37,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services import load_activity
+from apps.workspaces.services import load_activity, reconciliation
 from apps.workspaces.tasks import (
     HELD_REQUEST_NOTE,
     NO_REQUEST_NOTE,
@@ -1175,4 +1175,21 @@ async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
     )
 
     assert await load_activity.aworkspace_load_pending(ws.id)
-    assert not await load_activity.aworkspace_own_load_pending(ws.id)
+    assert not await load_activity.aworkspace_own_load_pending(ws)
+
+    await TenantSchema.objects.filter(id=schema.id).aupdate(load_workspace_id=ws.id)
+    assert await load_activity.aworkspace_own_load_pending(ws)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_synthetic_thread_message_never_raises():
+    _ws, _user, _client, thread = await _thread("synthetic")
+
+    with patch(
+        "apps.workspaces.services.reconciliation._append_synthetic_message",
+        AsyncMock(side_effect=RuntimeError("checkpointer down")),
+    ) as append:
+        await reconciliation.persist_synthetic_thread_message(thread, "Sorry.")
+
+    append.assert_awaited_once_with(thread, "Sorry.")

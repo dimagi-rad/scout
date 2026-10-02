@@ -4075,7 +4075,7 @@ async def _flush_thread(thread_id) -> int:
                 await pending_requests.asettle(held)
             # The run saves the user's message before the model answers, so a run
             # that failed after that leaves the message sent, with no reply.
-            landed = not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+            landed = await pending_requests.athread_has_message(thread_id, held.message_id)
             if landed and not answered:
                 await _persist_synthetic_thread_message(thread, FLUSH_FAILED_MESSAGE)
             answered = answered or landed
