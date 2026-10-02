@@ -24,7 +24,7 @@ import type { AccessDenialReason } from "@/store/uiSlice"
 // The server's message names every source and remedy, too long for the sidebar;
 // the lost-access modal and Connected Accounts carry the detail.
 const ACCESS_DENIAL_SUMMARY: Record<AccessDenialReason, string> = {
-  tenant_access_lost: "You no longer have access to all of this workspace's sources.",
+  tenant_access_lost: "You don't have access to all of this workspace's sources.",
   upstream_access_lost: "A provider removed your access to one of this workspace's sources.",
   credential_missing: "One of this workspace's sources isn't connected.",
   credential_expired: "Your sign-in for one of this workspace's sources expired.",

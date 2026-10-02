@@ -272,7 +272,7 @@ describe("Sidebar access denial", () => {
     renderSidebar()
 
     expect(screen.getByTestId("sidebar-threads-access-lost")).toHaveTextContent(
-      "You no longer have access to all of this workspace's sources.",
+      "You don't have access to all of this workspace's sources.",
     )
     fireEvent.click(screen.getByRole("button", { name: "Retry verification" }))
     expect(mocks.retryAccessVerification).toHaveBeenCalledWith("workspace-1")
