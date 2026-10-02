@@ -6,6 +6,7 @@ claims the held request under the thread's turn lease and sends it as one messag
 
 import json
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1058,16 +1059,29 @@ class TestFlush:
         await self._flush(ws, again)
         again.ainvoke.assert_awaited_once()
 
+    async def test_the_oldest_request_goes_first(self, checkpoint):
+        ws, user, _client, older = await _thread("flush-order")
+        newer = await Thread.objects.acreate(workspace=ws, user=user)
+        await _hold_without_load(newer)
+        await _hold_without_load(older)
+        await PendingRequest.objects.filter(thread=older).aupdate(
+            created_at=timezone.now() - timedelta(hours=1)
+        )
+
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [older.id, newer.id]
+
     async def test_a_thread_answering_now_is_skipped(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-leased")
         await _hold_without_load(thread)
         lease = await tasks.atry_acquire_turn_lease(thread.id)
         agent = _flush_agent(checkpoint)
 
+        assert await pending_requests.aflushable_thread_ids(ws.id) == []
         assert (await self._flush(ws, agent))["sent"] == 0
         await lease.release()
         pending = await PendingRequest.objects.aget(thread=thread)
         assert pending.flush_attempts == 0
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [thread.id]
 
     async def test_a_flush_sends_a_few_and_queues_the_rest(self, checkpoint):
         ws, user, _client, thread = await _thread("flush-batch")

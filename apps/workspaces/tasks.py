@@ -3661,7 +3661,9 @@ async def _resume_claimed_job(
     else:
         if held is not None:
             follow_up = HELD_REQUEST_NOTE
-        elif await PendingRequest.objects.filter(thread_id=tj.thread_id).aexists():
+        elif await PendingRequest.objects.filter(
+            thread_id=tj.thread_id, thread_job__isnull=True
+        ).aexists():
             # Held for the rest of the workspace's data: the flush sends it after.
             follow_up = REQUEST_STILL_WAITING_NOTE
         elif await _thread_has_user_turn(tj.thread_id):

@@ -484,7 +484,7 @@ async def aworkspace_pending_requests(workspace, user) -> dict[str, dict]:
 MAX_FLUSH_ATTEMPTS = 1
 
 
-def _flushable():
+def _flushable(*, skip_answering: bool = True):
     """Requests held for a workspace load, which no load of their chat sends.
 
     One left after its own load ended is not among them: the chat offers it to
@@ -500,16 +500,22 @@ def _flushable():
             completed_at__gt=timezone.now() - CANCELLED_RESUME_WINDOW,
         )
     )
-    return PendingRequest.objects.filter(
+    flushable = PendingRequest.objects.filter(
         thread_job__isnull=True, flush_attempts__lt=MAX_FLUSH_ATTEMPTS
     ).exclude(thread__jobs__in=resume_coming)
+    if skip_answering:
+        # Answering now: that turn takes the request with it.
+        flushable = flushable.exclude(thread__turn_lease_expires_at__gt=Now())
+    return flushable
 
 
 async def aflushable_thread_ids(workspace_id) -> list:
+    """Oldest first, so a batch never leaves the longest-waiting request behind."""
     return [
         thread_id
         async for thread_id in _flushable()
         .filter(thread__workspace_id=workspace_id)
+        .order_by("created_at")
         .values_list("thread_id", flat=True)
     ]
 
@@ -524,7 +530,8 @@ async def aflushable_workspace_ids() -> set:
 async def acount_flush_attempt(thread_id) -> bool:
     """Spend one of the request's flush attempts; False when it has none left (or is gone)."""
     return bool(
-        await _flushable()
+        # The flush holds the thread's lease by now, so the thread counts as answering.
+        await _flushable(skip_answering=False)
         .filter(thread_id=thread_id)
         .aupdate(flush_attempts=F("flush_attempts") + 1)
     )
