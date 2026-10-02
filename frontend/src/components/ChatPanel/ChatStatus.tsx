@@ -1,50 +1,81 @@
 import { useEffect } from "react"
+import { Link } from "react-router-dom"
 
 import { BUSY_MESSAGE } from "@/api/busy"
-import { ApiError } from "@/api/client"
 import { Button } from "@/components/ui/button"
 
-function isStaleThreadError(error: Error | undefined): boolean {
-  if (!error) return false
-  if (error instanceof ApiError && error.status === 404) return true
-  return error.message.includes("Thread not found")
-}
+import { ACCESS_RETRY_MESSAGE, GENERIC_CHAT_ERROR_MESSAGE, classifyChatError } from "./chatErrors"
 
 interface ChatErrorNoticeProps {
   error: Error
   onStartNewThread: () => void
+  onRetry: () => void
 }
 
 /**
- * Friendly chat error. Never renders a raw response body. The stale-thread case
- * gets a recovery button; everything else gets a generic message.
+ * Friendly chat error. Never renders an unrecognised response body: a stale
+ * thread offers a new chat, an access denial its reason-specific remedy, and
+ * anything else a generic message with Retry.
  */
-export function ChatErrorNotice({ error, onStartNewThread }: ChatErrorNoticeProps) {
-  const stale = isStaleThreadError(error)
+export function ChatErrorNotice({ error, onStartNewThread, onRetry }: ChatErrorNoticeProps) {
+  const classified = classifyChatError(error)
   useEffect(() => {
     console.error("[Scout] Chat error:", error)
   }, [error])
+
+  const retryButton = (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={onRetry}
+      data-testid="chat-error-retry"
+    >
+      Retry
+    </Button>
+  )
 
   return (
     <div
       className="text-sm text-destructive bg-destructive/10 rounded-lg px-4 py-3 space-y-2"
       data-testid="chat-error"
+      data-error-kind={classified.kind}
     >
-      <p>
-        {stale
-          ? "This conversation is no longer available."
-          : "Something went wrong. Please try again."}
-      </p>
-      {stale && (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={onStartNewThread}
-          data-testid="chat-error-new-thread"
-        >
-          Start new chat
-        </Button>
+      {classified.kind === "stale" && (
+        <>
+          <p data-testid="chat-error-message">This conversation is no longer available.</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onStartNewThread}
+            data-testid="chat-error-new-thread"
+          >
+            Start new chat
+          </Button>
+        </>
+      )}
+      {classified.kind === "access-retry" && (
+        <>
+          <p data-testid="chat-error-message">{ACCESS_RETRY_MESSAGE}</p>
+          {retryButton}
+        </>
+      )}
+      {classified.kind === "access-reconnect" && (
+        <>
+          <p data-testid="chat-error-message">{classified.message}</p>
+          <Button asChild variant="outline" size="sm">
+            <Link to={classified.recoveryPath} data-testid="chat-error-recovery-link">
+              Connected Accounts
+            </Link>
+          </Button>
+        </>
+      )}
+      {classified.kind === "generic" && (
+        <>
+          <p data-testid="chat-error-message">{GENERIC_CHAT_ERROR_MESSAGE}</p>
+          {retryButton}
+        </>
       )}
     </div>
   )

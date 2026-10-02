@@ -144,7 +144,9 @@ export function ChatPanel() {
       }),
   )
 
-  const { messages, sendMessage, status, stop, error, setMessages, regenerate } = useChat({
+  const {
+    messages, sendMessage, status, stop, error, setMessages, regenerate, clearError,
+  } = useChat({
     transport,
     onData: (part) => {
       const retryAfter = busyRetryAfter(part)
@@ -173,11 +175,13 @@ export function ChatPanel() {
   // A pending busy retry, or a notice whose Retry would regenerate, belongs to this
   // thread; never replay it into another. threadId is the trigger: this cleanup runs
   // on every thread change, so the dependency must stay even though it isn't read.
+  // setMessages does not clear useChat's error, so drop the error notice explicitly.
   useEffect(() => () => {
     cancelBusyRetry()
     setBusyNotice(false)
     setOverloadNotice(false)
-  }, [threadId, cancelBusyRetry])
+    clearError()
+  }, [threadId, cancelBusyRetry, clearError])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -390,8 +394,12 @@ export function ChatPanel() {
     void stop()
   }
 
-  function handleOverloadRetry() {
+  // regenerate resends the last user message, dropping any partial reply to it. After a
+  // mid-stream failure the turn was already checkpointed, so the backend records the
+  // message twice, as with a manual resend or the overload retry.
+  function handleRetry() {
     resetOverloadState()
+    setStoppedNotice(false)
     void regenerate()
   }
 
@@ -463,10 +471,14 @@ export function ChatPanel() {
           {isStreaming && <ChatThinkingIndicator />}
           {stoppedNotice && <ChatStoppedNotice />}
           {error && !busyError && (
-            <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />
+            <ChatErrorNotice
+              error={error}
+              onStartNewThread={startFreshThread}
+              onRetry={handleRetry}
+            />
           )}
-          {overloadNotice && <ChatOverloadNotice onRetry={handleOverloadRetry} />}
-          {busyNotice && <ChatBusyNotice onRetry={handleOverloadRetry} />}
+          {overloadNotice && <ChatOverloadNotice onRetry={handleRetry} />}
+          {busyNotice && <ChatBusyNotice onRetry={handleRetry} />}
         </div>
 
         {/* Materialization progress banner — always visible when a job is active for this thread */}
