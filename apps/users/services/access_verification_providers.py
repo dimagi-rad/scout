@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from threading import BoundedSemaphore
@@ -51,6 +52,8 @@ class ProcessNetworkLimiter:
 
 NETWORK_LIMITER = ProcessNetworkLimiter(4)
 
+logger = logging.getLogger(__name__)
+
 _UNAVAILABLE = "verification_unavailable"
 _INDETERMINATE = "verification_indeterminate"
 
@@ -93,6 +96,15 @@ def _provider_request(snapshot, settings):
         url = f"{settings.CONNECT_API_URL.rstrip('/')}/export/opp_org_program_list/"
         return provider, url, {"Authorization": f"Bearer {credential}"}
     return None
+
+
+def _names_invalid_token(response) -> bool:
+    """Whether a 401 blames the token itself (RFC 6750 3.1), not the caller's access.
+
+    A predicate so only a constant reaches the log: OCS answers 401 both for a dead
+    token and for a valid one whose user has left the team.
+    """
+    return 'error="invalid_token"' in response.headers.get("www-authenticate", "")
 
 
 def _status_result(status_code: int):
@@ -241,6 +253,12 @@ async def verify_provider(
                 if clock() >= deadline:
                     return ProviderVerificationResult.unavailable(_UNAVAILABLE)
                 status_result = _status_result(response.status_code)
+                if response.status_code == 401:
+                    logger.info(
+                        "Provider %s answered verification with HTTP 401 (%s)",
+                        provider,
+                        "invalid_token" if _names_invalid_token(response) else "no token error",
+                    )
                 if status_result is not None:
                     return status_result
                 try:
