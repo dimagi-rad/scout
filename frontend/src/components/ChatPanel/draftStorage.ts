@@ -35,6 +35,9 @@ export function readDraft(workspaceId: string, threadId: string): string {
 }
 
 /** An empty draft removes the entry rather than storing "". */
+export const DRAFT_MAX_CHARS = 100_000
+
+/** Oversized drafts are skipped so a huge paste cannot exhaust the origin's quota. */
 export function writeDraft(workspaceId: string, threadId: string, text: string): void {
   try {
     const key = draftKey(workspaceId, threadId)
@@ -42,6 +45,7 @@ export function writeDraft(workspaceId: string, threadId: string, text: string):
       localStorage.removeItem(key)
       return
     }
+    if (text.length > DRAFT_MAX_CHARS) return
     localStorage.setItem(key, JSON.stringify({ text, updatedAt: Date.now() }))
   } catch {
     // Storage may be unavailable (private mode, quota). Drafts are best-effort.

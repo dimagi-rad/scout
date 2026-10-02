@@ -7,6 +7,7 @@ import { createKnowledgeSlice, type KnowledgeSlice } from "./knowledgeSlice"
 import { createRecipeSlice, type RecipeSlice } from "./recipeSlice"
 import { createDomainSlice, type DomainSlice } from "./domainSlice"
 import type { AccountSessionScope } from "./accountSession"
+import { clearAllDrafts } from "@/components/ChatPanel/draftStorage"
 
 export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice & AccountSessionScope
 
@@ -41,6 +42,8 @@ export function createAppStore() {
   store.subscribe((state, previous) => {
     if (state.user?.id === previous.user?.id) return
     if (session) session.snapshot = previous
+    // First load (null -> user) must keep drafts; only a real account change drops them.
+    if (previous.user && state.user) clearAllDrafts()
     // Recreate the slices so even A → logout → A cannot revive old responses.
     // Seed account-owned fields only after setting the identity.
     store.setState(accountState(store.setState, store.getState, store))

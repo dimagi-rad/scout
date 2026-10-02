@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
   clearAllDrafts,
   DRAFT_MAX_AGE_MS,
+  DRAFT_MAX_CHARS,
   DRAFT_MAX_ENTRIES,
   pruneDrafts,
   readDraft,
@@ -23,6 +24,11 @@ describe("draftStorage", () => {
     expect(readDraft("ws", "t1")).toBe("hello")
     expect(readDraft("ws", "t2")).toBe("world")
     expect(localStorage.getItem("scout:draft:ws:t1")).not.toBeNull()
+  })
+
+  it("skips drafts over the size cap", () => {
+    writeDraft("ws", "t1", "x".repeat(DRAFT_MAX_CHARS + 1))
+    expect(localStorage.getItem("scout:draft:ws:t1")).toBeNull()
   })
 
   it("removes the entry when written empty", () => {

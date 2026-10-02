@@ -28,8 +28,7 @@ export function ChatComposer({
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
 
-  const showSlashMenu =
-    !isStreaming && input.startsWith("/") && !input.slice(1).includes(" ")
+  const showSlashMenu = input.startsWith("/") && !input.slice(1).includes(" ")
   const slashQuery = showSlashMenu ? input.slice(1) : ""
   const filteredCommands = matchSlashCommands(slashQuery, canWrite)
 
