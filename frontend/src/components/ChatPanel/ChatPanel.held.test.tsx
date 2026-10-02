@@ -180,10 +180,11 @@ describe("a message sent while the chat's data loads", () => {
       { id: "answer", role: "assistant", parts: [{ type: "text", text: ANSWER }] },
     ]
 
-    await screen.findByText(ANSWER, undefined, { timeout: 5000 })
+    // The next jobs poll (every 3s) finds the request gone and reloads the thread.
+    await screen.findByText(ANSWER, undefined, { timeout: 8000 })
     expect(screen.queryByTestId("pending-request-card")).toBeNull()
     expect(screen.getByTestId("chat-input")).toHaveAttribute("placeholder", "Ask about your data...")
-  })
+  }, 15_000)
 
   it("is sent as a normal turn when the request was claimed before it could join", async () => {
     const server = mockServer()

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 
 import type { PendingRequest } from "@/api/jobs"
 import {
@@ -77,6 +77,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     })
   }
   const { sent, hiddenMessageIds } = seen
+  const failedPartRef = useRef<{ id: string; text: string } | null>(null)
   const pending = current ?? sent
   const phase = pending ? (current ? pendingPhase(pending) : "answering") : null
 
@@ -97,21 +98,27 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
 
   const onMessagesLoaded = useCallback(
     (loaded: PendingRequest | null) => {
-      setSeen((prev) =>
-        prev.sent === null && prev.hiddenMessageIds.size === 0
+      // The poll and local changes own the request itself: a load that left before
+      // a hold or an add must not undo it. A load that found the request gone ends
+      // the "answering" overlay, since its messages now carry the request.
+      setSeen((prev) => {
+        const sent = loaded === null ? null : prev.sent
+        return sent === prev.sent && prev.hiddenMessageIds.size === 0
           ? prev
-          : { ...prev, sent: null, hiddenMessageIds: new Set() },
-      )
-      if (loaded) setPendingRequest(loaded.thread_id, loaded)
-      else forgetPendingRequest(threadId)
+          : { ...prev, sent, hiddenMessageIds: new Set() }
+      })
     },
-    [setPendingRequest, forgetPendingRequest, threadId],
+    [],
   )
 
   const add = useCallback(
     async (text: string): Promise<AddOutcome> => {
       if (!workspaceId || !current) return "send"
-      const part = { id: newPartId(), text }
+      // A resend of text whose add failed reuses its id, so an add that landed
+      // although its response was lost is not added twice.
+      const retry = failedPartRef.current
+      const part = { id: retry?.text === text ? retry.id : newPartId(), text }
+      failedPartRef.current = null
       setPendingRequest(threadId, {
         ...current,
         version: current.version + 1,
@@ -125,7 +132,9 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
         forgetPendingRequest(threadId)
         void refresh()
         // Claimed or gone: it is being (or was) answered, so this is a new turn.
-        return isPendingConflict(error) ? "send" : "failed"
+        if (isPendingConflict(error)) return "send"
+        failedPartRef.current = part
+        return "failed"
       }
     },
     [workspaceId, threadId, current, setPendingRequest, forgetPendingRequest, refresh],

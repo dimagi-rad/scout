@@ -461,7 +461,12 @@ export function ChatPanel() {
   // A held send that failed for good (not a busy retry) puts the request back.
   useEffect(() => {
     const sending = heldSendRef.current
-    if (status !== "error" || busyError || !sending) return
+    if (!sending) return
+    if (status === "ready") {
+      heldSendRef.current = null
+      return
+    }
+    if (status !== "error" || busyError) return
     heldSendRef.current = null
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
     held.restore()
