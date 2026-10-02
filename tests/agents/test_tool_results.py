@@ -152,12 +152,12 @@ def test_a_runaway_sql_result_keeps_whole_rows_and_says_it_was_cut():
 
 
 def test_a_result_with_nothing_to_cut_is_replaced_by_a_note():
-    payload = {"success": True, "data": {"blob": "x" * 100_000}, "schema": "s"}
+    payload = {"success": True, "data": {f"k{i}": i for i in range(20_000)}, "schema": "s"}
 
     compacted = _compacted_payload("get_metadata", payload)
 
     assert compacted["success"] is True
-    assert "blob" not in compacted["data"]
+    assert "k0" not in compacted["data"]
     assert compacted["data"]["truncated"] is True
 
 
@@ -168,3 +168,59 @@ def test_oversized_plain_text_is_cut_with_a_marker():
 
     assert len(content.encode()) <= TOOL_RESULT_BUDGET_BYTES
     assert content.endswith("KB.]")
+
+
+def test_a_page_whose_first_item_alone_is_too_large_does_not_repeat_its_offset():
+    payload = {
+        "success": True,
+        "data": {"datasets": [{"name": "wide", "fields": ["f" * 100] * 1_000}], "offset": 30},
+    }
+
+    data = _compacted_payload("list_datasets", payload)["data"]
+
+    assert data["datasets"] == []
+    assert "next_offset" not in data
+    assert "offset=30 alone is too large" in data["truncation"]["hint"]
+
+
+def test_cut_sql_rows_keep_row_count_in_step_and_columns_whole():
+    rows = [[i, "x" * 1_000] for i in range(500)]
+    payload = {
+        "success": True,
+        "data": {"columns": ["id", "note"] * 200, "rows": rows, "row_count": 500},
+    }
+
+    data = _compacted_payload("query", payload)["data"]
+
+    assert data["row_count"] == len(data["rows"]) < 500
+    assert data["truncation"]["original_row_count"] == 500
+    assert data["columns"] == ["id", "note"] * 200
+
+
+def test_a_huge_string_is_shortened_without_losing_the_fields_beside_it():
+    payload = {"success": True, "data": {"run_id": "r-1", "status": "failed", "log": "q" * 300_000}}
+
+    data = _compacted_payload("get_materialization_status", payload)["data"]
+
+    assert data["run_id"] == "r-1"
+    assert data["status"] == "failed"
+    assert data["log"].endswith("…[cut]")
+    assert data["truncated"] is True
+
+
+def test_many_cut_lists_still_fit_the_budget():
+    payload = {"success": True, "data": {f"list_{i}": ["z" * 100] * 20 for i in range(100)}}
+
+    data = _compacted_payload("list_tables", payload)["data"]
+
+    assert data["truncated"] is True
+    assert "and more" in data["truncation"]["hint"]
+
+
+def test_a_lone_surrogate_does_not_break_the_tool_node():
+    text = '{"success": true, "data": {"rows": [["\\ud800"]], "blob": "' + "b" * 60_000 + '"}}'
+    message = ToolMessage(content=text, tool_call_id="tc-1", name="get_lineage")
+
+    content = compact_tool_message(message).content
+
+    assert len(content.encode(errors="surrogatepass")) <= TOOL_RESULT_BUDGET_BYTES
