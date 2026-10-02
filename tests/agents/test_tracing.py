@@ -107,12 +107,23 @@ def langfuse_spans(settings):
         tracer_provider=TracerProvider(),
     )
 
+    # A second instance makes get_client() without a key return a disabled client,
+    # so these tests fail if the handler stops passing public_key.
+    other = Langfuse(
+        public_key=f"pk-other-{uuid.uuid4().hex}",
+        secret_key="sk-test",
+        base_url="http://localhost:1",
+        span_exporter=InMemorySpanExporter(),
+        tracer_provider=TracerProvider(),
+    )
+
     def finished():
         client.flush()
         return exporter.get_finished_spans()
 
     yield finished
     client.shutdown()
+    other.shutdown()
 
 
 def _agent_like_chain():
