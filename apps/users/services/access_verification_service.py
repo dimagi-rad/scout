@@ -8,10 +8,11 @@ import random
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from allauth.socialaccount.models import SocialToken
-from asgiref.sync import sync_to_async
+from asgiref.sync import SyncToAsync, ThreadSensitiveContext
 from django.db import close_old_connections
 from django.utils import timezone
 
@@ -534,24 +535,71 @@ def _attempt_matches_waiter_lineage(
     )
 
 
-def _spawn_detachable(coroutine) -> asyncio.Task:
-    """A task that may outlive its caller, so it must not run in the caller's context.
+# Every detached verification's ORM work runs on this context's one dedicated thread.
+# Not the caller's thread: a sync (DRF) view reaches here through async_to_sync, whose
+# executor dies when that call returns. Not asgiref's process-wide default either: a
+# sync caller blocked waiting on the check may be holding that very thread.
+class _RecyclingExecutor(ThreadPoolExecutor):
+    """Closes each call's connection when done, as a request's end would.
 
-    A sync (DRF) view reaches here through async_to_sync, whose context routes every
-    thread-sensitive sync_to_async call (all ORM work) to an executor that dies with
-    that call; anything still running afterwards would fail on its first query and
-    never publish, or even release, its lease.
+    No request signal ever fires on these threads, and with CONN_MAX_AGE at 0 a
+    connection is obsolete as soon as its call returns: left open, each thread would
+    hold an idle connection (prod and staging share one RDS), and one dropped by a
+    failover would fail every later check that lands on it.
     """
-    return asyncio.get_running_loop().create_task(
-        _with_fresh_connection(coroutine), context=contextvars.Context()
-    )
+
+    def submit(self, fn, /, *args, **kwargs):
+        return super().submit(self._recycled, fn, *args, **kwargs)
+
+    @staticmethod
+    def _recycled(fn, *args, **kwargs):
+        close_old_connections()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            close_old_connections()
 
 
-async def _with_fresh_connection(coroutine):
-    # Outside a request, nothing recycles the shared executor thread's connection: no
-    # request signals fire for it, so a dropped one would fail every later check.
-    await sync_to_async(close_old_connections)()
-    return await coroutine
+_DETACHED_ORM_CONTEXT = ThreadSensitiveContext()
+# A small pool, so one publication waiting on a row lock cannot hold up the rest.
+SyncToAsync.context_to_thread_executor[_DETACHED_ORM_CONTEXT] = _RecyclingExecutor(
+    max_workers=4, thread_name_prefix="access-verification"
+)
+
+
+def _spawn_detachable(coroutine) -> asyncio.Task:
+    """A task that may outlive its caller, with its own context and ORM threads."""
+    context = contextvars.Context()
+    context.run(SyncToAsync.thread_sensitive_context.set, _DETACHED_ORM_CONTEXT)
+    return asyncio.get_running_loop().create_task(coroutine, context=context)
+
+
+def _detach(verification, connection_id) -> None:
+    """Supervise a verification nobody is waiting for, and report what it could not do."""
+
+    def report(done):
+        if done.cancelled():
+            return
+        if done.exception() is not None:
+            logger.warning(
+                "Background upstream verification failed for connection %s",
+                connection_id,
+                exc_info=done.exception(),
+            )
+        elif done.result().status not in (
+            AccessVerificationStatus.VERIFIED,
+            AccessVerificationStatus.DENIED,
+        ):
+            logger.warning(
+                "Background upstream verification unconfirmed for connection %s: "
+                "status=%s error_code=%s",
+                connection_id,
+                done.result().status,
+                done.result().error_code or "-",
+            )
+
+    verification.add_done_callback(report)
+    _supervise(verification)
 
 
 class _Progress:
@@ -799,7 +847,12 @@ async def verify_connection_access(
     if respond_by >= deadline:
         # Bounded by the deadline itself; a cancelled caller cancels it, and waits
         # for it to release the lease.
-        return await verification
+        try:
+            return await verification
+        except asyncio.CancelledError:
+            # Cancelled before its first step, it never reached the code that would.
+            await asyncio.shield(_release_claim(claim))
+            raise
     try:
         done, _pending = await asyncio.wait({verification}, timeout=max(0, respond_by - clock()))
     except asyncio.CancelledError:
@@ -816,19 +869,6 @@ async def verify_connection_access(
             else _VERIFICATION_IN_PROGRESS,
         )
     return verification.result()
-
-
-def _detach(verification, connection_id) -> None:
-    def report(done):
-        if not done.cancelled() and done.exception() is not None:
-            logger.warning(
-                "Background upstream verification failed for connection %s",
-                connection_id,
-                exc_info=done.exception(),
-            )
-
-    verification.add_done_callback(report)
-    _supervise(verification)
 
 
 _BACKGROUND_RECHECKS: dict[tuple, asyncio.Task] = {}

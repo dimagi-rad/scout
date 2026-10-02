@@ -5,12 +5,13 @@ import contextlib
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-from asgiref.sync import sync_to_async
+from asgiref.sync import SyncToAsync, sync_to_async
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
@@ -819,6 +820,8 @@ async def test_cancellation_releases_only_owned_lease(user, tenant, api_connecti
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    # The release waits only briefly inline and finishes under supervision.
+    await _drain_overdue_work()
 
     control = await VerificationControl.objects.aget(connection=connection)
     assert control.lease_token is None
@@ -930,8 +933,16 @@ async def test_queued_claim_crossing_deadline_cannot_leave_late_lease(user, tena
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_queued_result_mapping_cannot_publish_after_deadline(user, tenant, api_connection):
+async def test_queued_result_mapping_cannot_publish_after_deadline(
+    user, tenant, api_connection, monkeypatch
+):
     connection, _membership = api_connection
+    # One thread for the verification's ORM work, so the blocker below holds it all.
+    monkeypatch.setitem(
+        SyncToAsync.context_to_thread_executor,
+        access_verification_service._DETACHED_ORM_CONTEXT,
+        ThreadPoolExecutor(max_workers=1),
+    )
     executor_started = threading.Event()
     executor_release = threading.Event()
     blocker = None

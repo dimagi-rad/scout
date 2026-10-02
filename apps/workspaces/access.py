@@ -854,7 +854,7 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     admission = UpstreamAdmission(admitted=False, rechecked=True, reason=retry_reason)
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
     if not result.granted:
-        if retry_reason in RETRYABLE_REASONS:
+        if retry_reason in RETRYABLE_REASONS or retry_reason == VERIFICATION_INDETERMINATE:
             result = _freshness_denied(user, workspace, retry_reason)
         else:
             result = _attribute_observed_denial(result, admission)
