@@ -506,7 +506,7 @@ export function ChatPanel() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [messages])
+  }, [messages, resumeStream.text])
 
   // A held send hides its request until the server stops reporting it; once the
   // send is over, the next poll shows the server's copy again (gone, or still

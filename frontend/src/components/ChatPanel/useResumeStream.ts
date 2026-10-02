@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { api } from "@/api/client"
 
 export const RESUME_STREAM_POLL_MS = 500
+// While nothing new arrives (a tool running, a queued resume), poll less often.
+export const RESUME_STREAM_IDLE_POLL_MS = 3000
 
 interface StreamChunk {
   id: number
@@ -41,11 +43,19 @@ export function useResumeStream(
   useEffect(() => {
     if (!active || !workspaceId) return
     if (cursorRef.current.scope !== scope) cursorRef.current = { scope, after: 0, caughtUp: false }
+    // Each resume is read afresh: a run that ended while nothing was tailing it
+    // (its last rows never read) is an earlier answer, not this one.
+    cursorRef.current.caughtUp = false
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    let delay = RESUME_STREAM_POLL_MS
 
     async function poll() {
       const cursor = cursorRef.current
+      if (typeof document !== "undefined" && document.hidden) {
+        timer = setTimeout(poll, RESUME_STREAM_IDLE_POLL_MS)
+        return
+      }
       try {
         const { chunks } = await api.get<{ chunks: StreamChunk[] }>(
           `/api/workspaces/${workspaceId}/threads/${threadId}/resume-stream/?after=${cursor.after}`,
@@ -59,6 +69,9 @@ export function useResumeStream(
           : new Set(chunks.filter((chunk) => chunk.done).map((chunk) => chunk.run))
         cursor.caughtUp = true
         const fresh = chunks.filter((chunk) => !finished.has(chunk.run))
+        delay = fresh.length
+          ? RESUME_STREAM_POLL_MS
+          : Math.min(delay * 2, RESUME_STREAM_IDLE_POLL_MS)
         if (fresh.length) {
           setState((prev) => {
             let { run, text } = prev
@@ -75,7 +88,7 @@ export function useResumeStream(
       } catch {
         // A missed poll is caught up by the next; the answer also lands on reload.
       }
-      if (!cancelled) timer = setTimeout(poll, RESUME_STREAM_POLL_MS)
+      if (!cancelled) timer = setTimeout(poll, delay)
     }
 
     void poll()

@@ -70,4 +70,24 @@ describe("useResumeStream", () => {
 
     expect(result.current.text).toBe("")
   })
+
+  it("reads each resume afresh, so an earlier one's unread end is not shown as new", async () => {
+    const spy = serve([{ id: 1, run: "r1", text: "First answer", done: false }])
+    const { result, rerender } = renderHook(({ active }) => useResumeStream("ws", "t", active), {
+      initialProps: { active: true },
+    })
+    await waitFor(() => expect(result.current.text).toBe("First answer"))
+    rerender({ active: false })
+    act(() => result.current.reset())
+
+    spy.mockResolvedValueOnce({
+      chunks: [{ id: 2, run: "r1", text: " ends here", done: true }],
+    })
+    const before = spy.mock.calls.length
+    rerender({ active: true })
+    await waitFor(() => expect(spy.mock.calls.length).toBe(before + 1))
+    await act(async () => {})
+
+    expect(result.current.text).toBe("")
+  })
 })
