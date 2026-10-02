@@ -10,6 +10,7 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
+from django.core.cache import cache
 from django.db import IntegrityError
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
@@ -22,6 +23,7 @@ from apps.users.providers.commcare.views import (
     CommCareOAuth2Adapter,
 )
 from apps.users.providers.ocs.provider import OCSProvider
+from apps.users.rate_limiting import AUTH_MAX_ATTEMPTS
 
 User = get_user_model()
 
@@ -859,3 +861,37 @@ class TestMeOnboardingComplete:
         client.force_login(user)
         resp = client.get("/api/auth/me/")
         assert resp.json()["onboarding_complete"] is True
+
+
+class TestLoginRateLimitEmailCase:
+    EMAIL = "casefold@example.com"
+
+    @pytest.fixture(autouse=True)
+    def _clear_attempts(self):
+        cache.delete(f"auth_attempts:{self.EMAIL}")
+        yield
+        cache.delete(f"auth_attempts:{self.EMAIL}")
+
+    def _login(self, client, email, password):
+        return client.post(
+            "/api/auth/login/",
+            data={"email": email, "password": password},
+            content_type="application/json",
+        )
+
+    def test_changing_email_case_does_not_reset_the_limit(self, client, db):
+        User.objects.create_user(email=self.EMAIL, password="right")
+        variants = ["casefold@example.com", "CaseFold@example.com", " CASEFOLD@EXAMPLE.COM "]
+        for i in range(AUTH_MAX_ATTEMPTS):
+            assert self._login(client, variants[i % len(variants)], "wrong").status_code == 401
+
+        assert self._login(client, "CASEFOLD@example.com", "right").status_code == 429
+        assert self._login(client, self.EMAIL, "right").status_code == 429
+
+    def test_success_with_other_casing_clears_the_counter(self, client, db):
+        User.objects.create_user(email=self.EMAIL, password="right")
+        for _ in range(AUTH_MAX_ATTEMPTS - 1):
+            assert self._login(client, self.EMAIL, "wrong").status_code == 401
+
+        assert self._login(client, "CaseFold@Example.com", "right").status_code == 200
+        assert cache.get(f"auth_attempts:{self.EMAIL}") is None

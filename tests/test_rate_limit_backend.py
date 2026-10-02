@@ -29,6 +29,14 @@ class TestRateLimiterBehavior:
             record_attempt(email, success=False)
         assert check_rate_limit(email) is False
 
+    def test_casing_and_whitespace_share_one_counter(self):
+        for email in ["Mixed@Example.com", "mixed@example.com", " MIXED@EXAMPLE.COM "]:
+            record_attempt(email, success=False)
+        for _ in range(AUTH_MAX_ATTEMPTS - 3):
+            record_attempt("mIxEd@example.com", success=False)
+        assert check_rate_limit("mixed@example.com") is True
+        assert check_rate_limit("MIXED@example.COM") is True
+
 
 @pytest.mark.django_db
 class TestRateLimitConfig:
