@@ -260,8 +260,8 @@ async def chat_view(request):
     if pending_version is None:
         try:
             held = await _hold_while_loading(workspace, thread_id, messages[-1], user_content)
-        except pending_requests.PendingRequestTooLong:
-            return _request_too_long_response()
+        except pending_requests.PendingRequestTooLong as e:
+            return _request_too_long_response(str(e))
         if held is not None:
             return _held_response(held)
 
@@ -350,10 +350,12 @@ def _held_response(pending: dict) -> StreamingHttpResponse:
     return response
 
 
-def _request_too_long_response() -> JsonResponse:
+def _request_too_long_response(
+    message: str = pending_requests.REQUEST_TOO_LONG_MESSAGE,
+) -> JsonResponse:
     return JsonResponse(
         {
-            "error": pending_requests.REQUEST_TOO_LONG_MESSAGE,
+            "error": message,
             "reason": "pending_request_too_long",
         },
         status=400,

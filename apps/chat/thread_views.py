@@ -306,10 +306,10 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
         pending = await pending_requests.aadd_part(thread.id, part_id=part_id, text=text)
     except pending_requests.PendingRequestConflict as e:
         return _pending_conflict(e)
-    except pending_requests.PendingRequestTooLong:
+    except pending_requests.PendingRequestTooLong as e:
         return JsonResponse(
             {
-                "error": pending_requests.REQUEST_TOO_LONG_MESSAGE,
+                "error": str(e),
                 "reason": "pending_request_too_long",
             },
             status=400,

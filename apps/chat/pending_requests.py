@@ -37,6 +37,7 @@ MAX_PART_ID_LENGTH = 128
 # Each part is stored, locked and polled whole; the text cap alone allows thousands.
 MAX_PARTS = 50
 REQUEST_TOO_LONG_MESSAGE = "Request too long — edit it"
+TOO_MANY_PARTS_MESSAGE = "That's as much as one request can hold — wait for your data"
 SETTLE_TIMEOUT_SECONDS = 15
 
 
@@ -86,9 +87,11 @@ def combined_text(parts: list[dict]) -> str:
     return PART_SEPARATOR.join(part["text"] for part in parts)
 
 
-def _check_length(text: str, parts: int = 1) -> None:
-    if len(text) > MAX_MESSAGE_LENGTH or parts > MAX_PARTS:
+def _check_length(text: str, part_count: int = 1) -> None:
+    if len(text) > MAX_MESSAGE_LENGTH:
         raise PendingRequestTooLong(REQUEST_TOO_LONG_MESSAGE)
+    if part_count > MAX_PARTS:
+        raise PendingRequestTooLong(TOO_MANY_PARTS_MESSAGE)
 
 
 def _new_part(part_id: str, text: str) -> dict:
