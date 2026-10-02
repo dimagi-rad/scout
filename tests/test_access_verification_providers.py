@@ -609,18 +609,20 @@ async def test_connect_checks_only_the_requested_opportunities(settings):
 
 
 @pytest.mark.asyncio
-async def test_connect_no_access_404_denies_that_opportunity(settings):
+async def test_connect_no_access_404_omits_that_opportunity_and_checks_the_rest(settings):
     settings.CONNECT_API_URL = "https://connect.example"
     result, requests = await _verify(
         _request("commcare_connect"),
-        [_response(payload={"id": 7}), _connect_404()],
+        [_connect_404(), _response(payload={"id": 9})],
         settings=settings,
         external_ids={"7", "9"},
     )
 
-    assert result.outcome == VerificationOutcome.TENANT_DENIED
-    assert result.denied_external_id == "9"
-    assert result.error_code == ErrorCode.AUTH_ACCESS_DENIED
+    # An omission, as the full listing would have reported it: publication archives
+    # that membership alone, without stamping a connection-wide denial.
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.scoped is True
+    assert result.external_ids == frozenset({"9"})
     assert len(requests) == 2
 
 
@@ -633,9 +635,6 @@ async def test_connect_no_access_404_denies_that_opportunity(settings):
         pytest.param(_response(404, payload={"detail": "x", "code": "y"}), id="404-other-json"),
         pytest.param(_response(404, payload=["Not found."]), id="404-json-list"),
         pytest.param(_response(403, payload={"detail": "scope"}), id="403-missing-scope"),
-        pytest.param(_response(payload={"id": 8}), id="200-other-opportunity"),
-        pytest.param(_response(payload={"name": "no id"}), id="200-no-id"),
-        pytest.param(_response(payload=[{"id": 7}]), id="200-list"),
         pytest.param(_response(302), id="redirect"),
     ],
 )
@@ -645,6 +644,46 @@ async def test_connect_unrecognized_answer_is_indeterminate_not_denial(settings,
         _request("commcare_connect"), [response], settings=settings, external_ids={"7"}
     )
     assert result.outcome == VerificationOutcome.INDETERMINATE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(_response(payload={"id": 8}), id="200-other-opportunity"),
+        pytest.param(_response(payload={"name": "no id"}), id="200-no-id"),
+        pytest.param(_response(payload=[{"id": 7}]), id="200-list"),
+    ],
+)
+async def test_connect_unrecognized_200_falls_back_to_the_listing(settings, response):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, requests = await _verify(
+        _request("commcare_connect"),
+        [response, _response(payload={"opportunities": [{"id": 7, "name": "Seven"}]})],
+        settings=settings,
+        external_ids={"7"},
+    )
+
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.scoped is False
+    assert [url for url, _kwargs in requests] == [
+        "https://connect.example/export/opportunity/7/",
+        "https://connect.example/export/opp_org_program_list/",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_connect_light_check_shares_the_budget_across_opportunities(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    _result, requests = await _verify(
+        _request("commcare_connect"),
+        [_response(payload={"id": i}) for i in (1, 2, 3, 4)],
+        settings=settings,
+        deadline=8.0,
+        external_ids={"1", "2", "3", "4"},
+    )
+
+    assert requests[0][1]["timeout"] == 2.0
 
 
 @pytest.mark.asyncio
@@ -674,6 +713,7 @@ async def test_connect_light_check_keeps_credential_and_transient_semantics(
         pytest.param(frozenset(), id="none-requested"),
         pytest.param(frozenset(str(i) for i in range(6)), id="above-cap"),
         pytest.param(frozenset({"7", "abc"}), id="non-numeric"),
+        pytest.param(frozenset({"007"}), id="zero-padded"),
     ],
 )
 async def test_connect_falls_back_to_the_full_listing(settings, external_ids):

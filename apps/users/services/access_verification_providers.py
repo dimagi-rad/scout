@@ -114,8 +114,11 @@ def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
         return None
     ids = tuple(sorted(external_ids))
     # Connect routes ``<int:opp_id>``; any other id 404s at routing, which must
-    # never be read as a denial.
-    if not all(external_id.isascii() and external_id.isdigit() for external_id in ids):
+    # never be read as a denial, and a zero-padded one comes back renumbered.
+    if not all(
+        external_id.isascii() and external_id.isdigit() and str(int(external_id)) == external_id
+        for external_id in ids
+    ):
         return None
     return ids
 
@@ -158,19 +161,24 @@ def _is_requested_opportunity(response, external_id: str) -> bool:
     )
 
 
-async def _verify_connect_opportunities(
-    client, policy, base_url, headers, external_ids, deadline, clock
-):
-    for external_id in external_ids:
+async def _verify_connect_opportunities(client, policy, listing_url, headers, ids, deadline, clock):
+    """Check each opportunity; None means fall back to the full listing.
+
+    A no-access 404 drops that opportunity, which publication then archives as an
+    omission, exactly as the listing would have; the rest are still checked.
+    """
+    confirmed = []
+    for index, external_id in enumerate(ids):
         remaining = deadline - clock()
         if remaining <= 0:
             return ProviderVerificationResult.unavailable(_UNAVAILABLE)
         try:
-            url = policy.resolve(f"{base_url}/export/opportunity/{external_id}/")
+            url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
         except UnsafeProviderURL:
             return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+        # Share what is left, so one slow opportunity cannot starve the rest.
+        request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining / (len(ids) - index))
         try:
-            request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
             response = await asyncio.wait_for(
                 client.get(
                     url,
@@ -185,15 +193,15 @@ async def _verify_connect_opportunities(
         if clock() >= deadline:
             return ProviderVerificationResult.unavailable(_UNAVAILABLE)
         if _is_connect_no_access_404(response):
-            return ProviderVerificationResult.tenant_denied(
-                external_id, ErrorCode.AUTH_ACCESS_DENIED
-            )
+            continue
         status_result = _status_result(response.status_code)
         if status_result is not None:
             return status_result
         if not _is_requested_opportunity(response, external_id):
-            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-    return ProviderVerificationResult.complete(external_ids, scoped=True)
+            # A changed response shape must cost a slow check, not every check.
+            return None
+        confirmed.append(external_id)
+    return ProviderVerificationResult.complete(confirmed, scoped=True)
 
 
 def _status_result(status_code: int):
@@ -326,15 +334,11 @@ async def verify_provider(
         total_rows = 0
         async with client_factory() as client:
             if light_ids is not None:
-                return await _verify_connect_opportunities(
-                    client,
-                    policy,
-                    settings.CONNECT_API_URL.rstrip("/"),
-                    headers,
-                    light_ids,
-                    deadline,
-                    clock,
+                light_result = await _verify_connect_opportunities(
+                    client, policy, url, headers, light_ids, deadline, clock
                 )
+                if light_result is not None:
+                    return light_result
             for _page_number in range(MAX_PAGES):
                 if url in seen_urls:
                     return ProviderVerificationResult.indeterminate(_INDETERMINATE)

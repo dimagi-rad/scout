@@ -92,6 +92,7 @@ class ProviderVerificationResult:
     external_ids: frozenset[str] = frozenset()
     denied_external_id: str | None = None
     error_code: str = ""
+    # Authoritative only for the requested tenants; see VerificationResult.scoped.
     scoped: bool = False
 
     @classmethod

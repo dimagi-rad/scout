@@ -11,10 +11,25 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
 from django.utils import timezone
 
-from apps.users.models import Tenant, TenantConnection, TenantMembership, UpstreamAccessProof
+from apps.users.models import (
+    Tenant,
+    TenantConnection,
+    TenantMembership,
+    UpstreamAccessProof,
+    VerificationControl,
+)
+from apps.users.services.access_verification import (
+    _completed_attempt,
+    attempt_receipt_matches,
+    claim_verification,
+    publish_verification,
+)
 from apps.users.services.access_verification_providers import verify_provider
 from apps.users.services.access_verification_service import verify_connection_access
-from apps.users.services.access_verification_types import AccessVerificationStatus
+from apps.users.services.access_verification_types import (
+    AccessVerificationStatus,
+    VerificationResult,
+)
 
 
 class _Client:
@@ -181,6 +196,9 @@ async def test_connect_denial_clears_the_denied_proof(user, connect_setup):
     assert result.status == AccessVerificationStatus.DENIED
     proof = await UpstreamAccessProof.objects.aget(connection=connection, tenant=opp_7)
     assert proof.verified_at is None
+    # Archived as an omission: no connection-wide stamp staling the siblings' proofs.
+    await connection.arefresh_from_db()
+    assert connection.upstream_denied_at is None
 
 
 @pytest.mark.django_db(transaction=True)
@@ -229,3 +247,17 @@ async def test_connect_many_opportunities_use_the_listing_and_archive_omissions(
     assert urls == [LISTING]
     # The full listing is authoritative for the whole connection, so 8 is archived.
     assert not await _is_live(user, opp_8)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_scoped_receipt_does_not_cover_a_sibling_tenant(user, connect_setup):
+    connection, opp_7, opp_8 = connect_setup
+    claim = claim_verification(user.id, connection.id, {opp_7.id})
+
+    publish_verification(claim, VerificationResult.complete({opp_7.id}, scoped=True))
+
+    control = VerificationControl.objects.get(connection=connection)
+    receipt = _completed_attempt(control)
+    assert attempt_receipt_matches(receipt, claim.lease_token, claim.observation, {opp_7.id})
+    assert not attempt_receipt_matches(receipt, claim.lease_token, claim.observation, {opp_8.id})
+    assert TenantMembership.objects.filter(user=user, tenant=opp_8).exists()
