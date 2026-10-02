@@ -1085,7 +1085,7 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     """The Langfuse span context manager must wrap the ainvoke on success,
     timeout, and exception paths so traces are emitted on every terminal
     outcome (the production bug was a silent ainvoke with no trace)."""
-    _, _, _, tj = await _make_thread_job_ready_to_resume(
+    user, ws, _, tj = await _make_thread_job_ready_to_resume(
         email="lf@b.c",
         ws_name="W-lf",
         ext_id="t-lf",
@@ -1095,12 +1095,14 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     )
 
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
 
+    span = MagicMock()
     span_cm = MagicMock()
-    span_cm.__enter__ = MagicMock(return_value=MagicMock())
+    span_cm.__enter__ = MagicMock(return_value=span)
     span_cm.__exit__ = MagicMock(return_value=False)
 
+    handler = object()
     with (
         patch(
             "apps.workspaces.tasks._build_agent_for_resume",
@@ -1110,15 +1112,21 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
             "apps.workspaces.tasks._resume_langfuse_span",
             return_value=span_cm,
         ) as span_helper,
+        patch("apps.workspaces.tasks.get_langfuse_callback", return_value=handler),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert mock_agent.ainvoke.await_args.args[1]["callbacks"] == [handler]
 
     span_helper.assert_called_once()
     kwargs = span_helper.call_args.kwargs
     assert kwargs["thread_job_id"] == str(tj.id)
     assert kwargs["thread_id"] == str(tj.thread_id)
+    assert kwargs["user_id"] == str(user.id)
+    assert kwargs["workspace_id"] == str(ws.id)
     span_cm.__enter__.assert_called_once()
     span_cm.__exit__.assert_called_once()
+    span.update.assert_called_once_with(output="done")
 
 
 @pytest.mark.asyncio
