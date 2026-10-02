@@ -22,6 +22,7 @@ from django.utils import timezone
 from langchain_core.messages import HumanMessage
 from procrastinate.exceptions import AlreadyEnqueued
 
+from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
 from apps.chat.tasks import aschedule_thread_title
@@ -2875,19 +2876,28 @@ async def prune_old_procrastinate_jobs(timestamp: int = 0) -> dict:
     return {"pruned": True}
 
 
-def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
-    """Open a Langfuse span around the resume ainvoke. No-op when Langfuse is
-    not configured so worker boots without LANGFUSE_* env vars stay quiet."""
+@contextlib.contextmanager
+def _resume_langfuse_span(
+    *, thread_job_id: str, thread_id: str, user_id: str, workspace_id: str, status: str
+):
+    """Open the root Langfuse span around the resume ainvoke and propagate the
+    thread's session/user onto every child observation, so resumed generations
+    land in the same Langfuse session (and session cost) as the chat turn.
+
+    Yields the span, or None when Langfuse is not configured so worker boots
+    without LANGFUSE_* env vars stay quiet."""
     if Langfuse is None:
-        return contextlib.nullcontext()
+        yield None
+        return
     secret_key = getattr(settings, "LANGFUSE_SECRET_KEY", "")
     public_key = getattr(settings, "LANGFUSE_PUBLIC_KEY", "")
     base_url = getattr(settings, "LANGFUSE_BASE_URL", "")
     if not all([secret_key, public_key, base_url]):
-        return contextlib.nullcontext()
+        yield None
+        return
     try:
         client = Langfuse(secret_key=secret_key, public_key=public_key, base_url=base_url)
-        return client.start_as_current_observation(
+        span_cm = client.start_as_current_observation(
             name="resume_thread_after_materialization",
             input={
                 "thread_job_id": thread_job_id,
@@ -2897,7 +2907,24 @@ def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
         )
     except Exception:
         logger.warning("resume: failed to open Langfuse span", exc_info=True)
-        return contextlib.nullcontext()
+        yield None
+        return
+    with (
+        span_cm as span,
+        langfuse_trace_context(
+            session_id=thread_id,
+            user_id=user_id,
+            metadata={"workspace_id": workspace_id},
+        ),
+    ):
+        yield span
+
+
+def _final_message_content(result) -> object:
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if not messages:
+        return None
+    return getattr(messages[-1], "content", None)
 
 
 TENANT_NOT_RUN = "not_run"
@@ -3595,15 +3622,22 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
             "configurable": {"thread_id": str(tj.thread.id)},
             "recursion_limit": settings.AGENT_RESUME_RECURSION_LIMIT,
         }
+        langfuse_handler = get_langfuse_callback(session_id=str(tj.thread.id), user_id=str(user.id))
+        if langfuse_handler is not None:
+            config["callbacks"] = [langfuse_handler]
         with _resume_langfuse_span(
             thread_job_id=thread_job_id,
             thread_id=str(tj.thread.id),
+            user_id=str(user.id),
+            workspace_id=str(workspace.id),
             status=status,
-        ):
-            await asyncio.wait_for(
+        ) as langfuse_span:
+            result = await asyncio.wait_for(
                 agent.ainvoke(input_state, config),
                 timeout=timeout_s,
             )
+            if langfuse_span is not None:
+                langfuse_span.update(output=_final_message_content(result))
     except TimeoutError:
         elapsed = time.monotonic() - start
         logger.exception(
