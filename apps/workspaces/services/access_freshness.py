@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import StrEnum
 from uuid import UUID
 
-from asgiref.sync import async_to_sync
+from asgiref.sync import SyncToAsync, async_to_sync
 from django.conf import settings
 from django.db import transaction
 
@@ -30,11 +32,16 @@ from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.users.services.access_verification import (
     afresh_proof_tenant_ids,
+    agrace_proof_tenant_ids,
     aproofs_are_fresh,
+    grace_proof_tenant_ids,
     proofs_are_fresh,
 )
 from apps.users.services.access_verification_providers import PROVIDER_BUDGET_SECONDS
-from apps.users.services.access_verification_service import verify_connection_access
+from apps.users.services.access_verification_service import (
+    schedule_background_verification,
+    verify_connection_access,
+)
 from apps.users.services.access_verification_types import (
     AccessVerificationResult,
     AccessVerificationStatus,
@@ -62,6 +69,8 @@ UPSTREAM_ACCESS_LOST = "upstream_access_lost"
 VERIFICATION_INDETERMINATE = "verification_indeterminate"
 VERIFICATION_UNAVAILABLE = "verification_unavailable"
 VERIFICATION_IN_PROGRESS = "verification_in_progress"
+# An unexpected exception during a recheck: reported as unavailable, never graced.
+_VERIFICATION_FAILED = "verification_failed"
 
 FRESHNESS_DENIAL_REASONS = (
     CREDENTIAL_MISSING,
@@ -119,6 +128,9 @@ class UpstreamAdmission:
     # memberships or replaced proofs, so the caller must re-read local access.
     rechecked: bool = False
     reason: str | None = None
+    # Connections admitted under grace: their recheck could not reach the provider,
+    # and a positive proof younger than the grace window stands in for a fresh one.
+    graced: frozenset = frozenset()
 
 
 ADMITTED = UpstreamAdmission(admitted=True)
@@ -261,14 +273,108 @@ async def _averify_stale(user_id, stale: dict, budget: VerificationBudget) -> li
                 connection_id,
             )
     return [
-        AccessVerificationResult(AccessVerificationStatus.UNAVAILABLE, VERIFICATION_UNAVAILABLE)
+        AccessVerificationResult(AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_FAILED)
         if isinstance(result, Exception)
         else result
         for result in results
     ]
 
 
-def _admission_from(check: FreshnessCheck, results) -> UpstreamAdmission:
+def grace_window():
+    return timedelta(seconds=max(0, getattr(settings, "UPSTREAM_ACCESS_GRACE_SECONDS", 0)))
+
+
+def _grace_eligible(result: AccessVerificationResult) -> bool:
+    """Only a check that never got an answer: timeout, network, 5xx, 429, or one
+    still running. Never a denial (401, omission, no-access 404), an indeterminate
+    answer, a dead refresh grant, or an unexpected failure.
+    """
+    # Exact codes: one that saw a 401 it could not settle carries its own code.
+    return (result.status, result.error_code) in {
+        (AccessVerificationStatus.IN_PROGRESS, VERIFICATION_IN_PROGRESS),
+        (AccessVerificationStatus.UNAVAILABLE, VERIFICATION_UNAVAILABLE),
+    }
+
+
+async def _agrace_admissible(user_id, connection_id, tenant_ids) -> bool:
+    window = grace_window()
+    if not window:
+        return False
+    graced = await agrace_proof_tenant_ids(user_id, connection_id, tenant_ids, max_age=window)
+    return graced == frozenset(tenant_ids)
+
+
+async def _aapply_grace(user_id, stale: dict, results: list) -> tuple[list, frozenset]:
+    """Admit each unreachable connection whose tenants all hold a recent positive proof.
+
+    Each one is re-verified in the background, so a revocation found there is
+    published and blocks the next request.
+    """
+    graced = set()
+    admitted = []
+    for (connection_id, tenant_ids), result in zip(stale.items(), results, strict=True):
+        if _grace_eligible(result) and await _agrace_admissible(user_id, connection_id, tenant_ids):
+            # Even behind a running check: this joins it as a waiter, and runs its
+            # own check if that one has finished without covering these tenants.
+            started = schedule_background_verification(user_id, connection_id, tenant_ids)
+            logger.info(
+                "upstream_access_grace user_id=%s connection_id=%s tenants=%d "
+                "status=%s background_recheck=%s",
+                user_id,
+                connection_id,
+                len(tenant_ids),
+                result.status.value,
+                "started" if started else "running",
+                extra={
+                    "user_id": user_id,
+                    "connection_id": str(connection_id),
+                    "verification_status": result.status.value,
+                },
+            )
+            graced.add(connection_id)
+            result = AccessVerificationResult(AccessVerificationStatus.VERIFIED)
+        admitted.append(result)
+    return admitted, frozenset(graced)
+
+
+async def _averify_stale_with_grace(
+    user_id, stale: dict, budget: VerificationBudget, *, allow_grace: bool = True
+):
+    results = await _averify_stale(user_id, stale, budget)
+    if budget != VerificationBudget.INTERACTIVE or not allow_grace:
+        return results, frozenset()
+    return await _aapply_grace(user_id, stale, results)
+
+
+def excuse_graced(user_id, final: FreshnessCheck, graced) -> FreshnessCheck:
+    """``final`` without the graced connections whose grace proofs still hold.
+
+    Re-read rather than trusted from the admission: a revocation published in
+    between must deny this very request.
+    """
+    window = grace_window()
+    stale = {
+        connection_id: ids
+        for connection_id, ids in final.stale.items()
+        if not (
+            window
+            and connection_id in graced
+            and grace_proof_tenant_ids(user_id, connection_id, ids, max_age=window) == ids
+        )
+    }
+    return FreshnessCheck(stale=stale, unbound=final.unbound)
+
+
+async def aexcuse_graced(user_id, final: FreshnessCheck, graced) -> FreshnessCheck:
+    stale = {}
+    for connection_id, ids in final.stale.items():
+        if connection_id in graced and await _agrace_admissible(user_id, connection_id, ids):
+            continue
+        stale[connection_id] = ids
+    return FreshnessCheck(stale=stale, unbound=final.unbound)
+
+
+def _admission_from(check: FreshnessCheck, results, graced=frozenset()) -> UpstreamAdmission:
     if check.unbound:
         # A legacy membership with no bound credential can never be rechecked, and
         # proofs are deliberately not backfilled; only reconnecting repairs it.
@@ -276,7 +382,22 @@ def _admission_from(check: FreshnessCheck, results) -> UpstreamAdmission:
     if results is None:
         return ADMITTED
     reason = most_severe(filter(None, (denial_reason(result) for result in results)))
-    return UpstreamAdmission(admitted=reason is None, rechecked=True, reason=reason)
+    return UpstreamAdmission(admitted=reason is None, rechecked=True, reason=reason, graced=graced)
+
+
+def _on_server_loop_thread() -> bool:
+    """Whether async_to_sync here runs on the server's long-lived loop.
+
+    It does in a sync view under ASGI (asgiref records that loop for the threads it
+    runs sync code in). Elsewhere (runserver, shell, management commands) it runs a
+    throwaway loop that cancels the background recheck grace depends on.
+    """
+    loop = getattr(SyncToAsync.threadlocal, "main_event_loop", None)
+    return (
+        getattr(SyncToAsync.threadlocal, "main_event_loop_pid", None) == os.getpid()
+        and loop is not None
+        and loop.is_running()
+    )
 
 
 def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> UpstreamAdmission:
@@ -294,16 +415,20 @@ def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> Upstre
             # proofs invisible to other verifiers until commit. Recheck outside.
             return UpstreamAdmission(admitted=False, reason=VERIFICATION_IN_PROGRESS)
         # Thread-bound caller (DRF); the async twin serves async callers.
-        results = async_to_sync(_averify_stale)(user_id, check.stale, budget)
+        results, graced = async_to_sync(_averify_stale_with_grace)(
+            user_id, check.stale, budget, allow_grace=_on_server_loop_thread()
+        )
+        return _admission_from(check, results, graced)
     return _admission_from(check, results)
 
 
 async def aadmit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> UpstreamAdmission:
     check = await acheck_freshness(user_id, tenant_ids)
     results = None
+    graced = frozenset()
     if check.stale and not check.unbound:
-        results = await _averify_stale(user_id, check.stale, budget)
-    return _admission_from(check, results)
+        results, graced = await _averify_stale_with_grace(user_id, check.stale, budget)
+    return _admission_from(check, results, graced)
 
 
 async def averify_membership_history(

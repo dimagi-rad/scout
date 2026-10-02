@@ -60,6 +60,9 @@ WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = True
 # Tests exercise the enforced gate; fixtures provision genuine fresh proofs.
 UPSTREAM_ACCESS_FRESHNESS_ENFORCED = True
 
+# Off, so fixtures' recently-stale proofs fail closed; the grace tests turn it on.
+UPSTREAM_ACCESS_GRACE_SECONDS = 0
+
 # DATABASES above ignores a .env DATABASE_URL, which the checkpointer still reads;
 # tests that need a real saver build it from the test database themselves, so that
 # URL is unused here whether it matches (E001) or even parses (E002).

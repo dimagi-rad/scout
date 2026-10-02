@@ -367,6 +367,11 @@ TASKBADGER_ENVIRONMENT = env("TASKBADGER_ENVIRONMENT", default=DEPLOY_ENVIRONMEN
 # worker and MCP processes; off keeps local-only authorization.
 UPSTREAM_ACCESS_FRESHNESS_ENFORCED = env.bool("UPSTREAM_ACCESS_FRESHNESS_ENFORCED", default=False)
 
+# How old a positive upstream proof may be and still admit an interactive request
+# whose recheck could not reach the provider (timeout, network, 5xx, 429). Never
+# applies to a denial or an indeterminate answer; 0 turns grace off.
+UPSTREAM_ACCESS_GRACE_SECONDS = env.int("UPSTREAM_ACCESS_GRACE_SECONDS", default=30 * 60)
+
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 

@@ -82,6 +82,7 @@ from apps.workspaces.services.access_freshness import (
     VerificationBudget,
     aadmit_upstream,
     acheck_freshness_many,
+    aexcuse_graced,
     freshness_enforced,
 )
 from apps.workspaces.services.load_activity import (
@@ -577,21 +578,25 @@ async def _accessible_workspace_memberships(user_id: str, workspace_ids: list[st
     return [membership async for membership in qs.order_by("workspace__name", "workspace_id")]
 
 
-async def _recheck_catalog_workspaces(user, workspace_ids) -> None:
+async def _recheck_catalog_workspaces(user, workspace_ids) -> frozenset:
     """One bounded upstream recheck for the workspaces a listing may verify.
 
     Batched by connection under one shared deadline, the same invariant the gate
     keeps for a single workspace, so listing K workspaces never costs K rechecks.
+    Returns the connections admitted under grace.
     """
     if not workspace_ids or not freshness_enforced():
-        return
+        return frozenset()
     tenant_ids = [
         tenant_id
         async for tenant_id in WorkspaceTenant.objects.filter(
             workspace_id__in=list(workspace_ids)
         ).values_list("tenant_id", flat=True)
     ]
-    await aadmit_upstream(user.pk, set(tenant_ids), budget=VerificationBudget.INTERACTIVE)
+    admission = await aadmit_upstream(
+        user.pk, set(tenant_ids), budget=VerificationBudget.INTERACTIVE
+    )
+    return admission.graced
 
 
 async def _catalog_denials(candidates, active_workspace_id, requested_ids=()) -> list:
@@ -608,7 +613,7 @@ async def _catalog_denials(candidates, active_workspace_id, requested_ids=()) ->
     with contextlib.suppress(ValueError, AttributeError, TypeError):
         verifiable_ids.add(str(uuid.UUID(str(active_workspace_id))))
     actor = candidates[0].user
-    await _recheck_catalog_workspaces(
+    graced = await _recheck_catalog_workspaces(
         actor, {str(m.workspace_id) for m in candidates} & verifiable_ids
     )
     local = await aresolve_local_access_many(actor, candidates)
@@ -621,6 +626,12 @@ async def _catalog_denials(candidates, active_workspace_id, requested_ids=()) ->
         ).values_list("workspace_id", "tenant_id"):
             tenant_ids_by_ws[ws_id].append(tenant_id)
         checks = await acheck_freshness_many(actor.pk, tenant_ids_by_ws)
+        if graced:
+            # As the single-workspace gate does: re-validated, never trusted, and only
+            # for the workspaces this listing actually rechecked.
+            for ws_id, check in list(checks.items()):
+                if str(ws_id) in verifiable_ids and not check.fresh:
+                    checks[ws_id] = await aexcuse_graced(actor.pk, check, graced)
     return [_catalog_denial(local[m.workspace_id], checks.get(m.workspace_id)) for m in candidates]
 
 

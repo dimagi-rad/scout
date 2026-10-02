@@ -211,11 +211,11 @@ def _current_snapshot(
     return current, snapshot_credential(current, token)
 
 
-def proof_is_fresh(proof, observation, *, now=None) -> bool:
+def proof_is_fresh(proof, observation, *, now=None, max_age=PROOF_MAX_AGE) -> bool:
     now = now or timezone.now()
     return bool(
         proof.verified_at
-        and now - proof.verified_at < PROOF_MAX_AGE
+        and now - proof.verified_at < max_age
         and proof.credential_fingerprint == observation.credential_fingerprint
         and proof.account_identity == observation.account_identity
         and proof.scope_key == observation.scope_key
@@ -246,8 +246,26 @@ def _owned_history(actor_user_id, current, requested) -> list[tuple]:
     ]
 
 
-def _fresh_history_tenants(current, request, history, *, now=None) -> frozenset:
-    """Tenants in ``history`` whose every row is live and whose proof is fresh."""
+# Answers short of access: grace may not stand on a proof any of them called into
+# question until a COMPLETE settles the tenant again.
+ANSWERS_SHORT_OF_ACCESS = frozenset(
+    {
+        VerificationOutcome.TENANT_DENIED,
+        VerificationOutcome.CREDENTIAL_REJECTED,
+        VerificationOutcome.INDETERMINATE,
+    }
+)
+_UNSETTLED_ATTEMPTS = frozenset(outcome.value for outcome in ANSWERS_SHORT_OF_ACCESS)
+
+
+def _fresh_history_tenants(
+    current, request, history, *, now=None, max_age=PROOF_MAX_AGE, settled_only=False
+) -> frozenset:
+    """Tenants in ``history`` whose every row is live and whose proof is fresh.
+
+    ``settled_only`` also requires that no attempt since the proof answered short of
+    access, for grace, which stands on an old proof rather than a fresh one.
+    """
     archived = {tenant_id for tenant_id, archived_at in history if archived_at is not None}
     live = {tenant_id for tenant_id, _archived_at in history} - archived
     if not live:
@@ -261,7 +279,8 @@ def _fresh_history_tenants(current, request, history, *, now=None) -> frozenset:
         tenant_id
         for tenant_id in live
         if tenant_id in proofs
-        and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now)
+        and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now, max_age=max_age)
+        and not (settled_only and proofs[tenant_id].last_attempt_result in _UNSETTLED_ATTEMPTS)
     )
 
 
@@ -288,6 +307,67 @@ def fresh_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, now=None
             return frozenset()
         history = _owned_history(actor_user_id, current, requested)
         return _fresh_history_tenants(current, request, history, now=now)
+
+
+def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age, now=None):
+    """The subset of ``tenant_ids`` whose last proof is positive and younger than ``max_age``.
+
+    :func:`fresh_proof_tenant_ids` with a longer window, for admitting a request whose
+    recheck could not reach the provider. Every other freshness condition still holds:
+    the membership is live, and the proof matches the current credential, account,
+    scope and denial marker, so any denial recorded since (which moves the marker or
+    clears ``verified_at``) disqualifies it.
+    """
+    requested = frozenset(tenant_ids)
+    if not requested:
+        return frozenset()
+    with transaction.atomic():
+        try:
+            current, request = _current_snapshot(actor_user_id, connection_id, lock=False)
+        except (TenantConnection.DoesNotExist, ValueError):
+            return frozenset()
+        history = _owned_history(actor_user_id, current, requested)
+        return _fresh_history_tenants(
+            current, request, history, now=now, max_age=max_age, settled_only=True
+        )
+
+
+def void_positive_proofs(
+    actor_user_id,
+    connection_id,
+    *,
+    tenant_ids=None,
+    except_tenant_ids=(),
+    before=None,
+    unsettled_by=None,
+    answered_at=None,
+):
+    """Withdraw positive proofs that an unsettled "access lost" answer calls into question.
+
+    Archives nothing. ``tenant_ids`` None means the whole connection: a 401 rejects
+    the credential, not one tenant, and other requests on this connection may be
+    checking other tenants. ``except_tenant_ids`` are tenants the same answer
+    confirmed. ``unsettled_by`` marks every proof in scope older than
+    ``answered_at`` with that outcome. ``before`` keeps a void that lands late from undoing a proof published
+    after the answer it is about.
+    """
+    proofs = UpstreamAccessProof.objects.filter(
+        connection_id=connection_id, connection__user_id=actor_user_id
+    )
+    if tenant_ids is not None:
+        proofs = proofs.filter(tenant_id__in=list(tenant_ids))
+    if except_tenant_ids:
+        proofs = proofs.exclude(tenant_id__in=list(except_tenant_ids))
+    if unsettled_by is not None:
+        # The proofs left standing are marked too, as publication would, so grace
+        # cannot stand on them later even if that publication never lands. Only those
+        # older than the answer: a late mark must not land on a proof published since.
+        proofs.filter(Q(verified_at__isnull=True) | Q(verified_at__lt=answered_at)).update(
+            last_attempt_result=unsettled_by.value
+        )
+    if before is not None:
+        proofs = proofs.filter(verified_at__lt=before)
+    proofs.update(verified_at=None)
 
 
 def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> bool:
@@ -809,9 +889,15 @@ def _publish_verification_receipt(
                         "observed_denied_at": request.observation.upstream_denied_at,
                     },
                 )
-                proof.last_attempt_result = result.outcome.value
-                proof.last_error_code = result.error_code
-                proof.save(update_fields=["last_attempt_result", "last_error_code"])
+                # An outage says nothing new, so it must not wash out an earlier
+                # unsettled answer that keeps grace off this tenant.
+                if not (
+                    result.outcome == VerificationOutcome.UNAVAILABLE
+                    and proof.last_attempt_result in _UNSETTLED_ATTEMPTS
+                ):
+                    proof.last_attempt_result = result.outcome.value
+                    proof.last_error_code = result.error_code
+                    proof.save(update_fields=["last_attempt_result", "last_error_code"])
         elif result.outcome == VerificationOutcome.TENANT_DENIED:
             denial_count = record_validated_upstream_denial(
                 current,
@@ -924,6 +1010,8 @@ def publish_verification(
 
 aclaim_verification = sync_to_async(claim_verification)
 afresh_proof_tenant_ids = sync_to_async(fresh_proof_tenant_ids)
+agrace_proof_tenant_ids = sync_to_async(grace_proof_tenant_ids)
+avoid_positive_proofs = sync_to_async(void_positive_proofs)
 aproofs_are_fresh = sync_to_async(proofs_are_fresh)
 apublish_verification = sync_to_async(publish_verification)
 apublish_verification_receipt = sync_to_async(publish_verification_receipt)

@@ -19,6 +19,8 @@ from django.utils import timezone
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.users.services.access_verification import (
+    ANSWERS_SHORT_OF_ACCESS,
+    PROOF_MAX_AGE,
     ClaimStatus,
     PublicationStatus,
     VerificationClaim,
@@ -29,6 +31,7 @@ from apps.users.services.access_verification import (
     arebase_verification_claim,
     arelease_verification,
     attempt_receipt_matches,
+    avoid_positive_proofs,
 )
 from apps.users.services.access_verification_providers import (
     NETWORK_LIMITER,
@@ -57,6 +60,13 @@ from apps.users.services.token_refresh import (
 _VERIFICATION_UNAVAILABLE = "verification_unavailable"
 _VERIFICATION_INDETERMINATE = "verification_indeterminate"
 _VERIFICATION_IN_PROGRESS = "verification_in_progress"
+# The provider rejected the credential (401) and the follow-up could not finish, so the
+# attempt saw a possible revocation it could not settle: never grounds for grace.
+VERIFICATION_UNAVAILABLE_AFTER_REJECTION = "verification_unavailable_after_rejection"
+VERIFICATION_IN_PROGRESS_AFTER_REJECTION = "verification_in_progress_after_rejection"
+# The provider denied access but the attempt could not publish it.
+VERIFICATION_UNAVAILABLE_AFTER_DENIAL = "verification_unavailable_after_denial"
+VERIFICATION_IN_PROGRESS_AFTER_DENIAL = "verification_in_progress_after_denial"
 _VERIFICATION_RETRY = "verification_retry"
 _UPSTREAM_ACCESS_LOST = "upstream_access_lost"
 _JITTER = random.SystemRandom()
@@ -530,10 +540,6 @@ def _attempt_matches_waiter_lineage(
     )
 
 
-# Every detached verification's ORM work runs on this context's one dedicated thread.
-# Not the caller's thread: a sync (DRF) view reaches here through async_to_sync, whose
-# executor dies when that call returns. Not asgiref's process-wide default either: a
-# sync caller blocked waiting on the check may be holding that very thread.
 class _RecyclingExecutor(ThreadPoolExecutor):
     """Closes each call's connection when done, as a request's end would.
 
@@ -553,10 +559,16 @@ class _RecyclingExecutor(ThreadPoolExecutor):
         finally:
             # Best effort: a socket a failover already broke must not mask the
             # call's own outcome.
-            with contextlib.suppress(Exception):
+            try:
                 connections.close_all()
+            except Exception:
+                logger.debug("Discarding a connection that failed to close", exc_info=True)
 
 
+# Every detached verification's ORM work runs on this context's dedicated pool.
+# Not the caller's thread: a sync (DRF) view reaches here through async_to_sync, whose
+# executor dies when that call returns. Not asgiref's process-wide default either: a
+# sync caller blocked waiting on the check may be holding that very thread.
 _DETACHED_ORM_CONTEXT = ThreadSensitiveContext()
 # A small pool, so one publication waiting on a row lock cannot hold up the rest.
 SyncToAsync.context_to_thread_executor[_DETACHED_ORM_CONTEXT] = _RecyclingExecutor(
@@ -599,11 +611,68 @@ def _detach(verification, connection_id) -> None:
     _supervise(verification)
 
 
-async def _verify_and_publish(
+async def _withdraw_proofs(
+    claim,
+    tenant_ids,
+    *,
+    before,
+    deadline,
+    clock,
+    except_tenant_ids=frozenset(),
+    unsettled_by=None,
+    answered_at=None,
+) -> None:
+    """Void the positive proofs an answer short of access calls into question.
+
+    ``tenant_ids`` None means the whole connection. Overdue, the update finishes under
+    supervision rather than being abandoned.
+    """
+    with contextlib.suppress(TimeoutError):
+        await _await_until(
+            avoid_positive_proofs(
+                claim.observation.user_id,
+                claim.observation.connection_id,
+                tenant_ids=tenant_ids,
+                except_tenant_ids=except_tenant_ids,
+                before=before,
+                unsettled_by=unsettled_by,
+                answered_at=answered_at,
+            ),
+            deadline=deadline,
+            clock=clock,
+        )
+
+
+class _Progress:
+    """What a running verification has seen so far, for a caller that stops waiting."""
+
+    rejected = False
+    # The provider answered short of access (a denial, an indeterminate answer, or a
+    # COMPLETE not covering the request), so grace must not stand in for it.
+    denied = False
+
+
+async def _verify_and_publish(claim, requested, early_provider_result, *, progress, **kwargs):
+    result = await _verify_and_publish_once(
+        claim, requested, early_provider_result, progress=progress, **kwargs
+    )
+    unsettled = (
+        result.status == AccessVerificationStatus.UNAVAILABLE
+        and result.error_code == _VERIFICATION_UNAVAILABLE
+    )
+    if unsettled and progress.denied:
+        return replace(result, error_code=VERIFICATION_UNAVAILABLE_AFTER_DENIAL)
+    if unsettled and progress.rejected:
+        return replace(result, error_code=VERIFICATION_UNAVAILABLE_AFTER_REJECTION)
+    return result
+
+
+async def _verify_and_publish_once(
     claim,
     requested,
     early_provider_result,
     *,
+    progress,
     refreshed,
     deadline,
     clock,
@@ -627,6 +696,17 @@ async def _verify_and_publish(
                 provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
                 and claim.request.token_snapshot is not None
             ):
+                progress.rejected = True
+                with contextlib.suppress(TimeoutError):
+                    await _await_until(
+                        avoid_positive_proofs(
+                            claim.observation.user_id,
+                            claim.observation.connection_id,
+                            before=timezone.now(),
+                        ),
+                        deadline=deadline,
+                        clock=clock,
+                    )
                 claim, early_result = await _renew_after_rejection(
                     claim,
                     refreshed=refreshed,
@@ -654,16 +734,76 @@ async def _verify_and_publish(
                             "recording the denial",
                             claim.observation.connection_id,
                         )
+        if (
+            progress.rejected
+            and provider_result.outcome == VerificationOutcome.UNAVAILABLE
+            and provider_result.error_code == _VERIFICATION_UNAVAILABLE
+        ):
+            # Published with the tag too, so a waiter replaying this receipt sees it.
+            provider_result = ProviderVerificationResult.unavailable(
+                VERIFICATION_UNAVAILABLE_AFTER_REJECTION
+            )
         completed_at = timezone.now()
+        # Any answer short of "every requested tenant is fine" withdraws the proofs it
+        # concerns at once, under the lease: before publication, which can be slow or
+        # fail, and before anyone else can claim. A COMPLETE counts as short until the
+        # mapping shows it covers the request.
+        # A dead refresh grant archives nothing (reconnecting fixes it), but it is
+        # no ground for grace either, for any tenant on the connection.
+        dead_grant = (
+            provider_result.outcome == VerificationOutcome.UNAVAILABLE
+            and provider_result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+        )
+        progress.denied = dead_grant or provider_result.outcome in {
+            VerificationOutcome.COMPLETE,
+            *ANSWERS_SHORT_OF_ACCESS,
+        }
+        if dead_grant or provider_result.outcome in ANSWERS_SHORT_OF_ACCESS:
+            indeterminate = provider_result.outcome == VerificationOutcome.INDETERMINATE
+            await _withdraw_proofs(
+                claim,
+                None
+                if dead_grant or provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
+                else claim.requested_tenant_ids,
+                # An indeterminate answer denies nothing: withdraw only the stale proofs
+                # grace could otherwise stand on, not the fresh ones of sibling tenants.
+                before=completed_at - PROOF_MAX_AGE if indeterminate else completed_at,
+                unsettled_by=provider_result.outcome if indeterminate else None,
+                answered_at=completed_at,
+                deadline=deadline,
+                clock=clock,
+            )
         try:
             mapped = await _await_until(
                 _map_provider_result(claim, provider_result), deadline=deadline, clock=clock
             )
         except TimeoutError:
+            if provider_result.outcome == VerificationOutcome.COMPLETE:
+                await _withdraw_proofs(
+                    claim,
+                    claim.requested_tenant_ids if provider_result.scoped else None,
+                    before=completed_at,
+                    deadline=time.monotonic() + _CLEANUP_WAIT_SECONDS,
+                    clock=time.monotonic,
+                )
             await _release_claim(claim)
             return AccessVerificationResult(
                 AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_UNAVAILABLE
             )
+        if mapped.outcome == VerificationOutcome.COMPLETE:
+            if short := requested - mapped.tenant_ids:
+                # An unscoped listing speaks for the whole connection, as publication's
+                # omission does; a scoped one only for what it asked about.
+                await _withdraw_proofs(
+                    claim,
+                    short if mapped.scoped else None,
+                    except_tenant_ids=mapped.tenant_ids,
+                    before=completed_at,
+                    deadline=deadline,
+                    clock=clock,
+                )
+            else:
+                progress.denied = False
         if clock() >= deadline:
             await _release_claim(claim)
             return AccessVerificationResult(
@@ -786,11 +926,13 @@ async def verify_connection_access(
     except Exception:
         await asyncio.shield(_release_claim(claim))
         raise
+    progress = _Progress()
     verification = _spawn_detachable(
         _verify_and_publish(
             claim,
             requested,
             early_result,
+            progress=progress,
             refreshed=claim is not claimed,
             deadline=deadline,
             clock=clock,
@@ -817,7 +959,59 @@ async def verify_connection_access(
         raise
     if not done:
         _detach(verification, connection_id)
-        return AccessVerificationResult(
-            AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
-        )
+        if progress.rejected:
+            code = VERIFICATION_IN_PROGRESS_AFTER_REJECTION
+        elif progress.denied:
+            # Answered "access lost", still publishing: never grounds for grace.
+            code = VERIFICATION_IN_PROGRESS_AFTER_DENIAL
+        else:
+            code = _VERIFICATION_IN_PROGRESS
+        return AccessVerificationResult(AccessVerificationStatus.IN_PROGRESS, code)
     return verification.result()
+
+
+_BACKGROUND_RECHECKS: dict[tuple, asyncio.Task] = {}
+
+
+def schedule_background_verification(actor_user_id, connection_id, tenant_ids) -> bool:
+    """Re-run a verification in the background, at most one per tenant set per process.
+
+    Must be called on a running event loop. Its publication is what turns an
+    admission under grace into either a fresh proof or a recorded revocation.
+    Returns whether a new check was started.
+    """
+    requested = frozenset(tenant_ids)
+    key = (actor_user_id, connection_id, requested)
+    # Several workspaces on one connection would otherwise each start a check that
+    # polls the same lease; one already covering these tenants suffices.
+    if any(
+        (user, connection) == (actor_user_id, connection_id)
+        and requested <= covered
+        and not task.done()
+        for (user, connection, covered), task in _BACKGROUND_RECHECKS.items()
+    ):
+        return False
+    task = _spawn_detachable(
+        verify_connection_access(
+            actor_user_id,
+            connection_id,
+            frozenset(tenant_ids),
+            deadline=time.monotonic() + PROVIDER_BUDGET_SECONDS,
+        )
+    )
+    _BACKGROUND_RECHECKS[key] = task
+
+    def finished(done):
+        if _BACKGROUND_RECHECKS.get(key) is done:
+            del _BACKGROUND_RECHECKS[key]
+        if not done.cancelled() and done.exception() is not None:
+            logger.warning(
+                "Background upstream recheck failed for user %s connection %s",
+                actor_user_id,
+                connection_id,
+                exc_info=done.exception(),
+            )
+
+    task.add_done_callback(finished)
+    _supervise(task)
+    return True
