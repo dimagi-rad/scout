@@ -39,6 +39,7 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import (
     HELD_REQUEST_NOTE,
     NO_REQUEST_NOTE,
+    REQUEST_STILL_WAITING_NOTE,
     resume_thread_after_materialization,
 )
 from tests.tenant_access import ausable_connection
@@ -623,6 +624,23 @@ class TestResume:
         assert pending.state == PendingRequest.State.WAITING
         assert pending.claim_token is None
 
+    async def test_a_request_still_waiting_on_the_workspace_is_named_not_answered(self, checkpoint):
+        thread, tj = await self._loaded("resume-still-waiting")
+        await pending_requests.ahold_message(
+            thread.id, part_id="m1", text="visits?", for_workspace_load=True
+        )
+        await PendingRequest.objects.filter(thread=thread).aupdate(thread_job=None)
+        agent = _resume_agent()
+
+        with patch.object(
+            pending_requests, "workspace_build_pending", MagicMock(return_value=True)
+        ):
+            await self._resume(tj, agent)
+
+        [message] = agent.ainvoke.await_args.args[0]["messages"]
+        assert REQUEST_STILL_WAITING_NOTE in message.content
+        assert await PendingRequest.objects.filter(thread=thread).aexists()
+
     async def test_a_thread_with_nothing_held_resumes_as_before(self, checkpoint):
         _thread, tj = await self._loaded("resume-legacy")
         agent = _resume_agent()
@@ -1063,7 +1081,7 @@ class TestFlush:
             result = await self._flush(ws, _flush_agent(checkpoint))
 
         assert result["sent"] == tasks.FLUSH_BATCH
-        defer.assert_awaited_once_with(str(ws.id), 0)
+        defer.assert_awaited_once_with(str(ws.id))
 
     async def test_the_sweep_queues_a_flush_for_every_workspace_with_one(self, checkpoint):
         ws_a, _user, _client, thread_a = await _thread("sweep-a")

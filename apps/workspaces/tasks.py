@@ -25,7 +25,7 @@ from procrastinate.exceptions import AlreadyEnqueued
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat import pending_requests
 from apps.chat.constants import SYSTEM_RESUME_MARKER
-from apps.chat.models import Thread, ThreadJob
+from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.tasks import aschedule_thread_title
 from apps.chat.turn_lease import TurnLease, atry_acquire_turn_lease
 from apps.common.capacity import CapacityExhausted, classify_capacity_error
@@ -3393,6 +3393,10 @@ HELD_REQUEST_NOTE = "The user's request, written while data loaded, follows; ans
 NO_REQUEST_NOTE = (
     "The user has no question waiting; tell them briefly that their data is ready to ask about."
 )
+REQUEST_STILL_WAITING_NOTE = (
+    "The user's question is still waiting on the rest of the workspace's data and will be "
+    "answered when it loads; tell them briefly that this load finished."
+)
 
 
 async def _thread_has_user_turn(thread_id) -> bool:
@@ -3657,6 +3661,9 @@ async def _resume_claimed_job(
     else:
         if held is not None:
             follow_up = HELD_REQUEST_NOTE
+        elif await PendingRequest.objects.filter(thread_id=tj.thread_id).aexists():
+            # Held for the rest of the workspace's data: the flush sends it after.
+            follow_up = REQUEST_STILL_WAITING_NOTE
         elif await _thread_has_user_turn(tj.thread_id):
             follow_up = (
                 "Please continue with the user's original request using the now-loaded data."
@@ -4018,7 +4025,7 @@ async def flush_pending_requests(workspace_id: str) -> dict:
         except Exception:
             logger.exception("flush: could not send the held request of thread %s", thread_id)
     if len(thread_ids) > FLUSH_BATCH:
-        await _defer_pending_flush(workspace_id, 0)
+        await _defer_pending_flush(workspace_id)
     return {"status": "flushed", "sent": sent}
 
 
