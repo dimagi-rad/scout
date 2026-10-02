@@ -260,7 +260,7 @@ async def chat_view(request):
         try:
             held = await _hold_while_loading(workspace, thread_id, messages[-1], user_content)
         except pending_requests.PendingRequestTooLong as e:
-            return _request_too_long_response(str(e))
+            return _request_too_long_response(e.user_message)
         if held is not None:
             return _held_response(held)
 

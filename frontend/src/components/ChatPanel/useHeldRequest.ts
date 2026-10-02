@@ -4,6 +4,7 @@ import type { PendingRequest } from "@/api/jobs"
 import { ApiError } from "@/api/client"
 import {
   isPendingConflict,
+  pendingErrorReason,
   pendingPhase,
   pendingRequestApi,
   type PendingPhase,
@@ -16,6 +17,14 @@ function isTooLong(error: unknown): boolean {
   const body = error.body as { reason?: unknown } | null | undefined
   return body?.reason === "pending_request_too_long"
 }
+
+/**
+ * "conflict": another tab changed the request first; the card shows its copy.
+ * "gone": it is being sent (or was), so the change came too late.
+ */
+export type EditOutcome = "saved" | "conflict" | "gone" | { failed: string }
+
+const EDIT_FAILED_MESSAGE = "Couldn't change your request. Try again."
 
 export type AddOutcome = "added" | "send" | { failed: string }
 
@@ -36,6 +45,10 @@ export interface HeldRequest {
   /** Hide the request before the client sends it itself; ``restore`` undoes it. */
   takeForSend: () => PendingRequest | null
   restore: (sendThreadId: string) => void
+  /** Rewrite the whole request, as it stood at ``baseVersion``. */
+  edit: (text: string, baseVersion: number) => Promise<EditOutcome>
+  /** Drop one of its later parts. */
+  removePart: (partId: string) => Promise<EditOutcome>
   /** The held send in ``sendThreadId`` is over: show the server's copy from the next poll. */
   settleSend: (sendThreadId: string) => void
   discard: () => Promise<void>
@@ -177,6 +190,59 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     [workspaceId, threadId, current, setPendingRequest, forgetPendingRequest, refresh],
   )
 
+  const change = useCallback(
+    async (
+      body: { text: string } | { remove_part_id: string },
+      optimistic: PendingRequest["parts"],
+      baseVersion?: number,
+    ): Promise<EditOutcome> => {
+      if (!workspaceId || !current) return "gone"
+      setPendingRequest(
+        threadId,
+        { ...current, version: current.version + 1, parts: optimistic },
+        "inFlight",
+      )
+      try {
+        const saved = await pendingRequestApi.edit(workspaceId, threadId, {
+          version: baseVersion ?? current.version,
+          ...body,
+        })
+        setPendingRequest(threadId, saved)
+        return "saved"
+      } catch (error) {
+        forgetPendingRequest(threadId)
+        void refresh()
+        const reason = pendingErrorReason(error)
+        if (isPendingConflict(error)) return reason === "version" ? "conflict" : "gone"
+        const readable =
+          reason === "pending_request_too_long" || reason === "pending_request_invalid_edit"
+        return { failed: readable ? (error as ApiError).message : EDIT_FAILED_MESSAGE }
+      }
+    },
+    [workspaceId, threadId, current, setPendingRequest, forgetPendingRequest, refresh],
+  )
+
+  const edit = useCallback(
+    // The version the edit started from, not the latest: replacing parts the user
+    // never saw in the editor would delete them.
+    (text: string, baseVersion: number) =>
+      change(
+        { text },
+        [{ id: `edit-${newPartId()}`, text, added_at: new Date().toISOString() }],
+        baseVersion,
+      ),
+    [change],
+  )
+
+  const removePart = useCallback(
+    (partId: string) =>
+      change(
+        { remove_part_id: partId },
+        (current?.parts ?? []).filter((part) => part.id !== partId),
+      ),
+    [change, current],
+  )
+
   const takeForSend = useCallback(() => {
     if (!current) return null
     setSeen((prev) => ({ ...prev, removedLocally: true }))
@@ -220,6 +286,8 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     add,
     takeForSend,
     restore,
+    edit,
+    removePart,
     settleSend,
     discard,
   }

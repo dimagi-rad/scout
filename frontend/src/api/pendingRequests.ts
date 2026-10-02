@@ -15,11 +15,24 @@ export const pendingRequestApi = {
     api.post<PendingRequest>(`${base(workspaceId, threadId)}/parts/`, part),
   discard: (workspaceId: string, threadId: string, version: number) =>
     api.delete<{ status: string }>(`${base(workspaceId, threadId)}/`, { version }),
+  /** ``text`` rewrites the whole request; ``remove_part_id`` drops a later part. */
+  edit: (
+    workspaceId: string,
+    threadId: string,
+    change: { version: number } & ({ text: string } | { remove_part_id: string }),
+  ) => api.patch<PendingRequest>(`${base(workspaceId, threadId)}/`, change),
 }
 
 /** A 409: the request was claimed, changed or settled since this client saw it. */
 export function isPendingConflict(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409
+}
+
+/** The server's reason code on a refused change, e.g. "version" or "pending_request_too_long". */
+export function pendingErrorReason(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null
+  const reason = (error.body as { reason?: unknown } | null | undefined)?.reason
+  return typeof reason === "string" ? reason : null
 }
 
 export function pendingRequestText(pending: PendingRequest): string {
