@@ -7,6 +7,11 @@ from django.db import models
 class Thread(models.Model):
     """Indexes chat thread metadata for listing and restoring sessions."""
 
+    class TitleSource(models.TextChoices):
+        FIRST_MESSAGE = "first_message", "First message"
+        GENERATED = "generated", "Generated"
+        USER = "user", "User"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
         "workspaces.Workspace",
@@ -20,6 +25,14 @@ class Thread(models.Model):
     )
     title = models.CharField(max_length=203, default="", blank=True)
     title_is_custom = models.BooleanField(default=False)
+    # The title is generated only while this is FIRST_MESSAGE, so a rename (USER)
+    # or an earlier generation is never overwritten; see apps/chat/titles.py.
+    title_source = models.CharField(
+        max_length=16,
+        choices=TitleSource.choices,
+        default=TitleSource.FIRST_MESSAGE,
+        db_default=TitleSource.FIRST_MESSAGE,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_viewed_at = models.DateTimeField(null=True, blank=True)

@@ -9,7 +9,6 @@ describe("ChatThreadHeader", () => {
     render(
       <ChatThreadHeader
         title="Untitled"
-        titleIsCustom={false}
         panelOpen={false}
         panelMode="files"
         onTitleChange={onTitleChange}
@@ -29,8 +28,7 @@ describe("ChatThreadHeader", () => {
   it("renders the untitled fallback as muted text", () => {
     render(
       <ChatThreadHeader
-        title="Untitled"
-        titleIsCustom={false}
+        title=""
         panelOpen={false}
         panelMode="files"
         onTitleChange={() => undefined}
@@ -48,7 +46,6 @@ describe("ChatThreadHeader", () => {
     render(
       <ChatThreadHeader
         title="Artifact work"
-        titleIsCustom
         panelOpen
         panelMode="files"
         onTitleChange={() => undefined}
@@ -69,7 +66,6 @@ describe("ChatThreadHeader", () => {
     render(
       <ChatThreadHeader
         title={longTitle}
-        titleIsCustom
         panelOpen={false}
         panelMode="files"
         onTitleChange={() => undefined}
@@ -87,7 +83,6 @@ describe("ChatThreadHeader", () => {
     render(
       <ChatThreadHeader
         title="Custom title"
-        titleIsCustom
         panelOpen={false}
         panelMode="files"
         onTitleChange={onTitleChange}
@@ -104,12 +99,33 @@ describe("ChatThreadHeader", () => {
     expect(onTitleChange).toHaveBeenCalledWith("")
   })
 
-  it("clears a non-default displayed title even if custom state is stale", () => {
+  it("does not rename when the provisional title is left unchanged", () => {
+    const onTitleChange = vi.fn()
+    render(
+      <ChatThreadHeader
+        title="What are module completion rates?"
+        panelOpen={false}
+        panelMode="files"
+        onTitleChange={onTitleChange}
+        onOpenFiles={() => undefined}
+        onOpenCanvas={() => undefined}
+      />,
+    )
+
+    fireEvent.click(screen.getByTestId("chat-thread-rename"))
+    fireEvent.blur(screen.getByTestId("chat-thread-title-input"))
+
+    expect(onTitleChange).not.toHaveBeenCalled()
+    expect(screen.getByTestId("chat-thread-title")).toHaveTextContent(
+      "What are module completion rates?",
+    )
+  })
+
+  it("clears a provisional title when the user empties it", () => {
     const onTitleChange = vi.fn()
     render(
       <ChatThreadHeader
         title="Loaded custom title"
-        titleIsCustom={false}
         panelOpen={false}
         panelMode="files"
         onTitleChange={onTitleChange}
@@ -124,5 +140,26 @@ describe("ChatThreadHeader", () => {
     fireEvent.submit(input.closest("form")!)
 
     expect(onTitleChange).toHaveBeenCalledWith("")
+  })
+
+  it("does not save the provisional title over one generated mid-edit", () => {
+    const onTitleChange = vi.fn()
+    const props = {
+      panelOpen: false,
+      panelMode: "files" as const,
+      onTitleChange,
+      onOpenFiles: () => undefined,
+      onOpenCanvas: () => undefined,
+    }
+    const { rerender } = render(
+      <ChatThreadHeader title="What are module completion rates?" {...props} />,
+    )
+
+    fireEvent.click(screen.getByTestId("chat-thread-rename"))
+    rerender(<ChatThreadHeader title="Module completion rates" {...props} />)
+    fireEvent.blur(screen.getByTestId("chat-thread-title-input"))
+
+    expect(onTitleChange).not.toHaveBeenCalled()
+    expect(screen.getByTestId("chat-thread-title")).toHaveTextContent("Module completion rates")
   })
 })

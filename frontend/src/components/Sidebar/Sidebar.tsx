@@ -28,6 +28,7 @@ const ACCESS_DENIAL_SUMMARY: Record<AccessDenialReason, string> = {
   upstream_access_lost: "A provider removed your access to one of this workspace's sources.",
   credential_missing: "One of this workspace's sources isn't connected.",
   credential_expired: "Your sign-in for one of this workspace's sources expired.",
+  verification_indeterminate: "A provider gave an answer Scout couldn't read.",
   verification_unavailable: "Couldn't verify your access right now.",
   verification_in_progress: "Your access is still being verified.",
   no_sources: "This workspace has no data sources.",
@@ -485,11 +486,6 @@ export function Sidebar() {
   )
 }
 
-function sidebarThreadTitle(thread: {
-  title: string
-  history_title?: string
-  title_is_custom: boolean
-}): string {
-  if (thread.title_is_custom) return thread.title.trim() || "Untitled"
-  return thread.history_title?.trim() || "Untitled"
+function sidebarThreadTitle(thread: { title: string }): string {
+  return thread.title.trim() || "Untitled"
 }

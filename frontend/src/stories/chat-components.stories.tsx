@@ -282,8 +282,7 @@ export const ThreadHeaderWithDrawer: Story = {
     layout: "fullscreen",
   },
   render: function ThreadHeaderWithDrawerStory() {
-    const [title, setTitle] = useState("Untitled")
-    const [titleIsCustom, setTitleIsCustom] = useState(false)
+    const [title, setTitle] = useState("What are module completion rates by district?")
     const [panelOpen, setPanelOpen] = useState(true)
     const [panelMode, setPanelMode] = useState<ThreadPanelMode>("files")
 
@@ -310,13 +309,9 @@ export const ThreadHeaderWithDrawer: Story = {
         <div className="flex min-w-0 flex-1 flex-col">
           <ChatThreadHeader
             title={title}
-            titleIsCustom={titleIsCustom}
             panelOpen={panelOpen}
             panelMode={panelMode}
-            onTitleChange={(nextTitle) => {
-              setTitle(nextTitle || "Untitled")
-              setTitleIsCustom(Boolean(nextTitle))
-            }}
+            onTitleChange={setTitle}
             onOpenFiles={openFiles}
             onOpenCanvas={openCanvas}
           />

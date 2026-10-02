@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
@@ -16,7 +17,8 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from mcp_server.server import run_materialization
+from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD
+from mcp_server.server import _THIS_CONVERSATION_RESUMES, run_materialization
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -45,7 +47,31 @@ async def test_run_materialization_observes_artifact_recovery(workspace, user):
         )
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["workspace_recovery_id"] == str(recovery.id)
-    assert "no automatic chat follow-up" in result["data"]["message"]
+    assert "Nothing will resume this conversation" in result["data"]["message"]
+    assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_chat_with_its_own_load_is_promised_a_resume_despite_a_recovery(workspace, user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    existing_tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=11_112,
+        tool_call_id="tc-existing",
+        state=ThreadJob.State.PENDING,
+    )
+    await WorkspaceDataRecovery.objects.acreate(
+        workspace=workspace, requested_by=user, recovery_type="materialization"
+    )
+    with patch(DISPATCH, new=AsyncMock()) as dispatch:
+        result = await run_materialization(
+            workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
+        )
+    assert result["data"]["thread_job_id"] == str(existing_tj.id)
+    assert _THIS_CONVERSATION_RESUMES in result["data"]["message"]
     dispatch.assert_not_awaited()
 
 
@@ -106,6 +132,7 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
 
     assert result["data"]["status"] == "started"
     assert "thread_job_id" in result["data"]
+    assert _THIS_CONVERSATION_RESUMES in result["data"]["message"]
     # Intent is captured before queueing, so an equivalent pending load is joined.
     assert mw.defer.call_args.kwargs["load_intent"] == {str(tenant.id): 1}
     tj = await ThreadJob.objects.aget(procrastinate_job_id=7777)
@@ -191,6 +218,7 @@ async def test_run_materialization_returns_already_in_progress_if_active_in_same
 
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["thread_job_id"] == str(existing_tj.id)
+    assert _THIS_CONVERSATION_RESUMES in result["data"]["message"]
     # No new ThreadJob created for this thread
     assert await ThreadJob.objects.filter(thread=thread).acount() == 1
 
@@ -336,3 +364,45 @@ async def test_run_materialization_queues_nothing_when_its_threadjob_cannot_be_s
     assert len(queued) == 1
     assert not await sync_to_async(_visible_to_a_worker)(queued[0])
     assert not await ThreadJob.objects.filter(thread=thread).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_running_resume_job_blocks_redispatch_without_promising_a_resume(workspace, user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=11_113,
+        tool_call_id="tc-running",
+        state=ThreadJob.State.RUNNING,
+    )
+    with patch(DISPATCH, new=AsyncMock()) as dispatch:
+        result = await run_materialization(
+            workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
+        )
+    assert result["data"]["status"] == "already_in_progress"
+    assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
+    assert "already ended" in result["data"]["message"]
+    assert "Nothing will resume this conversation" in result["data"]["message"]
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_abandoned_running_resume_job_does_not_block_a_new_load(workspace, user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=11_114,
+        tool_call_id="tc-abandoned",
+        state=ThreadJob.State.RUNNING,
+        started_at=datetime.now(UTC) - STALE_JOB_THRESHOLD - timedelta(minutes=1),
+    )
+    with patch(DISPATCH, new=AsyncMock(return_value=AsyncMock(id="tj-new"))) as dispatch:
+        result = await run_materialization(
+            workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
+        )
+    assert result["data"]["status"] == "started"
+    dispatch.assert_awaited_once()

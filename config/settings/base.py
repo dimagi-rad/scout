@@ -313,6 +313,8 @@ STALE_DATA_BANNER_HOURS = env.int("STALE_DATA_BANNER_HOURS", default=24)
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-5-5")
+# Thread titles need a few words, not reasoning: the cheapest model is enough.
+THREAD_TITLE_LLM_MODEL = env("THREAD_TITLE_LLM_MODEL", default="claude-haiku-4-5-20251001")
 
 # Hard ceiling on the materialization-resume agent.ainvoke. Beyond this, the
 # user sees a synthetic "took too long" message instead of a forever-spinner.
