@@ -286,6 +286,16 @@ describe("LostAccessModal with missing sources", () => {
     expect(outcome).not.toHaveTextContent("Bot B")
   })
 
+  it("keeps the server remedy for an expired sign-in, even with sources listed", () => {
+    useAppStore.setState({
+      threadsAccessDenialReason: "credential_expired",
+      accessRetryOutcome: "Your sign-in for one of this workspace's sources has expired. Reconnect it under Connected Accounts.",
+    })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("Reconnect it under Connected Accounts")
+  })
+
   it("shows a retry that could not verify, even with sources listed", () => {
     useAppStore.setState({
       threadsAccessDenialReason: "verification_unavailable",

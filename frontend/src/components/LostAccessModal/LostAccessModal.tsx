@@ -2,7 +2,6 @@ import { useMemo, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { ACCESS_LOSS_REASONS } from "@/store/uiSlice"
 import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
@@ -132,8 +131,8 @@ export function LostAccessModal() {
 
         {retryOutcome && !noSources && (
           <p className="mt-3 text-sm text-muted-foreground" data-testid="lost-access-retry-outcome">
-            {/* The server text repeats the source list, which the retry has just refreshed. */}
-            {missing.length > 0 && denialReason && ACCESS_LOSS_REASONS.has(denialReason)
+            {/* Only tenant_access_lost's text repeats the source list; other reasons carry their own remedy. */}
+            {missing.length > 0 && denialReason === "tenant_access_lost"
               ? "Verification ran, but the sources above are still needed."
               : retryOutcome}
           </p>
