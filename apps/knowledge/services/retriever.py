@@ -40,8 +40,9 @@ _TRUNCATION_NOTICE = (
 
 _SECTION_SEPARATOR = "\n\n"
 
-# Connect's generated stg_visits TableKnowledge carries hundreds of column notes
-# (30-50 KB rendered); uncapped, one table spends the whole budget (#264).
+# Applied only when the context is over budget: Connect's generated stg_visits
+# TableKnowledge carries hundreds of column notes (30-50 KB rendered), and
+# uncapped, one table spends the whole budget (#264).
 MAX_COLUMN_NOTES_PER_TABLE = 40
 
 
@@ -51,6 +52,8 @@ def _fit_section(text: str, limit: int) -> str:
     Trailing headings and labels left without their content are dropped, and a
     section reduced to nothing but headings is dropped entirely.
     """
+    if limit <= 0:
+        return ""
     if len(text) <= limit:
         return text
     lines = text[: limit + 1].split("\n")[:-1]
@@ -89,7 +92,8 @@ class KnowledgeRetriever:
         When over budget, sections claim space in priority order — learnings,
         then knowledge entries, then table context — so a bulky table dump
         cannot crowd out the short, high-value learnings (#264). Display order
-        is unchanged, and each section is cut only at a line boundary.
+        is unchanged, each table's column notes are capped, and each section is
+        cut only at a line boundary.
         """
         sections = {
             "entries": await self._format_knowledge_entries(),
@@ -100,6 +104,9 @@ class KnowledgeRetriever:
         if len(combined) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET:
             return combined
 
+        sections["tables"] = await self._format_table_knowledge(
+            max_column_notes=MAX_COLUMN_NOTES_PER_TABLE
+        )
         remaining = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
         fitted: dict[str, str] = {}
         for name in ("learnings", "entries", "tables"):
@@ -130,7 +137,7 @@ class KnowledgeRetriever:
 
         return "\n".join(lines).rstrip()
 
-    async def _format_table_knowledge(self) -> str:
+    async def _format_table_knowledge(self, max_column_notes: int | None = None) -> str:
         """Format table knowledge with column notes and data quality notes."""
         tables = TableKnowledge.objects.filter(workspace=self.workspace).order_by("table_name")
 
@@ -147,14 +154,15 @@ class KnowledgeRetriever:
 
             if table.column_notes:
                 lines.append("**Column Notes:**")
-                notes = list(table.column_notes.items())
-                for column, note in notes[:MAX_COLUMN_NOTES_PER_TABLE]:
+                # jsonb keeps no insertion order, so sort for a stated, stable cut.
+                notes = sorted(table.column_notes.items())
+                shown = notes if max_column_notes is None else notes[:max_column_notes]
+                for column, note in shown:
                     lines.append(f"- `{column}`: {_sanitize_prompt_content(str(note))}")
-                omitted = len(notes) - MAX_COLUMN_NOTES_PER_TABLE
-                if omitted > 0:
+                if len(notes) > len(shown):
                     lines.append(
-                        f"- … {omitted} more column notes omitted to fit the prompt; "
-                        f"`describe_table` lists every column of `{table.table_name}`."
+                        f"- … notes for {len(notes) - len(shown)} more columns are left out "
+                        f"to fit the prompt; `describe_table` gives only their names and types."
                     )
                 lines.append("")
 

@@ -11,6 +11,7 @@ import pytest
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
 from apps.knowledge.services.retriever import (
+    _TRUNCATION_NOTICE,
     KNOWLEDGE_CONTEXT_CHAR_BUDGET,
     MAX_COLUMN_NOTES_PER_TABLE,
     KnowledgeRetriever,
@@ -195,12 +196,49 @@ class TestLearningsNotCrowdedOut:
             updated_by=user,
         )
 
-        tables = await KnowledgeRetriever(workspace)._format_table_knowledge()
+        result = await KnowledgeRetriever(workspace).retrieve()
 
-        assert tables.count("- `question_") == MAX_COLUMN_NOTES_PER_TABLE
-        omitted = 549 - MAX_COLUMN_NOTES_PER_TABLE
-        assert f"{omitted} more column notes omitted" in tables
-        assert "`describe_table`" in tables
+        assert result.count("- `question_") == MAX_COLUMN_NOTES_PER_TABLE
+        assert f"notes for {549 - MAX_COLUMN_NOTES_PER_TABLE} more columns" in result
+        assert "`describe_table`" in result
+
+    @pytest.mark.asyncio
+    async def test_column_notes_not_capped_under_budget(self, workspace, user):
+        await TableKnowledge.objects.acreate(
+            workspace=workspace,
+            table_name="small_table",
+            description="Small.",
+            column_notes={f"c{i}": "n" for i in range(MAX_COLUMN_NOTES_PER_TABLE + 10)},
+            updated_by=user,
+        )
+
+        result = await KnowledgeRetriever(workspace).retrieve()
+
+        assert result.count("- `c") == MAX_COLUMN_NOTES_PER_TABLE + 10
+        assert "truncated" not in result
+
+    @pytest.mark.asyncio
+    async def test_section_filling_remaining_budget_exactly(self, workspace, user):
+        """A later section must not slip through untrimmed when nothing is left."""
+        heading = "## Learned Corrections\n\n- "
+        target = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
+        await AgentLearning.objects.acreate(
+            workspace=workspace,
+            description="L" * (target - len(heading)),
+            category="type_mismatch",
+            confidence_score=0.5,
+            is_active=True,
+            discovered_by_user=user,
+        )
+        for i in range(30):
+            await KnowledgeEntry.objects.acreate(
+                workspace=workspace, title=f"Entry {i}", content="E" * 500, created_by=user
+            )
+
+        result = await KnowledgeRetriever(workspace).retrieve()
+
+        assert len(result) == KNOWLEDGE_CONTEXT_CHAR_BUDGET
+        assert "## Knowledge Base" not in result
 
 
 class TestFitSection:
@@ -214,5 +252,6 @@ class TestFitSection:
     def test_heading_only_section_dropped(self):
         assert _fit_section("## A\n\n- a long bullet line", 8) == ""
 
-    def test_non_positive_limit(self):
-        assert _fit_section("## A\n\n- one", 0) == ""
+    @pytest.mark.parametrize("limit", [0, -1, -2, -50])
+    def test_non_positive_limit(self, limit):
+        assert _fit_section("## A\n\n- one\n- two\n- three", limit) == ""
