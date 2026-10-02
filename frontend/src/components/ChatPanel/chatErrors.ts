@@ -19,7 +19,11 @@ export const GENERIC_CHAT_ERROR_MESSAGE =
 // carrying the same reason classify the same way.
 const ACCESS_RETRY_REASONS = FRESHNESS_RETRY_REASONS
 // Resending the same message fails the same way; show the backend's remedy instead.
-const FINAL_REASONS: ReadonlySet<string> = new Set([NO_SOURCES_REASON, "message_too_long"])
+const FINAL_REASONS: ReadonlySet<string> = new Set([
+  NO_SOURCES_REASON,
+  "message_too_long",
+  "access_denied",
+])
 
 export type ChatErrorKind =
   | { kind: "stale" }

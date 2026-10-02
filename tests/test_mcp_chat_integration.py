@@ -224,6 +224,10 @@ class TestChatEndpointValidation:
             content_type="application/json",
         )
         assert response.status_code == 403
+        assert json.loads(response.content) == {
+            "error": "Workspace not found or access denied.",
+            "reason": "access_denied",
+        }
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)

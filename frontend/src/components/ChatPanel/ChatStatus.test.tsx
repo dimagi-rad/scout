@@ -11,12 +11,17 @@ function bodyError(body: unknown) {
 
 const RECONNECT_TEXT = "Your CommCare connection has expired. Reconnect it in Connected Accounts."
 
-function renderNotice(error: Error) {
+function renderNotice(error: Error, pathPrefix?: string) {
   const onRetry = vi.fn()
   const onStartNewThread = vi.fn()
   render(
     <MemoryRouter>
-      <ChatErrorNotice error={error} onRetry={onRetry} onStartNewThread={onStartNewThread} />
+      <ChatErrorNotice
+        error={error}
+        onRetry={onRetry}
+        onStartNewThread={onStartNewThread}
+        pathPrefix={pathPrefix}
+      />
     </MemoryRouter>,
   )
   return { onRetry, onStartNewThread }
@@ -51,7 +56,7 @@ describe("classifyChatError", () => {
     },
   )
 
-  it.each(["no_sources", "message_too_long"])(
+  it.each(["no_sources", "message_too_long", "access_denied"])(
     "treats %s as final, with the backend text",
     (reason) => {
       expect(classifyChatError(bodyError({ error: "Backend remedy.", reason }))).toEqual({
@@ -120,6 +125,17 @@ describe("ChatErrorNotice", () => {
     expect(screen.queryByText(/secret detail/)).toBeNull()
     fireEvent.click(screen.getByTestId("chat-error-retry"))
     expect(onRetry).toHaveBeenCalledOnce()
+  })
+
+  it("keeps the Connected Accounts link inside the embedded app", () => {
+    renderNotice(
+      bodyError({ error: RECONNECT_TEXT, reason: "credential_expired", recovery_url: "/settings/connections" }),
+      "/embed",
+    )
+    expect(screen.getByTestId("chat-error-recovery-link")).toHaveAttribute(
+      "href",
+      "/embed/settings/connections",
+    )
   })
 
   it("shows the backend text without Retry when resending cannot succeed", () => {

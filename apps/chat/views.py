@@ -210,10 +210,15 @@ async def chat_view(request):
     access, tm, is_multi_tenant = await _resolve_chat_access(user, workspace_id)
     workspace = access.workspace
     if workspace is None:
-        return JsonResponse(access_denied_body(access), status=403)
+        # The chat UI offers Retry unless a reason says resending cannot help.
+        body = {"reason": "access_denied", **access_denied_body(access)}
+        return JsonResponse(body, status=403)
 
     if tm is None and not is_multi_tenant:
-        return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
+        return JsonResponse(
+            {"error": "No tenant membership for this workspace", "reason": "access_denied"},
+            status=403,
+        )
 
     # Validate thread ownership so a user can't attach this turn to another
     # user's (or workspace's) thread. Return 404 not 403 to avoid leaking

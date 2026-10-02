@@ -1,6 +1,7 @@
 import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, type UIMessage } from "ai"
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useLocation } from "react-router-dom"
 import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
@@ -136,6 +137,7 @@ export function ChatPanel() {
   // The thread whose turn useChat is running. A switch does not abort it, so its
   // outcome can land while another thread is shown.
   const turnThreadRef = useRef<string | null>(null)
+  const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
 
   const [transport] = useState(
     () =>
@@ -488,6 +490,7 @@ export function ChatPanel() {
               error={error}
               onStartNewThread={startFreshThread}
               onRetry={handleRetry}
+              pathPrefix={pathPrefix}
             />
           )}
           {overloadNotice && <ChatOverloadNotice onRetry={handleRetry} />}

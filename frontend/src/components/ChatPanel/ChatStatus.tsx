@@ -10,6 +10,8 @@ interface ChatErrorNoticeProps {
   error: Error
   onStartNewThread: () => void
   onRetry: () => void
+  /** "/embed" inside the embedded app, whose routes all live under it. */
+  pathPrefix?: string
 }
 
 /**
@@ -18,7 +20,12 @@ interface ChatErrorNoticeProps {
  * request that cannot succeed as sent the backend's explanation, and anything
  * else a generic message with Retry and a new chat.
  */
-export function ChatErrorNotice({ error, onStartNewThread, onRetry }: ChatErrorNoticeProps) {
+export function ChatErrorNotice({
+  error,
+  onStartNewThread,
+  onRetry,
+  pathPrefix = "",
+}: ChatErrorNoticeProps) {
   const classified = classifyChatError(error)
   useEffect(() => {
     console.error("[Scout] Chat error:", error)
@@ -70,7 +77,10 @@ export function ChatErrorNotice({ error, onStartNewThread, onRetry }: ChatErrorN
         <>
           <p data-testid="chat-error-message">{classified.message}</p>
           <Button asChild variant="outline" size="sm">
-            <Link to={classified.recoveryPath} data-testid="chat-error-recovery-link">
+            <Link
+              to={`${pathPrefix}${classified.recoveryPath}`}
+              data-testid="chat-error-recovery-link"
+            >
               Connected Accounts
             </Link>
           </Button>
