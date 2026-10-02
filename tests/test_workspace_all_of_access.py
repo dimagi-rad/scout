@@ -236,6 +236,24 @@ def test_archived_ocs_row_with_a_team_or_api_key_is_still_access_removed(user):
 
 
 @pytest.mark.django_db
+def test_disconnected_api_key_row_without_a_slug_is_still_access_removed(user):
+    """Disconnecting nulls the connection; a key row's team name still marks it."""
+    bot_key = _tenant("bot-key", "Bot Key", provider="ocs")
+    grant_tenant_access(user, bot_key)
+    TenantMembership.objects.filter(user=user).update(
+        connection=None,
+        archived_at=timezone.now(),
+        provider_metadata={"team_slug": "", "team_name": "Typed Team"},
+    )
+    ws = _workspace(user, bot_key)
+    _join(ws, user)
+
+    result = resolve_workspace_access_ex(user, ws.id)
+
+    assert _missing(result) == [("Bot Key", CoverageRecovery.ACCESS_REMOVED)]
+
+
+@pytest.mark.django_db
 def test_archived_non_ocs_row_without_a_key_is_still_access_removed(user, two_sources):
     """No other provider records a team, so only OCS rows read as pre-team ones."""
     source = two_sources[0]
