@@ -24,9 +24,10 @@ from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.db.models.functions import Now
 from django.utils import timezone
+from langchain_core.messages import HumanMessage
 
 from apps.chat.checkpointer import ensure_checkpointer
-from apps.chat.constants import MAX_MESSAGE_LENGTH
+from apps.chat.constants import MAX_MESSAGE_LENGTH, SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 
 logger = logging.getLogger(__name__)
@@ -316,6 +317,22 @@ async def athread_has_message(thread_id, message_id: str) -> bool:
         return False
     messages = (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("messages", [])
     return any(getattr(message, "id", None) == message_id for message in messages)
+
+
+async def athread_has_user_turn(thread_id) -> bool:
+    """Whether the conversation holds anything the user wrote (resume notices aside)."""
+    checkpointer = await ensure_checkpointer()
+    checkpoint_tuple = await checkpointer.aget_tuple(
+        {"configurable": {"thread_id": str(thread_id)}}
+    )
+    if checkpoint_tuple is None:
+        return False
+    messages = (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("messages", [])
+    return any(
+        isinstance(message, HumanMessage)
+        and not str(message.content).startswith(SYSTEM_RESUME_MARKER)
+        for message in messages
+    )
 
 
 async def athread_pending_request(thread_id) -> dict | None:

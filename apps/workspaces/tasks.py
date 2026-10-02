@@ -3343,6 +3343,20 @@ async def _defer_resume_while_thread_busy(tj: ThreadJob, busy_attempt: int) -> d
 HELD_REQUEST_NOTE = "The user's request, written while data loaded, follows; answer it."
 
 
+# The chat's only request was discarded while its load ran.
+NO_REQUEST_NOTE = (
+    "The user has no question waiting; tell them briefly that their data is ready to ask about."
+)
+
+
+async def _thread_has_user_turn(thread_id) -> bool:
+    try:
+        return await pending_requests.athread_has_user_turn(thread_id)
+    except Exception:
+        logger.warning("resume: could not read thread %s's checkpoint", thread_id, exc_info=True)
+        return True
+
+
 async def _claim_held_request(tj: ThreadJob, lease: TurnLease):
     try:
         return await pending_requests.aclaim(tj.thread_id, lease.token, thread_job_id=tj.id)
@@ -3595,11 +3609,14 @@ async def _resume_claimed_job(
             f"want to re-run it. Per-tenant: {summary}"
         )
     else:
-        follow_up = (
-            HELD_REQUEST_NOTE
-            if held is not None
-            else "Please continue with the user's original request using the now-loaded data."
-        )
+        if held is not None:
+            follow_up = HELD_REQUEST_NOTE
+        elif await _thread_has_user_turn(tj.thread_id):
+            follow_up = (
+                "Please continue with the user's original request using the now-loaded data."
+            )
+        else:
+            follow_up = NO_REQUEST_NOTE
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization just completed "
             f"(status={status}). {follow_up} Per-tenant: {summary}"

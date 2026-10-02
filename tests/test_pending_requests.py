@@ -33,7 +33,11 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.tasks import HELD_REQUEST_NOTE, resume_thread_after_materialization
+from apps.workspaces.tasks import (
+    HELD_REQUEST_NOTE,
+    NO_REQUEST_NOTE,
+    resume_thread_after_materialization,
+)
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -612,10 +616,22 @@ class TestResume:
         _thread, tj = await self._loaded("resume-legacy")
         agent = _resume_agent()
 
-        await self._resume(tj, agent)
+        with patch.object(pending_requests, "athread_has_user_turn", AsyncMock(return_value=True)):
+            await self._resume(tj, agent)
 
         [message] = agent.ainvoke.await_args.args[0]["messages"]
         assert "continue with the user's original request" in message.content
+
+    async def test_a_chat_whose_request_was_discarded_is_not_asked_to_continue_it(self, checkpoint):
+        _thread, tj = await self._loaded("resume-discarded")
+        agent = _resume_agent()
+
+        with patch.object(pending_requests, "athread_has_user_turn", AsyncMock(return_value=False)):
+            await self._resume(tj, agent)
+
+        [message] = agent.ainvoke.await_args.args[0]["messages"]
+        assert NO_REQUEST_NOTE in message.content
+        assert "original request" not in message.content
 
 
 def test_the_request_counts_as_one_human_turn_and_shows_as_one_bubble():
