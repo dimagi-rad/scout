@@ -46,8 +46,8 @@ def get_langfuse_callback(
         from langfuse.langchain import CallbackHandler  # noqa: PLC0415
 
         Langfuse(secret_key=secret_key, public_key=public_key, base_url=base_url)
-        # Without public_key, get_client() hands back a disabled client as soon
-        # as a second Langfuse instance exists in the process.
+        # Pin the handler to this client: get_client() without a key returns a
+        # disabled client once any second Langfuse instance exists in the process.
         return CallbackHandler(public_key=public_key)
     except Exception:
         logger.warning("Failed to initialize Langfuse CallbackHandler", exc_info=True)
