@@ -11,6 +11,12 @@ import {
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 
 /** "send": the request was claimed or is gone, so the text is a new turn instead. */
+function isTooLong(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 400) return false
+  const body = error.body as { reason?: unknown } | null | undefined
+  return body?.reason === "pending_request_too_long"
+}
+
 export type AddOutcome = "added" | "send" | { failed: string }
 
 const ADD_FAILED_MESSAGE = "Couldn't add that to your request. It's back in the message box."
@@ -33,6 +39,17 @@ export interface HeldRequest {
   /** The held send in ``sendThreadId`` is over: show the server's copy from the next poll. */
   settleSend: (sendThreadId: string) => void
   discard: () => Promise<void>
+}
+
+/** Same request in the same state: polls rebuild it each time, so identity says nothing. */
+function samePending(a: PendingRequest | null, b: PendingRequest | null): boolean {
+  if (a === null || b === null) return a === b
+  return (
+    a.request_id === b.request_id &&
+    a.version === b.version &&
+    a.state === b.state &&
+    a.thread_job_state === b.thread_job_state
+  )
 }
 
 function newPartId(): string {
@@ -75,7 +92,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
       hiddenMessageIds: new Set(),
       removedLocally: false,
     })
-  } else if (seen.pending !== current) {
+  } else if (!samePending(seen.pending, current)) {
     const sentNow =
       seen.pending && !current && !seen.removedLocally
         ? { ...seen.pending, state: "claimed" as const }
@@ -151,10 +168,9 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
         failedPartRef.current = part
         // A 400 (the request would be too long) says what to do; it is not transient.
         return {
-          failed:
-            error instanceof ApiError && error.status === 400
-              ? `${error.message}. It's back in the message box.`
-              : ADD_FAILED_MESSAGE,
+          failed: isTooLong(error)
+            ? `${(error as ApiError).message}. It's back in the message box.`
+            : ADD_FAILED_MESSAGE,
         }
       }
     },

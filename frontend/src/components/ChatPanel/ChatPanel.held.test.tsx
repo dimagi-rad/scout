@@ -28,6 +28,7 @@ interface Server {
   heldSendGate: Promise<void> | null
   /** Answer a held send with a reply that fails after it began. */
   failHeldSendMidStream: boolean
+  discards: number
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -94,6 +95,7 @@ function mockServer(): Server {
     refuseHeldSend: false,
     heldSendGate: null,
     failHeldSendMidStream: false,
+    discards: 0,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -118,6 +120,11 @@ function mockServer(): Server {
       }
       server.pending = null
       return replyResponse(`echo: ${text}`)
+    }
+    if (url.endsWith("/pending-request/") && options?.method === "DELETE") {
+      server.discards += 1
+      server.pending = null
+      return Response.json({ status: "discarded" })
     }
     if (url.endsWith("/pending-request/parts/")) {
       const part = JSON.parse(options?.body as string)
@@ -284,6 +291,8 @@ describe("a message sent while the chat's data loads", () => {
     expect(server.chatBodies.at(-1)?.data).toMatchObject({ pendingRequestVersion: 1 })
     expect(await screen.findByTestId("pending-request-card")).toHaveTextContent(QUESTION)
     expect(screen.queryByText(`${QUESTION}\n\n${FOLLOW_UP}`)).toBeNull()
+    // The card is the way on; an error notice's Retry would resend some other turn.
+    expect(screen.queryByTestId("chat-error")).toBeNull()
     consoleError.mockRestore()
   })
 
@@ -338,5 +347,21 @@ describe("a message sent while the chat's data loads", () => {
     expect(screen.getByText(`${QUESTION} ${FOLLOW_UP}`, { normalizer: (t) => t.replace(/\s+/g, " ").trim() })).toBeInTheDocument()
     expect(screen.getByRole("textbox")).toHaveValue("")
     consoleError.mockRestore()
+  })
+
+  it("can be discarded while it waits", async () => {
+    const server = mockServer()
+    renderChat()
+    await waitFor(() => expect(server.messageLoads).toBe(1))
+    await act(async () => {})
+    await type(QUESTION, "Send message")
+    const card = await screen.findByTestId("pending-request-card")
+
+    await act(async () => {
+      fireEvent.click(within(card).getByTestId("pending-request-discard-waiting"))
+    })
+
+    await waitFor(() => expect(screen.queryByTestId("pending-request-card")).toBeNull())
+    expect(server.discards).toBe(1)
   })
 })

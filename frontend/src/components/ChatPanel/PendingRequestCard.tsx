@@ -60,9 +60,21 @@ export function PendingRequestCard({
           ))}
         </div>
         {phase === "waiting" && (
-          <p className="px-4 pb-2 text-xs text-muted-foreground">
-            Sent as one message when your data is ready
-          </p>
+          <div className="flex items-center justify-between gap-2 px-4 pb-2">
+            <p className="text-xs text-muted-foreground">
+              Sent as one message when your data is ready
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={onDiscard}
+              disabled={actionsDisabled}
+              data-testid="pending-request-discard-waiting"
+            >
+              Discard
+            </Button>
+          </div>
         )}
         {phase === "unanswered" && (
           <div className="flex items-center gap-2 px-4 pb-3">

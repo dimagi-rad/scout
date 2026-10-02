@@ -248,9 +248,9 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
 
   const sameWorkspace = state.workspaceId === workspaceId
   const pendingByThreadId = useMemo(() => {
-    const merged: Record<string, PendingRequest> = sameWorkspace
-      ? { ...state.pendingRequests }
-      : {}
+    // Overrides are cleared only once the next workspace starts polling.
+    if (!sameWorkspace) return {}
+    const merged: Record<string, PendingRequest> = { ...state.pendingRequests }
     for (const [threadId, override] of Object.entries(overrides)) {
       if (override.value === null) delete merged[threadId]
       else merged[threadId] = override.value

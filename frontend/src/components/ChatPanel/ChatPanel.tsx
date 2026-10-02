@@ -520,6 +520,8 @@ export function ChatPanel() {
       return
     }
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
+    // The card is the way on; the error notice's Retry would resend another turn.
+    clearError()
     held.restore(sending.threadId)
     if (sending.extra) returnToComposer(sending.workspaceId, sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -22,6 +22,7 @@ const ACCESS_RETRY_REASONS = FRESHNESS_RETRY_REASONS
 const FINAL_REASONS: ReadonlySet<string> = new Set([
   NO_SOURCES_REASON,
   "message_too_long",
+  "pending_request_too_long",
   "access_denied",
 ])
 
