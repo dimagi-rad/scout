@@ -236,7 +236,7 @@ async def _averify_stale(user_id, stale: dict, budget: VerificationBudget) -> li
             # publication), so the provider adapter's own WARNING is absent for them.
             logger.warning(
                 "Upstream verification unconfirmed: status=%s error_code=%s budget=%s "
-                "elapsed_ms=%d budget_ms=%d user_id=%s connection_id=%s",
+                "batch_elapsed_ms=%d budget_ms=%d user_id=%s connection_id=%s",
                 result.status,
                 result.error_code or "-",
                 budget,

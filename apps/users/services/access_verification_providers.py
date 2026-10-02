@@ -76,7 +76,7 @@ def _log_unconfirmed(
         cause,
         status if status is not None else "-",
         max(0, round((clock() - started) * 1000)),
-        round((deadline - started) * 1000),
+        max(0, round((deadline - started) * 1000)),
         page,
         observation.connection_id,
         observation.user_id,
