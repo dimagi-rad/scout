@@ -242,7 +242,7 @@ export function PendingRequestCard({
               size="sm"
               variant="ghost"
               onClick={onDiscard}
-              disabled={actionsDisabled}
+              disabled={actionsDisabled || saving}
               data-testid="pending-request-discard-waiting"
             >
               Discard
