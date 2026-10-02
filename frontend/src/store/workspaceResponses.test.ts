@@ -23,7 +23,7 @@ afterEach(() => vi.restoreAllMocks())
 
 const lists = [
   { name: "artifacts", start: () => state().artifactActions.fetchArtifacts(), response: (label: string) => ({ results: [artifact(label)] }), read: () => ({ data: state().artifacts, status: state().artifactsStatus, error: state().artifactsError }) },
-  { name: "threads", start: () => state().uiActions.fetchThreads(state().activeDomainId!), response: (label: string) => [thread(label)], read: () => ({ data: state().threads, status: state().threadsStatus, error: state().threadsAccessLostMessage }) },
+  { name: "threads", start: () => state().uiActions.fetchThreads(state().activeDomainId!), response: (label: string) => [thread(label)], read: () => ({ data: state().threads, status: state().threadsStatus, error: state().threadsAccessDenialReason }) },
 ]
 for (const list of lists) {
   describe(list.name, () => {

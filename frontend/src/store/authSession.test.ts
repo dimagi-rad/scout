@@ -36,7 +36,7 @@ function seedPrivateState(store: ReturnType<typeof createAppStore>, suffix = "a"
     domains: [workspace(id)], domainsStatus: "loaded", domainsError: id, activeDomainId: id,
     threadId: id, activeArtifactId: id,
     threads: [{ id, title: id } as AppStore["threads"][number]],
-    threadsStatus: "loaded", threadsAccessLostMessage: id,
+    threadsStatus: "loaded", threadsAccessDenialReason: "no_sources", accessRetryOutcome: id,
     artifacts: [{ id, title: id } as AppStore["artifacts"][number]],
     artifactsStatus: "loaded", artifactsError: id, artifactSearch: id,
     datasetCatalog: { datasets: [] } as unknown as AppStore["datasetCatalog"],
@@ -167,7 +167,7 @@ describe("account-owned store isolation", () => {
     expect(store.getState()).toMatchObject({
       user: null, authStatus: "unauthenticated", activeDomainId: null,
       domains: [], domainsStatus: "idle", domainsError: null,
-      activeArtifactId: null, threads: [], threadsStatus: "idle", threadsAccessLostMessage: null,
+      activeArtifactId: null, threads: [], threadsStatus: "idle", threadsAccessDenialReason: null, accessRetryOutcome: null,
       artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
       datasetCatalog: null, datasetStatus: "idle", datasetError: null,
       selectedDataset: null, selectedDatasetStatus: "idle", selectedDatasetError: null,
@@ -472,5 +472,51 @@ describe("authentication request ordering", () => {
     await login
 
     expect(store.getState().user).toEqual(USER_B)
+  })
+})
+
+describe("composer drafts", () => {
+  const DRAFT_KEY = `scout:draft:${USER_A.id}:workspace-a:thread-a`
+  const seedDraft = () =>
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ text: "private-a", updatedAt: Date.now() }))
+
+  it("keeps drafts when the first identity loads", () => {
+    seedDraft()
+    const store = createAppStore()
+    store.setState({ user: USER_A, authStatus: "authenticated" })
+    expect(localStorage.getItem(DRAFT_KEY)).not.toBeNull()
+  })
+
+  it("drops another account's drafts when an identity loads", () => {
+    const leftover = `scout:draft:${USER_B.id}:workspace-a:thread-a`
+    localStorage.setItem(leftover, JSON.stringify({ text: "private-b", updatedAt: Date.now() }))
+    seedDraft()
+    const store = createAppStore()
+    store.setState({ user: USER_A, authStatus: "authenticated" })
+    expect(localStorage.getItem(leftover)).toBeNull()
+    expect(localStorage.getItem(DRAFT_KEY)).not.toBeNull()
+  })
+
+  it("drops drafts on logout", async () => {
+    const store = signedIn()
+    seedDraft()
+    vi.mocked(api.post).mockResolvedValue(undefined)
+    await store.getState().authActions.logout()
+    expect(localStorage.getItem(DRAFT_KEY)).toBeNull()
+  })
+
+  it("drops drafts on an account switch through login", async () => {
+    const store = signedIn()
+    seedDraft()
+    await loginAs(store, USER_B)
+    expect(localStorage.getItem(DRAFT_KEY)).toBeNull()
+  })
+
+  it("drops drafts when the session expires", async () => {
+    const store = signedIn()
+    seedDraft()
+    vi.mocked(api.get).mockRejectedValue(new ApiError(401, "unauthenticated"))
+    await store.getState().authActions.fetchMe()
+    expect(localStorage.getItem(DRAFT_KEY)).toBeNull()
   })
 })

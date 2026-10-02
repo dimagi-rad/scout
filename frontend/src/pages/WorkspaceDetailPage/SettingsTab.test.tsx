@@ -101,6 +101,22 @@ describe("workspace settings saves", () => {
     expect(screen.queryByTestId("settings-save-name")).not.toBeInTheDocument()
   })
 
+  it("names sources that share a remedy on one line", () => {
+    const sameRemedy = redacted.missing_tenants![0]
+    renderTab({
+      ...redacted,
+      missing_tenants: [
+        { ...sameRemedy, tenant_id: "t2", tenant_name: "Source Two" },
+        { ...sameRemedy, tenant_id: "t3", tenant_name: "Source Three" },
+      ],
+    })
+
+    expect(screen.getByTestId("settings-missing-t2")).toHaveTextContent(
+      "Source Two, Source Three: reconnect CommCare in Connected Accounts",
+    )
+    expect(screen.queryByTestId("settings-missing-t3")).not.toBeInTheDocument()
+  })
+
   it("tells a non-manager only that the prompt is hidden", () => {
     renderTab({ ...redacted, role: "read" })
 

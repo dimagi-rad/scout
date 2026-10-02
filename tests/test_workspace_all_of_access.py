@@ -165,6 +165,21 @@ def test_removed_access_is_distinguished_from_never_having_it(user, two_sources)
 
 
 @pytest.mark.django_db
+def test_denial_names_sources_sharing_a_remedy_in_one_clause(user, two_sources):
+    t1, t2 = two_sources
+    t3 = _tenant("t3", "Source Three")
+    ws = _workspace(user, t1, t2, t3)
+    _join(ws, user)
+
+    body = access_denied_body(resolve_workspace_access_ex(user, ws.id))
+
+    remedy = body["missing_tenants"][0]["remedy"]
+    assert {t["remedy"] for t in body["missing_tenants"]} == {remedy}
+    assert f"'Source One', 'Source Three', 'Source Two': {remedy}." in body["error"]
+    assert body["error"].count(remedy) == 1
+
+
+@pytest.mark.django_db
 def test_ocs_team_gaps_name_the_team_to_connect(user):
     """Wrong-team and unknown-legacy-team OCS rows get distinct, team-specific
     guidance — they are fixed by connecting a team, not by asking for access."""
@@ -187,6 +202,104 @@ def test_ocs_team_gaps_name_the_team_to_connect(user):
     error = access_denied_body(result)["error"]
     assert "connect Open Chat Studio team 'Team-B'" in error
     assert "choosing the team that owns it" in error
+
+
+@pytest.mark.django_db
+def test_archived_teamless_ocs_row_says_reconnect_choosing_the_team(user):
+    """A pre-team OCS row archived by the team-less sweep (#702) comes back only
+    through a reconnect that picks a team, not by asking an OCS admin."""
+    bot_legacy = _tenant("bot-legacy", "Bot Legacy", provider="ocs")
+    bot_orphan = _tenant("bot-orphan", "Bot Orphan", provider="ocs")
+    team_a = ocs_team_connection(user, "team-a")
+    grant_ocs_team_access(user, bot_legacy, team_a, team_slug="")
+    grant_ocs_team_access(user, bot_orphan, team_a, team_slug="")
+    TenantMembership.objects.filter(tenant=bot_orphan).update(
+        connection=None, provider_metadata={"team_slug": "  "}
+    )
+    TenantMembership.objects.filter(user=user).update(archived_at=timezone.now())
+    ws = _workspace(user, bot_legacy, bot_orphan)
+    _join(ws, user)
+
+    result = resolve_workspace_access_ex(user, ws.id)
+
+    assert sorted(_missing(result)) == [
+        ("Bot Legacy", CoverageRecovery.LEGACY_TEAM_UNKNOWN),
+        ("Bot Orphan", CoverageRecovery.LEGACY_TEAM_UNKNOWN),
+    ]
+    error = access_denied_body(result)["error"]
+    assert "choosing the team that owns it" in error
+    assert "ask an admin there" not in error
+
+
+@pytest.mark.django_db
+def test_archived_ocs_row_with_a_team_or_api_key_is_still_access_removed(user):
+    bot_team = _tenant("bot-team", "Bot Team", provider="ocs")
+    bot_key = _tenant("bot-key", "Bot Key", provider="ocs")
+    grant_ocs_team_access(user, bot_team, ocs_team_connection(user, "team-a"))
+    # An API key's experiments can lack a team, so its tombstone is a real removal.
+    grant_tenant_access(user, bot_key)
+    TenantMembership.objects.filter(user=user).update(archived_at=timezone.now())
+    ws = _workspace(user, bot_team, bot_key)
+    _join(ws, user)
+
+    result = resolve_workspace_access_ex(user, ws.id)
+
+    assert sorted(_missing(result)) == [
+        ("Bot Key", CoverageRecovery.ACCESS_REMOVED),
+        ("Bot Team", CoverageRecovery.ACCESS_REMOVED),
+    ]
+
+
+@pytest.mark.django_db
+def test_disconnected_api_key_row_without_a_slug_is_still_access_removed(user):
+    """Disconnecting nulls the connection; a key row's team name still marks it."""
+    bot_key = _tenant("bot-key", "Bot Key", provider="ocs")
+    grant_tenant_access(user, bot_key)
+    TenantMembership.objects.filter(user=user).update(
+        connection=None,
+        archived_at=timezone.now(),
+        provider_metadata={"team_slug": "", "team_name": "Typed Team"},
+    )
+    ws = _workspace(user, bot_key)
+    _join(ws, user)
+
+    result = resolve_workspace_access_ex(user, ws.id)
+
+    assert _missing(result) == [("Bot Key", CoverageRecovery.ACCESS_REMOVED)]
+
+
+@pytest.mark.django_db
+def test_archived_non_ocs_row_without_a_key_is_still_access_removed(user, two_sources):
+    """No other provider records a team, so only OCS rows read as pre-team ones."""
+    source = two_sources[0]
+    grant_tenant_access(user, source)
+    TenantMembership.objects.filter(user=user).update(connection=None, archived_at=timezone.now())
+    ws = _workspace(user, source)
+    _join(ws, user)
+
+    result = resolve_workspace_access_ex(user, ws.id)
+
+    assert _missing(result) == [("Source One", CoverageRecovery.ACCESS_REMOVED)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_async_gate_maps_an_archived_teamless_ocs_row_like_the_sync_gate():
+    user = await User.objects.acreate_user(email="async-teamless@example.com", password="pass")
+    ws = await sync_to_async(_archived_teamless_ocs_fixture)(user)
+
+    result = await aresolve_workspace_access_ex(user, ws.id)
+
+    assert _missing(result) == [("Bot Legacy", CoverageRecovery.LEGACY_TEAM_UNKNOWN)]
+
+
+def _archived_teamless_ocs_fixture(user):
+    bot_legacy = _tenant("bot-legacy-async", "Bot Legacy", provider="ocs")
+    grant_ocs_team_access(user, bot_legacy, ocs_team_connection(user, "team-a"), team_slug="")
+    TenantMembership.objects.filter(user=user).update(archived_at=timezone.now())
+    ws = _workspace(user, bot_legacy)
+    _join(ws, user)
+    return ws
 
 
 @pytest.mark.django_db

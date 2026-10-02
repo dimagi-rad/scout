@@ -231,12 +231,13 @@ def missing_tenants_payload(missing) -> list[dict]:
 
 
 def needed_text(payload: list[dict]) -> str:
-    """``'Source': remedy; ...`` from :func:`missing_tenants_payload`, never
-    rendering a blank source name."""
-    return "; ".join(
-        f"'{t['tenant_name'] or _PROVIDER_LABELS.get(t['provider'], 'a source')}': {t['remedy']}"
-        for t in payload
-    )
+    """``'A', 'B': remedy; ...`` from :func:`missing_tenants_payload`, one clause per
+    distinct remedy, never rendering a blank source name."""
+    names_by_remedy: dict[str, list[str]] = {}
+    for t in payload:
+        name = t["tenant_name"] or _PROVIDER_LABELS.get(t["provider"], "a source")
+        names_by_remedy.setdefault(t["remedy"], []).append(f"'{name}'")
+    return "; ".join(f"{', '.join(names)}: {remedy}" for remedy, names in names_by_remedy.items())
 
 
 def access_denied_body(result: WorkspaceAccess) -> dict:

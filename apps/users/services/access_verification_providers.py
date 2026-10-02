@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from threading import BoundedSemaphore
@@ -15,10 +16,13 @@ from apps.users.models import TenantConnection
 from apps.users.services.access_verification_types import (
     CredentialRequestSnapshot,
     ProviderVerificationResult,
+    VerificationOutcome,
 )
 from apps.users.services.oauth_scope import canonical_provider
 from apps.users.services.token_refresh import is_transient_status
 from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
+
+logger = logging.getLogger(__name__)
 
 PROVIDER_BUDGET_SECONDS = 20.0
 PER_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -55,8 +59,35 @@ class ProcessNetworkLimiter:
 
 NETWORK_LIMITER = ProcessNetworkLimiter(4)
 
+logger = logging.getLogger(__name__)
+
 _UNAVAILABLE = "verification_unavailable"
 _INDETERMINATE = "verification_indeterminate"
+
+
+def _log_unconfirmed(
+    snapshot, provider, cause, *, started, deadline, clock, page=0, status=None, outcome
+):
+    # WARNING, not ERROR: Sentry's logging integration only turns ERROR records into
+    # events, so this is a breadcrumb plus a container log line, not a page. Never
+    # add the URL or headers here -- they carry the credential. budget_ms is what the
+    # caller's deadline left when this call started, separating a slow provider from
+    # a budget already spent upstream of it.
+    observation = snapshot.observation
+    logger.warning(
+        "Upstream access verification %s: provider=%s cause=%s status=%s "
+        "elapsed_ms=%d budget_ms=%s page=%d connection_id=%s user_id=%s scope=%s",
+        outcome,
+        provider,
+        cause,
+        status if status is not None else "-",
+        max(0, round((clock() - started) * 1000)),
+        max(0, round((deadline - started) * 1000)),
+        page,
+        observation.connection_id,
+        observation.user_id,
+        observation.scope_key or "-",
+    )
 
 
 def _default_client_factory():
@@ -163,7 +194,9 @@ def _is_requested_opportunity(response, external_id: str) -> bool:
     )
 
 
-async def _verify_connect_opportunities(client, policy, listing_url, headers, ids, deadline, clock):
+async def _verify_connect_opportunities(
+    client, policy, listing_url, headers, ids, deadline, clock, *, log, unavailable
+):
     """Check each opportunity; None means fall back to the full listing.
 
     A no-access 404 drops that opportunity, which publication then archives as an
@@ -175,7 +208,7 @@ async def _verify_connect_opportunities(client, policy, listing_url, headers, id
     for index, external_id in enumerate(ids):
         remaining = light_deadline - clock()
         if remaining <= 0:
-            return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+            return unavailable("light_deadline_before_request")
         try:
             url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
         except UnsafeProviderURL:
@@ -197,10 +230,13 @@ async def _verify_connect_opportunities(client, policy, listing_url, headers, id
                 ),
                 timeout=request_timeout,
             )
-        except (httpx.RequestError, TimeoutError):
-            return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+        except TimeoutError:
+            return unavailable("light_request_timeout")
+        except httpx.RequestError as exc:
+            # The class name only: str(exc) can carry the request URL.
+            return unavailable(f"light_request_error:{type(exc).__name__}")
         if clock() >= deadline:
-            return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+            return unavailable("light_deadline_after_response", status=response.status_code)
         if _is_connect_no_access_404(response):
             continue
         if response.status_code == 404:
@@ -209,12 +245,24 @@ async def _verify_connect_opportunities(client, policy, listing_url, headers, id
             return None
         status_result = _status_result(response.status_code)
         if status_result is not None:
+            if status_result.outcome == VerificationOutcome.UNAVAILABLE:
+                log("light_http_status", status=response.status_code)
             return status_result
         if not _is_requested_opportunity(response, external_id):
             # A changed response shape must cost a slow check, not every check.
             return None
         confirmed.append(external_id)
     return ProviderVerificationResult.complete(confirmed, scoped=True)
+
+
+def _names_invalid_token(response) -> bool:
+    """Whether a 401 blames the token itself (RFC 6750 3.1), not the caller's access.
+
+    A predicate so only a constant reaches the log: OCS answers 401 both for a dead
+    token and for a valid one whose user has left the team. Diagnostic only for now;
+    nothing decides on it until production shows which one OCS sends for which case.
+    """
+    return 'error="invalid_token"' in response.headers.get("www-authenticate", "")
 
 
 def _status_result(status_code: int):
@@ -308,6 +356,7 @@ async def verify_provider(
     ``external_ids`` are the tenants the caller needs. Connect checks only those
     when there are few, and its result is then authoritative only for them.
     """
+    started = clock()
     deadline = min(
         deadline if deadline is not None else float("inf"),
         clock() + PROVIDER_BUDGET_SECONDS,
@@ -317,6 +366,24 @@ async def verify_provider(
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)
     provider, initial_url, headers = request
     light_ids = _connect_light_ids(snapshot, external_ids)
+
+    def log(cause, *, page=0, status=None, outcome="unavailable"):
+        _log_unconfirmed(
+            snapshot,
+            provider,
+            cause,
+            started=started,
+            deadline=deadline,
+            clock=clock,
+            page=page,
+            status=status,
+            outcome=outcome,
+        )
+
+    def unavailable(cause, *, page=0, status=None):
+        log(cause, page=page, status=status)
+        return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+
     try:
         policy = ProviderURLPolicy(initial_url)
         url = policy.resolve(initial_url)
@@ -325,8 +392,9 @@ async def verify_provider(
 
     remaining = deadline - clock()
     if remaining <= 0:
-        return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+        return unavailable("deadline_before_start")
     acquired = False
+    page = 0
     try:
         # Take the permit through an explicit handle so the ownership transfer is
         # observable. stdlib wait_for does rescue a permit taken just as the wait
@@ -348,17 +416,26 @@ async def verify_provider(
         async with client_factory() as client:
             if light_ids is not None:
                 light_result = await _verify_connect_opportunities(
-                    client, policy, url, headers, light_ids, deadline, clock
+                    client,
+                    policy,
+                    url,
+                    headers,
+                    light_ids,
+                    deadline,
+                    clock,
+                    log=log,
+                    unavailable=unavailable,
                 )
                 if light_result is not None:
                     return light_result
-            for _page_number in range(MAX_PAGES):
+            for page_index in range(MAX_PAGES):
+                page = page_index + 1
                 if url in seen_urls:
                     return ProviderVerificationResult.indeterminate(_INDETERMINATE)
                 seen_urls.add(url)
                 remaining = deadline - clock()
                 if remaining <= 0:
-                    return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+                    return unavailable("deadline_before_request", page=page)
                 try:
                     request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
                     response = await asyncio.wait_for(
@@ -370,12 +447,26 @@ async def verify_provider(
                         ),
                         timeout=request_timeout,
                     )
-                except (httpx.RequestError, TimeoutError):
-                    return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+                except TimeoutError:
+                    return unavailable("request_timeout", page=page)
+                except httpx.RequestError as exc:
+                    # The class name only: str(exc) can carry the request URL.
+                    return unavailable(f"request_error:{type(exc).__name__}", page=page)
                 if clock() >= deadline:
-                    return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+                    return unavailable(
+                        "deadline_after_response", page=page, status=response.status_code
+                    )
                 status_result = _status_result(response.status_code)
+                if response.status_code == 401:
+                    logger.info(
+                        "Provider %s answered verification for connection %s with HTTP 401 (%s)",
+                        provider,
+                        snapshot.observation.connection_id,
+                        "invalid_token" if _names_invalid_token(response) else "no token error",
+                    )
                 if status_result is not None:
+                    if status_result.outcome == VerificationOutcome.UNAVAILABLE:
+                        log("http_status", page=page, status=response.status_code)
                     return status_result
                 try:
                     next_reference, page_rows = _parse_page(provider, response.json(), seen_rows)
@@ -394,7 +485,19 @@ async def verify_provider(
                     return ProviderVerificationResult.indeterminate(_INDETERMINATE)
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)
     except TimeoutError:
-        return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+        # Before the permit is held this is the shared limiter wait; after, a stray
+        # timeout from the client's context manager.
+        return unavailable("timeout" if acquired else "limiter_wait_timeout", page=page)
+    except asyncio.CancelledError:
+        # The caller's own wait_for shares this deadline and can win the race, which
+        # it reports as unavailable; log it so that outcome is not silent either. A
+        # client disconnect or shutdown lands here too, hence "cancelled".
+        log(
+            "cancelled" if acquired else "cancelled_in_limiter_wait",
+            page=page,
+            outcome="cancelled",
+        )
+        raise
     finally:
         if acquired:
             limiter.release()

@@ -28,8 +28,7 @@ export function ChatComposer({
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
 
-  const showSlashMenu =
-    !isStreaming && input.startsWith("/") && !input.slice(1).includes(" ")
+  const showSlashMenu = input.startsWith("/") && !input.slice(1).includes(" ")
   const slashQuery = showSlashMenu ? input.slice(1) : ""
   const filteredCommands = matchSlashCommands(slashQuery, canWrite)
 
@@ -93,7 +92,6 @@ export function ChatComposer({
         }}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
-        disabled={isStreaming}
         className="flex-1"
       />
       {isStreaming ? (
@@ -103,6 +101,7 @@ export function ChatComposer({
           size="icon"
           onClick={onStop}
           aria-label="Stop response"
+          data-testid="chat-stop"
         >
           <Square className="w-4 h-4" aria-hidden="true" />
         </Button>
