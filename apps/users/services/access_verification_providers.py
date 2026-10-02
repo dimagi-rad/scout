@@ -28,6 +28,10 @@ PROVIDER_BUDGET_SECONDS = 20.0
 PER_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_PAGES = 100
 MAX_ROWS = 10_000
+# Above this many requested opportunities, one full listing beats one request each.
+CONNECT_LIGHT_CHECK_MAX_OPPORTUNITIES = 5
+CONNECT_LIGHT_REQUEST_FLOOR_SECONDS = 4.0
+CONNECT_LISTING_RESERVE_SECONDS = 5.0
 
 
 class ProcessNetworkLimiter:
@@ -126,6 +130,175 @@ def _provider_request(snapshot, settings):
     return None
 
 
+def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
+    """The opportunity ids to check one by one, or None to use the full listing.
+
+    ``/export/opp_org_program_list/`` exports every opportunity with a per-row
+    visit count and takes ~10s for users with many opportunities, which alone
+    exhausts the interactive budget. ``/export/opportunity/<id>/`` answers the
+    question for one opportunity cheaply.
+    """
+    if (
+        canonical_provider(snapshot.observation.provider) != "commcare_connect"
+        or snapshot.observation.credential_type != TenantConnection.OAUTH
+        or not external_ids
+        or len(external_ids) > CONNECT_LIGHT_CHECK_MAX_OPPORTUNITIES
+    ):
+        return None
+    ids = tuple(sorted(external_ids))
+    # Connect routes ``<int:opp_id>``; any other id 404s at routing, which must
+    # never be read as a denial, and a zero-padded one comes back renumbered.
+    if not all(
+        external_id.isascii() and external_id.isdigit() and str(int(external_id)) == external_id
+        for external_id in ids
+    ):
+        return None
+    return ids
+
+
+def _is_connect_no_access_404(response) -> bool:
+    """DRF's NotFound body, as opposed to a routing 404 (an HTML page) or a proxy's.
+
+    Connect answers an opportunity the user may not export via
+    ``_get_opportunity_or_404`` with ``{"detail": "Not found."}``. ``detail`` is
+    localized, so only the shape is checked.
+    """
+    if response.status_code != 404:
+        return False
+    media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media_type != "application/json":
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return (
+        isinstance(payload, dict)
+        and set(payload) == {"detail"}
+        and isinstance(payload["detail"], str)
+    )
+
+
+def _is_requested_opportunity(response, external_id: str) -> bool:
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    raw_id = payload.get("id")
+    return (
+        not isinstance(raw_id, bool)
+        and isinstance(raw_id, (int, str))
+        and str(raw_id) == external_id
+    )
+
+
+async def _verify_connect_opportunities(
+    client, policy, listing_url, headers, ids, deadline, clock, *, connection_id, log, unavailable
+):
+    """Check each opportunity; None means fall back to the full listing.
+
+    A no-access 404 is an omission, which publication archives as the listing would
+    have. Once one is seen, a later failure ends the check with what was decided so
+    far rather than discarding that revocation.
+    """
+    # Keep part of the budget back, or the listing fallback could never finish.
+    light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
+    confirmed = []
+    omitted = False
+
+    def settle(index, failure, *, cause, status=None):
+        """``failure`` is a thunk, so a settled attempt does not log as unavailable."""
+        if omitted:
+            log(f"settled_after_omission:{cause}", status=status, outcome="partial")
+            return ProviderVerificationResult.complete(confirmed, scope=ids[:index])
+        return failure()
+
+    for index, external_id in enumerate(ids):
+        remaining = light_deadline - clock()
+        if remaining <= 0:
+            return settle(
+                index,
+                lambda: unavailable("light_deadline_before_request"),
+                cause="light_deadline_before_request",
+            )
+        try:
+            url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
+        except UnsafeProviderURL:
+            return settle(
+                index,
+                lambda: ProviderVerificationResult.indeterminate(_INDETERMINATE),
+                cause="unsafe_url",
+            )
+        # A share of what is left, so one slow opportunity cannot starve the rest,
+        # but never so small that an ordinary slow answer is cut off. On the 10s
+        # interactive budget the floor wins, so allocation is effectively greedy.
+        request_timeout = min(
+            PER_REQUEST_TIMEOUT_SECONDS,
+            remaining,
+            max(remaining / (len(ids) - index), CONNECT_LIGHT_REQUEST_FLOOR_SECONDS),
+        )
+        try:
+            response = await asyncio.wait_for(
+                client.get(
+                    url,
+                    headers=headers,
+                    follow_redirects=False,
+                    timeout=request_timeout,
+                ),
+                timeout=request_timeout,
+            )
+        except TimeoutError:
+            return settle(
+                index, lambda: unavailable("light_request_timeout"), cause="light_request_timeout"
+            )
+        except httpx.RequestError as exc:
+            # The class name only: str(exc) can carry the request URL.
+            cause = f"light_request_error:{type(exc).__name__}"
+            return settle(index, lambda cause=cause: unavailable(cause), cause=cause)
+        if clock() >= deadline:
+            status = response.status_code
+            return settle(
+                index,
+                lambda status=status: unavailable("light_deadline_after_response", status=status),
+                cause="light_deadline_after_response",
+                status=status,
+            )
+        if _is_connect_no_access_404(response):
+            omitted = True
+            continue
+        if response.status_code == 404:
+            # Not DRF's answer, so likely the route itself is gone; the listing
+            # can still decide, and must never read this as an omission.
+            return settle(index, lambda: None, cause="route_404", status=404)
+        status_result = _status_result(response.status_code)
+        if response.status_code == 401:
+            logger.info(
+                "Provider commcare_connect answered verification for connection %s "
+                "with HTTP 401 (%s)",
+                connection_id,
+                "invalid_token" if _names_invalid_token(response) else "no token error",
+            )
+            # Credential-level, so it outranks a per-opportunity omission.
+            return status_result
+        if status_result is not None:
+
+            def failed(result=status_result, status=response.status_code):
+                if result.outcome == VerificationOutcome.UNAVAILABLE:
+                    log("light_http_status", status=status)
+                return result
+
+            return settle(index, failed, cause="light_http_status", status=response.status_code)
+        if not _is_requested_opportunity(response, external_id):
+            # A changed response shape must cost a slow check, not every check.
+            return settle(
+                index, lambda: None, cause="unrecognized_answer", status=response.status_code
+            )
+        confirmed.append(external_id)
+    return ProviderVerificationResult.complete(confirmed, scope=ids)
+
+
 def _names_invalid_token(response) -> bool:
     """Whether a 401 blames the token itself (RFC 6750 3.1), not the caller's access.
 
@@ -220,8 +393,13 @@ async def verify_provider(
     client_factory: Callable[[], Any] = _default_client_factory,
     settings=django_settings,
     limiter: ProcessNetworkLimiter | asyncio.Semaphore = NETWORK_LIMITER,
+    external_ids: frozenset[str] = frozenset(),
 ) -> ProviderVerificationResult:
-    """Return a complete, bounded provider listing without touching the database."""
+    """Return a complete, bounded provider listing without touching the database.
+
+    ``external_ids`` are the tenants the caller needs. Connect checks only those
+    when there are few, and its result is then authoritative only for them.
+    """
     started = clock()
     deadline = min(
         deadline if deadline is not None else float("inf"),
@@ -231,6 +409,7 @@ async def verify_provider(
     if request is None:
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)
     provider, initial_url, headers = request
+    light_ids = _connect_light_ids(snapshot, external_ids)
 
     def log(cause, *, page=0, status=None, outcome="unavailable"):
         _log_unconfirmed(
@@ -279,6 +458,21 @@ async def verify_provider(
         seen_rows: dict[str, str] = {}
         total_rows = 0
         async with client_factory() as client:
+            if light_ids is not None:
+                light_result = await _verify_connect_opportunities(
+                    client,
+                    policy,
+                    url,
+                    headers,
+                    light_ids,
+                    deadline,
+                    clock,
+                    connection_id=snapshot.observation.connection_id,
+                    log=log,
+                    unavailable=unavailable,
+                )
+                if light_result is not None:
+                    return light_result
             for page_index in range(MAX_PAGES):
                 page = page_index + 1
                 if url in seen_urls:

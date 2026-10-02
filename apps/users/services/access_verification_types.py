@@ -57,10 +57,21 @@ class VerificationResult:
     tenant_ids: frozenset[UUID] = frozenset()
     denied_tenant_id: UUID | None = None
     error_code: str = ""
+    # The tenants a COMPLETE is authoritative for, or None for the whole connection.
+    # A scoped COMPLETE says nothing about other tenants, so it must not archive them.
+    scope: frozenset[UUID] | None = None
+
+    @property
+    def scoped(self) -> bool:
+        return self.scope is not None
 
     @classmethod
-    def complete(cls, tenant_ids) -> VerificationResult:
-        return cls(VerificationOutcome.COMPLETE, frozenset(tenant_ids))
+    def complete(cls, tenant_ids, *, scope=None) -> VerificationResult:
+        return cls(
+            VerificationOutcome.COMPLETE,
+            frozenset(tenant_ids),
+            scope=None if scope is None else frozenset(scope),
+        )
 
     @classmethod
     def credential_rejected(cls, error_code: str) -> VerificationResult:
@@ -89,10 +100,20 @@ class ProviderVerificationResult:
     external_ids: frozenset[str] = frozenset()
     denied_external_id: str | None = None
     error_code: str = ""
+    # The external ids a COMPLETE is authoritative for; see VerificationResult.scope.
+    scope: frozenset[str] | None = None
+
+    @property
+    def scoped(self) -> bool:
+        return self.scope is not None
 
     @classmethod
-    def complete(cls, external_ids) -> ProviderVerificationResult:
-        return cls(VerificationOutcome.COMPLETE, frozenset(external_ids))
+    def complete(cls, external_ids, *, scope=None) -> ProviderVerificationResult:
+        return cls(
+            VerificationOutcome.COMPLETE,
+            frozenset(external_ids),
+            scope=None if scope is None else frozenset(scope),
+        )
 
     @classmethod
     def credential_rejected(cls, error_code: str) -> ProviderVerificationResult:
@@ -100,6 +121,7 @@ class ProviderVerificationResult:
 
     @classmethod
     def tenant_denied(cls, external_id: str, error_code: str) -> ProviderVerificationResult:
+        # No provider adapter emits this today; kept so the outcome set stays total.
         return cls(
             VerificationOutcome.TENANT_DENIED,
             denied_external_id=external_id,

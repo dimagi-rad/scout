@@ -42,6 +42,7 @@ from apps.users.services.oauth_scope import (
 )
 from apps.users.services.token_refresh import credential_fingerprint
 from apps.users.services.upstream_denial import record_validated_upstream_denial
+from apps.workspaces import access_cache
 
 PROOF_MAX_AGE = timedelta(minutes=5)
 LEASE_DURATION = timedelta(seconds=30)
@@ -699,7 +700,8 @@ def _publish_verification_receipt(
             return PublicationReceipt(PublicationStatus.REJECTED)
         accepted_tenant_ids = frozenset()
         if result.outcome == VerificationOutcome.COMPLETE:
-            if current.upstream_denial_code:
+            # A scoped result that confirmed nothing proves nothing about the credential.
+            if current.upstream_denial_code and (result.tenant_ids or not result.scoped):
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
             # Claims match on the canonical provider, so publication must too or an
@@ -745,6 +747,10 @@ def _publish_verification_receipt(
                 returned_memberships.update(archived_at=None)
                 returned = list(returned_memberships)
                 omission_scope = owned_history
+            if result.scoped:
+                omission_scope = omission_scope.filter(
+                    tenant_id__in=result.scope & claim.requested_tenant_ids
+                )
             _configure_transaction_deadline(deadline, clock)
             omitted_ids = list(
                 omission_scope.exclude(tenant_id__in=result.tenant_ids).values_list(
@@ -752,9 +758,12 @@ def _publish_verification_receipt(
                 )
             )
             _configure_transaction_deadline(deadline, clock)
-            omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
+            if omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
                 archived_at=decision_now
-            )
+            ):
+                # As for a recorded denial: no grant cached before this may outlive it.
+                user_id = current.user_id
+                transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
             # Legacy discovery can restore a tombstone without our lease; it must
             # not revive an older positive proof after authoritative omission.
             _configure_transaction_deadline(deadline, clock)
@@ -815,9 +824,11 @@ def _publish_verification_receipt(
                 control.lease_expires_at = None
                 control.save(update_fields=["lease_token", "lease_expires_at"])
                 return PublicationReceipt(PublicationStatus.REJECTED)
+            # Like an omission: the denied tenant's older proof must not stay reusable.
             UpstreamAccessProof.objects.filter(
                 connection=current, tenant_id=result.denied_tenant_id
             ).update(
+                verified_at=None,
                 last_attempt_result=result.outcome.value,
                 last_error_code=result.error_code,
             )

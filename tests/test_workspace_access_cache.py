@@ -16,6 +16,8 @@ from django.test.utils import CaptureQueriesContext
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
+from apps.users.services.access_verification import claim_verification, publish_verification
+from apps.users.services.access_verification_types import VerificationResult
 from apps.users.services.tenant_resolution import _sync_memberships
 from apps.users.services.upstream_denial import record_validated_upstream_denial
 from apps.workspaces import access as access_module
@@ -43,6 +45,7 @@ from apps.workspaces.services.workspace_service import (
 )
 from config.middleware.workspace_access_cache import WorkspaceAccessCacheMiddleware
 from tests.tenant_access import grant_tenant_access
+from tests.upstream_proofs import make_proof_stale
 
 READ_KEY = (WorkspaceRole.READ, VerificationBudget.INTERACTIVE)
 
@@ -343,6 +346,25 @@ def test_an_upstream_denial_drops_the_users_cached_decisions(
         )
         # Not before commit: a sibling tool call could re-cache the unarchived rows.
         assert resolve_workspace_access_ex(user, workspace.id).granted
+    for callback in callbacks:
+        callback()
+
+    assert resolve_workspace_access_ex(user, workspace.id).denied_reason == TENANT_ACCESS_LOST
+
+
+@pytest.mark.django_db
+def test_an_upstream_omission_drops_the_users_cached_decisions(
+    scope, user, workspace, tenant, django_capture_on_commit_callbacks
+):
+    """A6 for the omission path, which a Connect per-opportunity 404 takes."""
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    connection = TenantMembership.objects.get(user=user, tenant=tenant).connection
+    make_proof_stale(user, tenant)
+    claim = claim_verification(user.id, connection.id, {tenant.id})
+
+    with django_capture_on_commit_callbacks() as callbacks:
+        publish_verification(claim, VerificationResult.complete(set(), scope={tenant.id}))
+    assert resolve_workspace_access_ex(user, workspace.id).granted
     for callback in callbacks:
         callback()
 
