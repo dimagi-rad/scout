@@ -45,7 +45,7 @@ async def test_run_materialization_observes_artifact_recovery(workspace, user):
         )
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["workspace_recovery_id"] == str(recovery.id)
-    assert "Nothing will resume this conversation" in result["data"]["message"]
+    assert "This recovery does not resume the conversation" in result["data"]["message"]
     assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
     dispatch.assert_not_awaited()
 

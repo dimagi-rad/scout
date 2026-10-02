@@ -1555,9 +1555,9 @@ async def run_materialization(
     Defers the work to the procrastinate ``materialize_workspace`` task and
     creates a ThreadJob row tying that procrastinate job to the calling chat
     thread. Returns ``status: started`` right away — the chat agent should
-    acknowledge briefly to the user and end its turn. When materialization
-    finishes, a chained ``resume_thread_after_materialization`` task injects
-    completion into the conversation via the LangGraph checkpointer.
+    relay the result's message briefly and end its turn. Only a result whose
+    message says this conversation will resume is backed by a chained
+    ``resume_thread_after_materialization`` task; any other result resumes nothing.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -1627,9 +1627,10 @@ async def run_materialization(
                     "workspace_recovery_id": str(recovery.id),
                     "message": (
                         "Artifact data recovery is already running for this workspace. "
-                        "Do not start another load. Nothing will resume this conversation "
-                        "when it finishes; tell the user to ask again once it has finished. "
-                        "Check get_schema_status for completion."
+                        "Do not start another load. This recovery does not resume the "
+                        "conversation when it finishes; unless a load this conversation "
+                        "started will resume it, tell the user to ask again once it has "
+                        "finished. Check get_schema_status for completion."
                     ),
                 },
                 schema="",
