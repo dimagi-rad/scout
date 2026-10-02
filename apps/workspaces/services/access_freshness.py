@@ -70,6 +70,14 @@ FRESHNESS_DENIAL_REASONS = (
     VERIFICATION_IN_PROGRESS,
 )
 RETRYABLE_REASONS = frozenset({VERIFICATION_UNAVAILABLE, VERIFICATION_IN_PROGRESS})
+_UNCONFIRMED_STATUSES = frozenset(
+    {
+        AccessVerificationStatus.UNAVAILABLE,
+        AccessVerificationStatus.INDETERMINATE,
+        AccessVerificationStatus.IN_PROGRESS,
+        AccessVerificationStatus.RETRY,
+    }
+)
 
 # Registry codes for surfaces that report per-source failures (worker summaries,
 # MCP envelopes); reuse the codes whose remedies already exist.
@@ -201,7 +209,8 @@ def most_severe(reasons) -> str | None:
 
 
 async def _averify_stale(user_id, stale: dict, budget: VerificationBudget) -> list:
-    deadline = time.monotonic() + BUDGET_SECONDS[budget]
+    started = time.monotonic()
+    deadline = started + BUDGET_SECONDS[budget]
     results = await asyncio.gather(
         *(
             verify_connection_access(user_id, connection_id, tenant_ids, deadline=deadline)
@@ -221,6 +230,20 @@ async def _averify_stale(user_id, stale: dict, budget: VerificationBudget) -> li
                 user_id,
                 connection_id,
                 exc_info=result,
+            )
+        elif result.status in _UNCONFIRMED_STATUSES:
+            # Most of these never reach the provider (lease wait, token refresh,
+            # publication), so the provider adapter's own WARNING is absent for them.
+            logger.warning(
+                "Upstream verification unconfirmed: status=%s error_code=%s budget=%s "
+                "batch_elapsed_ms=%d budget_ms=%d user_id=%s connection_id=%s",
+                result.status,
+                result.error_code or "-",
+                budget,
+                round((time.monotonic() - started) * 1000),
+                round(BUDGET_SECONDS[budget] * 1000),
+                user_id,
+                connection_id,
             )
     return [
         AccessVerificationResult(AccessVerificationStatus.UNAVAILABLE, VERIFICATION_UNAVAILABLE)

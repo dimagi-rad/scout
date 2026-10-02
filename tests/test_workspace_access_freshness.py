@@ -17,6 +17,10 @@ from django.utils import timezone
 
 from apps.users.models import Tenant, TenantMembership, UpstreamAccessProof, VerificationControl
 from apps.users.services.access_verification import PROOF_MAX_AGE, proofs_are_fresh
+from apps.users.services.access_verification_types import (
+    AccessVerificationResult,
+    AccessVerificationStatus,
+)
 from apps.workspaces import access as access_module
 from apps.workspaces.access import (
     INSUFFICIENT_ROLE,
@@ -416,3 +420,65 @@ def test_granted_access_logs_no_freshness_denial(user, workspace, upstream_provi
 
     assert resolve_workspace_access_ex(user, workspace.id).granted
     assert not [r for r in caplog.records if r.getMessage().startswith(FRESHNESS_DENIAL_EVENT)]
+
+
+UNCONFIRMED_EVENT = "Upstream verification unconfirmed"
+
+
+def _unconfirmed_records(caplog):
+    return [r for r in caplog.records if r.getMessage().startswith(UNCONFIRMED_EVENT)]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unconfirmed_recheck_logs_a_warning_with_its_budget(
+    user, workspace, tenant, upstream_provider, caplog
+):
+    caplog.set_level(logging.WARNING, logger="apps.workspaces.services.access_freshness")
+    make_proof_stale(user, tenant)
+    membership = TenantMembership.objects.get(user=user, tenant=tenant)
+    upstream_provider.failure = httpx.ConnectError("provider down")
+
+    assert resolve_workspace_access_ex(user, workspace.id).denied_reason == VERIFICATION_UNAVAILABLE
+
+    [record] = _unconfirmed_records(caplog)
+    message = record.getMessage()
+    assert record.levelno == logging.WARNING
+    assert "status=unavailable" in message
+    assert "budget=interactive" in message
+    assert "budget_ms=10000" in message
+    assert f"connection_id={membership.connection_id}" in message
+    assert f"user_id={user.pk}" in message
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lease_wait_timeout_is_logged_though_no_provider_was_called(
+    user, workspace, tenant, caplog
+):
+    caplog.set_level(logging.WARNING, logger="apps.workspaces.services.access_freshness")
+    make_proof_stale(user, tenant)
+
+    with patch(
+        "apps.workspaces.services.access_freshness.verify_connection_access",
+        AsyncMock(
+            return_value=AccessVerificationResult(
+                AccessVerificationStatus.IN_PROGRESS, VERIFICATION_IN_PROGRESS
+            )
+        ),
+    ):
+        result = resolve_workspace_access_ex(user, workspace.id)
+
+    assert result.denied_reason == VERIFICATION_IN_PROGRESS
+    [record] = _unconfirmed_records(caplog)
+    assert "status=in_progress" in record.getMessage()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_verified_recheck_logs_nothing_unconfirmed(
+    user, workspace, tenant, upstream_provider, caplog
+):
+    caplog.set_level(logging.WARNING, logger="apps.workspaces.services.access_freshness")
+    make_proof_stale(user, tenant)
+    upstream_provider.domains = [tenant.external_id]
+
+    assert resolve_workspace_access_ex(user, workspace.id).granted
+    assert _unconfirmed_records(caplog) == []

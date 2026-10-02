@@ -592,3 +592,174 @@ async def test_exact_row_bound_is_complete(settings):
     )
     assert result.outcome == VerificationOutcome.COMPLETE
     assert len(result.external_ids) == 10000
+
+
+_PROVIDERS_LOGGER = "apps.users.services.access_verification_providers"
+
+
+def _unavailable_records(caplog):
+    return [
+        record
+        for record in caplog.records
+        if record.name == _PROVIDERS_LOGGER
+        and record.getMessage().startswith("Upstream access verification ")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("responses", "deadline", "cause", "status"),
+    [
+        ([_response(503)], 100.0, "cause=http_status", "status=503"),
+        ([httpx.ConnectError("offline")], 100.0, "cause=request_error:ConnectError", "status=-"),
+        ([httpx.ReadTimeout("slow")], 100.0, "cause=request_error:ReadTimeout", "status=-"),
+        ([_response(payload={})], 0.0, "cause=deadline_before_start", "status=-"),
+    ],
+)
+async def test_unavailable_logs_cause_at_warning_without_secrets(
+    settings, caplog, responses, deadline, cause, status
+):
+    settings.OCS_URL = "https://ocs.example"
+    request = _request("ocs", credential="super-secret-token")
+    caplog.set_level("WARNING", logger=_PROVIDERS_LOGGER)
+
+    result, _ = await _verify(request, responses, settings=settings, deadline=deadline)
+
+    assert result.outcome == VerificationOutcome.UNAVAILABLE
+    [record] = _unavailable_records(caplog)
+    assert record.levelname == "WARNING"
+    message = record.getMessage()
+    assert "provider=ocs" in message
+    assert cause in message
+    assert status in message
+    assert "elapsed_ms=" in message
+    assert f"connection_id={request.observation.connection_id}" in message
+    assert "user_id=1" in message
+    assert "budget_ms=" in message
+    assert "super-secret-token" not in message
+    assert "ocs.example" not in message
+
+
+@pytest.mark.asyncio
+async def test_unavailable_log_reports_request_timeout_and_elapsed_ms(settings, caplog):
+    settings.OCS_URL = "https://ocs.example"
+    caplog.set_level("WARNING", logger=_PROVIDERS_LOGGER)
+
+    class HangingClient(_Client):
+        async def get(self, url, **kwargs):
+            await asyncio.Event().wait()
+
+    loop = asyncio.get_running_loop()
+    result = await verify_provider(
+        _request("ocs"),
+        deadline=loop.time() + 0.05,
+        clock=loop.time,
+        client_factory=lambda: HangingClient([]),
+        settings=settings,
+        limiter=asyncio.Semaphore(1),
+    )
+
+    assert result.outcome == VerificationOutcome.UNAVAILABLE
+    [record] = _unavailable_records(caplog)
+    message = record.getMessage()
+    assert "cause=request_timeout" in message
+    assert "page=1" in message
+    elapsed_ms = int(message.split("elapsed_ms=")[1].split()[0])
+    assert elapsed_ms >= 40
+
+
+@pytest.mark.asyncio
+async def test_unavailable_log_reports_limiter_wait_timeout(settings, caplog):
+    settings.OCS_URL = "https://ocs.example"
+    caplog.set_level("WARNING", logger=_PROVIDERS_LOGGER)
+    limiter = ProcessNetworkLimiter(1)
+    await limiter.acquire()
+    try:
+        result = await verify_provider(
+            _request("ocs"),
+            settings=settings,
+            limiter=limiter,
+            client_factory=Mock(),
+            deadline=asyncio.get_running_loop().time() + 0.03,
+        )
+    finally:
+        limiter.release()
+
+    assert result.outcome == VerificationOutcome.UNAVAILABLE
+    [record] = _unavailable_records(caplog)
+    assert "cause=limiter_wait_timeout" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_non_unavailable_outcomes_do_not_log_unavailable(settings, caplog):
+    settings.OCS_URL = "https://ocs.example"
+    caplog.set_level("WARNING", logger=_PROVIDERS_LOGGER)
+
+    rejected, _ = await _verify(_request("ocs"), [_response(401)], settings=settings)
+    indeterminate, _ = await _verify(_request("ocs"), [_response(403)], settings=settings)
+
+    assert rejected.outcome != VerificationOutcome.UNAVAILABLE
+    assert indeterminate.outcome != VerificationOutcome.UNAVAILABLE
+    assert _unavailable_records(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_by_the_caller_is_logged_and_propagates(settings, caplog):
+    settings.OCS_URL = "https://ocs.example"
+    caplog.set_level("WARNING", logger=_PROVIDERS_LOGGER)
+    started = asyncio.Event()
+
+    class HangingClient(_Client):
+        async def get(self, url, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.ensure_future(
+        verify_provider(
+            _request("ocs"),
+            deadline=100.0,
+            clock=lambda: 0.0,
+            client_factory=lambda: HangingClient([]),
+            settings=settings,
+            limiter=asyncio.Semaphore(1),
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    [record] = _unavailable_records(caplog)
+    assert record.getMessage().startswith("Upstream access verification cancelled")
+    assert "cause=cancelled" in record.getMessage()
+    assert "page=1" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_log_reports_a_response_past_the_deadline(settings, caplog):
+    settings.OCS_URL = "https://ocs.example"
+    caplog.set_level("WARNING", logger=_PROVIDERS_LOGGER)
+    now = [0.0]
+
+    class SlowClient(_Client):
+        async def get(self, url, **kwargs):
+            now[0] = 6.0
+            return await super().get(url, **kwargs)
+
+    client = SlowClient([_response(payload={"results": [], "next": None})])
+    result = await verify_provider(
+        _request("ocs"),
+        deadline=5.0,
+        clock=lambda: now[0],
+        client_factory=lambda: client,
+        settings=settings,
+        limiter=asyncio.Semaphore(1),
+    )
+
+    assert result.outcome == VerificationOutcome.UNAVAILABLE
+    [record] = _unavailable_records(caplog)
+    message = record.getMessage()
+    assert "cause=deadline_after_response" in message
+    assert "status=200" in message
+    assert "elapsed_ms=6000" in message
+    assert "budget_ms=5000" in message

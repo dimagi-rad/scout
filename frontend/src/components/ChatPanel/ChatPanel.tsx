@@ -1,6 +1,7 @@
 import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, type UIMessage } from "ai"
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useLocation } from "react-router-dom"
 import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
@@ -133,6 +134,10 @@ export function ChatPanel() {
   // even though useChat caches the transport from the first render.
   const contextRef = useRef({ workspaceId: activeDomainId, threadId })
   contextRef.current = { workspaceId: activeDomainId, threadId }
+  // The thread whose turn useChat is running. A switch does not abort it, so its
+  // outcome can land while another thread is shown.
+  const turnThreadRef = useRef<string | null>(null)
+  const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
 
   const [transport] = useState(
     () =>
@@ -144,7 +149,9 @@ export function ChatPanel() {
       }),
   )
 
-  const { messages, sendMessage, status, stop, error, setMessages, regenerate } = useChat({
+  const {
+    messages, sendMessage, status, stop, error, setMessages, regenerate, clearError,
+  } = useChat({
     transport,
     onData: (part) => {
       const retryAfter = busyRetryAfter(part)
@@ -173,11 +180,13 @@ export function ChatPanel() {
   // A pending busy retry, or a notice whose Retry would regenerate, belongs to this
   // thread; never replay it into another. threadId is the trigger: this cleanup runs
   // on every thread change, so the dependency must stay even though it isn't read.
+  // setMessages does not clear useChat's error, so drop the error notice explicitly.
   useEffect(() => () => {
     cancelBusyRetry()
     setBusyNotice(false)
     setOverloadNotice(false)
-  }, [threadId, cancelBusyRetry])
+    clearError()
+  }, [threadId, cancelBusyRetry, clearError])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -328,6 +337,14 @@ export function ChatPanel() {
     if (!wasRunning || (status !== "ready" && status !== "error")) return
     // Any finished run releases this thread's "retrying" slot, hard errors included.
     busyTracker.settle(busyToken)
+    if (turnThreadRef.current !== contextRef.current.threadId) {
+      // The turn belongs to a thread the user has left: regenerate (a busy retry or the
+      // notice's Retry) would resend the shown thread's last message instead.
+      busyHitRef.current = null
+      hitRetryableRef.current = false
+      if (status === "error") clearError()
+      return
+    }
     if (status === "error" && !busyError) {
       busyHitRef.current = null
       return
@@ -370,7 +387,7 @@ export function ChatPanel() {
       retriedRef.current = false
       setOverloadNotice(true)
     }
-  }, [status, regenerate, busyToken, busyError])
+  }, [status, regenerate, busyToken, busyError, clearError])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -381,6 +398,7 @@ export function ChatPanel() {
   function handleSend(text: string) {
     resetOverloadState()
     setStoppedNotice(false)
+    turnThreadRef.current = threadId
     sendMessage({ text })
   }
 
@@ -390,8 +408,13 @@ export function ChatPanel() {
     void stop()
   }
 
-  function handleOverloadRetry() {
+  // regenerate resends the last user message, dropping any partial reply to it. After a
+  // mid-stream failure the turn was already checkpointed, so the backend records the
+  // message twice, as with a manual resend or the overload retry.
+  function handleRetry() {
     resetOverloadState()
+    setStoppedNotice(false)
+    turnThreadRef.current = threadId
     void regenerate()
   }
 
@@ -463,10 +486,15 @@ export function ChatPanel() {
           {isStreaming && <ChatThinkingIndicator />}
           {stoppedNotice && <ChatStoppedNotice />}
           {error && !busyError && (
-            <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />
+            <ChatErrorNotice
+              error={error}
+              onStartNewThread={startFreshThread}
+              onRetry={handleRetry}
+              pathPrefix={pathPrefix}
+            />
           )}
-          {overloadNotice && <ChatOverloadNotice onRetry={handleOverloadRetry} />}
-          {busyNotice && <ChatBusyNotice onRetry={handleOverloadRetry} />}
+          {overloadNotice && <ChatOverloadNotice onRetry={handleRetry} />}
+          {busyNotice && <ChatBusyNotice onRetry={handleRetry} />}
         </div>
 
         {/* Materialization progress banner — always visible when a job is active for this thread */}

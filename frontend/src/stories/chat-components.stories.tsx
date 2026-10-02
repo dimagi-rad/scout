@@ -413,6 +413,7 @@ export const ErrorNotice: Story = {
       <ChatErrorNotice
         error={new Error("Thread not found")}
         onStartNewThread={() => undefined}
+        onRetry={() => undefined}
       />
     </div>
   ),

@@ -209,7 +209,8 @@ class TestChatEndpointValidation:
         )
         assert response.status_code == 400
         body = json.loads(response.content)
-        assert "10000" in body["error"]
+        assert "10,000" in body["error"]
+        assert body["reason"] == "message_too_long"
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
@@ -223,6 +224,10 @@ class TestChatEndpointValidation:
             content_type="application/json",
         )
         assert response.status_code == 403
+        assert json.loads(response.content) == {
+            "error": "Workspace not found or access denied.",
+            "reason": "access_denied",
+        }
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
