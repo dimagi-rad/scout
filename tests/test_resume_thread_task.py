@@ -1102,6 +1102,7 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     span_cm.__enter__ = MagicMock(return_value=span)
     span_cm.__exit__ = MagicMock(return_value=False)
 
+    handler = object()
     with (
         patch(
             "apps.workspaces.tasks._build_agent_for_resume",
@@ -1111,8 +1112,11 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
             "apps.workspaces.tasks._resume_langfuse_span",
             return_value=span_cm,
         ) as span_helper,
+        patch("apps.workspaces.tasks.get_langfuse_callback", return_value=handler),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert mock_agent.ainvoke.await_args.args[1]["callbacks"] == [handler]
 
     span_helper.assert_called_once()
     kwargs = span_helper.call_args.kwargs
