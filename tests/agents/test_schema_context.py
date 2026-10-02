@@ -53,9 +53,10 @@ async def test_semantic_context_active_run_takes_precedence_over_active_model(
     assert "in progress" in result.lower()
     if interactive:
         assert "trigger another" in result.lower()
-        assert "resume" not in result.lower()
+        assert "will resume automatically" not in result.lower()
         assert "if this conversation" not in result.lower()
-        assert "do not promise an automatic follow-up" in result.lower()
+        assert "nothing will resume this conversation" in result.lower()
+        assert "ask their question again" in result.lower()
     else:
         assert "waits" in result.lower()
     assert "Data is loaded and ready" not in result
@@ -96,7 +97,8 @@ async def test_refresh_keeps_previous_data_queryable_only_when_ready(
         assert "do not trigger another" in result.lower()
         assert "do not call other data tools" not in result.lower()
         assert "semantic_query" in result
-        assert "do not promise an automatic follow-up" in result.lower()
+        assert "nothing will resume this conversation" in result.lower()
+        assert "will resume automatically" not in result.lower()
     else:
         assert "previously loaded data" not in result.lower()
         assert "Data is loaded and ready" not in result

@@ -235,10 +235,11 @@ BASE_SYSTEM_PROMPT = _render(
 2. Otherwise, tell the user the data isn't currently queryable and ask whether
    to re-materialize before calling `run_materialization`.
 
-When you call it, it returns immediately with `status: started`: acknowledge that
-in one sentence and end your turn, and the system will resume the conversation
-when loading completes. If it returns `already_in_progress`, relay its message
-instead of promising a follow-up.""",
+It returns immediately: tell the user in one sentence what its result says and end
+your turn. A conversation resumes on its own only when a tool result in it, or the
+Data Availability section, says this conversation will resume automatically. Say
+you will continue only then; otherwise nothing will resume it, so tell the user to
+ask again once loading finishes, without naming a time.""",
 )
 
 # Headless (recipe) runs have no user to answer an ask-first question and no

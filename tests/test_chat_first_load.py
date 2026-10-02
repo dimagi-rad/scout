@@ -1,6 +1,7 @@
 """A chat in a workspace with no data starts its load as the chatting user (#408)."""
 
 import json
+import re
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -14,6 +15,7 @@ from procrastinate.contrib.django.models import ProcrastinateJob
 from apps.agents.graph.base import (
     _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE,
     _LOAD_STARTED_FOR_THIS_CHAT_GUIDANCE,
+    _build_system_prompt,
     _fetch_semantic_model_context,
 )
 from apps.chat.models import Thread, ThreadJob
@@ -34,6 +36,20 @@ from apps.workspaces.tasks import materialize_workspace
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
+
+
+# The one place the prompt may name the promise: the rule allowing it only when a
+# tool result or the Data Availability section says so.
+_CONDITIONAL_PROMISE = "says this conversation will resume automatically"
+_PROMISE = re.compile(
+    r"resume automatically|system will resume|resumes this conversation|"
+    r"I'll continue|continue when it finishes|pick this up",
+    re.IGNORECASE,
+)
+
+
+def _promises(prompt):
+    return _PROMISE.findall(prompt.replace(_CONDITIONAL_PROMISE, ""))
 
 
 def _delete_jobs(job_ids):
@@ -325,3 +341,43 @@ class TestPromptWhileTheLoadIsQueued:
 
         assert _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE in context
         assert "No data has been loaded yet" not in context
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs")
+class TestFullPromptPromisesAResumeOnlyWhenBound:
+    """An unbound load's chat must not read a resume promise anywhere in its prompt,
+    and the bound chat must keep its own."""
+
+    @pytest.mark.parametrize("write_capable", [True, False])
+    async def test_a_chat_with_no_bound_load_is_told_nothing_resumes_it(self, write_capable):
+        ws, tenant = await _workspace(f"orphan-{write_capable}")
+        role = WorkspaceRole.READ_WRITE if write_capable else WorkspaceRole.READ
+        user, _ = await _member(ws, tenant, f"chatter-orphan-{write_capable}@b.c", role)
+        thread = await Thread.objects.acreate(workspace=ws, user=user)
+        await materialize_workspace.defer_async(
+            workspace_id=str(ws.id), user_id="", notify_thread=False
+        )
+
+        stable, volatile = await _build_system_prompt(
+            ws, user, write_capable=write_capable, conversation_id=str(thread.id)
+        )
+
+        assert _promises(stable + volatile) == []
+        assert "Nothing will resume this conversation" in volatile
+        assert "without naming a time" in volatile
+
+    async def test_the_chat_a_load_is_bound_to_is_promised_a_resume(self):
+        ws, tenant = await _workspace("bound-full")
+        user, _ = await _member(ws, tenant, "chatter-bound-full@b.c")
+        thread = await Thread.objects.acreate(workspace=ws, user=user)
+        assert await astart_chat_load(workspace=ws, user=user, thread_id=thread.id)
+
+        stable, volatile = await _build_system_prompt(
+            ws, user, write_capable=True, conversation_id=str(thread.id)
+        )
+
+        assert _promises(stable) == []
+        assert _promises(volatile) == ["resume automatically"]
+        assert "Nothing will resume this conversation" not in volatile
