@@ -2916,7 +2916,6 @@ def _resume_langfuse_span(
         except Exception:
             logger.warning("resume: failed to open Langfuse span", exc_info=True)
             _close_langfuse_stack(stack, None)
-            stack = contextlib.ExitStack()
             span = None
     try:
         yield span
