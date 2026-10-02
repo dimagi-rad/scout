@@ -492,9 +492,13 @@ async def test_resume_bumps_thread_updated_at_on_success():
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
-    with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=mock_agent),
+    schedule_title = AsyncMock()
+    with (
+        patch(
+            "apps.workspaces.tasks._build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+        patch("apps.workspaces.tasks.aschedule_thread_title", schedule_title),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -503,6 +507,9 @@ async def test_resume_bumps_thread_updated_at_on_success():
     # Thread.updated_at must have been bumped after the successful resume
     await thread.arefresh_from_db()
     assert thread.updated_at > pre_resume_updated_at
+    # A thread whose first turn only started a load is titled on the resumed answer.
+    schedule_title.assert_awaited_once()
+    assert schedule_title.await_args.args[0].id == thread.id
 
 
 @pytest.mark.asyncio
@@ -1015,6 +1022,7 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("upstream LLM 500"))
     mock_agent.aupdate_state = AsyncMock(return_value=None)
+    schedule_title = AsyncMock()
 
     with (
         patch(
@@ -1025,10 +1033,12 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
             "apps.workspaces.services.reconciliation.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
+        patch("apps.workspaces.tasks.aschedule_thread_title", schedule_title),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     assert result["status"] == "agent_failed"
+    schedule_title.assert_not_awaited()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert tj.failure_phase == ThreadJob.FailurePhase.RESUME

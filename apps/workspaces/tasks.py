@@ -24,6 +24,7 @@ from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.chat.tasks import aschedule_thread_title
 from apps.chat.turn_lease import TurnLease, atry_acquire_turn_lease
 from apps.common.capacity import CapacityExhausted, classify_capacity_error
 from apps.common.error_codes import ErrorCode, code_of
@@ -3669,6 +3670,7 @@ async def _resume_with_turn_lease(tj: ThreadJob, thread_job_id: str) -> dict:
             tj.thread_id,
             exc_info=True,
         )
+    await aschedule_thread_title(tj.thread)
 
     terminal = (
         ThreadJob.State.CANCELLED

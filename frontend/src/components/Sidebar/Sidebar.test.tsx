@@ -133,13 +133,13 @@ describe("Sidebar hover behavior", () => {
     })
   })
 
-  it("uses the old history preview unless a custom title exists", () => {
+  it("shows each thread's one title, falling back to Untitled", () => {
     mocks.state.threads = [
       {
         id: "thread-preview",
-        title: "Untitled",
-        history_title: "Build an artifact from example queries",
+        title: "Build an artifact from example queries",
         title_is_custom: false,
+        title_source: "first_message",
         created_at: "2026-07-01T12:00:00Z",
         updated_at: "2026-07-01T12:00:00Z",
         last_viewed_at: null,
@@ -147,8 +147,17 @@ describe("Sidebar hover behavior", () => {
       {
         id: "thread-title",
         title: "Quarterly review",
-        history_title: "Old prompt text",
         title_is_custom: true,
+        title_source: "user",
+        created_at: "2026-07-01T12:00:00Z",
+        updated_at: "2026-07-01T12:00:00Z",
+        last_viewed_at: null,
+      },
+      {
+        id: "thread-blank",
+        title: "",
+        title_is_custom: false,
+        title_source: "first_message",
         created_at: "2026-07-01T12:00:00Z",
         updated_at: "2026-07-01T12:00:00Z",
         last_viewed_at: null,
@@ -160,15 +169,10 @@ describe("Sidebar hover behavior", () => {
     expect(screen.getByTestId("sidebar-thread-thread-preview")).toHaveTextContent(
       "Build an artifact from example queries",
     )
-    expect(screen.getByTestId("sidebar-thread-thread-preview")).not.toHaveTextContent(
-      "Untitled",
-    )
     expect(screen.getByTestId("sidebar-thread-thread-title")).toHaveTextContent(
       "Quarterly review",
     )
-    expect(screen.getByTestId("sidebar-thread-thread-title")).not.toHaveTextContent(
-      "Old prompt text",
-    )
+    expect(screen.getByTestId("sidebar-thread-thread-blank")).toHaveTextContent("Untitled")
   })
 })
 

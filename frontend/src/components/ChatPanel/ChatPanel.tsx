@@ -29,6 +29,7 @@ import {
   ChatThinkingIndicator,
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
+import { useGeneratedTitleRefresh, type TitleRefreshTrigger } from "./useGeneratedTitleRefresh"
 import {
   busyRetryAfter,
   decideOverloadAction,
@@ -74,6 +75,7 @@ export function ChatPanel() {
   const [busyToken] = useState(() => Symbol("chat-busy"))
   const [busyNotice, setBusyNotice] = useState(false)
   const [stoppedNotice, setStoppedNotice] = useState(false)
+  const [titleRefreshTrigger, setTitleRefreshTrigger] = useState<TitleRefreshTrigger | null>(null)
 
   const {
     jobsByThreadId,
@@ -127,8 +129,14 @@ export function ChatPanel() {
     />
   )
   const currentThread = threads.find((thread) => thread.id === threadId)
-  const threadTitle = currentThread?.title ?? "Untitled"
-  const titleIsCustom = currentThread?.title_is_custom ?? false
+  const threadTitle = currentThread?.title ?? ""
+  useGeneratedTitleRefresh({
+    workspaceId: activeDomainId,
+    threadId,
+    titlePending: currentThread?.title_source === "first_message",
+    trigger: titleRefreshTrigger,
+    refresh: fetchThreads,
+  })
 
   // Use a ref so the transport body closure always reads fresh values,
   // even though useChat caches the transport from the first render.
@@ -303,6 +311,8 @@ export function ChatPanel() {
     if (isStreaming) return
     if (threadId && recentlyCompletedThreadIds.includes(threadId)) {
       setMessageReloadKey((k) => k + 1)
+      // The resumed answer can be the thread's first, which is when it gets a title.
+      setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
     }
   }, [threadId, recentlyCompletedThreadIds, isStreaming])
 
@@ -310,6 +320,7 @@ export function ChatPanel() {
   useEffect(() => {
     if (prevStatusRef.current === "streaming" && status === "ready" && activeDomainId) {
       fetchThreads(activeDomainId)
+      setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
       if (threadPanelOpen && threadPanelMode === "files") {
         void loadThreadArtifacts()
       }
@@ -318,6 +329,7 @@ export function ChatPanel() {
   }, [
     status,
     activeDomainId,
+    threadId,
     fetchThreads,
     loadThreadArtifacts,
     threadPanelMode,
@@ -462,7 +474,6 @@ export function ChatPanel() {
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatThreadHeader
           title={threadTitle}
-          titleIsCustom={titleIsCustom}
           panelOpen={threadPanelOpen}
           panelMode={threadPanelMode}
           onTitleChange={handleTitleChange}

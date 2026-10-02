@@ -485,11 +485,6 @@ export function Sidebar() {
   )
 }
 
-function sidebarThreadTitle(thread: {
-  title: string
-  history_title?: string
-  title_is_custom: boolean
-}): string {
-  if (thread.title_is_custom) return thread.title.trim() || "Untitled"
-  return thread.history_title?.trim() || "Untitled"
+function sidebarThreadTitle(thread: { title: string }): string {
+  return thread.title.trim() || "Untitled"
 }
