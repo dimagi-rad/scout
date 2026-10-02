@@ -35,7 +35,7 @@ import { useGeneratedTitleRefresh, type TitleRefreshTrigger } from "./useGenerat
 import { readDraft, writeDraft } from "./draftStorage"
 import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
-import { useHeldRequest } from "./useHeldRequest"
+import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
 import {
   busyRetryAfter,
   decideOverloadAction,
@@ -608,6 +608,14 @@ export function ChatPanel() {
     else sendText(text)
   }
 
+  async function handleEditHeld(text: string): Promise<EditOutcome> {
+    const editedIn = threadId
+    const outcome = await held.edit(text)
+    // Too late to change what is being sent: keep the edit as the next message.
+    if (outcome === "gone") returnToComposer(activeDomainId, editedIn, text)
+    return outcome
+  }
+
   function handleSendHeldNow() {
     const pending = held.takeForSend()
     if (pending) sendHeld(pending)
@@ -697,7 +705,10 @@ export function ChatPanel() {
             <PendingRequestCard
               pending={held.pending}
               phase={held.phase}
+              key={threadId}
               onSendNow={handleSendHeldNow}
+              onEdit={handleEditHeld}
+              onRemovePart={held.removePart}
               actionsDisabled={isStreaming}
               onDiscard={() => void held.discard()}
             />

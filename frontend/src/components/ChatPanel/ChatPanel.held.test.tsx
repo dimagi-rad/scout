@@ -31,6 +31,9 @@ interface Server {
   discards: number
   /** Refuse a held send as too long, as the server does past MAX_MESSAGE_LENGTH. */
   tooLongHeldSend: boolean
+  patches: Record<string, unknown>[]
+  /** Answer edits with 409 version, as when another tab changed the request. */
+  editConflict: boolean
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -99,6 +102,8 @@ function mockServer(): Server {
     failHeldSendMidStream: false,
     discards: 0,
     tooLongHeldSend: false,
+    patches: [],
+    editConflict: false,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -129,6 +134,22 @@ function mockServer(): Server {
       }
       server.pending = null
       return replyResponse(`echo: ${text}`)
+    }
+    if (url.endsWith("/pending-request/") && options?.method === "PATCH") {
+      const change = JSON.parse(options.body as string)
+      server.patches.push(change)
+      if (server.editConflict) {
+        server.pending = { ...server.pending!, version: server.pending!.version + 1 }
+        return Response.json(
+          { error: "pending_request_conflict", reason: "version" },
+          { status: 409 },
+        )
+      }
+      const parts = change.text
+        ? [{ id: "edited", text: change.text, added_at: "" }]
+        : server.pending!.parts.filter((part) => part.id !== change.remove_part_id)
+      server.pending = { ...server.pending!, parts, version: server.pending!.version + 1 }
+      return Response.json(server.pending)
     }
     if (url.endsWith("/pending-request/") && options?.method === "DELETE") {
       server.discards += 1
@@ -423,5 +444,54 @@ describe("a message sent while the chat's data loads", () => {
     await act(async () => {})
     expect(screen.queryByTestId("chat-error")).toBeNull()
     consoleError.mockRestore()
+  })
+
+  it("removes a later part and rewrites the request through the card", async () => {
+    const server = mockServer()
+    renderChat()
+    await waitFor(() => expect(server.messageLoads).toBe(1))
+    await act(async () => {})
+    await type(QUESTION, "Send message")
+    await screen.findByTestId("pending-request-card")
+    await type(FOLLOW_UP, "Add to request")
+    const added = server.partPosts[0].id
+    await screen.findByTestId(`pending-request-remove-${added}`)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(`pending-request-remove-${added}`))
+    })
+    await waitFor(() => expect(screen.queryByText(FOLLOW_UP)).toBeNull())
+    expect(server.patches[0]).toEqual({ version: 2, remove_part_id: added })
+
+    fireEvent.click(screen.getByTestId("pending-request-edit"))
+    fireEvent.change(screen.getByTestId("pending-request-edit-text"), {
+      target: { value: "Visits by week" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("pending-request-edit-save"))
+    })
+
+    expect(await screen.findByText("Visits by week")).toBeInTheDocument()
+    expect(server.patches[1]).toEqual({ version: 3, text: "Visits by week" })
+  })
+
+  it("says the request was updated in another tab when an edit loses the race", async () => {
+    const server = mockServer()
+    renderChat()
+    await waitFor(() => expect(server.messageLoads).toBe(1))
+    await act(async () => {})
+    await type(QUESTION, "Send message")
+    await screen.findByTestId("pending-request-card")
+    server.editConflict = true
+
+    fireEvent.click(screen.getByTestId("pending-request-edit"))
+    fireEvent.change(screen.getByTestId("pending-request-edit-text"), { target: { value: "mine" } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("pending-request-edit-save"))
+    })
+
+    expect(await screen.findByTestId("pending-request-notice")).toHaveTextContent(
+      "Updated in another tab",
+    )
   })
 })
