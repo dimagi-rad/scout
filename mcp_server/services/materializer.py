@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -145,6 +146,7 @@ def run_pipeline(
     # The run's fingerprint must describe the config it actually executed, not a
     # shared registry object someone else could mutate mid-load.
     pipeline = deepcopy(pipeline)
+    run_started = time.monotonic()
     observed_connection = tenant_membership.connection
 
     # provision + discover + N sources + transform/skip
@@ -181,6 +183,10 @@ def run_pipeline(
             # Prefer the loader-reported total; fall back to a count discovered
             # up front (e.g. the opportunity's ``visit_count``) for a real percent.
             effective_total = rows_total if rows_total is not None else known_total
+            # A discovery count can trail the live export; grow it rather than
+            # report "1,050 of 1,000 rows".
+            if effective_total is not None and rows_loaded > effective_total:
+                effective_total = rows_loaded
             progress_updater(
                 {
                     "run_id": run_id_holder["id"],
@@ -229,11 +235,11 @@ def run_pipeline(
         report(f"Discovering tenant metadata from {pipeline.provider}...")
         discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
 
-        # The keyset-paginated visits export returns no total; reuse the
-        # opportunity's visit_count from discovery as the progress denominator.
-        visit_total: int | None = None
+        # Connect's keyset-paginated exports return no total; reuse the counts
+        # discovery already carries as progress denominators.
+        source_totals: dict[str, int] = {}
         if pipeline.provider == "commcare_connect":
-            visit_total = _connect_visit_total(
+            source_totals = _connect_source_totals(
                 discovered_metadata, int(tenant_membership.tenant.external_id)
             )
 
@@ -347,9 +353,10 @@ def run_pipeline(
                 if source_is_resumable
                 else None
             )
-            # visit_count counts *all* visits, valid only on a fresh load; on
-            # resume rows_loaded is just this run's new rows, so leave it indeterminate.
-            source_total = visit_total if source.name == "visits" and start_cursor is None else None
+            # Discovery counts cover the whole table. That holds on resume too: the
+            # resumed visits writer reports rows already in the table plus new ones.
+            source_total = source_totals.get(source.name)
+            source_started = time.monotonic()
             try:
                 rows = _load_and_commit_source(
                     source.name,
@@ -375,6 +382,7 @@ def run_pipeline(
                     "state": "cancelled",
                     "rows": 0,
                     "cursor_state": prior_cursor,
+                    "duration_s": _elapsed(source_started),
                 }
                 for remaining in sources_list[idx + 1 :]:
                     source_results[remaining.name] = {
@@ -402,6 +410,7 @@ def run_pipeline(
                     "attempts": getattr(e, "attempts", 1),
                     "failed_at": datetime.now(UTC).isoformat(),
                     "cursor_state": prior_cursor,
+                    "duration_s": _elapsed(source_started),
                 }
                 for remaining in sources_list[idx + 1 :]:
                     source_results[remaining.name] = {
@@ -409,19 +418,23 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                _stamp_load_ended(run, pipeline, source_results)
+                _stamp_load_ended(run, pipeline, source_results, duration_s=_elapsed(run_started))
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
+            duration_s = _elapsed(source_started)
             source_results[source.name] = {
                 "state": "completed",
                 "rows": rows,
                 "committed_at": datetime.now(UTC).isoformat(),
                 "cursor_state": final_cursor if source_is_resumable else None,
+                "duration_s": duration_s,
             }
             if source_is_resumable:
                 _persist_source_results(run, pipeline, source_results)
-            logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
+            logger.info(
+                "Loaded %d rows into %s.%s in %.1fs", rows, schema_name, source.name, duration_s
+            )
         current_source = None
 
         # Discovery may have generated SYSTEM assets. Fingerprint and execute the
@@ -444,6 +457,7 @@ def run_pipeline(
                 pipeline,
                 source_results,
                 error={"error": _summarize_error(e), "error_code": code_of(e)},
+                duration_s=_elapsed(run_started),
             )
             raise
 
@@ -458,6 +472,7 @@ def run_pipeline(
                 "cancelled": True,
                 "pipeline": pipeline.name,
                 "sources": source_results,
+                "duration_s": _elapsed(run_started),
             },
         )
         logger.info("Run %s cancelled; in-flight source rolled back", run.id)
@@ -485,6 +500,7 @@ def run_pipeline(
                     "sources": source_results,
                     "error": _summarize_error(e),
                     "error_code": code_of(e),
+                    "duration_s": _elapsed(run_started),
                 },
             )
         if (
@@ -511,7 +527,11 @@ def run_pipeline(
     ).update(state=MaterializationRun.RunState.TRANSFORMING)
     if not rows:
         MaterializationRun.objects.filter(id=run.id).update(
-            result={"cancelled": True, "sources": source_results},
+            result={
+                "cancelled": True,
+                "sources": source_results,
+                "duration_s": _elapsed(run_started),
+            },
         )
         logger.info("Run %s cancelled before transform; partial data committed", run.id)
         raise MaterializationCancelled()
@@ -542,11 +562,13 @@ def run_pipeline(
 
     # Conditional UPDATE: only transition to COMPLETED if still TRANSFORMING.
     # Preserves a CANCELLED (or FAILED) state written externally during transform.
+    duration_s = _elapsed(run_started)
     final_result = {
         "load_fingerprint": load_fingerprint,
         "sources": source_results,
         "pipeline": pipeline.name,
         "transforms": transform_result,
+        "duration_s": duration_s,
     }
     now = datetime.now(UTC)
     rows_updated = MaterializationRun.objects.filter(
@@ -574,7 +596,13 @@ def run_pipeline(
         tenant_schema.save(update_fields=["state", "last_accessed_at"])
 
     total_rows = sum(s.get("rows", 0) for s in source_results.values())
-    logger.info("Pipeline '%s' complete for '%s': %d rows", pipeline.name, schema_name, total_rows)
+    logger.info(
+        "Pipeline '%s' complete for '%s': %d rows in %.1fs",
+        pipeline.name,
+        schema_name,
+        total_rows,
+        duration_s,
+    )
 
     if step != total_steps:
         raise RuntimeError(
@@ -590,6 +618,7 @@ def run_pipeline(
         "pipeline": pipeline.name,
         "sources": source_results,
         "rows_loaded": total_rows,
+        "duration_s": duration_s,
     }
     # Kept on separate keys: transform_error means the tables are stale or
     # missing, transform_test_failures means they built and are populated but
@@ -639,21 +668,36 @@ def _run_discover_phase(
     return metadata
 
 
-def _connect_visit_total(metadata: dict | None, opportunity_id: int) -> int | None:
-    """Pull the opportunity's all-visits count from discovered Connect metadata.
+# Source name -> count field on the opportunity's ``/export/opp_org_program_list/``
+# entry. As of 2026-10 Connect sends only ``visit_count``; add a field here if it
+# starts sending counts for the other export endpoints. A resumable source also
+# needs its writer to add the already-loaded rows on resume, as visits does, or
+# a resumed bar starts from 0 against a whole-table total.
+_CONNECT_DISCOVERY_COUNT_FIELDS = {"visits": "visit_count"}
 
-    ``/export/opp_org_program_list/`` (fetched during DISCOVER) annotates each
-    opportunity with ``visit_count``. We use it as the denominator for the
-    visits progress bar, since the keyset-paginated visits export returns no
-    total of its own. Returns ``None`` when the count is absent or non-positive.
+
+def _connect_source_totals(metadata: dict | None, opportunity_id: int) -> dict[str, int]:
+    """Map Connect source names to row totals carried by discovered metadata.
+
+    The keyset-paginated export endpoints return no totals of their own, so these
+    counts are the progress-bar denominators. Absent or non-positive counts are
+    left out.
     """
     if not metadata:
-        return None
+        return {}
     for opp in metadata.get("all_opportunities", []) or []:
         if isinstance(opp, dict) and opp.get("id") == opportunity_id:
-            count = opp.get("visit_count")
-            return count if isinstance(count, int) and count > 0 else None
-    return None
+            totals = {}
+            for source, field in _CONNECT_DISCOVERY_COUNT_FIELDS.items():
+                count = opp.get(field)
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    totals[source] = count
+            return totals
+    return {}
+
+
+def _elapsed(started: float) -> float:
+    return round(time.monotonic() - started, 2)
 
 
 def _load_prior_resume_cursors(tenant_schema: Any, exclude_run_id: Any) -> dict[str, int]:
@@ -1193,7 +1237,14 @@ def _write_ocs_participants(
     return total
 
 
-def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None = None):
+def _stamp_load_ended(
+    run,
+    pipeline,
+    source_results: dict,
+    *,
+    error: dict | None = None,
+    duration_s: float | None = None,
+):
     """End a run whose load stopped early: PARTIAL if anything committed, else FAILED.
 
     A resumable source that advanced its cursor has committed rows even if it
@@ -1207,6 +1258,8 @@ def _stamp_load_ended(run, pipeline, source_results: dict, *, error: dict | None
     )
     run.completed_at = datetime.now(UTC)
     run.result = {"pipeline": pipeline.name, "sources": source_results, **(error or {})}
+    if duration_s is not None:
+        run.result["duration_s"] = duration_s
     run.save(update_fields=["state", "completed_at", "result"])
 
 
@@ -1744,6 +1797,17 @@ def _write_connect_visits(
         """
         ).format(schema=sid)
     )
+    # On resume, progress adds the rows already loaded so it lines up with the
+    # whole-table total from discovery; the return value stays this run's rows.
+    # Count only up to the cursor: it can lag the committed pages, and the loader
+    # re-fetches everything above it.
+    already_loaded = 0
+    if start_cursor is not None:
+        cur.execute(
+            psql.SQL("SELECT count(*) FROM {}.raw_visits WHERE visit_id <= %s").format(sid),
+            (start_cursor,),
+        )
+        already_loaded = cur.fetchone()[0]
     resuming_by_page = cursor_callback is not None
     if resuming_by_page:
         conn.commit()
@@ -1792,7 +1856,7 @@ def _write_connect_visits(
             if max_id is not None:
                 cursor_callback(max_id, total)
         if on_page is not None:
-            on_page(total, rows_total)
+            on_page(already_loaded + total, rows_total)
 
     return total
 
