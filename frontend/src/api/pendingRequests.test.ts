@@ -36,3 +36,9 @@ describe("pendingPhase", () => {
 it("joins the parts the way the server sends them", () => {
   expect(pendingRequestText(pending("waiting", "pending"))).toBe("visits?\n\nby month")
 })
+
+it("waits on a workspace load when the request has no load of its own", () => {
+  const held = { ...pending("waiting", null), thread_job_id: null }
+  expect(pendingPhase({ ...held, workspace_load_pending: true })).toBe("waiting")
+  expect(pendingPhase({ ...held, workspace_load_pending: false })).toBe("unanswered")
+})
