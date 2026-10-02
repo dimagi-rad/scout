@@ -8,8 +8,8 @@ service, so concurrent callers share one provider round-trip.
 
 Outcomes: fresh → admit with no provider call; authoritative revocation → deny,
 with the membership archival already persisted by the verification publisher;
-provider unavailable or indeterminate → a retryable denial that leaves every
-membership in place.
+provider unavailable → a retryable denial (503) that leaves every membership in
+place; an indeterminate answer → a non-retryable denial that also removes nothing.
 """
 
 from __future__ import annotations
@@ -67,9 +67,11 @@ FRESHNESS_DENIAL_REASONS = (
     CREDENTIAL_MISSING,
     CREDENTIAL_EXPIRED,
     UPSTREAM_ACCESS_LOST,
-    VERIFICATION_INDETERMINATE,
     VERIFICATION_UNAVAILABLE,
     VERIFICATION_IN_PROGRESS,
+    # Last: it proves nothing, so a sibling check that is still running and may yet
+    # pass keeps the request retryable.
+    VERIFICATION_INDETERMINATE,
 )
 RETRYABLE_REASONS = frozenset({VERIFICATION_UNAVAILABLE, VERIFICATION_IN_PROGRESS})
 _UNCONFIRMED_STATUSES = frozenset(

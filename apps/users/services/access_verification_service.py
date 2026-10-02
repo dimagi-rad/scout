@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 import random
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from allauth.socialaccount.models import SocialToken
-from asgiref.sync import sync_to_async
+from asgiref.sync import SyncToAsync, ThreadSensitiveContext, sync_to_async
 from django.db import close_old_connections
 from django.utils import timezone
 
@@ -528,24 +530,30 @@ def _attempt_matches_waiter_lineage(
     )
 
 
+# Every detached verification's ORM work runs on this context's one dedicated thread.
+# Not the caller's thread: a sync (DRF) view reaches here through async_to_sync, whose
+# executor dies when that call returns. Not asgiref's process-wide default either: a
+# sync caller blocked waiting on the check may be holding that very thread.
+_DETACHED_ORM_CONTEXT = ThreadSensitiveContext()
+# A small pool, so one publication waiting on a row lock cannot hold up the rest.
+SyncToAsync.context_to_thread_executor[_DETACHED_ORM_CONTEXT] = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="access-verification"
+)
+
+
 def _spawn_detachable(coroutine) -> asyncio.Task:
-    """A task that may outlive its caller, so it must not run in the caller's context.
-
-    A sync (DRF) view reaches here through async_to_sync, whose context routes every
-    thread-sensitive sync_to_async call (all ORM work) to an executor that dies with
-    that call; anything still running afterwards would fail on its first query and
-    never publish, or even release, its lease.
-    """
-    return asyncio.get_running_loop().create_task(
-        _with_fresh_connection(coroutine), context=contextvars.Context()
-    )
+    """A task that may outlive its caller, with its own context and ORM threads."""
+    context = contextvars.Context()
+    context.run(SyncToAsync.thread_sensitive_context.set, _DETACHED_ORM_CONTEXT)
+    return asyncio.get_running_loop().create_task(coroutine, context=context)
 
 
-async def _with_fresh_connection(coroutine):
-    # Outside a request, nothing recycles the shared executor thread's connection: no
-    # request signals fire for it, so a dropped one would fail every later check.
-    await sync_to_async(close_old_connections)()
-    return await coroutine
+async def _recycle_connection() -> None:
+    # Outside a request nothing recycles these threads' connections (no request
+    # signals fire for them), so a dropped one would fail every later check. Best
+    # effort: it must never stop the lease owner from running.
+    with contextlib.suppress(Exception):
+        await sync_to_async(close_old_connections)()
 
 
 async def _verify_and_publish(
@@ -566,6 +574,7 @@ async def _verify_and_publish(
     released, so this can outlive a caller that stopped waiting for it.
     """
     try:
+        await _recycle_connection()
         if early_provider_result is not None:
             provider_result = early_provider_result
         else:
