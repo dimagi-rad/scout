@@ -491,3 +491,46 @@ async def test_a_denial_that_could_not_be_published_never_earns_grace(
     assert not access_freshness._grace_eligible(result)
     window = timedelta(minutes=30)
     assert not await agrace_proof_tenant_ids(user.id, connection.id, {tenant.id}, max_age=window)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(lambda: ProviderVerificationResult.complete(set()), id="omission"),
+        pytest.param(
+            lambda: ProviderVerificationResult.indeterminate("verification_indeterminate"),
+            id="indeterminate",
+        ),
+    ],
+)
+async def test_an_answer_short_of_access_withdraws_the_proof_before_publishing(
+    user, tenant, workspace, monkeypatch, answer
+):
+    """A request waiting on the lease while the answer publishes must find no proof
+    for grace to read as positive, and neither may any request after it."""
+    membership = await TenantMembership.objects.select_related("connection").aget(
+        user=user, tenant=tenant
+    )
+    connection = membership.connection
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+    window = timedelta(minutes=30)
+    seen_at_publication = []
+    original = access_verification_service.apublish_verification_receipt
+
+    async def provider(*args, **kwargs):
+        return answer()
+
+    async def publish(*args, **kwargs):
+        seen_at_publication.append(
+            await agrace_proof_tenant_ids(user.id, connection.id, {tenant.id}, max_age=window)
+        )
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(access_verification_service, "apublish_verification_receipt", publish)
+
+    await verify_connection_access(user.id, connection.id, {tenant.id}, provider_verifier=provider)
+
+    assert seen_at_publication == [frozenset()]
+    assert not await agrace_proof_tenant_ids(user.id, connection.id, {tenant.id}, max_age=window)

@@ -609,12 +609,40 @@ def _detach(verification, connection_id) -> None:
     _supervise(verification)
 
 
+_ANSWERS_SHORT_OF_ACCESS = frozenset(
+    {
+        VerificationOutcome.TENANT_DENIED,
+        VerificationOutcome.CREDENTIAL_REJECTED,
+        VerificationOutcome.INDETERMINATE,
+    }
+)
+
+
+async def _withdraw_proofs(claim, tenant_ids, *, before, deadline, clock) -> None:
+    """Void the positive proofs an answer short of access calls into question.
+
+    ``tenant_ids`` None means the whole connection. Overdue, the update finishes under
+    supervision rather than being abandoned.
+    """
+    with contextlib.suppress(TimeoutError):
+        await _await_until(
+            avoid_positive_proofs(
+                claim.observation.user_id,
+                claim.observation.connection_id,
+                tenant_ids=tenant_ids,
+                before=before,
+            ),
+            deadline=deadline,
+            clock=clock,
+        )
+
+
 class _Progress:
     """What a running verification has seen so far, for a caller that stops waiting."""
 
     rejected = False
-    # The provider answered "access lost" (a denial, or an answer short of the
-    # request); cleared only once that answer has been published.
+    # The provider answered short of access (a denial, an indeterminate answer, or a
+    # COMPLETE not covering the request), so grace must not stand in for it.
     denied = False
 
 
@@ -627,18 +655,6 @@ async def _verify_and_publish(claim, requested, early_provider_result, *, progre
         and result.error_code == _VERIFICATION_UNAVAILABLE
     )
     if unsettled and progress.denied:
-        # A denial that could not be published must not leave a proof that grace
-        # would read as positive, for this request or one waiting on the lease.
-        with contextlib.suppress(TimeoutError):
-            await _await_until(
-                avoid_positive_proofs(
-                    claim.observation.user_id,
-                    claim.observation.connection_id,
-                    tenant_ids=claim.requested_tenant_ids,
-                ),
-                deadline=time.monotonic() + _CLEANUP_WAIT_SECONDS,
-                clock=time.monotonic,
-            )
         return replace(result, error_code=VERIFICATION_UNAVAILABLE_AFTER_DENIAL)
     if unsettled and progress.rejected:
         return replace(result, error_code=VERIFICATION_UNAVAILABLE_AFTER_REJECTION)
@@ -721,25 +737,49 @@ async def _verify_and_publish_once(
             provider_result = ProviderVerificationResult.unavailable(
                 VERIFICATION_UNAVAILABLE_AFTER_REJECTION
             )
-        # Assume "access lost" for any answer until the mapping shows it covers the
-        # request; a positive answer that fails to publish is only an outage.
+        completed_at = timezone.now()
+        # Any answer short of "every requested tenant is fine" withdraws the proofs it
+        # concerns at once, under the lease: before publication, which can be slow or
+        # fail, and before anyone else can claim. A COMPLETE counts as short until the
+        # mapping shows it covers the request.
         progress.denied = provider_result.outcome in {
             VerificationOutcome.COMPLETE,
-            VerificationOutcome.TENANT_DENIED,
-            VerificationOutcome.CREDENTIAL_REJECTED,
+            *_ANSWERS_SHORT_OF_ACCESS,
         }
-        completed_at = timezone.now()
+        if provider_result.outcome in _ANSWERS_SHORT_OF_ACCESS:
+            await _withdraw_proofs(
+                claim,
+                None
+                if provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
+                else claim.requested_tenant_ids,
+                before=completed_at,
+                deadline=deadline,
+                clock=clock,
+            )
         try:
             mapped = await _await_until(
                 _map_provider_result(claim, provider_result), deadline=deadline, clock=clock
             )
         except TimeoutError:
+            if provider_result.outcome == VerificationOutcome.COMPLETE:
+                await _withdraw_proofs(
+                    claim,
+                    claim.requested_tenant_ids,
+                    before=completed_at,
+                    deadline=time.monotonic() + _CLEANUP_WAIT_SECONDS,
+                    clock=time.monotonic,
+                )
             await _release_claim(claim)
             return AccessVerificationResult(
                 AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_UNAVAILABLE
             )
-        if mapped.outcome == VerificationOutcome.COMPLETE and requested <= mapped.tenant_ids:
-            progress.denied = False
+        if mapped.outcome == VerificationOutcome.COMPLETE:
+            if short := requested - mapped.tenant_ids:
+                await _withdraw_proofs(
+                    claim, short, before=completed_at, deadline=deadline, clock=clock
+                )
+            else:
+                progress.denied = False
         if clock() >= deadline:
             await _release_claim(claim)
             return AccessVerificationResult(
