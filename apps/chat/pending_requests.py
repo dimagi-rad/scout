@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 PART_SEPARATOR = "\n\n"
 # AI SDK message ids are short; a longer client id is not one.
 MAX_PART_ID_LENGTH = 128
+# Each part is stored, locked and polled whole; the text cap alone allows thousands.
+MAX_PARTS = 50
 REQUEST_TOO_LONG_MESSAGE = "Request too long — edit it"
 SETTLE_TIMEOUT_SECONDS = 15
 
@@ -84,8 +86,8 @@ def combined_text(parts: list[dict]) -> str:
     return PART_SEPARATOR.join(part["text"] for part in parts)
 
 
-def _check_length(text: str) -> None:
-    if len(text) > MAX_MESSAGE_LENGTH:
+def _check_length(text: str, parts: int = 1) -> None:
+    if len(text) > MAX_MESSAGE_LENGTH or parts > MAX_PARTS:
         raise PendingRequestTooLong(REQUEST_TOO_LONG_MESSAGE)
 
 
@@ -171,7 +173,7 @@ def ahold_message(thread_id, *, part_id: str, text: str) -> dict | None:
             return None
         elif not any(part["id"] == part_id for part in pending.parts):
             parts = [*pending.parts, _new_part(part_id, text)]
-            _check_length(combined_text(parts))
+            _check_length(combined_text(parts), len(parts))
             pending.parts = parts
             pending.version += 1
             pending.thread_job = job
@@ -191,7 +193,7 @@ def aadd_part(thread_id, *, part_id: str, text: str) -> dict:
             raise PendingRequestConflict("claimed")
         if not any(part["id"] == part_id for part in pending.parts):
             parts = [*pending.parts, _new_part(part_id, text)]
-            _check_length(combined_text(parts))
+            _check_length(combined_text(parts), len(parts))
             pending.parts = parts
             pending.version += 1
             pending.save(update_fields=["parts", "version", "updated_at"])

@@ -303,6 +303,24 @@ class TestLiveTurnSendsTheHeldRequest:
         assert pending.state == PendingRequest.State.WAITING
         assert await Thread.objects.filter(id=thread_id, turn_lease_token=None).aexists()
 
+    async def test_send_now_of_another_request_at_the_same_version_is_refused(
+        self, agent_layer, checkpoint
+    ):
+        ws, client, thread_id = await self._stranded("other-request")
+
+        response = await _post(
+            client,
+            ws,
+            thread_id,
+            "visits?",
+            pendingRequestVersion=1,
+            pendingRequestId=str(uuid.uuid4()),
+        )
+
+        assert response.status_code == 409
+        assert response.json()["reason"] == "version"
+        assert agent_layer.inputs == []
+
     async def test_a_response_closed_unsent_returns_the_claim(self, agent_layer, checkpoint):
         ws, client, thread_id = await self._stranded("closed-unsent")
 
@@ -393,6 +411,14 @@ class TestClaim:
         assert await pending_requests.aclaim(thread.id, lease.token, thread_job_id=other.id) is None
         claimed = await pending_requests.aclaim(thread.id, lease.token, thread_job_id=job.id)
         assert claimed.text == "first"
+
+    async def test_a_request_takes_only_so_many_parts(self, checkpoint):
+        thread, _job = await self._held("many-parts")
+        for n in range(2, pending_requests.MAX_PARTS + 1):
+            await pending_requests.aadd_part(thread.id, part_id=f"m{n}", text="x")
+
+        with pytest.raises(pending_requests.PendingRequestTooLong):
+            await pending_requests.aadd_part(thread.id, part_id="one-more", text="x")
 
     async def test_an_add_before_the_claim_goes_out_with_it(self, checkpoint):
         thread, _job = await self._held("add-before-claim")

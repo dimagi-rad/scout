@@ -244,6 +244,10 @@ async def chat_view(request):
     pending_version, err = _pending_request_version(data)
     if err:
         return err
+    # Names which request that version is of: a thread holds again after a send.
+    pending_request_id = data.get("pendingRequestId")
+    if pending_request_id is not None and not isinstance(pending_request_id, str):
+        return JsonResponse({"error": "pendingRequestId must be a string"}, status=400)
 
     # Before the hold decision, so the message that starts a chat's first load is held too.
     if (
@@ -276,6 +280,7 @@ async def chat_view(request):
                 thread=thread,
                 user_content=user_content,
                 pending_version=pending_version,
+                pending_request_id=pending_request_id,
             )
     except asyncio.CancelledError:
         await lease.release()
@@ -379,6 +384,7 @@ async def _start_turn(
     thread: Thread,
     user_content: str,
     pending_version: int | None = None,
+    pending_request_id: str | None = None,
 ):
     """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     thread_id = str(thread.id)
@@ -460,7 +466,11 @@ async def _start_turn(
     # Last before the response exists, so nothing between can strand the claim; an
     # unsent response returns it to waiting on close.
     claimed, human_message = await _claim_held_request(
-        thread_id, lease, user_content=user_content, pending_version=pending_version
+        thread_id,
+        lease,
+        user_content=user_content,
+        pending_version=pending_version,
+        pending_request_id=pending_request_id,
     )
     if isinstance(human_message, JsonResponse):
         return human_message
@@ -501,7 +511,12 @@ async def _start_turn(
 
 
 async def _claim_held_request(
-    thread_id: str, lease: TurnLease, *, user_content: str, pending_version: int | None
+    thread_id: str,
+    lease: TurnLease,
+    *,
+    user_content: str,
+    pending_version: int | None,
+    pending_request_id: str | None = None,
 ) -> tuple[pending_requests.ClaimedRequest | None, HumanMessage | JsonResponse]:
     """The turn's message, carrying any request still held for the thread.
 
@@ -520,7 +535,10 @@ async def _claim_held_request(
         if pending_version is not None:
             return None, _pending_conflict_response("gone")
         return None, HumanMessage(content=user_content)
-    if pending_version is not None and pending_version != claimed.version:
+    if pending_version is not None and (
+        pending_version != claimed.version
+        or (pending_request_id is not None and pending_request_id != str(claimed.request_id))
+    ):
         await pending_requests.arelease(claimed)
         return None, _pending_conflict_response("version")
     # The client sends a held request it showed whole; otherwise the held text leads.
