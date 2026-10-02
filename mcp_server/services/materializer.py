@@ -229,11 +229,11 @@ def run_pipeline(
         report(f"Discovering tenant metadata from {pipeline.provider}...")
         discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
 
-        # The keyset-paginated visits export returns no total; reuse the
-        # opportunity's visit_count from discovery as the progress denominator.
-        visit_total: int | None = None
+        # Connect's keyset-paginated exports return no total; reuse the counts
+        # discovery already carries as progress denominators.
+        source_totals: dict[str, int] = {}
         if pipeline.provider == "commcare_connect":
-            visit_total = _connect_visit_total(
+            source_totals = _connect_source_totals(
                 discovered_metadata, int(tenant_membership.tenant.external_id)
             )
 
@@ -347,9 +347,9 @@ def run_pipeline(
                 if source_is_resumable
                 else None
             )
-            # visit_count counts *all* visits, valid only on a fresh load; on
-            # resume rows_loaded is just this run's new rows, so leave it indeterminate.
-            source_total = visit_total if source.name == "visits" and start_cursor is None else None
+            # Discovery counts cover the whole table. That holds on resume too: the
+            # resumed visits writer reports rows already in the table plus new ones.
+            source_total = source_totals.get(source.name)
             try:
                 rows = _load_and_commit_source(
                     source.name,
@@ -639,21 +639,30 @@ def _run_discover_phase(
     return metadata
 
 
-def _connect_visit_total(metadata: dict | None, opportunity_id: int) -> int | None:
-    """Pull the opportunity's all-visits count from discovered Connect metadata.
+# Source name -> count field on the opportunity's ``/export/opp_org_program_list/``
+# entry. As of 2026-10 Connect sends only ``visit_count``; add a field here if it
+# starts sending counts for the other export endpoints.
+_CONNECT_DISCOVERY_COUNT_FIELDS = {"visits": "visit_count"}
 
-    ``/export/opp_org_program_list/`` (fetched during DISCOVER) annotates each
-    opportunity with ``visit_count``. We use it as the denominator for the
-    visits progress bar, since the keyset-paginated visits export returns no
-    total of its own. Returns ``None`` when the count is absent or non-positive.
+
+def _connect_source_totals(metadata: dict | None, opportunity_id: int) -> dict[str, int]:
+    """Map Connect source names to row totals carried by discovered metadata.
+
+    The keyset-paginated export endpoints return no totals of their own, so these
+    counts are the progress-bar denominators. Absent or non-positive counts are
+    left out.
     """
     if not metadata:
-        return None
+        return {}
     for opp in metadata.get("all_opportunities", []) or []:
         if isinstance(opp, dict) and opp.get("id") == opportunity_id:
-            count = opp.get("visit_count")
-            return count if isinstance(count, int) and count > 0 else None
-    return None
+            totals = {}
+            for source, field in _CONNECT_DISCOVERY_COUNT_FIELDS.items():
+                count = opp.get(field)
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    totals[source] = count
+            return totals
+    return {}
 
 
 def _load_prior_resume_cursors(tenant_schema: Any, exclude_run_id: Any) -> dict[str, int]:
@@ -1744,6 +1753,12 @@ def _write_connect_visits(
         """
         ).format(schema=sid)
     )
+    # On resume, progress counts the rows already loaded so it lines up with the
+    # whole-table total from discovery; the return value stays this run's rows.
+    already_loaded = 0
+    if start_cursor is not None:
+        cur.execute(psql.SQL("SELECT count(*) FROM {}.raw_visits").format(sid))
+        already_loaded = cur.fetchone()[0]
     resuming_by_page = cursor_callback is not None
     if resuming_by_page:
         conn.commit()
@@ -1792,7 +1807,7 @@ def _write_connect_visits(
             if max_id is not None:
                 cursor_callback(max_id, total)
         if on_page is not None:
-            on_page(total, rows_total)
+            on_page(already_loaded + total, rows_total)
 
     return total
 

@@ -19,7 +19,7 @@ from mcp_server.pipeline_registry import MetadataDiscoveryConfig, PipelineConfig
 from mcp_server.services.materializer import (
     _MAX_ERROR_CHARS,
     MaterializationCancelled,
-    _connect_visit_total,
+    _connect_source_totals,
     _load_prior_resume_cursors,
     _load_source,
     _make_cursor_callback,
@@ -987,6 +987,9 @@ class TestResumableMaterialization:
         loader_mocks,
         prior_run=None,
         completed_works_side_effect=None,
+        metadata=None,
+        progress_updater=None,
+        existing_visit_rows=None,
     ):
         """Run a Connect pipeline with mocked loaders. Returns the run mock."""
 
@@ -996,6 +999,7 @@ class TestResumableMaterialization:
             version="1.0",
             provider="commcare_connect",
             sources=sources,
+            metadata_discovery=MetadataDiscoveryConfig() if metadata else None,
         )
 
         with (
@@ -1029,10 +1033,12 @@ class TestResumableMaterialization:
             # Unpatched, the asset query fails on the mock tenant and the swallowed
             # error would skip the completion path these tests exist to cover.
             mock_asset_cls.objects.filter.return_value.__iter__.return_value = []
-            mock_meta.return_value.load.return_value = {}
+            mock_meta.return_value.load.return_value = metadata or {}
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
+            if existing_visit_rows is not None:
+                conn.cursor.return_value.fetchone.return_value = (existing_visit_rows,)
 
             invocations = {
                 "visits": mock_visits,
@@ -1042,7 +1048,12 @@ class TestResumableMaterialization:
             if completed_works_side_effect is not None:
                 mock_cw.return_value.load_pages.side_effect = completed_works_side_effect
             try:
-                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+                invocations["result"] = run_pipeline(
+                    self._make_tm(),
+                    {"type": "api_key", "value": "x"},
+                    pipeline,
+                    progress_updater=progress_updater,
+                )
             except Exception:
                 pass
             return run, invocations
@@ -1300,6 +1311,78 @@ class TestResumableMaterialization:
         # And because the cursor advanced (some pages committed), the run is
         # PARTIAL — not FAILED — so the next run knows it has resume work.
         assert run.state == "partial"
+
+
+class TestConnectProgressAndTiming:
+    """Discovery totals reach the progress bar, on fresh and resumed loads."""
+
+    _harness = TestResumableMaterialization()
+
+    def _visits_loader(self, ids):
+        loader_cls = MagicMock()
+        loader_cls.return_value.load_pages.return_value = iter(
+            [([{"visit_id": i} for i in ids], None)]
+        )
+        return loader_cls
+
+    @staticmethod
+    def _source_updates(calls, source):
+        return [c for c in calls if c["source"] == source and c["rows_loaded"]]
+
+    def test_fresh_visits_progress_uses_discovery_visit_count(self):
+        calls: list[dict] = []
+        self._harness._run_connect_pipeline(
+            sources=[SourceConfig(name="visits", resumable=True)],
+            loader_mocks={"visits": self._visits_loader([1, 2])},
+            metadata={"all_opportunities": [{"id": 42, "visit_count": 1000}]},
+            progress_updater=calls.append,
+        )
+        updates = self._source_updates(calls, "visits")
+        assert updates[-1]["rows_loaded"] == 2
+        assert updates[-1]["rows_total"] == 1000
+
+    def test_resumed_visits_progress_counts_rows_already_loaded(self):
+        prior = MagicMock()
+        prior.state = "partial"
+        prior.result = {
+            "sources": {
+                "visits": {
+                    "state": "in_progress",
+                    "rows": 900,
+                    "cursor_state": {"last_id": 900, "last_committed_at": None},
+                }
+            }
+        }
+        calls: list[dict] = []
+        _, invocations = self._harness._run_connect_pipeline(
+            sources=[SourceConfig(name="visits", resumable=True)],
+            loader_mocks={"visits": self._visits_loader([901, 902])},
+            prior_run=prior,
+            metadata={"all_opportunities": [{"id": 42, "visit_count": 1000}]},
+            progress_updater=calls.append,
+            existing_visit_rows=900,
+        )
+        updates = self._source_updates(calls, "visits")
+        assert updates[-1]["rows_loaded"] == 902
+        assert updates[-1]["rows_total"] == 1000
+        # The stored row count stays this run's inserts, not the table size.
+        assert invocations["result"]["sources"]["visits"]["rows"] == 2
+
+    def test_source_without_discovery_count_stays_indeterminate(self):
+        users_loader = MagicMock()
+        users_loader.return_value.load_pages.return_value = iter(
+            [([{"username": "a"}, {"username": "b"}], None)]
+        )
+        calls: list[dict] = []
+        self._harness._run_connect_pipeline(
+            sources=[SourceConfig(name="users", resumable=False)],
+            loader_mocks={"users": users_loader},
+            metadata={"all_opportunities": [{"id": 42, "visit_count": 1000}]},
+            progress_updater=calls.append,
+        )
+        updates = self._source_updates(calls, "users")
+        assert updates
+        assert all(c["rows_total"] is None for c in updates)
 
 
 @pytest.mark.django_db
@@ -1645,34 +1728,31 @@ class TestConnectPageReplayIdempotency:
             conn.close()
 
 
-class TestConnectVisitTotal:
-    """`_connect_visit_total` pulls the opportunity's all-visits count from the
-    discovery payload so the keyset-paginated visits bar can show a real percent.
-    """
+class TestConnectSourceTotals:
+    """Discovery counts become per-source progress denominators, since Connect's
+    keyset-paginated exports return no total of their own."""
 
-    def test_returns_visit_count_for_matching_opportunity(self):
+    def test_maps_visit_count_to_visits_for_matching_opportunity(self):
         meta = {
             "all_opportunities": [
                 {"id": 1, "visit_count": 5},
                 {"id": 765, "visit_count": 99130},
             ]
         }
-        assert _connect_visit_total(meta, 765) == 99130
+        assert _connect_source_totals(meta, 765) == {"visits": 99130}
 
-    def test_returns_none_when_opportunity_absent(self):
+    def test_empty_when_opportunity_absent(self):
         meta = {"all_opportunities": [{"id": 1, "visit_count": 5}]}
-        assert _connect_visit_total(meta, 765) is None
+        assert _connect_source_totals(meta, 765) == {}
 
-    def test_returns_none_for_zero_or_missing_count(self):
-        assert (
-            _connect_visit_total({"all_opportunities": [{"id": 765, "visit_count": 0}]}, 765)
-            is None
-        )
-        assert _connect_visit_total({"all_opportunities": [{"id": 765}]}, 765) is None
+    @pytest.mark.parametrize("count", [0, -3, None, "12", 1.5, True])
+    def test_drops_unusable_counts(self, count):
+        meta = {"all_opportunities": [{"id": 765, "visit_count": count}]}
+        assert _connect_source_totals(meta, 765) == {}
 
-    def test_returns_none_for_no_metadata(self):
-        assert _connect_visit_total(None, 765) is None
-        assert _connect_visit_total({}, 765) is None
+    def test_empty_for_no_metadata(self):
+        assert _connect_source_totals(None, 765) == {}
+        assert _connect_source_totals({}, 765) == {}
 
 
 @pytest.mark.django_db
