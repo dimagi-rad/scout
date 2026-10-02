@@ -55,6 +55,7 @@ from apps.workspaces.services.access_freshness import (
     RETRYABLE_REASONS,
     UPSTREAM_ACCESS_LOST,
     VERIFICATION_IN_PROGRESS,
+    VERIFICATION_INDETERMINATE,
     VERIFICATION_UNAVAILABLE,
     UpstreamAdmission,
     VerificationBudget,
@@ -178,6 +179,7 @@ _REPLAYABLE_REASONS = frozenset(
         CREDENTIAL_MISSING,
         CREDENTIAL_EXPIRED,
         UPSTREAM_ACCESS_LOST,
+        VERIFICATION_INDETERMINATE,
         VERIFICATION_UNAVAILABLE,
         VERIFICATION_IN_PROGRESS,
     }
@@ -194,6 +196,11 @@ _FRESHNESS_MESSAGES = {
     ),
     UPSTREAM_ACCESS_LOST: (
         "For one of this workspace's sources: " + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
+    ),
+    VERIFICATION_INDETERMINATE: (
+        "We couldn't confirm your access to one of this workspace's sources: its provider "
+        "gave an answer Scout could not interpret. Reconnecting it under Connected Accounts "
+        "may help; if it keeps happening, contact support."
     ),
     VERIFICATION_UNAVAILABLE: (
         "We couldn't verify your access to this workspace right now. Please retry shortly."

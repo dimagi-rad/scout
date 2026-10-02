@@ -59,6 +59,7 @@ BUDGET_SECONDS = {
 CREDENTIAL_MISSING = "credential_missing"
 CREDENTIAL_EXPIRED = "credential_expired"
 UPSTREAM_ACCESS_LOST = "upstream_access_lost"
+VERIFICATION_INDETERMINATE = "verification_indeterminate"
 VERIFICATION_UNAVAILABLE = "verification_unavailable"
 VERIFICATION_IN_PROGRESS = "verification_in_progress"
 
@@ -66,6 +67,7 @@ FRESHNESS_DENIAL_REASONS = (
     CREDENTIAL_MISSING,
     CREDENTIAL_EXPIRED,
     UPSTREAM_ACCESS_LOST,
+    VERIFICATION_INDETERMINATE,
     VERIFICATION_UNAVAILABLE,
     VERIFICATION_IN_PROGRESS,
 )
@@ -85,6 +87,8 @@ FRESHNESS_ERROR_CODES: dict[str, ErrorCode] = {
     CREDENTIAL_MISSING: ErrorCode.AUTH_CREDENTIAL_MISSING,
     CREDENTIAL_EXPIRED: ErrorCode.AUTH_TOKEN_EXPIRED,
     UPSTREAM_ACCESS_LOST: ErrorCode.AUTH_ACCESS_DENIED,
+    # Nothing was removed, so workers treat it like an outage they may pass over.
+    VERIFICATION_INDETERMINATE: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
     VERIFICATION_UNAVAILABLE: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
     VERIFICATION_IN_PROGRESS: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
 }
@@ -200,6 +204,10 @@ def denial_reason(result: AccessVerificationResult) -> str | None:
         return UPSTREAM_ACCESS_LOST
     if status in (AccessVerificationStatus.IN_PROGRESS, AccessVerificationStatus.RETRY):
         return VERIFICATION_IN_PROGRESS
+    if status == AccessVerificationStatus.INDETERMINATE:
+        # The provider answered, but not in a form that proves or denies access
+        # (e.g. a CommCare 403 on the domain listing); retrying gets the same answer.
+        return VERIFICATION_INDETERMINATE
     return VERIFICATION_UNAVAILABLE
 
 

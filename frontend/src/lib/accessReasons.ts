@@ -15,6 +15,8 @@ export const RECONNECT_REASONS: ReadonlySet<string> = new Set<AccessDenialReason
   "credential_missing",
   "upstream_access_lost",
   "tenant_access_lost",
+  // The provider's answer could not be read; reconnecting is the user's best lever.
+  "verification_indeterminate",
 ])
 
 /** A workspace with no sources (#381): only a delete resolves it. */
@@ -25,6 +27,7 @@ export const ACCESS_DENIAL_REASONS = [
   "credential_missing",
   "credential_expired",
   "upstream_access_lost",
+  "verification_indeterminate",
   "verification_unavailable",
   "verification_in_progress",
   NO_SOURCES_REASON,
@@ -39,6 +42,7 @@ export type AccessDenialReason = (typeof ACCESS_DENIAL_REASONS)[number]
 export const RECHECKABLE_REASONS: ReadonlySet<AccessDenialReason> = new Set([
   "tenant_access_lost",
   "upstream_access_lost",
+  "verification_indeterminate",
   "verification_unavailable",
   "verification_in_progress",
 ])

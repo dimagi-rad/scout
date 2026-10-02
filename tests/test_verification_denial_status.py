@@ -4,6 +4,11 @@ import json
 
 import pytest
 
+from apps.common.error_codes import ErrorCode
+from apps.users.services.access_verification_types import (
+    AccessVerificationResult,
+    AccessVerificationStatus,
+)
 from apps.workspaces.access import (
     VERIFICATION_RETRY_AFTER_SECONDS,
     WorkspaceAccess,
@@ -13,7 +18,9 @@ from apps.workspaces.services.access_freshness import (
     CREDENTIAL_EXPIRED,
     UPSTREAM_ACCESS_LOST,
     VERIFICATION_IN_PROGRESS,
+    VERIFICATION_INDETERMINATE,
     VERIFICATION_UNAVAILABLE,
+    denial_reason,
 )
 
 
@@ -28,7 +35,9 @@ def test_unfinished_verification_is_503_with_retry_after(reason):
     assert body["retryable"] is True
 
 
-@pytest.mark.parametrize("reason", [UPSTREAM_ACCESS_LOST, CREDENTIAL_EXPIRED])
+@pytest.mark.parametrize(
+    "reason", [UPSTREAM_ACCESS_LOST, CREDENTIAL_EXPIRED, VERIFICATION_INDETERMINATE]
+)
 def test_decided_denial_stays_403(reason):
     response = access_denied_response(WorkspaceAccess(denied_reason=reason))
 
@@ -45,3 +54,21 @@ def test_extra_fields_never_override_the_denial():
     )
 
     assert json.loads(response.content)["reason"] == VERIFICATION_UNAVAILABLE
+
+
+def test_indeterminate_is_its_own_reason():
+    def reason(status, code):
+        return denial_reason(AccessVerificationResult(status, code))
+
+    assert (
+        reason(AccessVerificationStatus.INDETERMINATE, "verification_indeterminate")
+        == VERIFICATION_INDETERMINATE
+    )
+    assert (
+        reason(AccessVerificationStatus.UNAVAILABLE, "verification_unavailable")
+        == VERIFICATION_UNAVAILABLE
+    )
+    assert (
+        reason(AccessVerificationStatus.UNAVAILABLE, ErrorCode.AUTH_TOKEN_EXPIRED)
+        == CREDENTIAL_EXPIRED
+    )
