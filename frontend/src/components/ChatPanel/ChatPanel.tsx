@@ -133,6 +133,9 @@ export function ChatPanel() {
   // even though useChat caches the transport from the first render.
   const contextRef = useRef({ workspaceId: activeDomainId, threadId })
   contextRef.current = { workspaceId: activeDomainId, threadId }
+  // The thread whose turn useChat is running. A switch does not abort it, so its
+  // outcome can land while another thread is shown.
+  const turnThreadRef = useRef<string | null>(null)
 
   const [transport] = useState(
     () =>
@@ -332,6 +335,14 @@ export function ChatPanel() {
     if (!wasRunning || (status !== "ready" && status !== "error")) return
     // Any finished run releases this thread's "retrying" slot, hard errors included.
     busyTracker.settle(busyToken)
+    if (turnThreadRef.current !== contextRef.current.threadId) {
+      // The turn belongs to a thread the user has left: regenerate (a busy retry or the
+      // notice's Retry) would resend the shown thread's last message instead.
+      busyHitRef.current = null
+      hitRetryableRef.current = false
+      if (status === "error") clearError()
+      return
+    }
     if (status === "error" && !busyError) {
       busyHitRef.current = null
       return
@@ -374,7 +385,7 @@ export function ChatPanel() {
       retriedRef.current = false
       setOverloadNotice(true)
     }
-  }, [status, regenerate, busyToken, busyError])
+  }, [status, regenerate, busyToken, busyError, clearError])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -385,6 +396,7 @@ export function ChatPanel() {
   function handleSend(text: string) {
     resetOverloadState()
     setStoppedNotice(false)
+    turnThreadRef.current = threadId
     sendMessage({ text })
   }
 
@@ -400,6 +412,7 @@ export function ChatPanel() {
   function handleRetry() {
     resetOverloadState()
     setStoppedNotice(false)
+    turnThreadRef.current = threadId
     void regenerate()
   }
 

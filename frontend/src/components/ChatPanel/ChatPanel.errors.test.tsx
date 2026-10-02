@@ -149,6 +149,32 @@ describe("a failed turn's notice after switching threads", () => {
   })
 })
 
+describe("a turn that fails after the user switched threads", () => {
+  it("shows no notice in the new thread and resends nothing", async () => {
+    let reject!: () => void
+    const pending = new Promise<Response>((resolve) => {
+      reject = () => resolve(Response.json(UNAVAILABLE_BODY, { status: 403 }))
+    })
+    const api = mockChat([() => pending as unknown as Response])
+    await renderAndSend(api)
+
+    await act(async () => {
+      useAppStore.setState({ threadId: OTHER_THREAD })
+    })
+    await screen.findByText("Earlier answer")
+
+    await act(async () => {
+      reject()
+      await pending
+    })
+    await act(async () => {})
+
+    expect(screen.queryByTestId("chat-error")).toBeNull()
+    expect(screen.getByText("Earlier answer")).toBeInTheDocument()
+    expect(api.chatBodies).toHaveLength(1)
+  })
+})
+
 describe("a chat turn denied because the credential expired", () => {
   it("shows the backend remedy with a Connected Accounts link and no Retry", async () => {
     const body = {
