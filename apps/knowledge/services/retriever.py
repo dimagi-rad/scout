@@ -85,11 +85,11 @@ def _fit_section(text: str, limit: int) -> str:
     # cut that line, at a word where there is one, rather than lose the section.
     head = text[: limit - 1]
     cut = head.rfind(" ")
-    for candidate in (head[:cut] if cut > 0 else "", head):
-        lines = _without_dangling_headings(candidate.split("\n"))
-        if lines and len(lines[-1].strip()) >= _MIN_CUT_LINE_CHARS:
-            return "\n".join(lines) + "…"
-    return ""
+    at_word = _without_dangling_headings(head[:cut].split("\n")) if cut > 0 else []
+    hard = _without_dangling_headings(head.split("\n"))
+    if not hard or len(hard[-1].strip()) < _MIN_CUT_LINE_CHARS:
+        return ""
+    return "\n".join(at_word or hard) + "…"
 
 
 def _joined_length(parts: list[str]) -> int:
@@ -122,15 +122,11 @@ class KnowledgeRetriever:
         When over budget, sections claim space in priority order — learnings,
         then knowledge entries, then table context — so a bulky table dump
         cannot crowd out the short, high-value learnings (#264). Display order
-        is unchanged, learnings take at most half the budget, each table's column
+        is unchanged, learnings claim at most half the budget before the other
+        sections are fitted and then take back what they leave unused, each table's column
         notes are capped, and each section is cut at a line boundary where possible.
         """
-        table_rows = [
-            table
-            async for table in TableKnowledge.objects.filter(workspace=self.workspace).order_by(
-                "table_name"
-            )
-        ]
+        table_rows = await self._table_rows()
         sections = {
             "entries": await self._format_knowledge_entries(),
             "tables": await self._format_table_knowledge(tables=table_rows),
@@ -185,6 +181,14 @@ class KnowledgeRetriever:
 
         return "\n".join(lines).rstrip()
 
+    async def _table_rows(self) -> list[TableKnowledge]:
+        return [
+            table
+            async for table in TableKnowledge.objects.filter(workspace=self.workspace).order_by(
+                "table_name"
+            )
+        ]
+
     async def _format_table_knowledge(
         self,
         max_column_notes: int | None = None,
@@ -192,12 +196,7 @@ class KnowledgeRetriever:
     ) -> str:
         """Format table knowledge with column notes and data quality notes."""
         if tables is None:
-            tables = [
-                table
-                async for table in TableKnowledge.objects.filter(workspace=self.workspace).order_by(
-                    "table_name"
-                )
-            ]
+            tables = await self._table_rows()
         if not tables:
             return ""
 

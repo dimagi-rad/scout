@@ -308,8 +308,7 @@ class TestLearningsNotCrowdedOut:
 
         assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
         assert "### Entry 0" in result
-        learnings = result[result.index("## Learned Corrections") :].split("\n\n*(")[0]
-        assert len(learnings) <= LEARNINGS_CHAR_CAP
+        assert "## Learned Corrections" in result
 
     @pytest.mark.asyncio
     async def test_no_truncation_notice_when_cap_alone_fits(self, workspace, user):
@@ -345,6 +344,14 @@ class TestFitSection:
         assert fitted.startswith("## A\n\n### Entry\n\nw0 w1")
         assert fitted.endswith("…")
         assert fitted[:-1].split()[-1] in {f"w{i}" for i in range(100)}
+
+    def test_prefers_word_cut_when_hard_cut_qualifies(self):
+        text = "## A\n\n### Entry\n\n" + " ".join(f"w{i}" for i in range(100))
+        for limit in range(40, 60):
+            fitted = _fit_section(text, limit)
+            assert fitted.endswith("…")
+            assert fitted[:-1].split()[-1] in {f"w{i}" for i in range(100)}
+            assert len(fitted) <= limit
 
     def test_overlong_line_without_spaces_hard_cut(self):
         fitted = _fit_section("## A\n\n### Blob\n\n" + "x" * 100, 50)
