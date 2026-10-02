@@ -51,7 +51,7 @@ MAX_COLUMN_NOTES_PER_TABLE = 40
 LEARNINGS_CHAR_CAP = KNOWLEDGE_CONTEXT_CHAR_BUDGET // 2
 
 
-# A cut line shorter than this carries no meaning (e.g. "- …"), so the section is dropped.
+# A cut line shorter than this carries no meaning (e.g. "- …"); such a cut is rejected.
 _MIN_CUT_LINE_CHARS = 20
 
 
@@ -82,7 +82,7 @@ def _fit_section(text: str, limit: int) -> str:
     if lines:
         return "\n".join(lines)
     # Its first content line alone overruns the limit (e.g. a one-paragraph entry):
-    # cut that line, at a word where there is one, rather than lose the section.
+    # cut that line (at a word if that leaves a meaningful line) rather than lose the section.
     head = text[: limit - 1]
     cut = head.rfind(" ")
     at_word = _without_dangling_headings(head[:cut].split("\n")) if cut > 0 else []
