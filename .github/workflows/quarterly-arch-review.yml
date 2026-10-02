@@ -33,7 +33,7 @@ jobs:
           cat > body.md <<'BODY'
           Quarterly reminder to re-run the architecture review coverage matrix (see #269).
 
-          The methodology is repeatable: run the `arch-review` skill and diff the new findings against the previous run to measure remediation and catch drift. Run output lives under `docs/arch-review/<YYYY-MM-DD>/`; the previous run is the most recent dated directory there (first run: 2026-06-12).
+          The methodology is repeatable: run the `arch-review` skill and diff the new findings against the previous run to measure remediation and catch drift. Commit run output under `docs/arch-review/<YYYY-MM-DD>/` (the earlier run was 2026-06-12; its output may not be checked in yet) so the next run can diff against it.
 
           ## Checklist
           - [ ] Re-run the arch-review coverage matrix
