@@ -128,6 +128,10 @@ def _cut_lists(payload: dict, target: dict, limit: int, omitted: dict[str, int])
         items = parent[key]
         keep = _longest_prefix_within(items, _size(items) - (total - limit))
         parent[key] = items[:keep]
+        if len(path) > 1:
+            # The hint names only a few paths; a nested entry, such as one table's
+            # columns, must say itself that it is incomplete.
+            parent[f"{key}_truncated"] = True
         label = ".".join(path)
         omitted[label] = omitted.get(label, 0) + len(items) - keep
         total = _size(payload)
@@ -158,7 +162,8 @@ def _cut_strings(payload: dict, target: dict, limit: int, omitted: dict[str, int
         text = parent[key]
         keep = _longest_text_prefix_within(text, marker, _size(text) - (total - limit))
         parent[key] = text[:keep] + marker
-        omitted[str(key)] = omitted.get(str(key), 0) + 1
+        label = f"{key} (text)"
+        omitted[label] = omitted.get(label, 0) + 1
         total = _size(payload)
     return total
 
@@ -170,6 +175,25 @@ def _note(payload: dict, target: dict, budget: int, original_bytes: int, hint: s
         payload["warnings"].append(hint)
     elif "success" in payload:
         payload["warnings"] = [hint]
+
+
+def _paged_list(target: dict, omitted: dict[str, int]) -> str | None:
+    """The cut top-level list that ``offset`` pages through, or None when none fits.
+
+    A sibling list (such as denied workspace ids) can be cut harder than the page, so
+    the page is the cut list whose kept and cut items together fit the envelope's
+    ``total`` past its ``offset``; with no ``total``, a single cut list is the page.
+    """
+    if not isinstance(target.get("offset"), int):
+        return None
+    cut = [label for label in omitted if "." not in label and isinstance(target.get(label), list)]
+    total = target.get("total")
+    if not isinstance(total, int):
+        return cut[0] if len(cut) == 1 else None
+    fits = [
+        label for label in cut if target["offset"] + len(target[label]) + omitted[label] <= total
+    ]
+    return max(fits, key=lambda label: omitted[label], default=None)
 
 
 def fit_to_budget(payload: Any, budget: int) -> Any:
@@ -196,13 +220,9 @@ def fit_to_budget(payload: Any, budget: int) -> Any:
         extra["original_row_count"] = target["row_count"]
         target["row_count"] = len(target["rows"])
     next_offset = stuck_offset = None
-    # The paged list is the one cut hardest; insertion order only says which was cut first.
-    page_keys = sorted(
-        (label for label in omitted if "." not in label and isinstance(target.get(label), list)),
-        key=lambda label: -omitted[label],
-    )
-    if isinstance(target.get("offset"), int) and page_keys:
-        kept = len(target[page_keys[0]])
+    page_key = _paged_list(target, omitted)
+    if page_key is not None:
+        kept = len(target[page_key])
         if kept:
             next_offset = target["offset"] + kept
             target["next_offset"] = next_offset

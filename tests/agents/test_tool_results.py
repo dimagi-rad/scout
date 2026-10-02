@@ -109,7 +109,7 @@ def test_an_oversized_listing_is_cut_to_a_page_the_agent_can_continue():
     datasets = [{"name": f"ds_{i:03d}", "description": "d" * 500} for i in range(200)]
     payload = {
         "success": True,
-        "data": {"datasets": datasets, "total": 200, "limit": 200, "offset": 20},
+        "data": {"datasets": datasets, "total": 220, "limit": 200, "offset": 20},
         "schema": "semantic",
     }
 
@@ -263,6 +263,7 @@ def test_next_offset_follows_the_list_cut_hardest():
             "datasets": [{"d": "x" * 400}] * 200,
             "workspace_errors": [{"e": "y" * 20_000}] * 10,
             "offset": 5,
+            "total": 300,
         },
     }
 
@@ -281,3 +282,33 @@ def test_original_row_count_survives_the_last_resort_note():
 
     assert data["truncated"] is True
     assert data["truncation"]["original_row_count"] == 1
+
+
+def test_a_cut_sibling_list_is_not_mistaken_for_the_page():
+    payload = {
+        "success": True,
+        "data": {
+            "workspaces": [{"id": i} for i in range(20)],
+            "inaccessible_workspace_ids": ["w" * 36] * 3_000,
+            "total": 20,
+            "offset": 0,
+            "has_more": False,
+        },
+    }
+
+    data = _compacted_payload("list_workspaces", payload)["data"]
+
+    assert len(data["workspaces"]) == 20
+    assert data["has_more"] is False
+    assert "next_offset" not in data
+
+
+def test_a_nested_list_that_was_cut_says_so_itself():
+    columns = [{"name": f"c{i}", "description": "d" * 200} for i in range(2_000)]
+    payload = {"success": True, "data": {"tables": {"visits": {"columns": columns}}}}
+
+    data = _compacted_payload("get_metadata", payload)["data"]
+
+    table = data["tables"]["visits"]
+    assert table["columns_truncated"] is True
+    assert 0 < len(table["columns"]) < 2_000
