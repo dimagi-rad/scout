@@ -19,9 +19,11 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.db import transaction
+from django.db.models import F
 from django.db.models.functions import Now
 from django.utils import timezone
 from langchain_core.messages import HumanMessage
@@ -29,6 +31,10 @@ from langchain_core.messages import HumanMessage
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import MAX_MESSAGE_LENGTH, SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
+from apps.workspaces.services.load_activity import (
+    aworkspace_load_pending,
+    workspace_load_pending,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +134,16 @@ def _claim_is_live(pending: PendingRequest, thread: Thread) -> bool:
     )
 
 
-def serialize(pending: PendingRequest, thread: Thread, job_state: str | None) -> dict:
+def serialize(
+    pending: PendingRequest,
+    thread: Thread,
+    job_state: str | None,
+    workspace_loading: bool = False,
+) -> dict:
     """The request as the chat shows it; a stale claim shows as waiting again.
 
-    ``job_state`` is its load's ThreadJob state: a waiting request whose load is no
-    longer pending or running will not be sent unless the user sends it.
+    ``job_state`` is its load's ThreadJob state. A request with no load of its own
+    waits on the workspace's (``workspace_loading``), whose end sends it.
     """
     return {
         "thread_id": str(pending.thread_id),
@@ -142,6 +153,7 @@ def serialize(pending: PendingRequest, thread: Thread, job_state: str | None) ->
         "state": "claimed" if _claim_is_live(pending, thread) else "waiting",
         "thread_job_id": str(pending.thread_job_id) if pending.thread_job_id else None,
         "thread_job_state": job_state,
+        "workspace_load_pending": workspace_loading,
     }
 
 
@@ -149,12 +161,19 @@ def _serialize_locked(pending: PendingRequest) -> dict:
     job_state = (
         ThreadJob.objects.filter(id=pending.thread_job_id).values_list("state", flat=True).first()
     )
-    return serialize(pending, Thread.objects.get(id=pending.thread_id), job_state)
+    thread = Thread.objects.get(id=pending.thread_id)
+    loading = pending.thread_job_id is None and workspace_load_pending(thread.workspace_id)
+    return serialize(pending, thread, job_state, loading)
 
 
-def _serialize_loaded(pending: PendingRequest) -> dict:
+def _serialize_loaded(pending: PendingRequest, workspace_loading: bool = False) -> dict:
     job = pending.thread_job
-    return serialize(pending, pending.thread, job.state if job is not None else None)
+    return serialize(
+        pending,
+        pending.thread,
+        job.state if job is not None else None,
+        workspace_loading and job is None,
+    )
 
 
 def _lease_is_live(thread_id) -> bool:
@@ -164,12 +183,16 @@ def _lease_is_live(thread_id) -> bool:
 
 
 @sync_to_async
-def ahold_message(thread_id, *, part_id: str, text: str) -> dict | None:
+def ahold_message(
+    thread_id, *, part_id: str, text: str, for_workspace_load: bool = False
+) -> dict | None:
     """Add ``text`` to the thread's held request while its load is still queued.
 
     Returns the request, or None when the message must be answered as a normal turn
-    instead: no load of this chat is waiting to resume it, the thread is answering
-    now, or a stale claim needs a lease holder to settle it first.
+    instead: no load is waiting to send it, the thread is answering now, or a stale
+    claim needs a lease holder to settle it first. ``for_workspace_load`` holds it
+    for a workspace load the chat did not start (the caller saw one pending), whose
+    end flushes it.
     """
     with transaction.atomic():
         # The resume flips this row to RUNNING before it claims the request, so
@@ -184,7 +207,7 @@ def ahold_message(thread_id, *, part_id: str, text: str) -> dict | None:
             .order_by("-created_at")
             .first()
         )
-        if job is None or _lease_is_live(thread_id):
+        if (job is None and not for_workspace_load) or _lease_is_live(thread_id):
             return None
         pending = PendingRequest.objects.select_for_update().filter(thread_id=thread_id).first()
         if pending is None:
@@ -199,8 +222,13 @@ def ahold_message(thread_id, *, part_id: str, text: str) -> dict | None:
             _check_length(combined_text(parts), len(parts))
             pending.parts = parts
             pending.version += 1
-            pending.thread_job = job
-            pending.save(update_fields=["parts", "version", "thread_job", "updated_at"])
+            # A workspace-load hold leaves the request's own load (if any) in charge.
+            pending.thread_job = job or pending.thread_job
+            # New text is a new request to try sending.
+            pending.flush_attempts = 0
+            pending.save(
+                update_fields=["parts", "version", "thread_job", "flush_attempts", "updated_at"]
+            )
         return _serialize_locked(pending)
 
 
@@ -219,7 +247,8 @@ def aadd_part(thread_id, *, part_id: str, text: str) -> dict:
             _check_length(combined_text(parts), len(parts))
             pending.parts = parts
             pending.version += 1
-            pending.save(update_fields=["parts", "version", "updated_at"])
+            pending.flush_attempts = 0
+            pending.save(update_fields=["parts", "version", "flush_attempts", "updated_at"])
         return _serialize_locked(pending)
 
 
@@ -261,7 +290,8 @@ def aedit(
                 raise PendingRequestInvalidEdit("first_part")
             pending.parts = [part for i, part in enumerate(pending.parts) if i != index]
         pending.version += 1
-        pending.save(update_fields=["parts", "version", "updated_at"])
+        pending.flush_attempts = 0
+        pending.save(update_fields=["parts", "version", "flush_attempts", "updated_at"])
         return _serialize_locked(pending)
 
 
@@ -402,14 +432,67 @@ async def athread_pending_request(thread_id) -> dict | None:
         .filter(thread_id=thread_id)
         .afirst()
     )
-    return _serialize_loaded(pending) if pending is not None else None
+    if pending is None:
+        return None
+    loading = pending.thread_job_id is None and await aworkspace_load_pending(
+        pending.thread.workspace_id
+    )
+    return _serialize_loaded(pending, loading)
 
 
 async def aworkspace_pending_requests(workspace, user) -> dict[str, dict]:
     """The user's held requests in ``workspace``, keyed by thread id."""
-    return {
-        str(pending.thread_id): _serialize_loaded(pending)
+    held = [
+        pending
         async for pending in PendingRequest.objects.select_related("thread", "thread_job").filter(
             thread__workspace=workspace, thread__user=user
         )
+    ]
+    loading = any(p.thread_job_id is None for p in held) and await aworkspace_load_pending(
+        workspace.id
+    )
+    return {str(pending.thread_id): _serialize_loaded(pending, loading) for pending in held}
+
+
+MAX_FLUSH_ATTEMPTS = 1
+ACTIVE_JOB_STATES = (ThreadJob.State.PENDING, ThreadJob.State.RUNNING)
+# A stopped load still resumes its chat and sends the request (CANCELLED is a
+# state the resume claims from), so the flush leaves it that long first.
+CANCELLED_RESUME_GRACE = timedelta(minutes=2)
+
+
+def _flushable():
+    """Held requests no load of their own will send: none, or one that has ended."""
+    return (
+        PendingRequest.objects.filter(flush_attempts__lt=MAX_FLUSH_ATTEMPTS)
+        .exclude(thread_job__state__in=ACTIVE_JOB_STATES)
+        .exclude(
+            thread_job__state=ThreadJob.State.CANCELLED,
+            thread_job__completed_at__gt=timezone.now() - CANCELLED_RESUME_GRACE,
+        )
+    )
+
+
+async def aflushable_thread_ids(workspace_id) -> list:
+    return [
+        thread_id
+        async for thread_id in _flushable()
+        .filter(thread__workspace_id=workspace_id)
+        .values_list("thread_id", flat=True)
+    ]
+
+
+async def aflushable_workspace_ids() -> set:
+    return {
+        workspace_id
+        async for workspace_id in _flushable().values_list("thread__workspace_id", flat=True)
     }
+
+
+async def acount_flush_attempt(thread_id) -> bool:
+    """Spend one of the request's flush attempts; False when it has none left (or is gone)."""
+    return bool(
+        await _flushable()
+        .filter(thread_id=thread_id)
+        .aupdate(flush_attempts=F("flush_attempts") + 1)
+    )

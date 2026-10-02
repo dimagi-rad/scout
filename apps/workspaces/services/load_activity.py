@@ -113,6 +113,11 @@ def _pending_loads(workspace_ids, task_names=(MATERIALIZE_TASK_NAME,)):
     return runs, recoveries, jobs
 
 
+def workspace_load_pending(workspace_id) -> bool:
+    """``aworkspace_load_pending`` for sync callers."""
+    return any(pending.exists() for pending in _pending_loads([workspace_id]))
+
+
 async def aworkspace_load_pending(workspace_id) -> bool:
     """Whether a load covering this workspace is queued or running."""
     return await _aany_pending(_pending_loads([workspace_id]))

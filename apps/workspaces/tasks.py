@@ -90,7 +90,10 @@ from apps.workspaces.services.data_recovery import (
 )
 from apps.workspaces.services.failure_guidance import credential_guidance
 from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
-from apps.workspaces.services.load_activity import active_runs_for_workspaces
+from apps.workspaces.services.load_activity import (
+    active_runs_for_workspaces,
+    aworkspace_load_pending,
+)
 from apps.workspaces.services.load_candidates import (
     Promotion,
     abandoned_workspace_candidates,
@@ -207,6 +210,26 @@ def _unreachable_tenant_error(tenant) -> str:
 
 @app.task(pass_context=True)
 async def refresh_tenant_schema(
+    context,
+    schema_id: str,
+    membership_id: str,
+    actor_user_id: str = "",
+    workspace_id: str = "",
+) -> dict:
+    """See ``_refresh_tenant_schema``; a held request waiting on it is flushed after."""
+    try:
+        return await _refresh_tenant_schema(
+            context,
+            schema_id,
+            membership_id,
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+        )
+    finally:
+        await _defer_pending_flush(workspace_id)
+
+
+async def _refresh_tenant_schema(
     context,
     schema_id: str,
     membership_id: str,
@@ -1306,6 +1329,7 @@ async def materialize_workspace(
                 logger.exception("Could not queue the view rebuild for workspace %s", workspace_id)
         if notify_thread:
             await _defer_resume_for_job(job_id, preflight_failures)
+        await _defer_pending_flush(workspace_id)
 
 
 def _resume_records(result: dict) -> list[dict]:
@@ -2278,6 +2302,19 @@ async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
 
 @app.task(pass_context=True)
 async def recover_workspace_data(context, recovery_id: str) -> dict:
+    """See ``_recover_workspace_data``; a held request waiting on it is flushed after."""
+    try:
+        return await _recover_workspace_data(context, recovery_id)
+    finally:
+        workspace_id = (
+            await WorkspaceDataRecovery.objects.filter(id=recovery_id)
+            .values_list("workspace_id", flat=True)
+            .afirst()
+        )
+        await _defer_pending_flush(workspace_id)
+
+
+async def _recover_workspace_data(context, recovery_id: str) -> dict:
     """Repair the least healthy layer of a workspace's artifact query surface.
 
     The requested recovery type captures why the job was created. The task
@@ -3919,3 +3956,111 @@ async def _resume_claimed_job(
         )
         return {"status": "resumed", "terminal_state": actual_state or terminal}
     return {"status": "resumed", "terminal_state": terminal}
+
+
+# Sent ahead of a request the workspace flush sends: one no load of its chat
+# resumes (held for another member's load, or left after its own load ended).
+FLUSH_NOTE = (
+    f"{SYSTEM_RESUME_MARKER} A workspace data load finished while this message waited; answer it."
+)
+# Lets the load that queued the flush finish, so the flush does not see it pending.
+PENDING_FLUSH_DELAY_SECONDS = 5
+
+
+async def _defer_pending_flush(workspace_id) -> None:
+    """Queue a flush of the workspace's held requests; never raises (the sweep is the backstop)."""
+    if not workspace_id:
+        return
+    try:
+        await flush_pending_requests.configure(
+            queueing_lock=f"pending-flush:{workspace_id}",
+            schedule_in={"seconds": PENDING_FLUSH_DELAY_SECONDS},
+        ).defer_async(workspace_id=str(workspace_id))
+    except AlreadyEnqueued:
+        pass
+    except Exception:
+        logger.exception("Could not queue the held-request flush for workspace %s", workspace_id)
+
+
+@app.task
+async def flush_pending_requests(workspace_id: str) -> dict:
+    """Send the workspace's held requests that no load of their own will send.
+
+    Runs when a load of the workspace ends, and from the minute sweep. A load
+    still under way flushes them itself when it ends.
+    """
+    if await aworkspace_load_pending(workspace_id):
+        return {"status": "load_pending"}
+    sent = 0
+    for thread_id in await pending_requests.aflushable_thread_ids(workspace_id):
+        try:
+            sent += await _flush_thread(thread_id)
+        except Exception:
+            logger.exception("flush: could not send the held request of thread %s", thread_id)
+    return {"status": "flushed", "sent": sent}
+
+
+@app.periodic(cron="* * * * *")
+@app.task
+async def sweep_pending_requests(timestamp: int = 0) -> dict:
+    """Backstop for a flush that never ran: a lost defer, or a hold racing a load's end."""
+    flushed = 0
+    for workspace_id in await pending_requests.aflushable_workspace_ids():
+        result = await flush_pending_requests(str(workspace_id))
+        flushed += result.get("sent", 0)
+    return {"sent": flushed}
+
+
+async def _flush_thread(thread_id) -> int:
+    lease = await atry_acquire_turn_lease(thread_id)
+    if lease is None:
+        # Answering now: that turn takes the request with it.
+        return 0
+    async with lease.held():
+        if not await pending_requests.acount_flush_attempt(thread_id):
+            return 0
+        held = await pending_requests.aclaim(thread_id, lease.token)
+        if held is None:
+            return 0
+        thread = await Thread.objects.select_related("workspace", "user").aget(id=thread_id)
+        try:
+            await _answer_flushed_request(thread, held)
+        finally:
+            await pending_requests.asettle(held)
+    try:
+        await Thread.objects.filter(id=thread_id).aupdate(updated_at=timezone.now())
+    except Exception:
+        logger.warning("flush: Thread.updated_at bump failed for %s", thread_id, exc_info=True)
+    await aschedule_thread_title(thread)
+    return 1
+
+
+async def _answer_flushed_request(thread: Thread, held) -> None:
+    workspace, user = thread.workspace, thread.user
+    try:
+        agent = await _build_agent_for_resume(workspace, user, conversation_id=str(thread.id))
+        config = {
+            "configurable": {"thread_id": str(thread.id)},
+            "recursion_limit": settings.AGENT_RESUME_RECURSION_LIMIT,
+        }
+        langfuse_handler = get_langfuse_callback(session_id=str(thread.id), user_id=str(user.id))
+        if langfuse_handler is not None:
+            config["callbacks"] = [langfuse_handler]
+        await asyncio.wait_for(
+            agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
+                        HumanMessage(content=held.text, id=held.message_id),
+                    ],
+                    "workspace_id": str(workspace.id),
+                    "user_id": str(user.id),
+                    "thread_id": str(thread.id),
+                },
+                config,
+            ),
+            timeout=settings.AGENT_RESUME_TIMEOUT_S,
+        )
+    except Exception:
+        # Settled after: unsent, it waits again (its one flush spent) for the user to send.
+        logger.exception("flush: agent failed for the held request of thread %s", thread.id)

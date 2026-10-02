@@ -6,6 +6,7 @@ claims the held request under the thread's turn lease and sends it as one messag
 
 import json
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,8 +15,10 @@ from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models.functions import Now
 from django.test import AsyncClient
+from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
+from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.graph.base import human_turn_count
 from apps.chat import pending_requests, turn_lease
@@ -24,6 +27,7 @@ from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.turn_lease import atry_acquire_turn_lease
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces import tasks
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -266,6 +270,14 @@ class TestLiveTurnSendsTheHeldRequest:
         thread_id = str(uuid.uuid4())
         await _held_events(await _post(client, ws, thread_id, "visits?", message_id="m1"))
         await ThreadJob.objects.filter(thread_id=thread_id).aupdate(state=ThreadJob.State.FAILED)
+        # The load's queue job ended too, or the next message is held for it again.
+        job_ids = [
+            job_id
+            async for job_id in ThreadJob.objects.filter(thread_id=thread_id).values_list(
+                "procrastinate_job_id", flat=True
+            )
+        ]
+        await ProcrastinateJob.objects.filter(id__in=job_ids).aupdate(status="failed")
         return ws, client, thread_id
 
     async def test_a_new_message_carries_the_held_text_first(self, agent_layer, checkpoint):
@@ -841,3 +853,201 @@ async def test_messages_include_pending_for_a_thread_not_yet_created():
     )
 
     assert response.json() == {"messages": [], "pending_request": None}
+
+
+# Step 4: requests no load of their own sends, and the workspace flush.
+
+
+def _flush_agent(checkpoint_ids, *, lands=True, raises=None):
+    agent = MagicMock()
+
+    async def invoke(input_state, _config):
+        if raises:
+            raise raises
+        if lands:
+            checkpoint_ids.update(m.id for m in input_state["messages"])
+        return {"messages": []}
+
+    agent.ainvoke = AsyncMock(side_effect=invoke)
+    return agent
+
+
+async def _thread(slug, **member_kwargs):
+    ws, _tenant, user, client = await _loading_chat(slug, **member_kwargs)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    return ws, user, client, thread
+
+
+async def _hold_without_load(thread, text="visits?"):
+    return await pending_requests.ahold_message(
+        thread.id, part_id=f"m-{uuid.uuid4()}", text=text, for_workspace_load=True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs", "checkpoint")
+class TestHoldForWorkspaceLoad:
+    async def test_a_read_only_member_is_held_for_a_teammates_load(self, agent_layer):
+        ws, _tenant, _user, client = await _loading_chat("ro", role=WorkspaceRole.READ)
+        thread_id = str(uuid.uuid4())
+
+        with (
+            patch("apps.chat.views.aworkspace_load_pending", AsyncMock(return_value=True)),
+            patch.object(pending_requests, "workspace_load_pending", MagicMock(return_value=True)),
+        ):
+            held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["thread_job_id"] is None
+        assert held["workspace_load_pending"] is True
+        assert not await ThreadJob.objects.filter(thread_id=thread_id).aexists()
+
+    async def test_with_no_load_under_way_it_is_answered(self, agent_layer):
+        ws, _tenant, _user, client = await _loading_chat("ro-idle", role=WorkspaceRole.READ)
+        thread_id = str(uuid.uuid4())
+
+        with patch("apps.chat.views.aworkspace_load_pending", AsyncMock(return_value=False)):
+            response = await _post(client, ws, thread_id, "visits?")
+            [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+    async def test_holding_for_the_workspace_keeps_the_chats_own_load(self, agent_layer):
+        _ws, _user, _client, thread = await _thread("keep-own")
+        job = await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=424242
+        )
+        await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
+
+        await _hold_without_load(thread, "by month")
+
+        pending = await PendingRequest.objects.aget(thread=thread)
+        assert pending.thread_job_id == job.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs")
+class TestFlush:
+    async def _flush(self, ws, agent):
+        with (
+            patch("apps.workspaces.tasks.aworkspace_load_pending", AsyncMock(return_value=False)),
+            patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+            patch("apps.workspaces.tasks.aschedule_thread_title", AsyncMock()),
+        ):
+            return await tasks.flush_pending_requests(str(ws.id))
+
+    async def test_it_sends_the_request_behind_a_short_marker(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush")
+        await _hold_without_load(thread, "visits?")
+        agent = _flush_agent(checkpoint)
+
+        result = await self._flush(ws, agent)
+
+        assert result == {"status": "flushed", "sent": 1}
+        marker, request = agent.ainvoke.await_args.args[0]["messages"]
+        assert marker.content.startswith(SYSTEM_RESUME_MARKER)
+        assert "workspace data load finished" in marker.content
+        assert request.content == "visits?"
+        assert marker.id == f"{request.id}-sys"
+        assert not await PendingRequest.objects.filter(thread=thread).aexists()
+
+    async def test_it_waits_while_a_load_is_under_way(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-busy")
+        await _hold_without_load(thread)
+        agent = _flush_agent(checkpoint)
+
+        with patch("apps.workspaces.tasks.aworkspace_load_pending", AsyncMock(return_value=True)):
+            result = await tasks.flush_pending_requests(str(ws.id))
+
+        assert result == {"status": "load_pending"}
+        agent.ainvoke.assert_not_awaited()
+        assert await PendingRequest.objects.filter(thread=thread).aexists()
+
+    async def test_a_request_its_own_load_will_send_is_left_to_it(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-own")
+        await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=515151
+        )
+        await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
+        agent = _flush_agent(checkpoint)
+
+        assert (await self._flush(ws, agent))["sent"] == 0
+        agent.ainvoke.assert_not_awaited()
+
+    async def test_a_just_stopped_load_keeps_its_request_for_its_resume(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-stopped")
+        job = await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=616161
+        )
+        await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
+        await ThreadJob.objects.filter(id=job.id).aupdate(
+            state=ThreadJob.State.CANCELLED, completed_at=timezone.now()
+        )
+        agent = _flush_agent(checkpoint)
+
+        assert (await self._flush(ws, agent))["sent"] == 0
+
+        await ThreadJob.objects.filter(id=job.id).aupdate(
+            completed_at=timezone.now() - timedelta(minutes=5)
+        )
+        assert (await self._flush(ws, agent))["sent"] == 1
+
+    async def test_one_that_failed_is_not_retried_until_it_changes(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-fail")
+        await _hold_without_load(thread)
+
+        await self._flush(ws, _flush_agent(checkpoint, raises=RuntimeError("model down")))
+        again = _flush_agent(checkpoint)
+        await self._flush(ws, again)
+
+        again.ainvoke.assert_not_awaited()
+        pending = await PendingRequest.objects.aget(thread=thread)
+        assert pending.state == PendingRequest.State.WAITING
+        assert pending.flush_attempts == 1
+
+        await pending_requests.aadd_part(thread.id, part_id="m-more", text="by month")
+        await self._flush(ws, again)
+        again.ainvoke.assert_awaited_once()
+
+    async def test_a_thread_answering_now_is_skipped(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-leased")
+        await _hold_without_load(thread)
+        lease = await tasks.atry_acquire_turn_lease(thread.id)
+        agent = _flush_agent(checkpoint)
+
+        assert (await self._flush(ws, agent))["sent"] == 0
+        await lease.release()
+        pending = await PendingRequest.objects.aget(thread=thread)
+        assert pending.flush_attempts == 0
+
+    async def test_the_sweep_flushes_every_workspace_with_one(self, checkpoint):
+        _ws_a, _user, _client, thread_a = await _thread("sweep-a")
+        _ws_b, _user_b, _client_b, thread_b = await _thread("sweep-b")
+        await _hold_without_load(thread_a)
+        await _hold_without_load(thread_b)
+        agent = _flush_agent(checkpoint)
+
+        with (
+            patch("apps.workspaces.tasks.aworkspace_load_pending", AsyncMock(return_value=False)),
+            patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+            patch("apps.workspaces.tasks.aschedule_thread_title", AsyncMock()),
+        ):
+            result = await tasks.sweep_pending_requests()
+
+        assert result == {"sent": 2}
+        assert not await PendingRequest.objects.filter(
+            thread_id__in=[thread_a.id, thread_b.id]
+        ).aexists()
+
+
+@pytest.mark.asyncio
+async def test_queueing_a_flush_twice_is_quiet():
+    configured = MagicMock()
+    configured.defer_async = AsyncMock(side_effect=AlreadyEnqueued("dup"))
+    with patch.object(tasks.flush_pending_requests, "configure", return_value=configured):
+        await tasks._defer_pending_flush("ws-1")
+
+    configured.defer_async.assert_awaited_once_with(workspace_id="ws-1")
