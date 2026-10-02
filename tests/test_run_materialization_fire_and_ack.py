@@ -16,7 +16,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from mcp_server.server import run_materialization
+from mcp_server.server import _THIS_CONVERSATION_RESUMES, run_materialization
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -45,7 +45,8 @@ async def test_run_materialization_observes_artifact_recovery(workspace, user):
         )
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["workspace_recovery_id"] == str(recovery.id)
-    assert "no automatic chat follow-up" in result["data"]["message"]
+    assert "Nothing will resume this conversation" in result["data"]["message"]
+    assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
     dispatch.assert_not_awaited()
 
 
@@ -106,6 +107,7 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
 
     assert result["data"]["status"] == "started"
     assert "thread_job_id" in result["data"]
+    assert _THIS_CONVERSATION_RESUMES in result["data"]["message"]
     # Intent is captured before queueing, so an equivalent pending load is joined.
     assert mw.defer.call_args.kwargs["load_intent"] == {str(tenant.id): 1}
     tj = await ThreadJob.objects.aget(procrastinate_job_id=7777)
@@ -191,6 +193,7 @@ async def test_run_materialization_returns_already_in_progress_if_active_in_same
 
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["thread_job_id"] == str(existing_tj.id)
+    assert _THIS_CONVERSATION_RESUMES in result["data"]["message"]
     # No new ThreadJob created for this thread
     assert await ThreadJob.objects.filter(thread=thread).acount() == 1
 

@@ -1537,6 +1537,11 @@ async def _run_belongs_to_workspace(run, workspace_id) -> bool:
     ).aexists()
 
 
+# Only results backed by a ThreadJob bound to the calling thread may say this; the
+# agent prompt allows promising a follow-up only after a tool result that does.
+_THIS_CONVERSATION_RESUMES = "This conversation will resume automatically when it finishes."
+
+
 @mcp.tool()
 async def run_materialization(
     workspace_id: str = "",
@@ -1622,8 +1627,9 @@ async def run_materialization(
                     "workspace_recovery_id": str(recovery.id),
                     "message": (
                         "Artifact data recovery is already running for this workspace. "
-                        "Do not start another load. Check get_schema_status for completion; "
-                        "this operation has no automatic chat follow-up."
+                        "Do not start another load. Nothing will resume this conversation "
+                        "when it finishes; tell the user to ask again once it has finished. "
+                        "Check get_schema_status for completion."
                     ),
                 },
                 schema="",
@@ -1644,8 +1650,8 @@ async def run_materialization(
                     "status": "already_in_progress",
                     "thread_job_id": str(existing.id),
                     "message": (
-                        "A materialization is already running in this chat. "
-                        "I'll continue once it finishes."
+                        "A materialization started by this conversation is already running. "
+                        f"{_THIS_CONVERSATION_RESUMES}"
                     ),
                 },
                 schema="",
@@ -1677,9 +1683,7 @@ async def run_materialization(
             {
                 "status": "started",
                 "thread_job_id": str(tj.id),
-                "message": (
-                    "Materialization started in background. I'll continue when it finishes."
-                ),
+                "message": f"Materialization started in background. {_THIS_CONVERSATION_RESUMES}",
             },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
