@@ -302,3 +302,27 @@ describe("Sidebar access denial", () => {
     expect(screen.queryByTestId("sidebar-threads-connected-accounts")).toBeNull()
   })
 })
+
+describe("Sidebar agent model label", () => {
+  afterEach(() => {
+    mocks.state.user = { id: "user-1" }
+  })
+
+  it("shows the friendly model name beside the wordmark", () => {
+    mocks.state.user = {
+      id: "user-1",
+      agent_model: { id: "claude-opus-5-5", label: "Opus 5.5" },
+    } as typeof mocks.state.user
+    renderSidebar()
+
+    const label = screen.getByTestId("app-model-label")
+    expect(label).toHaveTextContent("Opus 5.5")
+    expect(label).toHaveClass("scout-sidebar-label")
+  })
+
+  it("renders nothing when the server sends no model", () => {
+    renderSidebar()
+
+    expect(screen.queryByTestId("app-model-label")).toBeNull()
+  })
+})

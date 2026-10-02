@@ -4,6 +4,7 @@ import logging
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.sites.models import Site
 from django.core.cache import cache
@@ -13,6 +14,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
+from apps.agents.model_label import model_display_name
 from apps.common.commcare_servers import server_for_provider
 from apps.common.http import parse_json_object, string_field
 from apps.users.decorators import async_login_required, login_required_json
@@ -59,6 +61,10 @@ def _user_response(user, *, onboarding_complete=False):
         "name": user.get_full_name(),
         "is_staff": user.is_staff,
         "onboarding_complete": onboarding_complete,
+        "agent_model": {
+            "id": settings.DEFAULT_LLM_MODEL,
+            "label": model_display_name(settings.DEFAULT_LLM_MODEL),
+        },
     }
 
 
