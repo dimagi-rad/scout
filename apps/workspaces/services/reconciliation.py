@@ -629,7 +629,7 @@ async def persist_synthetic_failure_message(
     try:
         if holds_turn_lease:
             async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
-                await _append_synthetic_message(thread_job, text)
+                await _append_synthetic_message(thread_job.thread, text)
             return
         lease = await atry_acquire_turn_lease(thread_job.thread_id)
         if lease is None:
@@ -640,7 +640,7 @@ async def persist_synthetic_failure_message(
             )
             return
         async with lease.held(), asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
-            await _append_synthetic_message(thread_job, text)
+            await _append_synthetic_message(thread_job.thread, text)
     except Exception:
         logger.warning(
             "resume: failed to persist synthetic failure message for tj=%s",
@@ -649,11 +649,23 @@ async def persist_synthetic_failure_message(
         )
 
 
-async def _append_synthetic_message(thread_job, text: str) -> None:
+async def persist_synthetic_thread_message(thread, text: str) -> None:
+    """``persist_synthetic_failure_message`` for a caller holding ``thread``'s turn
+    lease with no ThreadJob, such as the held-request flush. Never raises."""
+    try:
+        async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
+            await _append_synthetic_message(thread, text)
+    except Exception:
+        logger.warning(
+            "Could not persist a synthetic message on thread %s", thread.id, exc_info=True
+        )
+
+
+async def _append_synthetic_message(thread, text: str) -> None:
     agent = await build_agent_for_resume(
-        thread_job.thread.workspace,
-        thread_job.thread.user,
-        conversation_id=str(thread_job.thread.id),
+        thread.workspace,
+        thread.user,
+        conversation_id=str(thread.id),
     )
-    config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
+    config = {"configurable": {"thread_id": str(thread.id)}}
     await agent.aupdate_state(config, {"messages": [AIMessage(content=text)]})

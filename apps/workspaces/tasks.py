@@ -138,6 +138,9 @@ from apps.workspaces.services.reconciliation import (
 from apps.workspaces.services.reconciliation import (
     persist_synthetic_failure_message as _persist_synthetic_failure_message,
 )
+from apps.workspaces.services.reconciliation import (
+    persist_synthetic_thread_message as _persist_synthetic_thread_message,
+)
 from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
     DENIED_ROLE_REQUIRED,
@@ -3982,6 +3985,7 @@ FLUSH_NOTE = (
     f"{SYSTEM_RESUME_MARKER} A workspace data load ended while this message waited; "
     "answer it from the data now available, and say so if what it needs did not load."
 )
+FLUSH_FAILED_MESSAGE = "I couldn't finish answering this after your data loaded. Please ask again."
 # Lets the load that queued the flush finish, so the flush does not see it pending.
 PENDING_FLUSH_DELAY_SECONDS = 5
 
@@ -4069,6 +4073,12 @@ async def _flush_thread(thread_id) -> int:
                 logger.exception("flush: the held request of thread %s timed out", thread_id)
             finally:
                 await pending_requests.asettle(held)
+            # The run saves the user's message before the model answers, so a run
+            # that failed after that leaves the message sent, with no reply.
+            landed = not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+            if landed and not answered:
+                await _persist_synthetic_thread_message(thread, FLUSH_FAILED_MESSAGE)
+            answered = answered or landed
     except asyncio.CancelledError:
         # The heartbeat cancels the task when another run takes the thread; that
         # ends this request (settled above), not the flush of the others.

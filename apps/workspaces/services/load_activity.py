@@ -126,6 +126,17 @@ async def aworkspace_load_pending(workspace_id) -> bool:
     return await _aany_pending(_pending_loads([workspace_id]))
 
 
+async def aworkspace_own_load_pending(workspace_id) -> bool:
+    """Whether a load of this workspace itself is queued or running.
+
+    Unlike ``aworkspace_load_pending``, a sibling workspace's run on a shared
+    tenant does not count: it builds that workspace's catalog, not this one's,
+    and its end flushes nothing here.
+    """
+    _runs, recoveries, jobs = _pending_loads([workspace_id])
+    return await _aany_pending([recoveries, jobs])
+
+
 async def aworkspace_build_pending(workspace_id) -> bool:
     """Whether a load, or a view or semantic-model rebuild after one, is queued or running."""
     return await _aany_pending(_pending_loads([workspace_id], _BUILD_TASK_NAMES))

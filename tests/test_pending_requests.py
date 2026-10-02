@@ -37,6 +37,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services import load_activity
 from apps.workspaces.tasks import (
     HELD_REQUEST_NOTE,
     NO_REQUEST_NOTE,
@@ -911,7 +912,7 @@ class TestHoldForWorkspaceLoad:
         thread_id = str(uuid.uuid4())
 
         with (
-            patch("apps.chat.views.aworkspace_load_pending", AsyncMock(return_value=True)),
+            patch("apps.chat.views.aworkspace_own_load_pending", AsyncMock(return_value=True)),
             patch.object(pending_requests, "workspace_build_pending", MagicMock(return_value=True)),
         ):
             held = await _held_events(await _post(client, ws, thread_id, "visits?"))
@@ -925,7 +926,7 @@ class TestHoldForWorkspaceLoad:
         ws, _tenant, _user, client = await _loading_chat("ro-idle", role=WorkspaceRole.READ)
         thread_id = str(uuid.uuid4())
 
-        with patch("apps.chat.views.aworkspace_load_pending", AsyncMock(return_value=False)):
+        with patch("apps.chat.views.aworkspace_own_load_pending", AsyncMock(return_value=False)):
             response = await _post(client, ws, thread_id, "visits?")
             [chunk async for chunk in response.streaming_content]
 
@@ -1070,6 +1071,27 @@ class TestFlush:
 
         assert await pending_requests.aflushable_thread_ids(ws.id) == [older.id, newer.id]
 
+    async def test_a_reply_that_failed_after_the_message_landed_says_so(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-landed-failed")
+        await _hold_without_load(thread)
+        agent = MagicMock()
+
+        async def lands_then_fails(input_state, _config):
+            checkpoint.update(m.id for m in input_state["messages"])
+            raise RuntimeError("model down")
+
+        agent.ainvoke = AsyncMock(side_effect=lands_then_fails)
+
+        with patch(
+            "apps.workspaces.tasks._persist_synthetic_thread_message", AsyncMock()
+        ) as persist:
+            result = await self._flush(ws, agent)
+
+        assert result["sent"] == 1
+        persist.assert_awaited_once()
+        assert persist.await_args.args[1] == tasks.FLUSH_FAILED_MESSAGE
+        assert not await PendingRequest.objects.filter(thread=thread).aexists()
+
     async def test_a_thread_answering_now_is_skipped(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-leased")
         await _hold_without_load(thread)
@@ -1138,3 +1160,19 @@ async def test_queueing_a_flush_twice_is_quiet():
         await tasks._defer_pending_flush("ws-1")
 
     configured.defer_async.assert_awaited_once_with(workspace_id="ws-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
+    ws, tenant = await _workspace("sibling-run")
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_sibling_run")
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=4242,
+    )
+
+    assert await load_activity.aworkspace_load_pending(ws.id)
+    assert not await load_activity.aworkspace_own_load_pending(ws.id)

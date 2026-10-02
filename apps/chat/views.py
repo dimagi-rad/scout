@@ -42,7 +42,7 @@ from apps.workspaces.access import access_denied_response, role_satisfies
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.services.load_activity import (
     athread_awaits_load,
-    aworkspace_load_pending,
+    aworkspace_own_load_pending,
     aworkspace_serves_nothing,
 )
 from apps.workspaces.services.thread_job_dispatch import (
@@ -326,7 +326,7 @@ async def _hold_while_loading(workspace, thread_id: str, message: dict, text: st
     if not await aworkspace_serves_nothing(workspace.id):
         return None
     own_load = await athread_awaits_load(thread_id)
-    if not own_load and not await aworkspace_load_pending(workspace.id):
+    if not own_load and not await aworkspace_own_load_pending(workspace.id):
         return None
     part_id = message.get("id")
     if (
