@@ -26,6 +26,8 @@ MAX_PAGES = 100
 MAX_ROWS = 10_000
 # Above this many requested opportunities, one full listing beats one request each.
 CONNECT_LIGHT_CHECK_MAX_OPPORTUNITIES = 5
+CONNECT_LIGHT_REQUEST_FLOOR_SECONDS = 4.0
+CONNECT_LISTING_RESERVE_SECONDS = 5.0
 
 
 class ProcessNetworkLimiter:
@@ -167,17 +169,24 @@ async def _verify_connect_opportunities(client, policy, listing_url, headers, id
     A no-access 404 drops that opportunity, which publication then archives as an
     omission, exactly as the listing would have; the rest are still checked.
     """
+    # Keep part of the budget back, or the listing fallback could never finish.
+    light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
     confirmed = []
     for index, external_id in enumerate(ids):
-        remaining = deadline - clock()
+        remaining = light_deadline - clock()
         if remaining <= 0:
             return ProviderVerificationResult.unavailable(_UNAVAILABLE)
         try:
             url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
         except UnsafeProviderURL:
             return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-        # Share what is left, so one slow opportunity cannot starve the rest.
-        request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining / (len(ids) - index))
+        # A share of what is left, so one slow opportunity cannot starve the rest,
+        # but never so small that an ordinary slow answer is cut off.
+        request_timeout = min(
+            PER_REQUEST_TIMEOUT_SECONDS,
+            remaining,
+            max(remaining / (len(ids) - index), CONNECT_LIGHT_REQUEST_FLOOR_SECONDS),
+        )
         try:
             response = await asyncio.wait_for(
                 client.get(

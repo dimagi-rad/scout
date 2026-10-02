@@ -105,6 +105,7 @@ class ProviderVerificationResult:
 
     @classmethod
     def tenant_denied(cls, external_id: str, error_code: str) -> ProviderVerificationResult:
+        # No provider adapter emits this today; kept so the outcome set stays total.
         return cls(
             VerificationOutcome.TENANT_DENIED,
             denied_external_id=external_id,

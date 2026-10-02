@@ -695,17 +695,29 @@ async def test_connect_fallback_discards_partial_light_results(settings):
 
 
 @pytest.mark.asyncio
-async def test_connect_light_check_shares_the_budget_across_opportunities(settings):
+@pytest.mark.parametrize(
+    ("deadline", "count", "expected"),
+    [
+        # 5s of the 20s kept back for the listing; the rest shared across two.
+        pytest.param(20.0, 2, 7.5, id="share"),
+        # The share would be 2.25s; an ordinary slow answer still gets 4s.
+        pytest.param(14.0, 4, 4.0, id="floor"),
+        # Under 10s, half is kept back.
+        pytest.param(6.0, 4, 3.0, id="reserve-half"),
+    ],
+)
+async def test_connect_light_check_budget(settings, deadline, count, expected):
     settings.CONNECT_API_URL = "https://connect.example"
+    ids = [str(i) for i in range(1, count + 1)]
     _result, requests = await _verify(
         _request("commcare_connect"),
-        [_response(payload={"id": i}) for i in (1, 2, 3, 4)],
+        [_response(payload={"id": int(i)}) for i in ids],
         settings=settings,
-        deadline=8.0,
-        external_ids={"1", "2", "3", "4"},
+        deadline=deadline,
+        external_ids=set(ids),
     )
 
-    assert requests[0][1]["timeout"] == 2.0
+    assert requests[0][1]["timeout"] == expected
 
 
 @pytest.mark.asyncio
