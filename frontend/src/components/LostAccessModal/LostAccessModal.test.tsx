@@ -70,6 +70,16 @@ describe("LostAccessModal", () => {
     expect(screen.queryByTestId("lost-access-goto-skelly")).toBeNull()
   })
 
+  it("titles the gate with the workspace name, not the source-count display name", () => {
+    useAppStore.setState({
+      domains: [{ ...ws("skelly", false), name: "ocs demo 2", display_name: "ocs demo 2 · 3 sources" }],
+      activeDomainId: "skelly",
+    })
+    renderModal()
+
+    expect(screen.getByRole("heading")).toHaveTextContent("You’ve lost access to “ocs demo 2”")
+  })
+
   it("points a workspace with no sources at deleting it, not at reconnecting (#381)", () => {
     useAppStore.setState({
       domains: [{ ...ws("empty", false), tenants: [] }, ws("live", true)],

@@ -81,10 +81,10 @@ export function LostAccessModal() {
           </span>
           <h2 id="lost-access-title" className="text-lg font-semibold">
             {noSources
-              ? `“${active.display_name}” has no data sources`
+              ? `“${active.name}” has no data sources`
               : missing.length > 0
-                ? `You can’t open “${active.display_name}” yet`
-                : `You’ve lost access to “${active.display_name}”`}
+                ? `You can’t open “${active.name}” yet`
+                : `You’ve lost access to “${active.name}”`}
           </h2>
         </div>
 
