@@ -1347,6 +1347,17 @@ class TestConnectProgressAndTiming:
         assert updates[-1]["rows_loaded"] == 2
         assert updates[-1]["rows_total"] == 1000
 
+    def test_total_grows_when_rows_overrun_a_stale_discovery_count(self):
+        calls: list[dict] = []
+        self._harness._run_connect_pipeline(
+            sources=[SourceConfig(name="visits", resumable=True)],
+            loader_mocks={"visits": self._visits_loader([1, 2, 3])},
+            metadata={"all_opportunities": [{"id": 42, "visit_count": 2}]},
+            progress_updater=calls.append,
+        )
+        last = self._source_updates(calls, "visits")[-1]
+        assert (last["rows_loaded"], last["rows_total"]) == (3, 3)
+
     def test_resumed_visits_progress_counts_rows_already_loaded(self):
         prior = MagicMock()
         prior.state = "partial"

@@ -183,6 +183,10 @@ def run_pipeline(
             # Prefer the loader-reported total; fall back to a count discovered
             # up front (e.g. the opportunity's ``visit_count``) for a real percent.
             effective_total = rows_total if rows_total is not None else known_total
+            # A discovery count can trail the live export; grow it rather than
+            # report "1,050 of 1,000 rows".
+            if effective_total is not None and rows_loaded > effective_total:
+                effective_total = rows_loaded
             progress_updater(
                 {
                     "run_id": run_id_holder["id"],
