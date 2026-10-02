@@ -90,4 +90,20 @@ describe("useResumeStream", () => {
 
     expect(result.current.text).toBe("")
   })
+
+  it("judges a long finished answer by all of it, across pages", async () => {
+    const page = Array.from({ length: 500 }, (_, i) => ({
+      id: i + 1,
+      run: "old",
+      text: "x",
+      done: false,
+    }))
+    serve(page, [{ id: 501, run: "old", text: "", done: true }])
+    const { result } = renderHook(() => useResumeStream("ws", "t", true))
+
+    await waitFor(() => expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThanOrEqual(2))
+    await act(async () => {})
+
+    expect(result.current.text).toBe("")
+  })
 })
