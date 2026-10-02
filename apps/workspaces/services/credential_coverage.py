@@ -639,9 +639,14 @@ class MissingTenant:
 def _recovery(item: TenantCredentialReadiness, removed_pairs) -> CoverageRecovery:
     gap = item.gap
     if gap.code == CredentialGapCode.MISSING_LIVE_MEMBERSHIP:
-        if (item.user_id, item.tenant_id) in removed_pairs:
-            return CoverageRecovery.ACCESS_REMOVED
-        return CoverageRecovery.CONNECT_SOURCE
+        teamless = removed_pairs.get((item.user_id, item.tenant_id))
+        if teamless is None:
+            return CoverageRecovery.CONNECT_SOURCE
+        if teamless and canonical_provider(gap.provider) == "ocs":
+            # The team-less sweep (#702) and upstream denials archive pre-team OCS
+            # rows; only a reconnect that picks a team can bring one back.
+            return CoverageRecovery.LEGACY_TEAM_UNKNOWN
+        return CoverageRecovery.ACCESS_REMOVED
     if gap.code == CredentialGapCode.OCS_TEAM_MISSING:
         return CoverageRecovery.LEGACY_TEAM_UNKNOWN
     if gap.code in _TEAM_GAPS:
@@ -676,11 +681,22 @@ def _removed_pairs_queryset(unmembered):
         user_id__in={item.user_id for item in unmembered},
         tenant_id__in={item.tenant_id for item in unmembered},
         archived_at__isnull=False,
-    ).values_list("user_id", "tenant_id")
+    ).values_list(
+        "user_id",
+        "tenant_id",
+        "provider_metadata__team_slug",
+        "connection__credential_type",
+    )
 
 
 def _gaps_by_pair(readiness, removed_pairs) -> dict[tuple[int, str], MissingTenant]:
-    removed = {(user_id, str(tenant_id)) for user_id, tenant_id in removed_pairs}
+    # Tombstone pair -> whether it records no team. An API key's rows may
+    # legitimately lack one, so a key-backed row never counts as a pre-team row.
+    removed = {
+        (user_id, str(tenant_id)): not str(team_slug or "").strip()
+        and credential_type != TenantConnection.API_KEY
+        for user_id, tenant_id, team_slug, credential_type in removed_pairs
+    }
     return {
         (item.user_id, item.tenant_id): _missing_tenant(item, removed)
         for item in readiness
