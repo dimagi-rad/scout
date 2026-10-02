@@ -535,10 +535,6 @@ def _attempt_matches_waiter_lineage(
     )
 
 
-# Every detached verification's ORM work runs on this context's one dedicated thread.
-# Not the caller's thread: a sync (DRF) view reaches here through async_to_sync, whose
-# executor dies when that call returns. Not asgiref's process-wide default either: a
-# sync caller blocked waiting on the check may be holding that very thread.
 class _RecyclingExecutor(ThreadPoolExecutor):
     """Closes each call's connection when done, as a request's end would.
 
@@ -558,10 +554,16 @@ class _RecyclingExecutor(ThreadPoolExecutor):
         finally:
             # Best effort: a socket a failover already broke must not mask the
             # call's own outcome.
-            with contextlib.suppress(Exception):
+            try:
                 connections.close_all()
+            except Exception:
+                logger.debug("Discarding a connection that failed to close", exc_info=True)
 
 
+# Every detached verification's ORM work runs on this context's dedicated pool.
+# Not the caller's thread: a sync (DRF) view reaches here through async_to_sync, whose
+# executor dies when that call returns. Not asgiref's process-wide default either: a
+# sync caller blocked waiting on the check may be holding that very thread.
 _DETACHED_ORM_CONTEXT = ThreadSensitiveContext()
 # A small pool, so one publication waiting on a row lock cannot hold up the rest.
 SyncToAsync.context_to_thread_executor[_DETACHED_ORM_CONTEXT] = _RecyclingExecutor(
