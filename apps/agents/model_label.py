@@ -1,7 +1,7 @@
 import re
 
 _MODEL_ID = re.compile(
-    r"^claude-(?P<family>opus|sonnet|haiku)-(?P<major>\d+)-(?P<minor>\d+)(?:-(?:\d{8}|latest))?$"
+    r"^claude-(?P<family>opus|sonnet|haiku)-(?P<major>\d+)-(?P<minor>\d{1,2})(?:-(?:\d{8}|latest))?$"
 )
 
 
