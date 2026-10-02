@@ -201,6 +201,27 @@ class TestRunStreamed:
         assert "".join(row.text for row in rows) == ANSWER
         assert rows[-1].done is True
 
+    async def test_a_run_whose_writes_failed_still_ends_its_stream(self):
+        _ws, _user, thread = await _thread("stream-gap")
+        writer = resume_stream.ResumeStreamWriter(thread.id)
+        real = ResumeStreamChunk.objects.acreate
+        calls = {"n": 0}
+
+        async def fails_once(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("db blip")
+            return await real(**kwargs)
+
+        with patch.object(ResumeStreamChunk.objects, "acreate", side_effect=fails_once):
+            await writer.feed("x" * resume_stream.FLUSH_CHARS)
+            await writer.feed("more text")
+            await writer.close()
+
+        [row] = await _rows(thread)
+        assert row.done is True
+        assert row.text == ""
+
 
 def test_only_answer_text_is_streamed():
     assert resume_stream.chunk_text(AIMessage(content="plain")) == "plain"
@@ -253,6 +274,19 @@ class TestTailEndpoint:
         response = await intruder.get(f"/api/workspaces/{ws.id}/threads/{thread.id}/resume-stream/")
 
         assert response.json() == {"chunks": []}
+
+    async def test_a_negative_cursor_reads_as_a_first_read(self):
+        ws, _tenant, thread, client = await self._chat("tail-negative")
+        old, new = uuid.uuid4(), uuid.uuid4()
+        await ResumeStreamChunk.objects.acreate(thread=thread, run=old, text="old", done=True)
+        await ResumeStreamChunk.objects.acreate(thread=thread, run=new, text="new")
+
+        body = (
+            await client.get(f"/api/workspaces/{ws.id}/threads/{thread.id}/resume-stream/?after=-1")
+        ).json()
+
+        assert [c["text"] for c in body["chunks"]] == ["new"]
+        assert body["more"] is False
 
     async def test_a_bad_cursor_is_refused(self):
         ws, _tenant, thread, client = await self._chat("tail-bad")

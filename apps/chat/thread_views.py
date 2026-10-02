@@ -394,7 +394,8 @@ async def thread_resume_stream_view(request, workspace_id, thread_id):
     if thread is None:
         return JsonResponse({"chunks": []})
     try:
-        after = int(request.GET.get("after", "0"))
+        after = max(int(request.GET.get("after", "0")), 0)
     except ValueError:
         return JsonResponse({"error": "after must be an integer"}, status=400)
-    return JsonResponse({"chunks": await resume_stream.aread_after(thread.id, after)})
+    chunks = await resume_stream.aread_after(thread.id, after)
+    return JsonResponse({"chunks": chunks, "more": len(chunks) >= resume_stream.READ_LIMIT})

@@ -19,6 +19,7 @@ from datetime import timedelta
 from django.utils import timezone
 from langchain_core.messages import AIMessageChunk
 
+from apps.agents.graph.base import AGENT_NODE
 from apps.chat.models import ResumeStreamChunk
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,11 @@ logger = logging.getLogger(__name__)
 # Small enough to read as streaming, large enough not to write a row per token.
 FLUSH_INTERVAL_SECONDS = 0.25
 FLUSH_CHARS = 400
+# The client reads a full page as "more to come" (``more`` in the response).
 READ_LIMIT = 500
 RETENTION = timedelta(minutes=30)
 # Only the graph's own answer: tools may run models of their own.
-STREAMED_NODE = "agent"
+STREAMED_NODE = AGENT_NODE
 # Between the answer's model calls (text, tools, more text), as the reload shows them.
 CALL_SEPARATOR = "\n\n"
 
@@ -88,9 +90,12 @@ class ResumeStreamWriter:
         await self._flush(done=True)
 
     async def _flush(self, *, done: bool = False) -> None:
-        if self._broken or (not self._buffer and not done):
+        # The done row is still tried after a failed write: without it a reader
+        # would take the run's partial text for an answer still being written.
+        if (self._broken and not done) or (not self._buffer and not done):
             return
-        text = "".join(self._buffer)
+        # After a gap, more text would read as joined to what came before it.
+        text = "" if self._broken else "".join(self._buffer)
         self._buffer, self._buffered = [], 0
         self._last_flush = time.monotonic()
         try:

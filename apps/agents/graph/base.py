@@ -161,6 +161,9 @@ def human_turn_count(messages: list) -> int:
     )
 
 
+# The node whose model call writes the answer; resume streaming tails its tokens.
+AGENT_NODE = "agent"
+
 # Adaptive thinking counts toward max_tokens, so 4096 could cut a turn off
 # mid-answer or mid-tool-call. 16k stays under the Anthropic SDK's 21,333-token
 # guard for non-streamed requests (recipes use ainvoke; resumes stream).
@@ -1159,7 +1162,7 @@ async def build_agent_graph(
 
     graph = StateGraph(AgentState)
 
-    graph.add_node("agent", agent_node)
+    graph.add_node(AGENT_NODE, agent_node)
     graph.add_node("tools", tool_node)
     graph.add_node("escalate", escalation_node)
     graph.add_node("model_stopped", model_stopped_node)
