@@ -1537,6 +1537,11 @@ async def _run_belongs_to_workspace(run, workspace_id) -> bool:
     ).aexists()
 
 
+# Only results backed by a ThreadJob bound to the calling thread may say this; the
+# agent prompt allows promising a follow-up only after a tool result that does.
+_THIS_CONVERSATION_RESUMES = "This conversation will resume automatically when it finishes."
+
+
 @mcp.tool()
 async def run_materialization(
     workspace_id: str = "",
@@ -1550,9 +1555,9 @@ async def run_materialization(
     Defers the work to the procrastinate ``materialize_workspace`` task and
     creates a ThreadJob row tying that procrastinate job to the calling chat
     thread. Returns ``status: started`` right away — the chat agent should
-    acknowledge briefly to the user and end its turn. When materialization
-    finishes, a chained ``resume_thread_after_materialization`` task injects
-    completion into the conversation via the LangGraph checkpointer.
+    relay the result's message briefly and end its turn. Only a result whose
+    message says this conversation will resume is backed by a chained
+    ``resume_thread_after_materialization`` task; any other result resumes nothing.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -1611,6 +1616,30 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
+        # Each chat needs its own ThreadJob for automatic follow-up. Only PENDING counts
+        # (a RUNNING one is the resume itself, matching athread_awaits_load). Checked before
+        # recovery: a load this chat started may run under a recovery row, and this
+        # chat must still hear that it resumes.
+        existing = await ThreadJob.objects.filter(
+            thread_id=thread_id,
+            job_type=ThreadJob.JobType.MATERIALIZATION,
+            state=ThreadJob.State.PENDING,
+        ).afirst()
+        if existing is not None:
+            tc["result"] = success_response(
+                {
+                    "status": "already_in_progress",
+                    "thread_job_id": str(existing.id),
+                    "message": (
+                        "A materialization started by this conversation is already running. "
+                        f"{_THIS_CONVERSATION_RESUMES}"
+                    ),
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
+            return tc["result"]
+
         recovery = await WorkspaceDataRecovery.objects.filter(
             workspace_id=workspace_id,
             state__in=WorkspaceDataRecovery.ACTIVE_STATES,
@@ -1621,31 +1650,10 @@ async def run_materialization(
                     "status": "already_in_progress",
                     "workspace_recovery_id": str(recovery.id),
                     "message": (
-                        "Artifact data recovery is already running for this workspace. "
-                        "Do not start another load. Check get_schema_status for completion; "
-                        "this operation has no automatic chat follow-up."
-                    ),
-                },
-                schema="",
-                timing_ms=tc["timer"].elapsed_ms,
-            )
-            return tc["result"]
-
-        # Each chat needs its own ThreadJob for automatic follow-up. The worker
-        # serializes data operations through Cube publication for this workspace.
-        existing = await ThreadJob.objects.filter(
-            thread_id=thread_id,
-            job_type=ThreadJob.JobType.MATERIALIZATION,
-            state__in=list(ThreadJob.ACTIVE_STATES),
-        ).afirst()
-        if existing is not None:
-            tc["result"] = success_response(
-                {
-                    "status": "already_in_progress",
-                    "thread_job_id": str(existing.id),
-                    "message": (
-                        "A materialization is already running in this chat. "
-                        "I'll continue once it finishes."
+                        "A data recovery is already running for this workspace. "
+                        "Do not start another load. Nothing will resume this conversation "
+                        "when it finishes; tell the user to ask again once it has finished. "
+                        "Check get_schema_status for completion."
                     ),
                 },
                 schema="",
@@ -1677,9 +1685,7 @@ async def run_materialization(
             {
                 "status": "started",
                 "thread_job_id": str(tj.id),
-                "message": (
-                    "Materialization started in background. I'll continue when it finishes."
-                ),
+                "message": f"Materialization started in background. {_THIS_CONVERSATION_RESUMES}",
             },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,

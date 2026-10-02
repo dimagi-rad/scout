@@ -272,7 +272,8 @@ async def test_the_agent_is_never_sent_to_a_reload_for_the_data_model(rebuilding
         else graph_base._SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
     )
     assert expected in context
-    assert ("check back" in context) is rebuilding
+    assert ("ask again once it has" in context) is rebuilding
+    assert "in a few minutes" not in context
 
 
 @pytest.mark.asyncio
