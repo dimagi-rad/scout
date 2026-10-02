@@ -211,11 +211,11 @@ def _current_snapshot(
     return current, snapshot_credential(current, token)
 
 
-def proof_is_fresh(proof, observation, *, now=None) -> bool:
+def proof_is_fresh(proof, observation, *, now=None, max_age=PROOF_MAX_AGE) -> bool:
     now = now or timezone.now()
     return bool(
         proof.verified_at
-        and now - proof.verified_at < PROOF_MAX_AGE
+        and now - proof.verified_at < max_age
         and proof.credential_fingerprint == observation.credential_fingerprint
         and proof.account_identity == observation.account_identity
         and proof.scope_key == observation.scope_key
@@ -246,7 +246,9 @@ def _owned_history(actor_user_id, current, requested) -> list[tuple]:
     ]
 
 
-def _fresh_history_tenants(current, request, history, *, now=None) -> frozenset:
+def _fresh_history_tenants(
+    current, request, history, *, now=None, max_age=PROOF_MAX_AGE
+) -> frozenset:
     """Tenants in ``history`` whose every row is live and whose proof is fresh."""
     archived = {tenant_id for tenant_id, archived_at in history if archived_at is not None}
     live = {tenant_id for tenant_id, _archived_at in history} - archived
@@ -261,7 +263,7 @@ def _fresh_history_tenants(current, request, history, *, now=None) -> frozenset:
         tenant_id
         for tenant_id in live
         if tenant_id in proofs
-        and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now)
+        and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now, max_age=max_age)
     )
 
 
@@ -288,6 +290,27 @@ def fresh_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, now=None
             return frozenset()
         history = _owned_history(actor_user_id, current, requested)
         return _fresh_history_tenants(current, request, history, now=now)
+
+
+def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age, now=None):
+    """The subset of ``tenant_ids`` whose last proof is positive and younger than ``max_age``.
+
+    :func:`fresh_proof_tenant_ids` with a longer window, for admitting a request whose
+    recheck could not reach the provider. Every other freshness condition still holds:
+    the membership is live, and the proof matches the current credential, account,
+    scope and denial marker, so any denial recorded since (which moves the marker or
+    clears ``verified_at``) disqualifies it.
+    """
+    requested = frozenset(tenant_ids)
+    if not requested:
+        return frozenset()
+    with transaction.atomic():
+        try:
+            current, request = _current_snapshot(actor_user_id, connection_id, lock=False)
+        except (TenantConnection.DoesNotExist, ValueError):
+            return frozenset()
+        history = _owned_history(actor_user_id, current, requested)
+        return _fresh_history_tenants(current, request, history, now=now, max_age=max_age)
 
 
 def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> bool:
@@ -921,6 +944,7 @@ def publish_verification(
 
 aclaim_verification = sync_to_async(claim_verification)
 afresh_proof_tenant_ids = sync_to_async(fresh_proof_tenant_ids)
+agrace_proof_tenant_ids = sync_to_async(grace_proof_tenant_ids)
 aproofs_are_fresh = sync_to_async(proofs_are_fresh)
 apublish_verification = sync_to_async(publish_verification)
 apublish_verification_receipt = sync_to_async(publish_verification_receipt)

@@ -62,8 +62,10 @@ from apps.workspaces.services.access_freshness import (
     aadmit_upstream,
     acheck_freshness,
     admit_upstream,
+    aexcuse_graced,
     averify_membership_history,
     check_freshness,
+    excuse_graced,
     final_denial_reason,
     freshness_enforced,
 )
@@ -698,6 +700,8 @@ def _resolve_with_freshness(
     if not result.granted:
         return _attribute_observed_denial(result, admission)
     final = check_freshness(user.pk, _live_tenant_ids(result.workspace))
+    if admission.graced and not final.fresh:
+        final = excuse_graced(user.pk, final, admission.graced)
     return (
         result
         if final.fresh
@@ -794,6 +798,8 @@ async def _aresolve_workspace_access_ex(
     if not result.granted:
         return _attribute_observed_denial(result, admission)
     final = await acheck_freshness(user.pk, await _alive_tenant_ids(result.workspace))
+    if admission.graced and not final.fresh:
+        final = await aexcuse_graced(user.pk, final, admission.graced)
     return (
         result
         if final.fresh

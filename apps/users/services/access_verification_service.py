@@ -53,6 +53,10 @@ from apps.users.services.token_refresh import (
 _VERIFICATION_UNAVAILABLE = "verification_unavailable"
 _VERIFICATION_INDETERMINATE = "verification_indeterminate"
 _VERIFICATION_IN_PROGRESS = "verification_in_progress"
+# The provider rejected the credential (401) and the follow-up could not finish, so the
+# attempt saw a possible revocation it could not settle: never grounds for grace.
+VERIFICATION_UNAVAILABLE_AFTER_REJECTION = "verification_unavailable_after_rejection"
+VERIFICATION_IN_PROGRESS_AFTER_REJECTION = "verification_in_progress_after_rejection"
 _VERIFICATION_RETRY = "verification_retry"
 _UPSTREAM_ACCESS_LOST = "upstream_access_lost"
 _JITTER = random.SystemRandom()
@@ -528,11 +532,31 @@ def _spawn_detachable(coroutine) -> asyncio.Task:
     return asyncio.get_running_loop().create_task(coroutine, context=contextvars.Context())
 
 
-async def _verify_and_publish(
+class _Progress:
+    """What a running verification has seen so far, for a caller that stops waiting."""
+
+    rejected = False
+
+
+async def _verify_and_publish(claim, requested, early_provider_result, *, progress, **kwargs):
+    result = await _verify_and_publish_once(
+        claim, requested, early_provider_result, progress=progress, **kwargs
+    )
+    if (
+        progress.rejected
+        and result.status == AccessVerificationStatus.UNAVAILABLE
+        and result.error_code == _VERIFICATION_UNAVAILABLE
+    ):
+        return replace(result, error_code=VERIFICATION_UNAVAILABLE_AFTER_REJECTION)
+    return result
+
+
+async def _verify_and_publish_once(
     claim,
     requested,
     early_provider_result,
     *,
+    progress,
     refreshed,
     deadline,
     clock,
@@ -556,6 +580,7 @@ async def _verify_and_publish(
                 provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
                 and claim.request.token_snapshot is not None
             ):
+                progress.rejected = True
                 claim, early_result = await _renew_after_rejection(
                     claim,
                     refreshed=refreshed,
@@ -715,11 +740,13 @@ async def verify_connection_access(
     except Exception:
         await asyncio.shield(_release_claim(claim))
         raise
+    progress = _Progress()
     verification = _spawn_detachable(
         _verify_and_publish(
             claim,
             requested,
             early_result,
+            progress=progress,
             refreshed=claim is not claimed,
             deadline=deadline,
             clock=clock,
@@ -737,11 +764,67 @@ async def verify_connection_access(
     except asyncio.CancelledError:
         # The verification owns the lease and stays bounded by ``deadline``; a
         # caller going away must not throw away a provider answer already paid for.
-        _supervise(verification)
+        _detach(verification, connection_id)
         raise
     if not done:
-        _supervise(verification)
+        _detach(verification, connection_id)
         return AccessVerificationResult(
-            AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
+            AccessVerificationStatus.IN_PROGRESS,
+            VERIFICATION_IN_PROGRESS_AFTER_REJECTION
+            if progress.rejected
+            else _VERIFICATION_IN_PROGRESS,
         )
     return verification.result()
+
+
+def _detach(verification, connection_id) -> None:
+    def report(done):
+        if not done.cancelled() and done.exception() is not None:
+            logger.warning(
+                "Background upstream verification failed for connection %s",
+                connection_id,
+                exc_info=done.exception(),
+            )
+
+    verification.add_done_callback(report)
+    _supervise(verification)
+
+
+_BACKGROUND_RECHECKS: dict[tuple, asyncio.Task] = {}
+
+
+def schedule_background_verification(actor_user_id, connection_id, tenant_ids) -> bool:
+    """Re-run a verification in the background, at most one per tenant set per process.
+
+    Must be called on a running event loop. Its publication is what turns an
+    admission under grace into either a fresh proof or a recorded revocation.
+    Returns whether a new check was started.
+    """
+    key = (actor_user_id, connection_id, frozenset(tenant_ids))
+    running = _BACKGROUND_RECHECKS.get(key)
+    if running is not None and not running.done():
+        return False
+    task = _spawn_detachable(
+        verify_connection_access(
+            actor_user_id,
+            connection_id,
+            frozenset(tenant_ids),
+            deadline=time.monotonic() + PROVIDER_BUDGET_SECONDS,
+        )
+    )
+    _BACKGROUND_RECHECKS[key] = task
+
+    def finished(done):
+        if _BACKGROUND_RECHECKS.get(key) is done:
+            del _BACKGROUND_RECHECKS[key]
+        if not done.cancelled() and done.exception() is not None:
+            logger.warning(
+                "Background upstream recheck failed for user %s connection %s",
+                actor_user_id,
+                connection_id,
+                exc_info=done.exception(),
+            )
+
+    task.add_done_callback(finished)
+    _supervise(task)
+    return True
