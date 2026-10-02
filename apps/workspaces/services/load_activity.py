@@ -193,7 +193,13 @@ async def aworkspace_schema_status(workspace_id) -> str:
 
 
 async def athread_awaits_load(thread_id) -> bool:
-    """Whether this chat has a load queued for it that will resume it when done."""
+    """Whether this chat has a load queued for it that will resume it when done.
+
+    PENDING only. A job turns RUNNING when its resume claims it, after loading has
+    finished and while holding the thread's turn lease, so no chat turn builds a
+    prompt then; counting it would only promise a continuation for another load.
+    A CANCELLED job's resume reports the cancellation rather than answering.
+    """
     try:
         thread_id = uuid.UUID(str(thread_id))
     except ValueError:

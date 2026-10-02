@@ -152,6 +152,27 @@ async def test_a_synthetic_conversation_id_awaits_no_load():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("state", "awaits"),
+    [(state, state == ThreadJob.State.PENDING) for state in ThreadJob.State],
+)
+async def test_only_a_pending_job_awaits_a_load(state, awaits):
+    ws, tenant = await _workspace(f"awaits-{state}")
+    user, _ = await _member(ws, tenant, f"chatter-awaits-{state}@b.c")
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=list(ThreadJob.State).index(state) + 880_000,
+        tool_call_id="",
+        state=state,
+    )
+
+    assert await athread_awaits_load(thread.id) is awaits
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("agent_layer", "queued_jobs")
 class TestChatStartsTheLoad:
     async def test_first_chat_queues_one_load_as_the_chatter_bound_to_the_thread(self):
