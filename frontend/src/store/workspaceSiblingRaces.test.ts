@@ -197,3 +197,16 @@ it("clearDatasets invalidates both pending catalog and detail requests", async (
   expect(state().datasetStatus).toBe("idle")
   expect(state().selectedDatasetStatus).toBe("idle")
 })
+
+it.each([
+  ["the catalog is not built", { error: "Not built", schema_status: "provisioning" }, "not_materialized"],
+  [
+    "the access check has not finished",
+    { error: "Retry shortly.", reason: "verification_in_progress", retryable: true },
+    "error",
+  ],
+])("a 503 because %s reads as %s", async (_label, body, expected) => {
+  vi.spyOn(api, "get").mockRejectedValue(new ApiError(503, String(body.error), body))
+  await state().datasetActions.fetchDatasets()
+  expect(state().datasetStatus).toBe(expected)
+})

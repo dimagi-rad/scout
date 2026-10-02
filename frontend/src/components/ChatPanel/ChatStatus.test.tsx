@@ -44,7 +44,13 @@ describe("classifyChatError", () => {
     },
   )
 
-  it.each(["credential_expired", "credential_missing", "upstream_access_lost", "tenant_access_lost"])(
+  it.each([
+    "credential_expired",
+    "credential_missing",
+    "upstream_access_lost",
+    "tenant_access_lost",
+    "verification_indeterminate",
+  ])(
     "treats %s as needing a reconnect, with the backend text",
     (reason) => {
       const error = bodyError({ error: RECONNECT_TEXT, reason, recovery_url: "/settings/connections" })

@@ -8,7 +8,7 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 
 from apps.users.decorators import async_login_required
-from apps.workspaces.access import access_denied_body, aretry_workspace_verification
+from apps.workspaces.access import access_denied_response, aretry_workspace_verification
 
 
 @require_POST
@@ -18,4 +18,4 @@ async def workspace_access_verify_view(request, workspace_id):
     result = await aretry_workspace_verification(request._authenticated_user, workspace_id)
     if result.granted:
         return JsonResponse({"has_access": True})
-    return JsonResponse({"has_access": False, **access_denied_body(result)}, status=403)
+    return access_denied_response(result, has_access=False)

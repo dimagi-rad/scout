@@ -43,6 +43,7 @@ from dataclasses import dataclass
 
 from django.conf import settings
 from django.core.cache import cache
+from django.http import JsonResponse
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import PROVIDER_CHOICES, TenantMembership
@@ -54,6 +55,7 @@ from apps.workspaces.services.access_freshness import (
     RETRYABLE_REASONS,
     UPSTREAM_ACCESS_LOST,
     VERIFICATION_IN_PROGRESS,
+    VERIFICATION_INDETERMINATE,
     VERIFICATION_UNAVAILABLE,
     UpstreamAdmission,
     VerificationBudget,
@@ -177,6 +179,7 @@ _REPLAYABLE_REASONS = frozenset(
         CREDENTIAL_MISSING,
         CREDENTIAL_EXPIRED,
         UPSTREAM_ACCESS_LOST,
+        VERIFICATION_INDETERMINATE,
         VERIFICATION_UNAVAILABLE,
         VERIFICATION_IN_PROGRESS,
     }
@@ -193,6 +196,11 @@ _FRESHNESS_MESSAGES = {
     ),
     UPSTREAM_ACCESS_LOST: (
         "For one of this workspace's sources: " + CREDENTIAL_GUIDANCE[ErrorCode.AUTH_ACCESS_DENIED]
+    ),
+    VERIFICATION_INDETERMINATE: (
+        "We couldn't confirm your access to one of this workspace's sources: its provider "
+        "gave an answer Scout could not interpret. Reconnecting it under Connected Accounts "
+        "may help; if it keeps happening, contact support."
     ),
     VERIFICATION_UNAVAILABLE: (
         "We couldn't verify your access to this workspace right now. Please retry shortly."
@@ -284,6 +292,41 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
     if result.denied_reason == NO_SOURCES:
         return {"error": NO_SOURCES_MESSAGE, "reason": NO_SOURCES}
     return {"error": _GENERIC_DENIED}
+
+
+# A provider check that outlived the request keeps running, so a retry a few seconds
+# later usually finds its proof published.
+VERIFICATION_RETRY_AFTER_SECONDS = 5
+
+
+def access_denied_status(result: WorkspaceAccess) -> int:
+    """503 for a check that could not finish (nothing was decided), else 403."""
+    return 503 if result.retryable else 403
+
+
+def access_denied_headers(result: WorkspaceAccess) -> dict:
+    return {"Retry-After": str(VERIFICATION_RETRY_AFTER_SECONDS)} if result.retryable else {}
+
+
+def quiet_denial(response):
+    """Keep a verification 503 out of ``django.request``'s ERROR log, and so out of
+    Sentry: it is an expected state, already logged at INFO by ``_freshness_denied``.
+    """
+    if response.status_code == 503:
+        # Django's log_response skips a response it has already logged.
+        response._has_been_logged = True
+    return response
+
+
+def access_denied_response(result: WorkspaceAccess, **extra) -> JsonResponse:
+    """The JSON denial for ``result``: ``extra`` fields, then ``access_denied_body``."""
+    return quiet_denial(
+        JsonResponse(
+            {**extra, **access_denied_body(result)},
+            status=access_denied_status(result),
+            headers=access_denied_headers(result),
+        )
+    )
 
 
 def _live_tenant_ids(workspace) -> list:
@@ -805,7 +848,7 @@ async def aretry_workspace_verification(user, workspace_id) -> WorkspaceAccess:
     admission = UpstreamAdmission(admitted=False, rechecked=True, reason=retry_reason)
     result = await _aresolve_local_access_ex(user, workspace_id, minimum_role=WorkspaceRole.READ)
     if not result.granted:
-        if retry_reason in RETRYABLE_REASONS:
+        if retry_reason in RETRYABLE_REASONS or retry_reason == VERIFICATION_INDETERMINATE:
             result = _freshness_denied(user, workspace, retry_reason)
         else:
             result = _attribute_observed_denial(result, admission)

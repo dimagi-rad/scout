@@ -174,16 +174,22 @@ def test_provider_outage_is_a_temporary_denial_that_keeps_memberships(
 
 @pytest.mark.django_db(transaction=True)
 def test_outage_response_body_is_structured_and_retryable(
-    user, workspace, tenant, upstream_provider
+    user, workspace, tenant, upstream_provider, caplog
 ):
     make_proof_stale(user, tenant)
     upstream_provider.failure = 503
     client = Client()
     client.force_login(user)
 
-    response = client.get(f"/api/workspaces/{workspace.id}/artifacts/")
+    with caplog.at_level(logging.ERROR, logger="django.request"):
+        response = client.get(f"/api/workspaces/{workspace.id}/artifacts/")
 
-    assert response.status_code == 403
+    # An expected state: django.request's ERROR line would become a Sentry event.
+    assert not [r for r in caplog.records if r.name == "django.request"]
+
+    # Nothing was decided, so it is a 503 a client may retry, not a 403 denial.
+    assert response.status_code == 503
+    assert response["Retry-After"] == "5"
     body = response.json()
     assert body["reason"] == VERIFICATION_UNAVAILABLE
     assert body["retryable"] is True
@@ -382,16 +388,19 @@ def test_both_switches_off_keep_the_pre_380_decision(
 
 @pytest.mark.django_db(transaction=True)
 def test_covered_callers_of_exempt_paths_still_pass_freshness(
-    client, user, workspace, tenant, upstream_provider
+    client, user, workspace, tenant, upstream_provider, caplog
 ):
     """The coverage exemption must not switch freshness off for covered members."""
     make_proof_stale(user, tenant)
     upstream_provider.failure = 503
     client.force_login(user)
 
-    resp = client.get(f"/api/workspaces/{workspace.id}/members/")
+    with caplog.at_level(logging.ERROR, logger="django.request"):
+        resp = client.get(f"/api/workspaces/{workspace.id}/members/")
 
-    assert resp.status_code == 403
+    assert not [r for r in caplog.records if r.name == "django.request"]
+
+    assert resp.status_code == 503
     assert resp.json()["reason"] == VERIFICATION_UNAVAILABLE
 
 

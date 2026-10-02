@@ -9,7 +9,10 @@ from apps.users.models import TenantMembership
 from apps.workspaces import access
 from apps.workspaces.access import resolve_workspace_access_ex
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
-from apps.workspaces.services.access_freshness import VERIFICATION_UNAVAILABLE
+from apps.workspaces.services.access_freshness import (
+    VERIFICATION_INDETERMINATE,
+    VERIFICATION_UNAVAILABLE,
+)
 from tests.upstream_proofs import grant_fresh_upstream_access, make_proof_stale
 
 
@@ -36,7 +39,7 @@ def test_retry_reports_temporary_failure_then_restores_access(
 
     failed = _retry(user, workspace)
 
-    assert failed.status_code == 403
+    assert failed.status_code == 503
     assert failed.json()["reason"] == VERIFICATION_UNAVAILABLE
     assert failed.json()["retryable"] is True
     assert TenantMembership.objects.filter(user=user, tenant=tenant).exists()
@@ -75,7 +78,7 @@ def test_an_outage_during_retry_of_archived_access_stays_retryable(
 
     response = _retry(user, workspace)
 
-    assert response.status_code == 403
+    assert response.status_code == 503
     assert response.json()["reason"] == VERIFICATION_UNAVAILABLE
     assert response.json()["retryable"] is True
 
@@ -199,3 +202,17 @@ def test_a_cached_reason_is_not_replayed_for_another_workspace(
 
     assert first.json()["reason"] == "upstream_access_lost"
     assert second.json()["reason"] == "verification_in_progress"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_indeterminate_answer_during_retry_is_reported_as_such(
+    user, workspace, tenant, upstream_provider
+):
+    TenantMembership.objects.filter(user=user, tenant=tenant).update(archived_at=timezone.now())
+    upstream_provider.failure = 403
+
+    response = _retry(user, workspace)
+
+    assert response.status_code == 403
+    assert response.json()["reason"] == VERIFICATION_INDETERMINATE
+    assert response.json()["retryable"] is False

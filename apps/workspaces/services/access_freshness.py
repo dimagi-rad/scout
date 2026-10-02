@@ -8,8 +8,8 @@ service, so concurrent callers share one provider round-trip.
 
 Outcomes: fresh → admit with no provider call; authoritative revocation → deny,
 with the membership archival already persisted by the verification publisher;
-provider unavailable or indeterminate → a retryable denial that leaves every
-membership in place.
+provider unavailable → a retryable denial (503) that leaves every membership in
+place; an indeterminate answer → a non-retryable denial that also removes nothing.
 """
 
 from __future__ import annotations
@@ -48,9 +48,9 @@ class VerificationBudget(StrEnum):
     BACKGROUND = "background"
 
 
-# An interactive caller is a person waiting on a response; a worker can afford the
-# provider adapter's full budget. Either way the deadline is end-to-end across every
-# connection being rechecked, never multiplied per connection.
+# How long a caller waits for an answer: an interactive caller is a person waiting on
+# a response; a worker can afford the provider adapter's full budget. Either way it is
+# end-to-end across every connection being rechecked, never multiplied per connection.
 BUDGET_SECONDS = {
     VerificationBudget.INTERACTIVE: 10.0,
     VerificationBudget.BACKGROUND: PROVIDER_BUDGET_SECONDS,
@@ -59,6 +59,7 @@ BUDGET_SECONDS = {
 CREDENTIAL_MISSING = "credential_missing"
 CREDENTIAL_EXPIRED = "credential_expired"
 UPSTREAM_ACCESS_LOST = "upstream_access_lost"
+VERIFICATION_INDETERMINATE = "verification_indeterminate"
 VERIFICATION_UNAVAILABLE = "verification_unavailable"
 VERIFICATION_IN_PROGRESS = "verification_in_progress"
 
@@ -68,6 +69,9 @@ FRESHNESS_DENIAL_REASONS = (
     UPSTREAM_ACCESS_LOST,
     VERIFICATION_UNAVAILABLE,
     VERIFICATION_IN_PROGRESS,
+    # Last: it proves nothing, so a sibling check that is still running and may yet
+    # pass keeps the request retryable.
+    VERIFICATION_INDETERMINATE,
 )
 RETRYABLE_REASONS = frozenset({VERIFICATION_UNAVAILABLE, VERIFICATION_IN_PROGRESS})
 _UNCONFIRMED_STATUSES = frozenset(
@@ -85,6 +89,8 @@ FRESHNESS_ERROR_CODES: dict[str, ErrorCode] = {
     CREDENTIAL_MISSING: ErrorCode.AUTH_CREDENTIAL_MISSING,
     CREDENTIAL_EXPIRED: ErrorCode.AUTH_TOKEN_EXPIRED,
     UPSTREAM_ACCESS_LOST: ErrorCode.AUTH_ACCESS_DENIED,
+    # Nothing was removed, so workers treat it like an outage they may pass over.
+    VERIFICATION_INDETERMINATE: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
     VERIFICATION_UNAVAILABLE: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
     VERIFICATION_IN_PROGRESS: ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE,
 }
@@ -200,6 +206,10 @@ def denial_reason(result: AccessVerificationResult) -> str | None:
         return UPSTREAM_ACCESS_LOST
     if status in (AccessVerificationStatus.IN_PROGRESS, AccessVerificationStatus.RETRY):
         return VERIFICATION_IN_PROGRESS
+    if status == AccessVerificationStatus.INDETERMINATE:
+        # The provider answered, but not in a form that proves or denies access
+        # (e.g. a CommCare 403 on the domain listing); retrying gets the same answer.
+        return VERIFICATION_INDETERMINATE
     return VERIFICATION_UNAVAILABLE
 
 
@@ -210,10 +220,15 @@ def most_severe(reasons) -> str | None:
 
 async def _averify_stale(user_id, stale: dict, budget: VerificationBudget) -> list:
     started = time.monotonic()
-    deadline = started + BUDGET_SECONDS[budget]
+    # The provider check always gets the full background budget; an interactive
+    # caller stops waiting earlier and the check finishes and publishes behind it.
+    deadline = started + PROVIDER_BUDGET_SECONDS
+    respond_by = started + BUDGET_SECONDS[budget]
     results = await asyncio.gather(
         *(
-            verify_connection_access(user_id, connection_id, tenant_ids, deadline=deadline)
+            verify_connection_access(
+                user_id, connection_id, tenant_ids, deadline=deadline, respond_by=respond_by
+            )
             for connection_id, tenant_ids in stale.items()
         ),
         return_exceptions=True,

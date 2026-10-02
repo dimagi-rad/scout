@@ -179,7 +179,7 @@ async def test_unverified_cancel_leaves_shared_orphan_runs_alone(
         queue.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         response = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
 
-    assert response.status_code == 403
+    assert response.status_code == 503
     assert response.json()["retryable"] is True
     await orphan.arefresh_from_db()
     assert orphan.state == MaterializationRun.RunState.LOADING

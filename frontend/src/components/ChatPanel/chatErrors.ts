@@ -10,11 +10,10 @@ export const GENERIC_CHAT_ERROR_MESSAGE =
   "retrying usually works; if it keeps failing, start a new chat."
 
 // The upstream recheck did not finish in time (apps/workspaces/services/access_freshness.py).
-// Deliberately no auto-retry, unlike busy errors: verification_unavailable usually
-// means the server already spent its whole 10 s interactive budget and the aborted
-// check published nothing, so a silent resend would double the wait and the load on a
-// provider that is already slow. Some verification_in_progress answers come back fast
-// and would pass on a resend, but the manual Retry covers those at no extra cost.
+// Deliberately no auto-retry, unlike busy errors: the server already spent its whole
+// 10 s interactive budget, so a silent resend would double the wait on a provider that
+// is already slow. A check still running then keeps going and publishes its proof, so
+// the manual Retry a few seconds later usually passes.
 // Matched on the body only: the transport drops the status, so a 403 and a 503
 // carrying the same reason classify the same way.
 const ACCESS_RETRY_REASONS = FRESHNESS_RETRY_REASONS

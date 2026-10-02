@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import logging
 import random
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from allauth.socialaccount.models import SocialToken
+from asgiref.sync import SyncToAsync, ThreadSensitiveContext
+from django.db import connections
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
@@ -525,78 +530,95 @@ def _attempt_matches_waiter_lineage(
     )
 
 
-async def verify_connection_access(
-    actor_user_id,
-    connection_id,
-    tenant_ids: Iterable,
+# Every detached verification's ORM work runs on this context's one dedicated thread.
+# Not the caller's thread: a sync (DRF) view reaches here through async_to_sync, whose
+# executor dies when that call returns. Not asgiref's process-wide default either: a
+# sync caller blocked waiting on the check may be holding that very thread.
+class _RecyclingExecutor(ThreadPoolExecutor):
+    """Closes each call's connection when done, as a request's end would.
+
+    No request signal ever fires on these threads: left open, each would hold an
+    idle connection (prod and staging share one RDS), and one dropped by a failover
+    would fail every later check that lands on it. The cost is a fresh connect per
+    ORM hop, a few per verification, which runs every five minutes per user.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):
+        return super().submit(self._recycled, fn, *args, **kwargs)
+
+    @staticmethod
+    def _recycled(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            # Best effort: a socket a failover already broke must not mask the
+            # call's own outcome.
+            with contextlib.suppress(Exception):
+                connections.close_all()
+
+
+_DETACHED_ORM_CONTEXT = ThreadSensitiveContext()
+# A small pool, so one publication waiting on a row lock cannot hold up the rest.
+SyncToAsync.context_to_thread_executor[_DETACHED_ORM_CONTEXT] = _RecyclingExecutor(
+    max_workers=4, thread_name_prefix="access-verification"
+)
+
+
+def _spawn_detachable(coroutine) -> asyncio.Task:
+    """A task that may outlive its caller, with its own context and ORM threads."""
+    context = contextvars.Context()
+    context.run(SyncToAsync.thread_sensitive_context.set, _DETACHED_ORM_CONTEXT)
+    return asyncio.get_running_loop().create_task(coroutine, context=context)
+
+
+def _detach(verification, connection_id) -> None:
+    """Supervise a verification nobody is waiting for, and report what it could not do."""
+
+    def report(done):
+        if done.cancelled():
+            return
+        if done.exception() is not None:
+            logger.warning(
+                "Background upstream verification failed for connection %s",
+                connection_id,
+                exc_info=done.exception(),
+            )
+        elif done.result().status not in (
+            AccessVerificationStatus.VERIFIED,
+            AccessVerificationStatus.DENIED,
+        ):
+            logger.warning(
+                "Background upstream verification unconfirmed for connection %s: "
+                "status=%s error_code=%s",
+                connection_id,
+                done.result().status,
+                done.result().error_code or "-",
+            )
+
+    verification.add_done_callback(report)
+    _supervise(verification)
+
+
+async def _verify_and_publish(
+    claim,
+    requested,
+    early_provider_result,
     *,
-    deadline: float | None = None,
-    provider_verifier: Callable[..., Awaitable[ProviderVerificationResult]] = verify_provider,
-    clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    limiter: asyncio.Semaphore = NETWORK_LIMITER,
+    refreshed,
+    deadline,
+    clock,
+    provider_verifier,
+    sleep,
+    limiter,
 ) -> AccessVerificationResult:
-    """Verify one connection once and publish only its known membership history."""
-    requested = frozenset(tenant_ids)
-    if not requested:
-        return AccessVerificationResult(
-            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
-        )
-    deadline = min(
-        deadline if deadline is not None else float("inf"),
-        clock() + PROVIDER_BUDGET_SECONDS,
-    )
-    claim = await _claim_with_cancellation_cleanup(
-        actor_user_id,
-        connection_id,
-        requested,
-        deadline=deadline,
-        clock=clock,
-    )
-    if claim.status == ClaimStatus.FRESH:
-        return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
-    if claim.status == ClaimStatus.DENIED:
-        return AccessVerificationResult(
-            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
-        )
-    if claim.status == ClaimStatus.DEADLINE:
-        return AccessVerificationResult(
-            AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_UNAVAILABLE
-        )
-    if claim.status == ClaimStatus.IN_PROGRESS:
-        claim = await _wait_for_claim(
-            actor_user_id,
-            connection_id,
-            requested,
-            claim,
-            deadline=deadline,
-            clock=clock,
-            sleep=sleep,
-        )
-        if claim is None:
-            return AccessVerificationResult(
-                AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
-            )
-        if isinstance(claim, AccessVerificationResult):
-            return claim
-        if claim.status == ClaimStatus.FRESH:
-            return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
-        if claim.status == ClaimStatus.DENIED:
-            return AccessVerificationResult(
-                AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
-            )
+    """Ask the provider (unless refresh already decided), then publish under ``claim``.
+
+    Owns the lease from here on: whatever happens, the lease ends published or
+    released, so this can outlive a caller that stopped waiting for it.
+    """
     try:
-        claimed = claim
-        claim, early_result = await _refresh_claim_if_needed(
-            claim, deadline=deadline, clock=clock, limiter=limiter
-        )
-        if claim is None:
-            return early_result
-        if isinstance(early_result, AccessVerificationResult):
-            await _release_claim(claim)
-            return early_result
-        if isinstance(early_result, ProviderVerificationResult):
-            provider_result = early_result
+        if early_provider_result is not None:
+            provider_result = early_provider_result
         else:
             provider_result = await _call_provider(
                 provider_verifier, claim, deadline=deadline, clock=clock
@@ -607,7 +629,7 @@ async def verify_connection_access(
             ):
                 claim, early_result = await _renew_after_rejection(
                     claim,
-                    refreshed=claim is not claimed,
+                    refreshed=refreshed,
                     deadline=deadline,
                     clock=clock,
                     limiter=limiter,
@@ -678,3 +700,124 @@ async def verify_connection_access(
     except Exception:
         await asyncio.shield(_release_claim(claim))
         raise
+
+
+async def verify_connection_access(
+    actor_user_id,
+    connection_id,
+    tenant_ids: Iterable,
+    *,
+    deadline: float | None = None,
+    respond_by: float | None = None,
+    provider_verifier: Callable[..., Awaitable[ProviderVerificationResult]] = verify_provider,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    limiter: asyncio.Semaphore = NETWORK_LIMITER,
+) -> AccessVerificationResult:
+    """Verify one connection once and publish only its known membership history.
+
+    ``deadline`` bounds the whole verification. ``respond_by`` (default: the
+    deadline) is when the caller needs an answer: a provider check still running
+    then keeps going in the background and publishes its proof, holding the lease
+    so concurrent callers coalesce on it, and this call answers IN_PROGRESS.
+    """
+    requested = frozenset(tenant_ids)
+    if not requested:
+        return AccessVerificationResult(
+            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
+        )
+    deadline = min(
+        deadline if deadline is not None else float("inf"),
+        clock() + PROVIDER_BUDGET_SECONDS,
+    )
+    respond_by = min(respond_by if respond_by is not None else deadline, deadline)
+    claim = await _claim_with_cancellation_cleanup(
+        actor_user_id,
+        connection_id,
+        requested,
+        deadline=respond_by,
+        clock=clock,
+    )
+    if claim.status == ClaimStatus.FRESH:
+        return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
+    if claim.status == ClaimStatus.DENIED:
+        return AccessVerificationResult(
+            AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
+        )
+    if claim.status == ClaimStatus.DEADLINE:
+        return AccessVerificationResult(
+            AccessVerificationStatus.UNAVAILABLE, _VERIFICATION_UNAVAILABLE
+        )
+    if claim.status == ClaimStatus.IN_PROGRESS:
+        claim = await _wait_for_claim(
+            actor_user_id,
+            connection_id,
+            requested,
+            claim,
+            deadline=respond_by,
+            clock=clock,
+            sleep=sleep,
+        )
+        if claim is None:
+            return AccessVerificationResult(
+                AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
+            )
+        if isinstance(claim, AccessVerificationResult):
+            return claim
+        if claim.status == ClaimStatus.FRESH:
+            return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
+        if claim.status == ClaimStatus.DENIED:
+            return AccessVerificationResult(
+                AccessVerificationStatus.DENIED, ErrorCode.AUTH_CREDENTIAL_MISSING
+            )
+    try:
+        claimed = claim
+        claim, early_result = await _refresh_claim_if_needed(
+            claim, deadline=respond_by, clock=clock, limiter=limiter
+        )
+        if claim is None:
+            return early_result
+        if isinstance(early_result, AccessVerificationResult):
+            await _release_claim(claim)
+            return early_result
+    except asyncio.CancelledError:
+        await asyncio.shield(_release_claim(claim))
+        raise
+    except Exception:
+        await asyncio.shield(_release_claim(claim))
+        raise
+    verification = _spawn_detachable(
+        _verify_and_publish(
+            claim,
+            requested,
+            early_result,
+            refreshed=claim is not claimed,
+            deadline=deadline,
+            clock=clock,
+            provider_verifier=provider_verifier,
+            sleep=sleep,
+            limiter=limiter,
+        )
+    )
+    if respond_by >= deadline:
+        # Bounded by the deadline itself; a cancelled caller cancels it, and waits
+        # for it to release the lease.
+        try:
+            return await verification
+        except asyncio.CancelledError:
+            # Cancelled before its first step, it never reached the code that would.
+            await asyncio.shield(_release_claim(claim))
+            raise
+    try:
+        done, _pending = await asyncio.wait({verification}, timeout=max(0, respond_by - clock()))
+    except asyncio.CancelledError:
+        # The verification owns the lease and stays bounded by ``deadline``; a
+        # caller going away must not throw away a provider answer already paid for.
+        _detach(verification, connection_id)
+        raise
+    if not done:
+        _detach(verification, connection_id)
+        return AccessVerificationResult(
+            AccessVerificationStatus.IN_PROGRESS, _VERIFICATION_IN_PROGRESS
+        )
+    return verification.result()

@@ -1,5 +1,5 @@
 import type { StateCreator } from "zustand"
-import { api, ApiError } from "@/api/client"
+import { api, ApiError, asRecord } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
 import { createWorkspaceRequestGuard } from "./workspaceRequest"
 
@@ -120,8 +120,14 @@ export const createDatasetSlice: StateCreator<
           })
         } catch (error) {
           if (!isCurrent()) return
+          // Only the catalog's own 503 (it names a schema_status) means "not built yet";
+          // an access check that has not finished is a 503 too, and an error to show.
           const status =
-            error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
+            error instanceof ApiError &&
+            error.status === 503 &&
+            typeof asRecord(error.body)?.schema_status === "string"
+              ? "not_materialized"
+              : "error"
           set({
             datasetStatus: status,
             datasetError: error instanceof Error ? error.message : "Failed to load datasets",
