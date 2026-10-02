@@ -29,7 +29,10 @@ TITLE_MAX_CHARS = 80
 # Long enough to identify the topic; caps the cost of a pasted 10k-char message.
 TITLE_INPUT_MAX_CHARS = 1000
 TITLE_MAX_TOKENS = 32
-TITLE_TIMEOUT_S = 20
+# The worker runs one job at a time and title jobs are queued ahead of the rest, so
+# a slow or failing call must not hold the slot for long: one short try, no retry.
+# A failed title is retried on the thread's next successful turn.
+TITLE_TIMEOUT_S = 8
 
 TITLE_SYSTEM_PROMPT = (
     "You name data-analysis chat conversations. Given the user's first message, reply "
@@ -92,7 +95,7 @@ async def _acall_title_model(thread: Thread, first_message: str) -> str:
         model=settings.THREAD_TITLE_LLM_MODEL,
         max_tokens=TITLE_MAX_TOKENS,
         timeout=TITLE_TIMEOUT_S,
-        max_retries=1,
+        max_retries=0,
     )
     trace = {
         "session_id": str(thread.id),

@@ -95,6 +95,9 @@ async def test_generates_title_from_first_message_with_haiku(workspace, user, ti
     assert thread.updated_at == updated_at
     (call,) = title_model.calls
     assert call["kwargs"]["model"] == "claude-haiku-4-5-20251001"
+    # Bounded so a slow model cannot hold the single worker slot.
+    assert call["kwargs"]["max_retries"] == 0
+    assert call["kwargs"]["timeout"] <= 10
     assert "What are the module completion rates by district?" in call["messages"][-1].content
 
 
