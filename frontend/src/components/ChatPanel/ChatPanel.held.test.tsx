@@ -32,6 +32,8 @@ interface Server {
   /** Refuse a held send as too long, as the server does past MAX_MESSAGE_LENGTH. */
   tooLongHeldSend: boolean
   patches: Record<string, unknown>[]
+  /** What a background resume has streamed for the thread. */
+  streamed: { id: number; run: string; text: string; done: boolean }[]
   /** Answer edits with 409 version, as when another tab changed the request. */
   editConflict: boolean
 }
@@ -103,6 +105,7 @@ function mockServer(): Server {
     discards: 0,
     tooLongHeldSend: false,
     patches: [],
+    streamed: [],
     editConflict: false,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
@@ -177,6 +180,10 @@ function mockServer(): Server {
     if (url.endsWith("/messages/?include=pending")) {
       server.messageLoads += 1
       return Response.json({ messages: server.messages, pending_request: server.pending })
+    }
+    if (url.includes("/resume-stream/")) {
+      const after = Number(new URL(url, "http://x").searchParams.get("after") ?? 0)
+      return Response.json({ chunks: server.streamed.filter((chunk) => chunk.id > after) })
     }
     if (url.endsWith("/viewed/")) return new Response(null, { status: 204 })
     if (url.endsWith("/threads/")) return Response.json([])
@@ -494,4 +501,31 @@ describe("a message sent while the chat's data loads", () => {
       "Updated in another tab",
     )
   })
+
+  it("shows the answer as the resume writes it, until the conversation carries it", async () => {
+    const server = mockServer()
+    const thread = useAppStore.getState().threadId
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: thread,
+      state: "claimed",
+      thread_job_state: "running",
+    })
+    server.chatBodies.push({})
+    server.streamed = [{ id: 1, run: "r", text: "Counting the", done: false }]
+    renderChat()
+
+    expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Counting the")
+    server.streamed.push({ id: 2, run: "r", text: " visits now", done: false })
+    await waitFor(() =>
+      expect(screen.getByTestId("resume-stream")).toHaveTextContent("Counting the visits now"),
+    )
+
+    server.pending = null
+    server.messages = [
+      { id: `pr-r1-1`, role: "user", parts: [{ type: "text", text: QUESTION }] },
+      { id: "answer", role: "assistant", parts: [{ type: "text", text: ANSWER }] },
+    ]
+    await screen.findByText(ANSWER, undefined, { timeout: 8000 })
+    expect(screen.queryByTestId("resume-stream")).toBeNull()
+  }, 15_000)
 })
