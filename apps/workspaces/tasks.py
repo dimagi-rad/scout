@@ -26,7 +26,6 @@ from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat import pending_requests, resume_stream
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
-from apps.chat.resume_stream import arun_streamed
 from apps.chat.tasks import aschedule_thread_title
 from apps.chat.turn_lease import TurnLease, atry_acquire_turn_lease
 from apps.common.capacity import CapacityExhausted, classify_capacity_error
@@ -3771,7 +3770,7 @@ async def _resume_claimed_job(
         ) as langfuse_span:
             # Streamed, so a chat open on the thread shows the answer as it is written.
             result = await asyncio.wait_for(
-                arun_streamed(agent, input_state, config, tj.thread_id),
+                resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
                 timeout=timeout_s,
             )
             if langfuse_span is not None:
@@ -4116,7 +4115,7 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
         await asyncio.wait_for(
-            arun_streamed(
+            resume_stream.arun_streamed(
                 agent,
                 {
                     "messages": [

@@ -10,6 +10,7 @@ once the run ends; these rows are best-effort and pruned soon after.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
@@ -29,6 +30,20 @@ READ_LIMIT = 500
 RETENTION = timedelta(minutes=30)
 # Only the graph's own answer: tools may run models of their own.
 STREAMED_NODE = "agent"
+# Between the answer's model calls (text, tools, more text), as the reload shows them.
+CALL_SEPARATOR = "\n\n"
+
+
+def _is_answer(chunk, metadata: dict) -> bool:
+    """A token of the top-level agent's answer, not of a subagent tool's own graph.
+
+    Subagent graphs name their node "agent" too and inherit the run's callbacks,
+    so the node alone does not tell them apart (see stream.py's equivalent check).
+    """
+    if not isinstance(chunk, AIMessageChunk) or metadata.get("langgraph_node") != STREAMED_NODE:
+        return False
+    tags = metadata.get("tags") or []
+    return not metadata.get("subagent") and "subagent" not in tags
 
 
 def chunk_text(chunk) -> str:
@@ -97,30 +112,42 @@ async def arun_streamed(agent, input_state: dict, config: dict, thread_id) -> di
     """
     writer = ResumeStreamWriter(thread_id)
     final = None
+    call_id = None
     try:
-        async for mode, payload in agent.astream(
-            input_state, config, stream_mode=["messages", "values"]
-        ):
-            if mode == "values":
-                final = payload
-                continue
-            chunk, metadata = payload
-            if (
-                isinstance(chunk, AIMessageChunk)
-                and (metadata or {}).get("langgraph_node") == STREAMED_NODE
-            ):
-                await writer.feed(chunk_text(chunk))
+        # aclosing: a timeout or cancel must close the graph run here, not at GC.
+        async with contextlib.aclosing(
+            agent.astream(input_state, config, stream_mode=["messages", "values"])
+        ) as stream:
+            async for mode, payload in stream:
+                if mode == "values":
+                    final = payload
+                    continue
+                chunk, metadata = payload
+                if not _is_answer(chunk, metadata or {}):
+                    continue
+                text = chunk_text(chunk)
+                if text and chunk.id != call_id:
+                    if call_id is not None:
+                        text = CALL_SEPARATOR + text
+                    call_id = chunk.id
+                await writer.feed(text)
     finally:
         await writer.close()
     return final
 
 
 async def aread_after(thread_id, after_id: int) -> list[dict]:
+    """Rows after ``after_id``; with none read yet, only the thread's latest run's,
+    so a chat catching up never pages through answers it already shows."""
+    rows = ResumeStreamChunk.objects.filter(thread_id=thread_id, id__gt=after_id)
+    if after_id == 0:
+        latest = await rows.order_by("-id").values_list("run", flat=True).afirst()
+        if latest is None:
+            return []
+        rows = rows.filter(run=latest)
     return [
         {"id": row.id, "run": str(row.run), "text": row.text, "done": row.done}
-        async for row in ResumeStreamChunk.objects.filter(
-            thread_id=thread_id, id__gt=after_id
-        ).order_by("id")[:READ_LIMIT]
+        async for row in rows.order_by("id")[:READ_LIMIT]
     ]
 
 

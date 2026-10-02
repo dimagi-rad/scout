@@ -1,5 +1,6 @@
 """Streaming a background resume's answer to open chats (apps/chat/resume_stream.py)."""
 
+import uuid
 from datetime import timedelta
 from typing import Annotated, TypedDict
 from unittest.mock import AsyncMock, patch
@@ -9,11 +10,14 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 
-from apps.chat import resume_stream
+from apps.chat import pending_requests, resume_stream
 from apps.chat.models import ResumeStreamChunk, Thread
+from apps.workspaces import tasks
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 from tests.test_pending_requests import _loading_chat, _member
 
@@ -38,6 +42,64 @@ def _graph(answer: str = ANSWER, *, fails: bool = False):
     graph.add_node("agent", agent)
     graph.add_edge(START, "agent")
     graph.add_edge("agent", END)
+    return graph.compile()
+
+
+def _graph_with_subagent(lead: str = ""):
+    """A tool call to a subagent graph tagged as the app's managers tag theirs."""
+
+    def nested():
+        model = GenericFakeChatModel(messages=iter([AIMessage(content="SUBAGENT PROSE")]))
+
+        async def agent(state: _State) -> dict:
+            return {"messages": [await model.ainvoke(state["messages"])]}
+
+        graph = StateGraph(_State)
+        graph.add_node("agent", agent)
+        graph.add_edge(START, "agent")
+        graph.add_edge("agent", END)
+        return graph.compile()
+
+    @tool
+    async def manager(task: str) -> str:
+        """Run the subagent."""
+        async for _event in nested().astream_events(
+            {"messages": [HumanMessage(task)]},
+            # As the app's managers do: a run of their own, tagged as a subagent's.
+            config={
+                "configurable": {"thread_id": "subagent-run"},
+                "tags": ["subagent", "m"],
+                "metadata": {"subagent": "m"},
+            },
+            version="v2",
+        ):
+            pass
+        return "done"
+
+    replies = [AIMessage(content=lead)] if lead else []
+    model = GenericFakeChatModel(messages=iter([*replies, AIMessage(content="MAIN ANSWER")]))
+    call = {"tool": {"name": "manager", "args": {"task": "t"}, "id": "c1"}}
+
+    async def agent(state: _State) -> dict:
+        if len(state["messages"]) == 1:
+            # The tool call is attached by hand: the fake model streams content only.
+            reply = await model.ainvoke(state["messages"]) if lead else AIMessage(content="")
+            return {
+                "messages": [
+                    AIMessage(content=reply.content, id=reply.id, tool_calls=[call["tool"]])
+                ]
+            }
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    def route(state: _State):
+        return "tools" if state["messages"][-1].tool_calls else END
+
+    graph = StateGraph(_State)
+    graph.add_node("agent", agent)
+    graph.add_node("tools", ToolNode([manager]))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", route, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
     return graph.compile()
 
 
@@ -95,6 +157,50 @@ class TestRunStreamed:
 
         assert final["messages"][-1].content == ANSWER
 
+    async def test_a_subagents_own_answer_is_not_streamed(self):
+        _ws, _user, thread = await _thread("stream-subagent")
+
+        final = await resume_stream.arun_streamed(
+            _graph_with_subagent(), {"messages": [HumanMessage("visits?")]}, {}, thread.id
+        )
+
+        assert final["messages"][-1].content == "MAIN ANSWER"
+        streamed = "".join(row.text for row in await _rows(thread))
+        assert streamed == "MAIN ANSWER"
+
+    async def test_separate_model_calls_are_kept_apart(self):
+        _ws, _user, thread = await _thread("stream-calls")
+
+        await resume_stream.arun_streamed(
+            _graph_with_subagent(lead="Let me check."),
+            {"messages": [HumanMessage("visits?")]},
+            {},
+            thread.id,
+        )
+
+        streamed = "".join(row.text for row in await _rows(thread))
+        assert streamed == "Let me check.\n\nMAIN ANSWER"
+
+    async def test_the_flush_streams_its_answer(self):
+        _ws, _user, thread = await _thread("stream-flush")
+        thread = await Thread.objects.select_related("workspace", "user").aget(id=thread.id)
+        held = pending_requests.ClaimedRequest(
+            thread_id=str(thread.id),
+            request_id=uuid.uuid4(),
+            version=1,
+            text="visits?",
+            token=uuid.uuid4(),
+        )
+
+        with patch(
+            "apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=_graph())
+        ):
+            await tasks._answer_flushed_request(thread, held)
+
+        rows = await _rows(thread)
+        assert "".join(row.text for row in rows) == ANSWER
+        assert rows[-1].done is True
+
 
 def test_only_answer_text_is_streamed():
     assert resume_stream.chunk_text(AIMessage(content="plain")) == "plain"
@@ -125,6 +231,19 @@ class TestTailEndpoint:
 
         assert [c["text"] for c in everything] == ["a", "b"]
         assert [(c["text"], c["done"]) for c in later] == [("b", True)]
+
+    async def test_a_first_read_starts_at_the_latest_run(self):
+        ws, _tenant, thread, client = await self._chat("tail-latest")
+        old, new = uuid.uuid4(), uuid.uuid4()
+        await ResumeStreamChunk.objects.acreate(thread=thread, run=old, text="old answer")
+        await ResumeStreamChunk.objects.acreate(thread=thread, run=old, text="", done=True)
+        await ResumeStreamChunk.objects.acreate(thread=thread, run=new, text="new")
+
+        chunks = (
+            await client.get(f"/api/workspaces/{ws.id}/threads/{thread.id}/resume-stream/")
+        ).json()["chunks"]
+
+        assert [c["text"] for c in chunks] == ["new"]
 
     async def test_another_users_thread_shows_nothing(self):
         ws, tenant, thread, _client = await self._chat("tail-owner")

@@ -33,7 +33,7 @@ def resume_runs_through_ainvoke(request, monkeypatch):
     async def via_ainvoke(agent, input_state, config, _thread_id):
         return await agent.ainvoke(input_state, config)
 
-    monkeypatch.setattr("apps.workspaces.tasks.arun_streamed", via_ainvoke)
+    monkeypatch.setattr("apps.chat.resume_stream.arun_streamed", via_ainvoke)
 
 
 @pytest.fixture
