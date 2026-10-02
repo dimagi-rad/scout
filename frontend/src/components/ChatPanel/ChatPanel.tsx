@@ -97,6 +97,9 @@ export function ChatPanel() {
   const busyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [busyToken] = useState(() => Symbol("chat-busy"))
   const [busyNotice, setBusyNotice] = useState(false)
+  // Read by the thread-change cleanup, which sees only the first render's state.
+  const busyNoticeRef = useRef(busyNotice)
+  busyNoticeRef.current = busyNotice
   const [stoppedNotice, setStoppedNotice] = useState(false)
   const [titleRefreshTrigger, setTitleRefreshTrigger] = useState<TitleRefreshTrigger | null>(null)
 
@@ -253,10 +256,10 @@ export function ChatPanel() {
   // on every thread change, so the dependency must stay even though it isn't read.
   // setMessages does not clear useChat's error, so drop the error notice explicitly.
   useEffect(() => () => {
-    // A held send waiting on a busy retry is abandoned with it: stop hiding its
-    // request, and return text that only the unsent message carried.
+    // A held send waiting on a busy retry, or out of them, is abandoned with it:
+    // stop hiding its request, and return text that only the unsent message carried.
     const sending = heldSendRef.current
-    if (sending && busyTimerRef.current) {
+    if (sending && (busyTimerRef.current || busyNoticeRef.current)) {
       heldSendRef.current = null
       settleSendRef.current(sending.threadId)
       if (!sending.streamed && sending.extra) {
