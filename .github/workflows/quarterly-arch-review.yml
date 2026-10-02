@@ -31,7 +31,7 @@ jobs:
           cat > body.md <<'BODY'
           Quarterly reminder to re-run the architecture review coverage matrix (see #269).
 
-          The methodology is repeatable: run the `arch-review` skill (`.claude/skills` / `docs/arch-review-methodology.md` if present in your checkout) and diff the new findings against the previous run to measure remediation and catch drift. Run output lives under `docs/arch-review/<YYYY-MM-DD>/`; the previous run is the most recent dated directory there (first run: 2026-06-12).
+          The methodology is repeatable: run the `arch-review` skill and diff the new findings against the previous run to measure remediation and catch drift. Run output lives under `docs/arch-review/<YYYY-MM-DD>/`; the previous run is the most recent dated directory there (first run: 2026-06-12).
 
           ## Checklist
           - [ ] Re-run the arch-review coverage matrix
@@ -41,6 +41,5 @@ jobs:
 
           _Opened automatically by `.github/workflows/quarterly-arch-review.yml`._
           BODY
-          sed -i 's/^          //' body.md
 
           gh issue create --title "$title" --body-file body.md
