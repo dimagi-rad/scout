@@ -56,6 +56,8 @@ _VERIFICATION_RETRY = "verification_retry"
 _UPSTREAM_ACCESS_LOST = "upstream_access_lost"
 _JITTER = random.SystemRandom()
 _CLEANUP_WAIT_SECONDS = 0.075
+# The incident's 401 came ~170ms after the refresh; 0.5s covers that with margin
+# while staying small against the 10s interactive budget.
 _REJECTION_RETRY_PAUSE_SECONDS = 0.5
 logger = logging.getLogger(__name__)
 _SUPERVISED_OPERATIONS: set[asyncio.Task] = set()
@@ -268,7 +270,7 @@ async def _rebase_claim(claim, snapshot, *, deadline, clock):
     return rebased, None
 
 
-async def _renew_after_rejection(claim, *, refreshed, deadline, clock, limiter, sleep):
+async def _renew_after_rejection(claim, *, refreshed, deadline, clock, limiter):
     """Put a current OAuth credential on the claim before retrying a provider 401 once.
 
     A 401 against a stale or expired access token says nothing about access, so it
@@ -313,12 +315,14 @@ async def _renew_after_rejection(claim, *, refreshed, deadline, clock, limiter, 
         return await _refresh_and_rebase(
             claim, token, token_url, deadline=deadline, clock=clock, limiter=limiter
         )
-    if not refreshed and token.expires_at is not None and token.expires_at <= timezone.now():
-        # Expired and unrenewable: only a reconnect helps, and it proves nothing about access.
+    if (
+        not refreshed
+        and token.expires_at is not None
+        and token_needs_refresh(token.expires_at, can_refresh=False)
+    ):
+        # Expired (or about to be) and unrenewable: only a reconnect helps, and it
+        # proves nothing about access.
         return claim, ProviderVerificationResult.unavailable(ErrorCode.AUTH_TOKEN_EXPIRED)
-    # The credential is already the newest one we can get. A provider can briefly
-    # reject a token it has only just issued, so pause before the one retry.
-    await sleep(min(_REJECTION_RETRY_PAUSE_SECONDS, max(0, deadline - clock())))
     return claim, None
 
 
@@ -580,7 +584,6 @@ async def verify_connection_access(
                     deadline=deadline,
                     clock=clock,
                     limiter=limiter,
-                    sleep=sleep,
                 )
                 if claim is None:
                     return early_result
@@ -590,6 +593,9 @@ async def verify_connection_access(
                 if isinstance(early_result, ProviderVerificationResult):
                     provider_result = early_result
                 else:
+                    # Whichever credential the retry carries was usually issued moments
+                    # ago, and a provider can briefly reject a token it just issued.
+                    await sleep(min(_REJECTION_RETRY_PAUSE_SECONDS, max(0, deadline - clock())))
                     provider_result = await _call_provider(
                         provider_verifier, claim, deadline=deadline, clock=clock
                     )

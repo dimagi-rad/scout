@@ -1581,13 +1581,69 @@ async def test_401_from_a_token_rotated_mid_call_retries_with_the_stored_token(u
             return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
         return ProviderVerificationResult.complete({tenant.external_id})
 
+    pauses = []
+
+    async def sleep(seconds):
+        pauses.append(seconds)
+
     result = await verify_connection_access(
-        user.id, connection.id, {tenant.id}, provider_verifier=provider
+        user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=sleep
     )
 
     assert result.status == AccessVerificationStatus.VERIFIED
     assert sent == ["stale-access", "rotated-access"]
+    assert len(pauses) == 1
     await _assert_not_archived(connection, membership)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_rotated_token_rejected_again_still_archives(user, tenant):
+    token, connection, membership = await _oauth_connection(
+        user, tenant, access="stale-access", refresh="stale-refresh", expires_in=timedelta(hours=1)
+    )
+    sent = []
+
+    async def provider(snapshot, **kwargs):
+        sent.append(snapshot.credential)
+        if snapshot.credential == "stale-access":
+            await SocialToken.objects.filter(pk=token.pk).aupdate(
+                token="rotated-access", token_secret="rotated-refresh"
+            )
+        return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    async def sleep(_seconds):
+        pass
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=sleep
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    assert sent == ["stale-access", "rotated-access"]
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_api_key_401_is_still_one_call_and_archives(user, tenant, api_connection):
+    connection, membership = api_connection
+    calls = 0
+
+    async def provider(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=provider
+    )
+
+    assert result.status == AccessVerificationStatus.DENIED
+    assert calls == 1
+    refreshed = await TenantMembership.all_objects.aget(pk=membership.pk)
+    assert refreshed.archived_at is not None
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1638,12 +1694,18 @@ async def test_401_on_an_unexpired_token_refreshes_before_deciding(user, tenant,
             return ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED)
         return ProviderVerificationResult.complete({tenant.external_id})
 
+    pauses = []
+
+    async def sleep(seconds):
+        pauses.append(seconds)
+
     result = await verify_connection_access(
-        user.id, connection.id, {tenant.id}, provider_verifier=provider
+        user.id, connection.id, {tenant.id}, provider_verifier=provider, sleep=sleep
     )
 
     assert result.status == AccessVerificationStatus.VERIFIED
     assert sent == ["old-access", "new-access"]
+    assert len(pauses) == 1
     await _assert_not_archived(connection, membership)
 
 
