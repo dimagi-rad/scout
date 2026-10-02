@@ -523,9 +523,11 @@ export function ChatPanel() {
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
     // A notice with Retry would resend whatever turn is now last, so those are
     // cleared and the card is the way on. Notices without one (a final reason, a
-    // reconnect remedy, a stale thread) stay: they say what the card cannot.
+    // reconnect remedy, a stale thread) stay, while their chat is the one open:
+    // they say what the card cannot.
     const refusal = error ? classifyChatError(error).kind : "generic"
-    if (refusal === "generic" || refusal === "access-retry") clearError()
+    const elsewhere = sending.threadId !== contextRef.current.threadId
+    if (elsewhere || refusal === "generic" || refusal === "access-retry") clearError()
     held.restore(sending.threadId)
     if (sending.extra) returnToComposer(sending.workspaceId, sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
