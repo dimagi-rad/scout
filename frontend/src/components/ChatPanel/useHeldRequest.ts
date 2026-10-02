@@ -45,8 +45,8 @@ export interface HeldRequest {
   /** Hide the request before the client sends it itself; ``restore`` undoes it. */
   takeForSend: () => PendingRequest | null
   restore: (sendThreadId: string) => void
-  /** Rewrite the whole request. */
-  edit: (text: string) => Promise<EditOutcome>
+  /** Rewrite the whole request, as it stood at ``baseVersion``. */
+  edit: (text: string, baseVersion: number) => Promise<EditOutcome>
   /** Drop one of its later parts. */
   removePart: (partId: string) => Promise<EditOutcome>
   /** The held send in ``sendThreadId`` is over: show the server's copy from the next poll. */
@@ -194,6 +194,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     async (
       body: { text: string } | { remove_part_id: string },
       optimistic: PendingRequest["parts"],
+      baseVersion?: number,
     ): Promise<EditOutcome> => {
       if (!workspaceId || !current) return "gone"
       setPendingRequest(
@@ -203,7 +204,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
       )
       try {
         const saved = await pendingRequestApi.edit(workspaceId, threadId, {
-          version: current.version,
+          version: baseVersion ?? current.version,
           ...body,
         })
         setPendingRequest(threadId, saved)
@@ -222,8 +223,14 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
   )
 
   const edit = useCallback(
-    (text: string) =>
-      change({ text }, [{ id: `edit-${newPartId()}`, text, added_at: new Date().toISOString() }]),
+    // The version the edit started from, not the latest: replacing parts the user
+    // never saw in the editor would delete them.
+    (text: string, baseVersion: number) =>
+      change(
+        { text },
+        [{ id: `edit-${newPartId()}`, text, added_at: new Date().toISOString() }],
+        baseVersion,
+      ),
     [change],
   )
 

@@ -608,9 +608,9 @@ export function ChatPanel() {
     else sendText(text)
   }
 
-  async function handleEditHeld(text: string): Promise<EditOutcome> {
+  async function handleEditHeld(text: string, baseVersion: number): Promise<EditOutcome> {
     const editedIn = threadId
-    const outcome = await held.edit(text)
+    const outcome = await held.edit(text, baseVersion)
     // Too late to change what is being sent: keep the edit as the next message.
     if (outcome === "gone") returnToComposer(activeDomainId, editedIn, text)
     return outcome
@@ -709,6 +709,7 @@ export function ChatPanel() {
               onSendNow={handleSendHeldNow}
               onEdit={handleEditHeld}
               onRemovePart={held.removePart}
+              onAbandonEdit={(text) => returnToComposer(activeDomainId, threadId, text)}
               actionsDisabled={isStreaming}
               onDiscard={() => void held.discard()}
             />

@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { AlertCircle, Clock, Loader2, Pencil, X } from "lucide-react"
 
 import type { PendingRequest } from "@/api/jobs"
@@ -12,7 +12,10 @@ interface PendingRequestCardProps {
   phase: PendingPhase
   onSendNow?: () => void
   onDiscard?: () => void
-  onEdit?: (text: string) => Promise<EditOutcome>
+  onEdit?: (text: string, baseVersion: number) => Promise<EditOutcome>
+  /** An open edit the card can no longer save (the request is being sent, or the
+   *  chat closed): its text goes where the user can still send it. */
+  onAbandonEdit?: (text: string) => void
   onRemovePart?: (partId: string) => Promise<EditOutcome>
   /** While a turn is in flight, so a second send cannot overtake it. */
   actionsDisabled?: boolean
@@ -30,7 +33,8 @@ const ICONS: Record<PendingPhase, typeof Clock> = {
   unanswered: AlertCircle,
 }
 
-const CONFLICT_NOTICE = "Updated in another tab"
+const CONFLICT_NOTICE =
+  "Updated in another tab. Cancel and edit again to include the change; your text is still here."
 const TOO_LATE_NOTICE = "Your request was already being sent."
 
 /** The user's request held while their data loads, sent as one message once it can be answered. */
@@ -41,6 +45,7 @@ export function PendingRequestCard({
   onDiscard,
   onEdit,
   onRemovePart,
+  onAbandonEdit,
   actionsDisabled = false,
 }: PendingRequestCardProps) {
   const Icon = ICONS[phase]
@@ -48,9 +53,37 @@ export function PendingRequestCard({
   // Parts here when the card first showed came in with it; later ones slide in.
   const [initialPartIds] = useState(() => new Set(pending.parts.map((part) => part.id)))
   const [draft, setDraft] = useState<string | null>(null)
+  // The version the open edit was made from; a save against any other is refused.
+  const [draftBase, setDraftBase] = useState(pending.version)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const editing = draft !== null && editable
+
+  const abandonRef = useRef(onAbandonEdit)
+  abandonRef.current = onAbandonEdit
+  const draftRef = useRef(draft)
+  draftRef.current = draft
+  // An edit open when the request started sending, handed on after this render.
+  const abandonedRef = useRef<string | null>(null)
+  if (draft !== null && !editable) {
+    abandonedRef.current = draft
+    setDraft(null)
+    setNotice(`${TOO_LATE_NOTICE} Your edit is in the message box.`)
+  }
+  useEffect(() => {
+    const abandoned = abandonedRef.current
+    if (abandoned === null) return
+    abandonedRef.current = null
+    abandonRef.current?.(abandoned)
+  }, [editable])
+  // Closing the chat with an edit open keeps it too.
+  useEffect(
+    () => () => {
+      const open = draftRef.current ?? abandonedRef.current
+      if (open !== null) abandonRef.current?.(open)
+    },
+    [],
+  )
 
   function settle(outcome: EditOutcome, keepDraft: boolean) {
     if (outcome === "saved") {
@@ -72,7 +105,7 @@ export function PendingRequestCard({
     if (draft === null || !onEdit) return
     setSaving(true)
     try {
-      settle(await onEdit(draft), true)
+      settle(await onEdit(draft, draftBase), true)
     } finally {
       setSaving(false)
     }
@@ -110,6 +143,7 @@ export function PendingRequestCard({
               className="h-6 px-2 text-xs"
               onClick={() => {
                 setNotice(null)
+                setDraftBase(pending.version)
                 setDraft(pendingRequestText(pending))
               }}
               disabled={actionsDisabled}

@@ -72,7 +72,7 @@ describe("PendingRequestCard", () => {
     fireEvent.change(box, { target: { value: "visits by week" } })
     await act(async () => fireEvent.click(screen.getByTestId("pending-request-edit-save")))
 
-    expect(onEdit).toHaveBeenCalledWith("visits by week")
+    expect(onEdit).toHaveBeenCalledWith("visits by week", 2)
     expect(screen.queryByTestId("pending-request-edit-text")).toBeNull()
   })
 
@@ -97,5 +97,71 @@ describe("PendingRequestCard", () => {
     expect(screen.getByTestId("pending-request-part-p2").className).toContain(
       "motion-safe:animate-in",
     )
+  })
+
+  it("keeps saving against the version the edit started from", async () => {
+    const onEdit = vi.fn().mockResolvedValue("conflict")
+    const { rerender } = render(
+      <PendingRequestCard pending={request(["visits?"])} phase="waiting" onEdit={onEdit} />,
+    )
+    fireEvent.click(screen.getByTestId("pending-request-edit"))
+    fireEvent.change(screen.getByTestId("pending-request-edit-text"), { target: { value: "mine" } })
+
+    rerender(
+      <PendingRequestCard pending={request(["visits?", "by month"])} phase="waiting" onEdit={onEdit} />,
+    )
+    await act(async () => fireEvent.click(screen.getByTestId("pending-request-edit-save")))
+    await act(async () => fireEvent.click(screen.getByTestId("pending-request-edit-save")))
+
+    expect(onEdit.mock.calls).toEqual([
+      ["mine", 1],
+      ["mine", 1],
+    ])
+  })
+
+  it("hands on an open edit when the request starts sending", async () => {
+    const onAbandonEdit = vi.fn()
+    const { rerender } = render(
+      <PendingRequestCard
+        pending={request(["visits?"])}
+        phase="waiting"
+        onEdit={vi.fn()}
+        onAbandonEdit={onAbandonEdit}
+      />,
+    )
+    fireEvent.click(screen.getByTestId("pending-request-edit"))
+    fireEvent.change(screen.getByTestId("pending-request-edit-text"), { target: { value: "mine" } })
+
+    rerender(
+      <PendingRequestCard
+        pending={request(["visits?"])}
+        phase="answering"
+        onEdit={vi.fn()}
+        onAbandonEdit={onAbandonEdit}
+      />,
+    )
+
+    expect(onAbandonEdit).toHaveBeenCalledWith("mine")
+    expect(onAbandonEdit).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId("pending-request-edit-text")).toBeNull()
+    expect(screen.getByTestId("pending-request-notice")).toHaveTextContent("message box")
+  })
+
+  it("hands on an open edit when the card closes", () => {
+    const onAbandonEdit = vi.fn()
+    const { unmount } = render(
+      <PendingRequestCard
+        pending={request(["visits?"])}
+        phase="waiting"
+        onEdit={vi.fn()}
+        onAbandonEdit={onAbandonEdit}
+      />,
+    )
+    fireEvent.click(screen.getByTestId("pending-request-edit"))
+    fireEvent.change(screen.getByTestId("pending-request-edit-text"), { target: { value: "mine" } })
+
+    unmount()
+
+    expect(onAbandonEdit).toHaveBeenCalledWith("mine")
   })
 })
