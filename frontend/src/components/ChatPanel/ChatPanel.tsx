@@ -182,6 +182,8 @@ export function ChatPanel() {
   } | null>(null)
   const heldHandlerRef = useRef(held.onHeld)
   heldHandlerRef.current = held.onHeld
+  const settleSendRef = useRef(held.settleSend)
+  settleSendRef.current = held.settleSend
 
   const [transport] = useState(
     () =>
@@ -241,6 +243,12 @@ export function ChatPanel() {
   // on every thread change, so the dependency must stay even though it isn't read.
   // setMessages does not clear useChat's error, so drop the error notice explicitly.
   useEffect(() => () => {
+    // A held send waiting on a busy retry is abandoned with it, so stop hiding its request.
+    const sending = heldSendRef.current
+    if (sending && busyTimerRef.current) {
+      heldSendRef.current = null
+      settleSendRef.current(sending.threadId)
+    }
     cancelBusyRetry()
     setBusyNotice(false)
     setOverloadNotice(false)
