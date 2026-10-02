@@ -199,3 +199,53 @@ describe("uiSlice upstream-verification denials", () => {
     expect(useAppStore.getState().threadsAccessRetryable).toBe(true)
   })
 })
+
+describe("uiSlice.fetchThreads refreshes the workspace list on access loss", () => {
+  beforeEach(() => {
+    useAppStore.setState({ activeDomainId: "ws-1", threads: [], threadsStatus: "idle" })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function deny(reason: string) {
+    vi.spyOn(api, "get").mockRejectedValue(new ApiError(403, reason, { error: reason, reason }))
+  }
+
+  it.each(["tenant_access_lost", "upstream_access_lost", "credential_missing", "credential_expired"])(
+    "refetches fresh so the lost-access gate opens now (%s)",
+    async (reason) => {
+      const revalidate = vi
+        .spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+        .mockResolvedValue("fetched")
+      deny(reason)
+
+      await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+      expect(revalidate).toHaveBeenCalledOnce()
+      expect(revalidate).toHaveBeenCalledWith({ fresh: true })
+    },
+  )
+
+  it.each(["verification_unavailable", "verification_in_progress", "no_sources"])(
+    "leaves the list alone when access was not lost (%s)",
+    async (reason) => {
+      const revalidate = vi.spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+      deny(reason)
+
+      await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+      expect(revalidate).not.toHaveBeenCalled()
+    },
+  )
+
+  it("leaves the list alone on an outage", async () => {
+    const revalidate = vi.spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+    vi.spyOn(api, "get").mockRejectedValue(new Error("503 Service Unavailable"))
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(revalidate).not.toHaveBeenCalled()
+  })
+})

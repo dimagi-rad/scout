@@ -39,6 +39,15 @@ const RECHECKABLE_REASONS: ReadonlySet<AccessDenialReason> = new Set([
   "verification_in_progress",
 ])
 
+// The threads fetch is what notices these upstream and archives the membership; the
+// workspace list's has_access, which gates the lost-access modal, lags until refetched.
+const ACCESS_LOSS_REASONS: ReadonlySet<AccessDenialReason> = new Set([
+  "tenant_access_lost",
+  "upstream_access_lost",
+  "credential_missing",
+  "credential_expired",
+])
+
 interface AccessDenial {
   reason: AccessDenialReason
   message: string
@@ -144,6 +153,10 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
             threadsAccessDenialReason: denial?.reason ?? null,
             threadsAccessRetryable: denial?.retryable === true,
           })
+          // Can't loop: threads refetch on a workspace switch, not when the list changes.
+          if (denial && ACCESS_LOSS_REASONS.has(denial.reason)) {
+            void get().domainActions.revalidateDomains({ fresh: true })
+          }
         }
       },
       retryAccessVerification: async (workspaceId: string) => {
