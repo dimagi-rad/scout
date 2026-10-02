@@ -48,6 +48,7 @@ from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
+from apps.agents.tool_results import compact_tool_results
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
@@ -404,7 +405,9 @@ async def _semantic_catalog_context(workspace) -> str:
     return (
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
-        "to page through dataset summaries, `describe_dataset` for one dataset's "
+        "to page through this workspace's dataset summaries (pass `workspace_ids` "
+        "only to look at other workspaces, whose data this chat cannot query), "
+        "`describe_dataset` for one dataset's "
         "members, and `semantic_query` for analysis. When the semantic model "
         "cannot express the question, fall back to `list_tables`, "
         "`describe_table`, and read-only `query` SQL."
@@ -919,7 +922,10 @@ def _make_injecting_tool_node(
 
         token = set_subagent_event_queue(event_queue)
         try:
-            result = await base_tool_node.ainvoke({"messages": messages}, config=config)
+            result = compact_tool_results(
+                await base_tool_node.ainvoke({"messages": messages}, config=config),
+                MCP_TOOL_NAMES,
+            )
             if (
                 "persistable_msg" in locals()
                 and persistable_changed
@@ -1429,7 +1435,8 @@ pipelines, and dataset lists are runtime data; do not assume they are present
 in the system prompt.
 
 Use dataset tools by intent:
-- Discover available data: `list_workspaces` and `list_datasets`.
+- Discover available data: `list_datasets` lists this workspace's datasets;
+  `list_workspaces` lists the others. The query tools only read this workspace.
 - Inspect one dataset's fields, labels, descriptions, formats, and
   relationships: `describe_dataset`.
 - Answer analytical questions: `semantic_query` over semantic members.

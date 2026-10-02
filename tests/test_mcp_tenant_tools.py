@@ -36,6 +36,7 @@ from mcp_server.context import QueryContext, _parse_db_url, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.server import (
+    MAX_REQUESTED_DATASET_WORKSPACES,
     cancel_materialization,
     describe_table,
     get_materialization_status,
@@ -346,7 +347,7 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
 
-    async def test_list_datasets_pages_across_accessible_workspaces(self, workspace, user):
+    async def test_list_datasets_lists_the_active_workspace(self, workspace, user):
 
         model = await SemanticModel.objects.acreate(
             workspace=workspace,
@@ -375,6 +376,7 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         )
 
         result = await list_datasets(
+            workspace_id=str(workspace.id),
             user_id=str(user.id),
             limit=10,
             offset=0,
@@ -390,6 +392,93 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         assert item["row_count"] == 10
         assert item["row_count_verified"] is False
         assert item["fields"][0]["member"] == "raw_users.count"
+
+    async def test_list_datasets_leaves_other_workspaces_out_unless_requested(
+        self, workspace, user, tenant
+    ):
+        sibling = await Workspace.objects.acreate(name="AAA sibling", created_by=user)
+        await WorkspaceTenant.objects.acreate(workspace=sibling, tenant=tenant)
+        await WorkspaceMembership.objects.acreate(
+            workspace=sibling, user=user, role=WorkspaceRole.READ
+        )
+        for ws, name in ((workspace, "active_visits"), (sibling, "sibling_visits")):
+            model = await SemanticModel.objects.acreate(workspace=ws, name="m")
+            await SemanticDataset.objects.acreate(
+                workspace=ws,
+                semantic_model=model,
+                name=name,
+                schema_name="s",
+                table_name=name,
+            )
+
+        default = await list_datasets(workspace_id=str(workspace.id), user_id=str(user.id))
+        both = await list_datasets(
+            workspace_ids=[str(workspace.id), str(sibling.id)],
+            workspace_id=str(workspace.id),
+            user_id=str(user.id),
+        )
+
+        assert [d["name"] for d in default["data"]["datasets"]] == ["active_visits"]
+        assert [d["name"] for d in both["data"]["datasets"]] == [
+            "sibling_visits",
+            "active_visits",
+        ]
+
+    async def test_list_datasets_with_fields_returns_a_short_page_of_short_fields(
+        self, workspace, user
+    ):
+        model = await SemanticModel.objects.acreate(workspace=workspace, name="m")
+        for i in range(12):
+            dataset = await SemanticDataset.objects.acreate(
+                workspace=workspace,
+                semantic_model=model,
+                name=f"ds_{i:02d}",
+                schema_name="s",
+                table_name=f"ds_{i:02d}",
+            )
+            await SemanticField.objects.acreate(
+                dataset=dataset,
+                name="count",
+                label="Count",
+                description="x" * 500,
+                field_type=SemanticField.FieldType.MEASURE,
+                data_type="integer",
+                expression="*",
+                measure_type=SemanticField.MeasureType.COUNT,
+                metadata={"format": "number_0", "cube_sql": "y" * 500},
+                is_visible=True,
+            )
+
+        result = await list_datasets(
+            workspace_id=str(workspace.id), user_id=str(user.id), limit=50, include_fields=True
+        )
+
+        data = result["data"]
+        assert data["limit"] == 10
+        assert len(data["datasets"]) == 10
+        assert data["has_more"] is True
+        field = data["datasets"][0]["fields"][0]
+        assert set(field) == {"name", "member", "type", "description"}
+        assert len(field["description"]) <= 160
+
+    async def test_list_datasets_without_fields_keeps_the_full_page_size(self, workspace, user):
+        result = await list_datasets(workspace_id=str(workspace.id), user_id=str(user.id), limit=50)
+
+        assert result["data"]["limit"] == 50
+
+    async def test_list_datasets_refuses_too_many_workspaces(self, user):
+        ids = [str(uuid.uuid4()) for _ in range(MAX_REQUESTED_DATASET_WORKSPACES + 1)]
+
+        result = await list_datasets(workspace_ids=ids, user_id=str(user.id))
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    async def test_list_datasets_requires_a_workspace(self, user):
+        result = await list_datasets(user_id=str(user.id))
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
 
     async def test_list_datasets_filters_inaccessible_requested_workspaces(
         self, workspace, user, other_user, tenant
