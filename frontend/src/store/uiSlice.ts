@@ -41,7 +41,7 @@ const RECHECKABLE_REASONS: ReadonlySet<AccessDenialReason> = new Set([
 
 // The threads fetch is what notices these upstream and archives the membership; the
 // workspace list's has_access, which gates the lost-access modal, lags until refetched.
-const ACCESS_LOSS_REASONS: ReadonlySet<AccessDenialReason> = new Set([
+export const ACCESS_LOSS_REASONS: ReadonlySet<AccessDenialReason> = new Set([
   "tenant_access_lost",
   "upstream_access_lost",
   "credential_missing",
@@ -176,6 +176,10 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
               threadsAccessRetryable: denial.retryable,
               accessRetryOutcome: denial.message,
             })
+            // The gate lists missing sources from the workspace list, not this response.
+            if (ACCESS_LOSS_REASONS.has(denial.reason)) {
+              void get().domainActions.revalidateDomains({ fresh: true })
+            }
             return
           }
           console.error("[Scout] Access verification retry failed:", error)

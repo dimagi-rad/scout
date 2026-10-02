@@ -2,6 +2,7 @@ import { useMemo, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
+import { ACCESS_LOSS_REASONS } from "@/store/uiSlice"
 import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
@@ -32,6 +33,7 @@ export function LostAccessModal() {
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
   const retryOutcome = useAppStore((s) => s.accessRetryOutcome)
+  const denialReason = useAppStore((s) => s.threadsAccessDenialReason)
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
 
   const active = domains.find((d) => d.id === activeDomainId)
@@ -128,9 +130,12 @@ export function LostAccessModal() {
           </p>
         )}
 
-        {retryOutcome && !noSources && missing.length === 0 && (
+        {retryOutcome && !noSources && (
           <p className="mt-3 text-sm text-muted-foreground" data-testid="lost-access-retry-outcome">
-            {retryOutcome}
+            {/* The server text repeats the source list, which the retry has just refreshed. */}
+            {missing.length > 0 && denialReason && ACCESS_LOSS_REASONS.has(denialReason)
+              ? "Verification ran, but the sources above are still needed."
+              : retryOutcome}
           </p>
         )}
 

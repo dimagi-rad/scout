@@ -240,6 +240,19 @@ describe("uiSlice.fetchThreads refreshes the workspace list on access loss", () 
     },
   )
 
+  it("refetches the list fresh when a retry is still denied", async () => {
+    const revalidate = vi
+      .spyOn(useAppStore.getState().domainActions, "revalidateDomains")
+      .mockResolvedValue("fetched")
+    vi.spyOn(api, "post").mockRejectedValue(
+      new ApiError(403, "Still needed", { error: "Still needed", reason: "tenant_access_lost" }),
+    )
+
+    await useAppStore.getState().uiActions.retryAccessVerification("ws-1")
+
+    expect(revalidate).toHaveBeenCalledWith({ fresh: true })
+  })
+
   it("leaves the list alone on an outage", async () => {
     const revalidate = vi.spyOn(useAppStore.getState().domainActions, "revalidateDomains")
     vi.spyOn(api, "get").mockRejectedValue(new Error("503 Service Unavailable"))

@@ -264,11 +264,26 @@ describe("LostAccessModal with missing sources", () => {
     expect(items[0]).toHaveTextContent(`A, B, C: ${ended}`)
   })
 
-  it("leaves a retry's outcome to the source list, which already says what is needed", () => {
-    useAppStore.setState({ accessRetryOutcome: "Still needed — 'Bot B': connect …" })
+  it("confirms a denied retry without repeating the source list", () => {
+    useAppStore.setState({
+      threadsAccessDenialReason: "tenant_access_lost",
+      accessRetryOutcome: "Still needed — 'Bot B': connect …",
+    })
     renderModal()
 
-    expect(screen.queryByTestId("lost-access-retry-outcome")).toBeNull()
+    const outcome = screen.getByTestId("lost-access-retry-outcome")
+    expect(outcome).toHaveTextContent("sources above are still needed")
+    expect(outcome).not.toHaveTextContent("Bot B")
+  })
+
+  it("shows a retry that could not verify, even with sources listed", () => {
+    useAppStore.setState({
+      threadsAccessDenialReason: "verification_unavailable",
+      accessRetryOutcome: "We couldn't verify your access right now.",
+    })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("couldn't verify")
   })
 
   it("links to Connected Accounts", async () => {
