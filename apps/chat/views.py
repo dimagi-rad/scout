@@ -34,7 +34,7 @@ from apps.chat.stream import langgraph_to_ui_stream
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
-from apps.workspaces.access import access_denied_body, role_satisfies
+from apps.workspaces.access import access_denied_response, role_satisfies
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.services.thread_job_dispatch import (
     astart_chat_load,
@@ -211,8 +211,7 @@ async def chat_view(request):
     workspace = access.workspace
     if workspace is None:
         # The chat UI offers Retry unless a reason says resending cannot help.
-        body = {"reason": "access_denied", **access_denied_body(access)}
-        return JsonResponse(body, status=403)
+        return access_denied_response(access, reason="access_denied")
 
     if tm is None and not is_multi_tenant:
         return JsonResponse(

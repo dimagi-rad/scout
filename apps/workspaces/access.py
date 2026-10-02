@@ -43,6 +43,7 @@ from dataclasses import dataclass
 
 from django.conf import settings
 from django.core.cache import cache
+from django.http import JsonResponse
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import PROVIDER_CHOICES, TenantMembership
@@ -284,6 +285,41 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
     if result.denied_reason == NO_SOURCES:
         return {"error": NO_SOURCES_MESSAGE, "reason": NO_SOURCES}
     return {"error": _GENERIC_DENIED}
+
+
+# A provider check that outlived the request keeps running, so a retry a few seconds
+# later usually finds its proof published.
+VERIFICATION_RETRY_AFTER_SECONDS = 5
+
+
+def access_denied_status(result: WorkspaceAccess) -> int:
+    """503 for a check that could not finish (nothing was decided), else 403."""
+    return 503 if result.retryable else 403
+
+
+def access_denied_headers(result: WorkspaceAccess) -> dict:
+    return {"Retry-After": str(VERIFICATION_RETRY_AFTER_SECONDS)} if result.retryable else {}
+
+
+def quiet_denial(response):
+    """Keep a verification 503 out of ``django.request``'s ERROR log, and so out of
+    Sentry: it is an expected state, already logged at INFO by ``_freshness_denied``.
+    """
+    if response.status_code == 503:
+        # Django's log_response skips a response it has already logged.
+        response._has_been_logged = True
+    return response
+
+
+def access_denied_response(result: WorkspaceAccess, **extra) -> JsonResponse:
+    """The JSON denial for ``result``: ``extra`` fields, then ``access_denied_body``."""
+    return quiet_denial(
+        JsonResponse(
+            {**extra, **access_denied_body(result)},
+            status=access_denied_status(result),
+            headers=access_denied_headers(result),
+        )
+    )
 
 
 def _live_tenant_ids(workspace) -> list:

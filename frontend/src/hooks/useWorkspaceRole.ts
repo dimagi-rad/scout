@@ -10,6 +10,21 @@ export const READ_ONLY_DENIAL =
 // access_denied_body's generic copy; older views omit the trailing period.
 const GENERIC_DENIAL = /^Workspace not found or access denied\.?$/
 
+/**
+ * The structured access denial in a failed response, or undefined. A verification
+ * that could not finish (reason verification_unavailable / verification_in_progress)
+ * comes back as a 503 with the same body as a 403 denial.
+ */
+function accessDenialBody(error: unknown): Record<string, unknown> | undefined {
+  if (!(error instanceof ApiError)) return undefined
+  if (error.status === 403) return asRecord(error.body)
+  if (error.status === 503) {
+    const body = asRecord(error.body)
+    if (typeof body?.reason === "string" && typeof body.retryable === "boolean") return body
+  }
+  return undefined
+}
+
 export interface WorkspaceRoleAccess {
   role: WorkspaceRole | null
   canWrite: boolean
@@ -40,7 +55,9 @@ export function writeErrorMessage(
   fallback: string,
   canWrite: boolean,
 ): string {
-  if (!(error instanceof ApiError) || error.status !== 403) return fallback
+  if (!(error instanceof ApiError)) return fallback
+  if (error.status === 503 && accessDenialBody(error)) return error.message
+  if (error.status !== 403) return fallback
   if (/role required/i.test(error.message)) return READ_ONLY_DENIAL
   const body = asRecord(error.body)
   const serverMessage = Boolean(body?.error || body?.detail)
@@ -60,7 +77,7 @@ export interface ActionFailure {
 
 /**
  * Like writeErrorMessage, but also says whether offering the action again
- * makes sense. A structured 403 is final unless access_denied_body marks it
+ * makes sense. A structured denial is final unless access_denied_body marks it
  * `retryable` (an upstream verification outage); anything else — a 5xx, a
  * dropped connection, a non-JSON 403 like a CSRF failure — may clear on its own.
  * Only access_denied_body's freshness branch sets `retryable`, so a new denial
@@ -72,7 +89,7 @@ export function actionFailure(
   fallback: string,
   canWrite: boolean,
 ): ActionFailure {
-  const denial = error instanceof ApiError && error.status === 403 ? asRecord(error.body) : undefined
+  const denial = accessDenialBody(error)
   return {
     message: writeErrorMessage(error, fallback, canWrite),
     retryable: !denial || denial.retryable === true,

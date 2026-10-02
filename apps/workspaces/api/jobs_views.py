@@ -10,7 +10,7 @@ from django.utils import timezone
 from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
 from apps.workspaces.access import (
-    access_denied_body,
+    access_denied_response,
     aresolve_workspace_access_ex,
     role_satisfies,
 )
@@ -127,7 +127,7 @@ async def active_jobs_view(request, workspace_id):
     # verification outage would drop the user's own progress card mid-load.
     access = await aresolve_workspace_access_ex(user, workspace_id, verification=None)
     if not access.granted:
-        return JsonResponse(access_denied_body(access), status=403)
+        return access_denied_response(access)
     workspace = access.workspace
     viewer_can_write = role_satisfies(access.membership.role, WorkspaceRole.READ_WRITE)
 

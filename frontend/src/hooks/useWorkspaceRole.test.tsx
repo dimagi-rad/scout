@@ -91,6 +91,17 @@ describe("writeErrorMessage", () => {
     )
   })
 
+  it("surfaces an unfinished verification's 503 copy", () => {
+    const body = {
+      error: "We couldn't verify your access to this workspace right now. Please retry shortly.",
+      reason: "verification_unavailable",
+      retryable: true,
+    }
+    expect(writeErrorMessage(new ApiError(503, body.error, body), "Try again.", false)).toBe(
+      body.error,
+    )
+  })
+
   it("keeps the fallback for non-permission failures", () => {
     expect(writeErrorMessage(new ApiError(500, "boom"), "Try again.", false)).toBe("Try again.")
     expect(writeErrorMessage(new Error("offline"), "Try again.", false)).toBe("Try again.")
@@ -103,6 +114,15 @@ describe("actionFailure", () => {
     ["a final structured 403", new ApiError(403, "Reconnect.", { error: "Reconnect.", retryable: false }), false],
     ["a structured 403 without the flag", new ApiError(403, "Denied.", { error: "Denied." }), false],
     ["a non-JSON 403", new ApiError(403, "Forbidden", undefined), true],
+    [
+      "a verification 503",
+      new ApiError(503, "Retry shortly.", {
+        error: "Retry shortly.",
+        reason: "verification_in_progress",
+        retryable: true,
+      }),
+      true,
+    ],
     ["a 500", new ApiError(500, "Failed to dispatch", { error: "Failed to dispatch" }), true],
     ["a network error", new TypeError("Failed to fetch"), true],
   ])("treats %s as retryable: %s", (_label, error, retryable) => {

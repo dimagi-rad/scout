@@ -8,7 +8,7 @@ from django.http import JsonResponse
 from apps.chat.models import Thread, ThreadJob
 from apps.common.http import parse_json_object
 from apps.users.decorators import async_login_required
-from apps.workspaces.access import access_denied_body, aresolve_workspace_access_ex
+from apps.workspaces.access import access_denied_response, aresolve_workspace_access_ex
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun, WorkspaceRole
 from apps.workspaces.services.load_generations import (
@@ -134,7 +134,7 @@ async def materialization_cancel_view(request, workspace_id):
 
     if total == 0 and orphan_denial is not None and not tjs:
         # Runs are still active; "nothing to cancel" would be false.
-        return JsonResponse(access_denied_body(orphan_denial), status=403)
+        return access_denied_response(orphan_denial)
     if total == 0 and orphan_denial is None:
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
     body = {"status": "cancelled", "runs_cancelled": total}

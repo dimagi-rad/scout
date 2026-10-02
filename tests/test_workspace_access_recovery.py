@@ -36,7 +36,7 @@ def test_retry_reports_temporary_failure_then_restores_access(
 
     failed = _retry(user, workspace)
 
-    assert failed.status_code == 403
+    assert failed.status_code == 503
     assert failed.json()["reason"] == VERIFICATION_UNAVAILABLE
     assert failed.json()["retryable"] is True
     assert TenantMembership.objects.filter(user=user, tenant=tenant).exists()
@@ -75,7 +75,7 @@ def test_an_outage_during_retry_of_archived_access_stays_retryable(
 
     response = _retry(user, workspace)
 
-    assert response.status_code == 403
+    assert response.status_code == 503
     assert response.json()["reason"] == VERIFICATION_UNAVAILABLE
     assert response.json()["retryable"] is True
 
