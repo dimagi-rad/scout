@@ -1,0 +1,46 @@
+name: Quarterly architecture review reminder
+
+on:
+  schedule:
+    - cron: "0 9 1 1,4,7,10 *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  open-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open review issue if not already open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          year=$(date -u +%Y)
+          quarter=$(( ($(date -u +%-m) - 1) / 3 + 1 ))
+          title="Quarterly architecture review: ${year} Q${quarter}"
+
+          existing=$(gh issue list --state open --search "\"${title}\" in:title" \
+            --json title --jq "[.[] | select(.title == \"${title}\")] | length")
+          if [ "$existing" -gt 0 ]; then
+            echo "Open issue \"${title}\" already exists; skipping."
+            exit 0
+          fi
+
+          cat > body.md <<'BODY'
+          Quarterly reminder to re-run the architecture review coverage matrix (see #269).
+
+          The methodology is repeatable: run the `arch-review` skill (`.claude/skills` / `docs/arch-review-methodology.md` if present in your checkout) and diff the new findings against the previous run to measure remediation and catch drift. Run output lives under `docs/arch-review/<YYYY-MM-DD>/`; the previous run is the most recent dated directory there (first run: 2026-06-12).
+
+          ## Checklist
+          - [ ] Re-run the arch-review coverage matrix
+          - [ ] Diff the new findings DB against the previous run
+          - [ ] Record remediation progress and any new drift
+          - [ ] File issues for new findings
+
+          _Opened automatically by `.github/workflows/quarterly-arch-review.yml`._
+          BODY
+          sed -i 's/^          //' body.md
+
+          gh issue create --title "$title" --body-file body.md
