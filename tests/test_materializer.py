@@ -1523,6 +1523,49 @@ class TestConnectPageReplayIdempotency:
             cur.execute(f"CREATE SCHEMA {schema_name}")
         conn.autocommit = False
 
+    def test_resumed_visits_progress_skips_replayed_rows(self, django_db_setup, db):
+        """The resume cursor can lag the committed pages, so rows above it are
+        re-fetched. Progress must count each visit once, not table size + replay."""
+
+        db_url = self._get_db_url()
+        if not db_url:
+            pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
+
+        test_schema = "test_cpr_visits_resume_progress"
+        conn = psycopg.connect(db_url, autocommit=True)
+        try:
+            self._make_schema(conn, test_schema)
+            _write_connect_visits(
+                iter([([{"visit_id": i} for i in range(1, 6)], None)]),
+                test_schema,
+                conn,
+            )
+            conn.commit()
+
+            progress: list[int] = []
+            # Rows 4-5 committed but the cursor only reached 3; the loader replays them.
+            rows = _write_connect_visits(
+                iter([([{"visit_id": i} for i in (4, 5, 6)], None)]),
+                test_schema,
+                conn,
+                on_page=lambda loaded, _total: progress.append(loaded),
+                start_cursor=3,
+                cursor_callback=lambda *_: None,
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*) FROM {test_schema}.raw_visits")
+                distinct = cur.fetchone()[0]
+            assert rows == 3
+            assert distinct == 6
+            assert progress[-1] == distinct
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
+            conn.close()
+
     def test_payments_idless_full_reload_no_duplication(self, django_db_setup, db):
         """payments records carry no ``id`` in the v2 export. They must insert
         via the surrogate identity PK (no NotNullViolation), and because the

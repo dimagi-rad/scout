@@ -1775,11 +1775,16 @@ def _write_connect_visits(
         """
         ).format(schema=sid)
     )
-    # On resume, progress counts the rows already loaded so it lines up with the
+    # On resume, progress adds the rows already loaded so it lines up with the
     # whole-table total from discovery; the return value stays this run's rows.
+    # Count only up to the cursor: it can lag the committed pages, and the loader
+    # re-fetches everything above it.
     already_loaded = 0
     if start_cursor is not None:
-        cur.execute(psql.SQL("SELECT count(*) FROM {}.raw_visits").format(sid))
+        cur.execute(
+            psql.SQL("SELECT count(*) FROM {}.raw_visits WHERE visit_id <= %s").format(sid),
+            (start_cursor,),
+        )
         already_loaded = cur.fetchone()[0]
     resuming_by_page = cursor_callback is not None
     if resuming_by_page:
