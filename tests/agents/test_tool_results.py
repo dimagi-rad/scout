@@ -5,7 +5,11 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import _make_injecting_tool_node
-from apps.agents.tool_results import compact_tool_message
+from apps.agents.tool_results import (
+    FULL_RESULT_BUDGET_BYTES,
+    TOOL_RESULT_BUDGET_BYTES,
+    compact_tool_message,
+)
 from apps.agents.tools import artifact_manager_agent, canvas_manager_agent
 
 ENVELOPE = {"success": True, "data": {"datasets": [{"name": "visits", "label": "Visits é"}]}}
@@ -88,3 +92,79 @@ async def test_subagent_tool_nodes_compact_mcp_results(module):
 
     assert "\n" not in result["messages"][0].content
     assert result["messages"][0].artifact is None
+
+
+def _compacted_payload(name, payload):
+    message = compact_tool_message(_mcp_message(name, payload))
+    assert len(message.content.encode()) <= _budget(name)
+    return json.loads(message.content)
+
+
+def _budget(name):
+    return FULL_RESULT_BUDGET_BYTES if name == "query" else TOOL_RESULT_BUDGET_BYTES
+
+
+def test_an_oversized_listing_is_cut_to_a_page_the_agent_can_continue():
+    datasets = [{"name": f"ds_{i:03d}", "description": "d" * 500} for i in range(200)]
+    payload = {
+        "success": True,
+        "data": {"datasets": datasets, "total": 200, "limit": 200, "offset": 20},
+        "schema": "semantic",
+    }
+
+    data = _compacted_payload("list_datasets", payload)["data"]
+
+    kept = data["datasets"]
+    assert 0 < len(kept) < 200
+    assert kept == datasets[: len(kept)]
+    assert data["truncated"] is True
+    assert data["has_more"] is True
+    assert data["next_offset"] == 20 + len(kept)
+    assert f"offset={data['next_offset']}" in data["truncation"]["hint"]
+
+
+def test_a_normal_sql_result_is_not_cut():
+    rows = [[i, f"worker-{i}@example.org", "x" * 200] for i in range(500)]
+    payload = {"success": True, "data": {"columns": ["id", "user", "note"], "rows": rows}}
+
+    assert len(json.dumps(payload)) > TOOL_RESULT_BUDGET_BYTES
+    assert _compacted_payload("query", payload) == payload
+
+
+def test_a_runaway_sql_result_keeps_whole_rows_and_says_it_was_cut():
+    rows = [[i, "x" * 1_000] for i in range(500)]
+    payload = {
+        "success": True,
+        "data": {"columns": ["id", "note"], "rows": rows, "row_count": 500, "truncated": False},
+        "warnings": ["existing"],
+    }
+
+    compacted = _compacted_payload("query", payload)
+
+    data = compacted["data"]
+    assert data["columns"] == ["id", "note"]
+    assert 0 < len(data["rows"]) < 500
+    assert data["rows"] == rows[: len(data["rows"])]
+    assert data["truncated"] is True
+    assert "next_offset" not in data
+    assert compacted["warnings"][0] == "existing"
+    assert "rows" in compacted["warnings"][1]
+
+
+def test_a_result_with_nothing_to_cut_is_replaced_by_a_note():
+    payload = {"success": True, "data": {"blob": "x" * 100_000}, "schema": "s"}
+
+    compacted = _compacted_payload("get_metadata", payload)
+
+    assert compacted["success"] is True
+    assert "blob" not in compacted["data"]
+    assert compacted["data"]["truncated"] is True
+
+
+def test_oversized_plain_text_is_cut_with_a_marker():
+    message = ToolMessage(content="y" * 100_000, tool_call_id="tc-1", name="get_lineage")
+
+    content = compact_tool_message(message).content
+
+    assert len(content.encode()) <= TOOL_RESULT_BUDGET_BYTES
+    assert content.endswith("KB.]")
