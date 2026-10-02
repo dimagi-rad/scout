@@ -442,6 +442,7 @@ _ASYNC_TO_SYNC_BASELINE = {
     "apps/semantic/services/cube_schema.py": 3,
     "apps/semantic/services/query.py": 1,
     "apps/users/auth_views.py": 1,
+    "apps/users/management/commands/restore_token_expired_memberships.py": 1,
     "apps/users/signals.py": 3,
     "apps/workspaces/api/workspace_views.py": 2,
     "apps/workspaces/services/access_freshness.py": 1,
