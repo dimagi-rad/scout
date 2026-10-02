@@ -57,10 +57,13 @@ class VerificationResult:
     tenant_ids: frozenset[UUID] = frozenset()
     denied_tenant_id: UUID | None = None
     error_code: str = ""
+    # A scoped COMPLETE confirms only the tenants the attempt asked about; it says
+    # nothing about the connection's other tenants, so it must not archive them.
+    scoped: bool = False
 
     @classmethod
-    def complete(cls, tenant_ids) -> VerificationResult:
-        return cls(VerificationOutcome.COMPLETE, frozenset(tenant_ids))
+    def complete(cls, tenant_ids, *, scoped: bool = False) -> VerificationResult:
+        return cls(VerificationOutcome.COMPLETE, frozenset(tenant_ids), scoped=scoped)
 
     @classmethod
     def credential_rejected(cls, error_code: str) -> VerificationResult:
@@ -89,10 +92,11 @@ class ProviderVerificationResult:
     external_ids: frozenset[str] = frozenset()
     denied_external_id: str | None = None
     error_code: str = ""
+    scoped: bool = False
 
     @classmethod
-    def complete(cls, external_ids) -> ProviderVerificationResult:
-        return cls(VerificationOutcome.COMPLETE, frozenset(external_ids))
+    def complete(cls, external_ids, *, scoped: bool = False) -> ProviderVerificationResult:
+        return cls(VerificationOutcome.COMPLETE, frozenset(external_ids), scoped=scoped)
 
     @classmethod
     def credential_rejected(cls, error_code: str) -> ProviderVerificationResult:

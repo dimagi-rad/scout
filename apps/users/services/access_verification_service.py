@@ -36,7 +36,7 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
     VerificationResult,
 )
-from apps.users.services.oauth_scope import amemberships_on_provider
+from apps.users.services.oauth_scope import amemberships_on_provider, canonical_provider
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     TokenRefreshRejected,
@@ -243,22 +243,37 @@ async def _refresh_claim_if_needed(claim, *, deadline, clock, limiter):
     return rebased, None
 
 
+async def _requested_external_ids(claim) -> frozenset[str]:
+    """External ids of the claimed tenants, for providers that can check just those."""
+    if canonical_provider(claim.observation.provider) != "commcare_connect":
+        return frozenset()
+    return frozenset(
+        [
+            external_id
+            async for external_id in TenantMembership.all_objects.filter(
+                user_id=claim.observation.user_id,
+                connection_id=claim.observation.connection_id,
+                tenant_id__in=claim.requested_tenant_ids,
+            ).values_list("tenant__external_id", flat=True)
+        ]
+    )
+
+
 async def _map_provider_result(claim, result):
     # Claims and publication both match memberships on the canonical provider, so
     # the mapping sandwiched between them must too, or publication archives an
     # alias tenant the provider just confirmed.
     provider = claim.observation.provider
     if result.outcome == VerificationOutcome.COMPLETE:
-        tenant_ids = await amemberships_on_provider(
-            TenantMembership.all_objects.filter(
-                user_id=claim.observation.user_id,
-                connection_id=claim.observation.connection_id,
-                tenant__external_id__in=result.external_ids,
-            ),
-            provider,
-            "tenant_id",
+        memberships = TenantMembership.all_objects.filter(
+            user_id=claim.observation.user_id,
+            connection_id=claim.observation.connection_id,
+            tenant__external_id__in=result.external_ids,
         )
-        return VerificationResult.complete(set(tenant_ids))
+        if result.scoped:
+            memberships = memberships.filter(tenant_id__in=claim.requested_tenant_ids)
+        tenant_ids = await amemberships_on_provider(memberships, provider, "tenant_id")
+        return VerificationResult.complete(set(tenant_ids), scoped=result.scoped)
     if result.outcome == VerificationOutcome.CREDENTIAL_REJECTED:
         return VerificationResult.credential_rejected(result.error_code)
     if result.outcome == VerificationOutcome.TENANT_DENIED:
@@ -479,8 +494,13 @@ async def verify_connection_access(
                 provider_result = ProviderVerificationResult.unavailable(_VERIFICATION_UNAVAILABLE)
             else:
                 try:
+                    external_ids = await _await_until(
+                        _requested_external_ids(claim), deadline=deadline, clock=clock
+                    )
                     provider_result = await asyncio.wait_for(
-                        provider_verifier(claim.request, deadline=deadline),
+                        provider_verifier(
+                            claim.request, deadline=deadline, external_ids=external_ids
+                        ),
                         timeout=max(0, deadline - clock()),
                     )
                 except TimeoutError:

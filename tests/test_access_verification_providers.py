@@ -63,7 +63,9 @@ def _request(provider, credential_type=TenantConnection.OAUTH, credential="secre
     )
 
 
-async def _verify(request, responses, *, settings, deadline=100.0, clock=lambda: 0.0):
+async def _verify(
+    request, responses, *, settings, deadline=100.0, clock=lambda: 0.0, external_ids=frozenset()
+):
     client = _Client(responses)
     result = await verify_provider(
         request,
@@ -72,6 +74,7 @@ async def _verify(request, responses, *, settings, deadline=100.0, clock=lambda:
         client_factory=lambda: client,
         settings=settings,
         limiter=asyncio.Semaphore(1),
+        external_ids=frozenset(external_ids),
     )
     return result, client.requests
 
@@ -570,3 +573,133 @@ async def test_exact_row_bound_is_complete(settings):
     )
     assert result.outcome == VerificationOutcome.COMPLETE
     assert len(result.external_ids) == 10000
+
+
+def _connect_404(*, json_body=True):
+    request = httpx.Request("GET", "https://connect.example/export/opportunity/7/")
+    if json_body:
+        return httpx.Response(404, json={"detail": "Not found."}, request=request)
+    return httpx.Response(
+        404,
+        text="<!DOCTYPE html><html>Page not found</html>",
+        headers={"content-type": "text/html; charset=utf-8"},
+        request=request,
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_checks_only_the_requested_opportunities(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, requests = await _verify(
+        _request("commcare_connect"),
+        [_response(payload={"id": 7, "name": "Seven"}), _response(payload={"id": 8})],
+        settings=settings,
+        external_ids={"8", "7"},
+    )
+
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.scoped is True
+    assert result.external_ids == frozenset({"7", "8"})
+    assert [url for url, _kwargs in requests] == [
+        "https://connect.example/export/opportunity/7/",
+        "https://connect.example/export/opportunity/8/",
+    ]
+    assert requests[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert requests[0][1]["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_connect_no_access_404_denies_that_opportunity(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, requests = await _verify(
+        _request("commcare_connect"),
+        [_response(payload={"id": 7}), _connect_404()],
+        settings=settings,
+        external_ids={"7", "9"},
+    )
+
+    assert result.outcome == VerificationOutcome.TENANT_DENIED
+    assert result.denied_external_id == "9"
+    assert result.error_code == ErrorCode.AUTH_ACCESS_DENIED
+    assert len(requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(_connect_404(json_body=False), id="routing-404-html"),
+        pytest.param(_response(404), id="404-empty-body"),
+        pytest.param(_response(404, payload={"detail": "x", "code": "y"}), id="404-other-json"),
+        pytest.param(_response(404, payload=["Not found."]), id="404-json-list"),
+        pytest.param(_response(403, payload={"detail": "scope"}), id="403-missing-scope"),
+        pytest.param(_response(payload={"id": 8}), id="200-other-opportunity"),
+        pytest.param(_response(payload={"name": "no id"}), id="200-no-id"),
+        pytest.param(_response(payload=[{"id": 7}]), id="200-list"),
+        pytest.param(_response(302), id="redirect"),
+    ],
+)
+async def test_connect_unrecognized_answer_is_indeterminate_not_denial(settings, response):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, _ = await _verify(
+        _request("commcare_connect"), [response], settings=settings, external_ids={"7"}
+    )
+    assert result.outcome == VerificationOutcome.INDETERMINATE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "outcome"),
+    [
+        (_response(401), VerificationOutcome.CREDENTIAL_REJECTED),
+        (_response(429), VerificationOutcome.UNAVAILABLE),
+        (_response(503), VerificationOutcome.UNAVAILABLE),
+        (httpx.ConnectError("down"), VerificationOutcome.UNAVAILABLE),
+    ],
+)
+async def test_connect_light_check_keeps_credential_and_transient_semantics(
+    settings, response, outcome
+):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, _ = await _verify(
+        _request("commcare_connect"), [response], settings=settings, external_ids={"7"}
+    )
+    assert result.outcome == outcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "external_ids",
+    [
+        pytest.param(frozenset(), id="none-requested"),
+        pytest.param(frozenset(str(i) for i in range(6)), id="above-cap"),
+        pytest.param(frozenset({"7", "abc"}), id="non-numeric"),
+    ],
+)
+async def test_connect_falls_back_to_the_full_listing(settings, external_ids):
+    settings.CONNECT_API_URL = "https://connect.example"
+    result, requests = await _verify(
+        _request("commcare_connect"),
+        [_response(payload={"opportunities": [{"id": 7, "name": "Seven"}]})],
+        settings=settings,
+        external_ids=external_ids,
+    )
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.scoped is False
+    assert [url for url, _kwargs in requests] == [
+        "https://connect.example/export/opp_org_program_list/"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_external_ids_do_not_change_other_providers(settings):
+    settings.OCS_URL = "https://ocs.example"
+    result, requests = await _verify(
+        _request("ocs"),
+        [_response(payload={"results": [{"id": "bot"}], "next": None})],
+        settings=settings,
+        external_ids={"bot"},
+    )
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.scoped is False
+    assert [url for url, _kwargs in requests] == ["https://ocs.example/api/experiments/"]

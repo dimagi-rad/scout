@@ -24,6 +24,8 @@ PROVIDER_BUDGET_SECONDS = 20.0
 PER_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_PAGES = 100
 MAX_ROWS = 10_000
+# Above this many requested opportunities, one full listing beats one request each.
+CONNECT_LIGHT_CHECK_MAX_OPPORTUNITIES = 5
 
 
 class ProcessNetworkLimiter:
@@ -93,6 +95,98 @@ def _provider_request(snapshot, settings):
         url = f"{settings.CONNECT_API_URL.rstrip('/')}/export/opp_org_program_list/"
         return provider, url, {"Authorization": f"Bearer {credential}"}
     return None
+
+
+def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
+    """The opportunity ids to check one by one, or None to use the full listing.
+
+    ``/export/opp_org_program_list/`` exports every opportunity with a per-row
+    visit count and takes ~10s for users with many opportunities, which alone
+    exhausts the interactive budget. ``/export/opportunity/<id>/`` answers the
+    question for one opportunity cheaply.
+    """
+    if (
+        canonical_provider(snapshot.observation.provider) != "commcare_connect"
+        or snapshot.observation.credential_type != TenantConnection.OAUTH
+        or not external_ids
+        or len(external_ids) > CONNECT_LIGHT_CHECK_MAX_OPPORTUNITIES
+    ):
+        return None
+    ids = tuple(sorted(external_ids))
+    # Connect routes ``<int:opp_id>``; any other id 404s at routing, which must
+    # never be read as a denial.
+    if not all(external_id.isascii() and external_id.isdigit() for external_id in ids):
+        return None
+    return ids
+
+
+def _is_connect_no_access_404(response) -> bool:
+    """DRF's NotFound body, as opposed to a routing 404 (an HTML page) or a proxy's.
+
+    Connect answers an opportunity the user may not export via
+    ``_get_opportunity_or_404`` with ``{"detail": "Not found."}``. ``detail`` is
+    localized, so only the shape is checked.
+    """
+    if response.status_code != 404:
+        return False
+    if not response.headers.get("content-type", "").startswith("application/json"):
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return (
+        isinstance(payload, dict)
+        and set(payload) == {"detail"}
+        and isinstance(payload["detail"], str)
+    )
+
+
+def _is_requested_opportunity(response, external_id: str) -> bool:
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    raw_id = payload.get("id")
+    return (
+        not isinstance(raw_id, bool)
+        and isinstance(raw_id, (int, str))
+        and str(raw_id) == external_id
+    )
+
+
+async def _verify_connect_opportunities(client, base_url, headers, external_ids, deadline, clock):
+    for external_id in external_ids:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+        try:
+            request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
+            response = await asyncio.wait_for(
+                client.get(
+                    f"{base_url}/export/opportunity/{external_id}/",
+                    headers=headers,
+                    follow_redirects=False,
+                    timeout=request_timeout,
+                ),
+                timeout=request_timeout,
+            )
+        except (httpx.RequestError, TimeoutError):
+            return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+        if clock() >= deadline:
+            return ProviderVerificationResult.unavailable(_UNAVAILABLE)
+        if _is_connect_no_access_404(response):
+            return ProviderVerificationResult.tenant_denied(
+                external_id, ErrorCode.AUTH_ACCESS_DENIED
+            )
+        status_result = _status_result(response.status_code)
+        if status_result is not None:
+            return status_result
+        if not _is_requested_opportunity(response, external_id):
+            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+    return ProviderVerificationResult.complete(external_ids, scoped=True)
 
 
 def _status_result(status_code: int):
@@ -179,8 +273,13 @@ async def verify_provider(
     client_factory: Callable[[], Any] = _default_client_factory,
     settings=django_settings,
     limiter: ProcessNetworkLimiter | asyncio.Semaphore = NETWORK_LIMITER,
+    external_ids: frozenset[str] = frozenset(),
 ) -> ProviderVerificationResult:
-    """Return a complete, bounded provider listing without touching the database."""
+    """Return a complete, bounded provider listing without touching the database.
+
+    ``external_ids`` are the tenants the caller needs. Connect checks only those
+    when there are few, and its result is then authoritative only for them.
+    """
     deadline = min(
         deadline if deadline is not None else float("inf"),
         clock() + PROVIDER_BUDGET_SECONDS,
@@ -189,6 +288,7 @@ async def verify_provider(
     if request is None:
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)
     provider, initial_url, headers = request
+    light_ids = _connect_light_ids(snapshot, external_ids)
     try:
         policy = ProviderURLPolicy(initial_url)
         url = policy.resolve(initial_url)
@@ -218,6 +318,15 @@ async def verify_provider(
         seen_rows: dict[str, str] = {}
         total_rows = 0
         async with client_factory() as client:
+            if light_ids is not None:
+                return await _verify_connect_opportunities(
+                    client,
+                    settings.CONNECT_API_URL.rstrip("/"),
+                    headers,
+                    light_ids,
+                    deadline,
+                    clock,
+                )
             for _page_number in range(MAX_PAGES):
                 if url in seen_urls:
                     return ProviderVerificationResult.indeterminate(_INDETERMINATE)
