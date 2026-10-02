@@ -388,11 +388,9 @@ describe("a message sent while the chat's data loads", () => {
 
     await type(FOLLOW_UP, "Send message")
 
-    expect(await screen.findByTestId("pending-request-add-failed")).toHaveTextContent(
-      "Request too long — edit it",
-    )
+    expect(await screen.findByTestId("chat-error")).toHaveTextContent("Request too long — edit it")
     expect(screen.getByRole("textbox")).toHaveValue(FOLLOW_UP)
-    expect(screen.queryByTestId("chat-error")).toBeNull()
+    expect(await screen.findByTestId("pending-request-card")).toHaveTextContent(QUESTION)
     consoleError.mockRestore()
   })
 })

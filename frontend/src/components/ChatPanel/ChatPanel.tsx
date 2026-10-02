@@ -521,15 +521,11 @@ export function ChatPanel() {
       return
     }
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
-    // The card is the way on; the error notice's Retry would resend another turn.
-    // A refusal that resending cannot fix (too long) still says why, by the card.
-    const refusal = error ? classifyChatError(error) : null
-    clearError()
-    if (refusal?.kind === "final" && sending.threadId === contextRef.current.threadId) {
-      setAddFailed(
-        sending.extra ? `${refusal.message} Your text is back in the message box.` : refusal.message,
-      )
-    }
+    // A notice with Retry would resend whatever turn is now last, so those are
+    // cleared and the card is the way on. Notices without one (a final reason, a
+    // reconnect remedy, a stale thread) stay: they say what the card cannot.
+    const refusal = error ? classifyChatError(error).kind : "generic"
+    if (refusal === "generic" || refusal === "access-retry") clearError()
     held.restore(sending.threadId)
     if (sending.extra) returnToComposer(sending.workspaceId, sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
