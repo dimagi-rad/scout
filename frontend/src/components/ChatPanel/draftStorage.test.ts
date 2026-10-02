@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
   clearAllDrafts,
+  clearOtherUsersDrafts,
   DRAFT_MAX_AGE_MS,
   DRAFT_MAX_CHARS,
   DRAFT_MAX_ENTRIES,
@@ -10,7 +11,7 @@ import {
 } from "./draftStorage"
 
 function seed(key: string, updatedAt: number) {
-  localStorage.setItem(`scout:draft:${key}`, JSON.stringify({ text: key, updatedAt }))
+  localStorage.setItem(`scout:draft:u:${key}`, JSON.stringify({ text: key, updatedAt }))
 }
 
 describe("draftStorage", () => {
@@ -19,29 +20,39 @@ describe("draftStorage", () => {
   })
 
   it("round-trips a draft per workspace and thread under the documented key", () => {
-    writeDraft("ws", "t1", "hello")
-    writeDraft("ws", "t2", "world")
-    expect(readDraft("ws", "t1")).toBe("hello")
-    expect(readDraft("ws", "t2")).toBe("world")
-    expect(localStorage.getItem("scout:draft:ws:t1")).not.toBeNull()
+    writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "hello")
+    writeDraft({ userId: "u", workspaceId: "ws", threadId: "t2" }, "world")
+    expect(readDraft({ userId: "u", workspaceId: "ws", threadId: "t1" })).toBe("hello")
+    expect(readDraft({ userId: "u", workspaceId: "ws", threadId: "t2" })).toBe("world")
+    expect(localStorage.getItem("scout:draft:u:ws:t1")).not.toBeNull()
   })
 
-  it("skips drafts over the size cap", () => {
-    writeDraft("ws", "t1", "x".repeat(DRAFT_MAX_CHARS + 1))
-    expect(localStorage.getItem("scout:draft:ws:t1")).toBeNull()
+  it("drops the saved draft when an edit goes over the size cap", () => {
+    writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "short")
+    writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "x".repeat(DRAFT_MAX_CHARS + 1))
+    expect(localStorage.getItem("scout:draft:u:ws:t1")).toBeNull()
+  })
+
+  it("keeps each user's drafts apart and clears other users' on demand", () => {
+    writeDraft({ userId: "a", workspaceId: "ws", threadId: "t1" }, "from a")
+    expect(readDraft({ userId: "b", workspaceId: "ws", threadId: "t1" })).toBe("")
+    writeDraft({ userId: "b", workspaceId: "ws", threadId: "t1" }, "from b")
+    clearOtherUsersDrafts("b")
+    expect(localStorage.getItem("scout:draft:a:ws:t1")).toBeNull()
+    expect(readDraft({ userId: "b", workspaceId: "ws", threadId: "t1" })).toBe("from b")
   })
 
   it("removes the entry when written empty", () => {
-    writeDraft("ws", "t1", "hello")
-    writeDraft("ws", "t1", "")
-    expect(localStorage.getItem("scout:draft:ws:t1")).toBeNull()
+    writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "hello")
+    writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "")
+    expect(localStorage.getItem("scout:draft:u:ws:t1")).toBeNull()
   })
 
   it("clearAllDrafts removes only draft entries", () => {
-    writeDraft("ws", "t1", "a")
+    writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "a")
     localStorage.setItem("scout:thread:ws", "keep")
     clearAllDrafts()
-    expect(localStorage.getItem("scout:draft:ws:t1")).toBeNull()
+    expect(localStorage.getItem("scout:draft:u:ws:t1")).toBeNull()
     expect(localStorage.getItem("scout:thread:ws")).toBe("keep")
   })
 
@@ -52,9 +63,9 @@ describe("draftStorage", () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(boom)
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(boom)
     vi.spyOn(Storage.prototype, "removeItem").mockImplementation(boom)
-    expect(readDraft("ws", "t1")).toBe("")
-    expect(() => writeDraft("ws", "t1", "x")).not.toThrow()
-    expect(() => writeDraft("ws", "t1", "")).not.toThrow()
+    expect(readDraft({ userId: "u", workspaceId: "ws", threadId: "t1" })).toBe("")
+    expect(() => writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "x")).not.toThrow()
+    expect(() => writeDraft({ userId: "u", workspaceId: "ws", threadId: "t1" }, "")).not.toThrow()
     expect(() => pruneDrafts()).not.toThrow()
     expect(() => clearAllDrafts()).not.toThrow()
     vi.restoreAllMocks()
@@ -64,12 +75,12 @@ describe("draftStorage", () => {
     const now = 10_000_000_000_000
     seed("ws:old", now - DRAFT_MAX_AGE_MS - 1)
     seed("ws:fresh", now - 1000)
-    localStorage.setItem("scout:draft:ws:bad", "not json")
+    localStorage.setItem("scout:draft:u:ws:bad", "not json")
     localStorage.setItem("scout:other", "keep")
     pruneDrafts(now)
-    expect(localStorage.getItem("scout:draft:ws:old")).toBeNull()
-    expect(localStorage.getItem("scout:draft:ws:bad")).toBeNull()
-    expect(localStorage.getItem("scout:draft:ws:fresh")).not.toBeNull()
+    expect(localStorage.getItem("scout:draft:u:ws:old")).toBeNull()
+    expect(localStorage.getItem("scout:draft:u:ws:bad")).toBeNull()
+    expect(localStorage.getItem("scout:draft:u:ws:fresh")).not.toBeNull()
     expect(localStorage.getItem("scout:other")).toBe("keep")
   })
 
@@ -81,7 +92,7 @@ describe("draftStorage", () => {
       k?.startsWith("scout:draft:"),
     )
     expect(remaining).toHaveLength(DRAFT_MAX_ENTRIES)
-    expect(localStorage.getItem("scout:draft:ws:t0")).not.toBeNull()
-    expect(localStorage.getItem(`scout:draft:ws:t${DRAFT_MAX_ENTRIES}`)).toBeNull()
+    expect(localStorage.getItem("scout:draft:u:ws:t0")).not.toBeNull()
+    expect(localStorage.getItem(`scout:draft:u:ws:t${DRAFT_MAX_ENTRIES}`)).toBeNull()
   })
 })

@@ -1,4 +1,4 @@
-/** localStorage helpers for per-thread composer drafts. */
+/** localStorage helpers for per-thread composer drafts, keyed by user. */
 
 const DRAFT_PREFIX = "scout:draft:"
 export const DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
@@ -18,8 +18,15 @@ export function draftGeneration(): number {
   return generation
 }
 
-function draftKey(workspaceId: string, threadId: string): string {
-  return `${DRAFT_PREFIX}${workspaceId}:${threadId}`
+/** Whose draft, and for which thread. The user id keeps a shared browser's next user out. */
+export interface DraftScope {
+  userId: string
+  workspaceId: string
+  threadId: string
+}
+
+function draftKey({ userId, workspaceId, threadId }: DraftScope): string {
+  return `${DRAFT_PREFIX}${userId}:${workspaceId}:${threadId}`
 }
 
 function draftKeys(): string[] {
@@ -44,9 +51,9 @@ function parseDraft(raw: string | null): StoredDraft | null {
   return null
 }
 
-export function readDraft(workspaceId: string, threadId: string): string {
+export function readDraft(scope: DraftScope): string {
   try {
-    return parseDraft(localStorage.getItem(draftKey(workspaceId, threadId)))?.text ?? ""
+    return parseDraft(localStorage.getItem(draftKey(scope)))?.text ?? ""
   } catch {
     return ""
   }
@@ -58,19 +65,18 @@ export function readDraft(workspaceId: string, threadId: string): string {
  * a generation older than the last clearAllDrafts is dropped.
  */
 export function writeDraft(
-  workspaceId: string,
-  threadId: string,
+  scope: DraftScope,
   text: string,
   writtenGeneration: number = generation,
 ): void {
   if (writtenGeneration !== generation) return
   try {
-    const key = draftKey(workspaceId, threadId)
-    if (!text) {
+    const key = draftKey(scope)
+    // Over the cap, drop the older saved text too so a reload cannot pass it off as current.
+    if (!text || text.length > DRAFT_MAX_CHARS) {
       localStorage.removeItem(key)
       return
     }
-    if (text.length > DRAFT_MAX_CHARS) return
     const payload = JSON.stringify({ text, updatedAt: Date.now() })
     try {
       localStorage.setItem(key, payload)
@@ -89,6 +95,19 @@ export function clearAllDrafts(): void {
   generation++
   try {
     for (const key of draftKeys()) localStorage.removeItem(key)
+  } catch {
+    // Best-effort.
+  }
+}
+
+/**
+ * Drafts another account left behind: a logout in another tab, or a session that
+ * expired while the browser was closed, never ends an identity in this tab.
+ */
+export function clearOtherUsersDrafts(userId: string): void {
+  const own = `${DRAFT_PREFIX}${userId}:`
+  try {
+    for (const key of draftKeys()) if (!key.startsWith(own)) localStorage.removeItem(key)
   } catch {
     // Best-effort.
   }

@@ -33,8 +33,7 @@ export function ChatEmptyPrompt({
 
   // Slash command menu state — mirrors ChatPanel's active-thread input so
   // slash commands work identically here.
-  const showSlashMenu =
-    !disabled && input.startsWith("/") && !input.slice(1).includes(" ")
+  const showSlashMenu = input.startsWith("/") && !input.slice(1).includes(" ")
   const slashQuery = showSlashMenu ? input.slice(1) : ""
   const filteredCommands = matchSlashCommands(slashQuery, canWrite)
 

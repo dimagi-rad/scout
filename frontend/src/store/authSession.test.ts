@@ -476,7 +476,7 @@ describe("authentication request ordering", () => {
 })
 
 describe("composer drafts", () => {
-  const DRAFT_KEY = "scout:draft:workspace-a:thread-a"
+  const DRAFT_KEY = `scout:draft:${USER_A.id}:workspace-a:thread-a`
   const seedDraft = () =>
     localStorage.setItem(DRAFT_KEY, JSON.stringify({ text: "private-a", updatedAt: Date.now() }))
 
@@ -484,6 +484,16 @@ describe("composer drafts", () => {
     seedDraft()
     const store = createAppStore()
     store.setState({ user: USER_A, authStatus: "authenticated" })
+    expect(localStorage.getItem(DRAFT_KEY)).not.toBeNull()
+  })
+
+  it("drops another account's drafts when an identity loads", () => {
+    const leftover = `scout:draft:${USER_B.id}:workspace-a:thread-a`
+    localStorage.setItem(leftover, JSON.stringify({ text: "private-b", updatedAt: Date.now() }))
+    seedDraft()
+    const store = createAppStore()
+    store.setState({ user: USER_A, authStatus: "authenticated" })
+    expect(localStorage.getItem(leftover)).toBeNull()
     expect(localStorage.getItem(DRAFT_KEY)).not.toBeNull()
   })
 
