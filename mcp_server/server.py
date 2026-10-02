@@ -1616,30 +1616,9 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
-        recovery = await WorkspaceDataRecovery.objects.filter(
-            workspace_id=workspace_id,
-            state__in=WorkspaceDataRecovery.ACTIVE_STATES,
-        ).afirst()
-        if recovery is not None:
-            tc["result"] = success_response(
-                {
-                    "status": "already_in_progress",
-                    "workspace_recovery_id": str(recovery.id),
-                    "message": (
-                        "Artifact data recovery is already running for this workspace. "
-                        "Do not start another load. This recovery does not resume the "
-                        "conversation when it finishes; unless a load this conversation "
-                        "started will resume it, tell the user to ask again once it has "
-                        "finished. Check get_schema_status for completion."
-                    ),
-                },
-                schema="",
-                timing_ms=tc["timer"].elapsed_ms,
-            )
-            return tc["result"]
-
-        # Each chat needs its own ThreadJob for automatic follow-up. The worker
-        # serializes data operations through Cube publication for this workspace.
+        # Each chat needs its own ThreadJob for automatic follow-up. Checked before
+        # recovery: a load this chat started may run under a recovery row, and this
+        # chat must still hear that it resumes.
         existing = await ThreadJob.objects.filter(
             thread_id=thread_id,
             job_type=ThreadJob.JobType.MATERIALIZATION,
@@ -1653,6 +1632,27 @@ async def run_materialization(
                     "message": (
                         "A materialization started by this conversation is already running. "
                         f"{_THIS_CONVERSATION_RESUMES}"
+                    ),
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
+            return tc["result"]
+
+        recovery = await WorkspaceDataRecovery.objects.filter(
+            workspace_id=workspace_id,
+            state__in=WorkspaceDataRecovery.ACTIVE_STATES,
+        ).afirst()
+        if recovery is not None:
+            tc["result"] = success_response(
+                {
+                    "status": "already_in_progress",
+                    "workspace_recovery_id": str(recovery.id),
+                    "message": (
+                        "A data recovery is already running for this workspace. "
+                        "Do not start another load. Nothing will resume this conversation "
+                        "when it finishes; tell the user to ask again once it has finished. "
+                        "Check get_schema_status for completion."
                     ),
                 },
                 schema="",

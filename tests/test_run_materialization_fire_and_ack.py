@@ -45,8 +45,31 @@ async def test_run_materialization_observes_artifact_recovery(workspace, user):
         )
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["workspace_recovery_id"] == str(recovery.id)
-    assert "This recovery does not resume the conversation" in result["data"]["message"]
+    assert "Nothing will resume this conversation" in result["data"]["message"]
     assert _THIS_CONVERSATION_RESUMES not in result["data"]["message"]
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_chat_with_its_own_load_is_promised_a_resume_despite_a_recovery(workspace, user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    existing_tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=11_112,
+        tool_call_id="tc-existing",
+        state=ThreadJob.State.PENDING,
+    )
+    await WorkspaceDataRecovery.objects.acreate(
+        workspace=workspace, requested_by=user, recovery_type="materialization"
+    )
+    with patch(DISPATCH, new=AsyncMock()) as dispatch:
+        result = await run_materialization(
+            workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
+        )
+    assert result["data"]["thread_job_id"] == str(existing_tj.id)
+    assert _THIS_CONVERSATION_RESUMES in result["data"]["message"]
     dispatch.assert_not_awaited()
 
 
