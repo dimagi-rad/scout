@@ -54,6 +54,12 @@ export function useThreadDraft(
   // Persist the outgoing thread's pending edit before the scope changes or we unmount.
   useEffect(() => flush, [scope, flush])
 
+  // Unmount cleanup does not run on reload/tab close, which would lose the last debounce window.
+  useEffect(() => {
+    window.addEventListener("pagehide", flush)
+    return () => window.removeEventListener("pagehide", flush)
+  }, [flush])
+
   const setValue = useCallback(
     (value: string) => {
       setState({ scope, value })
@@ -71,5 +77,5 @@ export function useThreadDraft(
     [scope, workspaceId, threadId, flush],
   )
 
-  return [state.scope === scope ? state.value : load(workspaceId, threadId), setValue]
+  return [state.value, setValue]
 }

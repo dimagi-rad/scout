@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand"
 import { api, ApiError } from "@/api/client"
 import { clearUserTenantsCache } from "@/api/userTenantsCache"
+import { clearAllDrafts } from "@/components/ChatPanel/draftStorage"
 
 export type AuthStatus = "idle" | "loading" | "authenticated" | "unauthenticated"
 
@@ -87,6 +88,7 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set)
       logout: async () => {
         ++requestId
         clearUserTenantsCache()
+        clearAllDrafts()
         set({ user: null, authStatus: "unauthenticated", authError: null })
         // Serialize cookie writes so an older logout cannot erase B's new login.
         await mutateSession(() => api.post<void>("/api/auth/logout/"))

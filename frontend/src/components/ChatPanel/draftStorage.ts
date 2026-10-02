@@ -48,6 +48,20 @@ export function writeDraft(workspaceId: string, threadId: string, text: string):
   }
 }
 
+/** Drafts hold query text, so they must not outlive the session that wrote them. */
+export function clearAllDrafts(): void {
+  try {
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key?.startsWith(DRAFT_PREFIX)) keys.push(key)
+    }
+    for (const key of keys) localStorage.removeItem(key)
+  } catch {
+    // Best-effort.
+  }
+}
+
 /** Drop drafts older than 30 days, then the oldest beyond 50 entries. */
 export function pruneDrafts(now: number = Date.now()): void {
   try {

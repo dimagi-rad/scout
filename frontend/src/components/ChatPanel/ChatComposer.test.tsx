@@ -48,6 +48,17 @@ describe("ChatComposer", () => {
     expect(setInput).not.toHaveBeenCalled()
   })
 
+  it("keeps the empty-state prompt typeable but unsendable while streaming", () => {
+    const onSend = vi.fn()
+    const setInput = vi.fn()
+    render(<ChatEmptyPrompt input="hi" setInput={setInput} onSend={onSend} disabled />)
+    const field = screen.getByTestId("chat-input-prominent")
+    expect(field).not.toBeDisabled()
+    fireEvent.keyDown(field, { key: "Enter" })
+    expect(onSend).not.toHaveBeenCalled()
+    expect(setInput).not.toHaveBeenCalled()
+  })
+
   it("keeps Stop working while streaming", () => {
     const onStop = vi.fn()
     render(

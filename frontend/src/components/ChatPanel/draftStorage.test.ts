@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  clearAllDrafts,
   DRAFT_MAX_AGE_MS,
   DRAFT_MAX_ENTRIES,
   pruneDrafts,
@@ -28,6 +29,29 @@ describe("draftStorage", () => {
     writeDraft("ws", "t1", "hello")
     writeDraft("ws", "t1", "")
     expect(localStorage.getItem("scout:draft:ws:t1")).toBeNull()
+  })
+
+  it("clearAllDrafts removes only draft entries", () => {
+    writeDraft("ws", "t1", "a")
+    localStorage.setItem("scout:thread:ws", "keep")
+    clearAllDrafts()
+    expect(localStorage.getItem("scout:draft:ws:t1")).toBeNull()
+    expect(localStorage.getItem("scout:thread:ws")).toBe("keep")
+  })
+
+  it("never throws when storage is unavailable", () => {
+    const boom = () => {
+      throw new Error("blocked")
+    }
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(boom)
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(boom)
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(boom)
+    expect(readDraft("ws", "t1")).toBe("")
+    expect(() => writeDraft("ws", "t1", "x")).not.toThrow()
+    expect(() => writeDraft("ws", "t1", "")).not.toThrow()
+    expect(() => pruneDrafts()).not.toThrow()
+    expect(() => clearAllDrafts()).not.toThrow()
+    vi.restoreAllMocks()
   })
 
   it("prunes drafts older than 30 days and malformed entries, keeping fresh ones", () => {
