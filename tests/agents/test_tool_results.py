@@ -9,6 +9,7 @@ from apps.agents.tool_results import (
     FULL_RESULT_BUDGET_BYTES,
     TOOL_RESULT_BUDGET_BYTES,
     compact_tool_message,
+    result_budget_bytes,
 )
 from apps.agents.tools import artifact_manager_agent, canvas_manager_agent
 
@@ -101,7 +102,7 @@ def _compacted_payload(name, payload):
 
 
 def _budget(name):
-    return FULL_RESULT_BUDGET_BYTES if name == "query" else TOOL_RESULT_BUDGET_BYTES
+    return result_budget_bytes(name)
 
 
 def test_an_oversized_listing_is_cut_to_a_page_the_agent_can_continue():
@@ -211,7 +212,7 @@ def test_a_huge_string_is_shortened_without_losing_the_fields_beside_it():
 def test_many_cut_lists_still_fit_the_budget():
     payload = {"success": True, "data": {f"list_{i}": ["z" * 100] * 20 for i in range(100)}}
 
-    data = _compacted_payload("list_tables", payload)["data"]
+    data = _compacted_payload("get_lineage", payload)["data"]
 
     assert data["truncated"] is True
     assert "and more" in data["truncation"]["hint"]
@@ -232,3 +233,51 @@ def test_a_string_that_grows_when_escaped_is_cut_only_as_far_as_needed():
     data = _compacted_payload("get_materialization_status", payload)["data"]
 
     assert len(data["log"]) > 10_000
+
+
+def test_schema_listings_get_the_full_result_budget():
+    assert result_budget_bytes("get_metadata") == FULL_RESULT_BUDGET_BYTES
+    assert result_budget_bytes("list_tables") == FULL_RESULT_BUDGET_BYTES
+
+
+def test_an_empty_row_set_still_lets_other_lists_be_cut_but_never_its_columns():
+    payload = {
+        "success": True,
+        "data": {
+            "columns": ["c"] * 10,
+            "rows": [],
+            "tables_accessed": ["t" * 100] * 1_000,
+        },
+    }
+
+    data = _compacted_payload("list_workspaces", payload)["data"]
+
+    assert data["columns"] == ["c"] * 10
+    assert 0 < len(data["tables_accessed"]) < 1_000
+
+
+def test_next_offset_follows_the_list_cut_hardest():
+    payload = {
+        "success": True,
+        "data": {
+            "datasets": [{"d": "x" * 400}] * 200,
+            "workspace_errors": [{"e": "y" * 20_000}] * 10,
+            "offset": 5,
+        },
+    }
+
+    data = _compacted_payload("list_datasets", payload)["data"]
+
+    assert data["next_offset"] == 5 + len(data["datasets"])
+
+
+def test_original_row_count_survives_the_last_resort_note():
+    payload = {
+        "success": True,
+        "data": {"rows": [["x" * 300_000]], "row_count": 1, **{f"k{i}": i for i in range(30_000)}},
+    }
+
+    data = _compacted_payload("query", payload)["data"]
+
+    assert data["truncated"] is True
+    assert data["truncation"]["original_row_count"] == 1

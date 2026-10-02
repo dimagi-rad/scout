@@ -25,14 +25,24 @@ logger = logging.getLogger(__name__)
 
 TOOL_RESULT_BUDGET_BYTES = 50_000
 # Results the agent reads whole: SQL and semantic rows, already capped by row count,
-# and one dataset's or table's members. A normal result must never be cut, so they
-# get a ceiling instead, past which the result would crowd out the conversation.
+# one dataset's or table's members, and the argument-less schema listings, where a
+# shortened column list would read as columns that do not exist. A normal result
+# must never be cut, so they get a ceiling instead, past which the result would
+# crowd out the conversation.
 FULL_RESULT_TOOLS = frozenset(
-    {"query", "semantic_query", "describe_dataset", "describe_table", "semantic_catalog"}
+    {
+        "query",
+        "semantic_query",
+        "describe_dataset",
+        "describe_table",
+        "semantic_catalog",
+        "get_metadata",
+        "list_tables",
+    }
 )
 FULL_RESULT_BUDGET_BYTES = 250_000
 # Room for the truncation note itself.
-_NOTE_RESERVE_BYTES = 1_024
+_NOTE_RESERVE_BYTES = 2_048
 
 
 def compact_json(value: Any) -> str:
@@ -52,13 +62,15 @@ def _dict_lists(node: dict, path: tuple[str, ...] = ()):
 
     Lists inside lists are never entered: cutting inside a SQL row or a dataset entry
     would leave a malformed item rather than fewer whole items. Where a dict holds
-    ``rows``, only the rows are cut: its ``columns`` and query spec describe every row.
+    ``rows``, the rows are cut first, and its ``columns`` never: they describe every row.
     """
-    if isinstance(node.get("rows"), list):
-        if node["rows"]:
-            yield (*path, "rows"), node, "rows"
+    rows = node.get("rows")
+    if isinstance(rows, list) and rows:
+        yield (*path, "rows"), node, "rows"
         return
     for key, value in node.items():
+        if isinstance(rows, list) and key == "columns":
+            continue
         if isinstance(value, list) and value:
             yield (*path, str(key)), node, key
         elif isinstance(value, dict):
@@ -99,7 +111,11 @@ def _truncation_hint(
             f" The item at offset={stuck_offset} alone is too large to list; ask for less"
             " detail about it (for example describe it on its own) and skip past it."
         )
-    return hint + " Narrow the request, for example with a smaller limit or fewer columns."
+    return hint + (
+        " Narrow the request (a smaller limit, search or fewer columns), or call"
+        " describe_table or describe_dataset for the table or dataset you need;"
+        " anything left out here may still exist."
+    )
 
 
 def _cut_lists(payload: dict, target: dict, limit: int, omitted: dict[str, int]) -> int:
@@ -180,9 +196,11 @@ def fit_to_budget(payload: Any, budget: int) -> Any:
         extra["original_row_count"] = target["row_count"]
         target["row_count"] = len(target["rows"])
     next_offset = stuck_offset = None
-    page_keys = [
-        label for label in omitted if "." not in label and isinstance(target.get(label), list)
-    ]
+    # The paged list is the one cut hardest; insertion order only says which was cut first.
+    page_keys = sorted(
+        (label for label in omitted if "." not in label and isinstance(target.get(label), list)),
+        key=lambda label: -omitted[label],
+    )
     if isinstance(target.get("offset"), int) and page_keys:
         kept = len(target[page_keys[0]])
         if kept:
@@ -203,6 +221,7 @@ def fit_to_budget(payload: Any, budget: int) -> Any:
         payload.pop("warnings", None)
         hint = _truncation_hint(budget, {"data": 1}, None, None)
         _note(payload, target, budget, original_bytes, hint)
+        target["truncation"].update(extra)
     return payload
 
 
