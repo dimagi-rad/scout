@@ -523,7 +523,7 @@ def _missing_tenant_failure(tenant, missing: MissingTenant) -> dict:
     if missing.recovery == CoverageRecovery.RECONNECT:
         problem = f"{who} sign-in for '{tenant.external_id}' can't be used"
     elif missing.recovery == CoverageRecovery.LEGACY_TEAM_UNKNOWN:
-        problem = f"{who} connection for '{tenant.external_id}' records no team"
+        problem = f"{who} membership in '{tenant.external_id}' records no team"
     else:
         team = missing.team_name or missing.team_slug
         problem = f"{who} credential is not for the team that owns '{tenant.external_id}'" + (
