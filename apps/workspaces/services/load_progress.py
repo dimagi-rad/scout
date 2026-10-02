@@ -36,7 +36,7 @@ def progress_payload(progress: dict | None) -> dict | None:
     rows_total = progress.get("rows_total")
     percent = None
     if isinstance(rows_total, int) and rows_total > 0:
-        percent = int(100 * rows_loaded / rows_total)
+        percent = min(100, int(100 * rows_loaded / rows_total))
     return {
         "percent": percent,
         "rows_loaded": rows_loaded,

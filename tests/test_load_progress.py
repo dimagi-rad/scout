@@ -18,6 +18,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.load_progress import progress_payload
 from tests.tenant_access import ausable_connection, grant_tenant_access
 
 User = get_user_model()
@@ -277,3 +278,13 @@ def test_list_query_count_with_loading_workspaces_does_not_scale(user, workspace
         f"list endpoint grew from {len(small)} to {len(large)} queries "
         f"between {small_n} and {large_n} workspaces"
     )
+
+
+@pytest.mark.parametrize(
+    ("rows_loaded", "rows_total", "percent"),
+    [(500, 1000, 50), (1000, 1000, 100), (1100, 1000, 100), (10, None, None)],
+)
+def test_progress_percent_is_capped_at_100(rows_loaded, rows_total, percent):
+    # Discovery totals can trail the live export (new visits, a replayed resume page).
+    payload = progress_payload({"rows_loaded": rows_loaded, "rows_total": rows_total})
+    assert payload["percent"] == percent
