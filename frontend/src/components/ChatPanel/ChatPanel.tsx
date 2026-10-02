@@ -179,11 +179,21 @@ export function ChatPanel() {
     threadId: string
     /** What the user typed with it, which only this message carries. */
     extra?: string
+    /** A reply began streaming, so the server took the message: never undo it. */
+    streamed: boolean
   } | null>(null)
   const heldHandlerRef = useRef(held.onHeld)
   heldHandlerRef.current = held.onHeld
   const settleSendRef = useRef(held.settleSend)
   settleSendRef.current = held.settleSend
+  const returnToComposerRef = useRef(returnToComposer)
+  returnToComposerRef.current = returnToComposer
+  // Leaving the chat drops useChat's view of a held send, so nothing would end its
+  // hiding; the next poll shows the server's copy instead.
+  useEffect(() => () => {
+    const sending = heldSendRef.current
+    if (sending) settleSendRef.current(sending.threadId)
+  }, [])
 
   const [transport] = useState(
     () =>
@@ -243,11 +253,15 @@ export function ChatPanel() {
   // on every thread change, so the dependency must stay even though it isn't read.
   // setMessages does not clear useChat's error, so drop the error notice explicitly.
   useEffect(() => () => {
-    // A held send waiting on a busy retry is abandoned with it, so stop hiding its request.
+    // A held send waiting on a busy retry is abandoned with it: stop hiding its
+    // request, and return text that only the unsent message carried.
     const sending = heldSendRef.current
     if (sending && busyTimerRef.current) {
       heldSendRef.current = null
       settleSendRef.current(sending.threadId)
+      if (!sending.streamed && sending.extra) {
+        returnToComposerRef.current(sending.threadId, sending.extra)
+      }
     }
     cancelBusyRetry()
     setBusyNotice(false)
@@ -479,6 +493,10 @@ export function ChatPanel() {
   useEffect(() => {
     const sending = heldSendRef.current
     if (!sending) return
+    if (status === "streaming") {
+      sending.streamed = true
+      return
+    }
     if (status === "error" && busyError) {
       // Out of busy retries: Retry still resends it (naming its version), so keep
       // the ref, but stop hiding a request that may be offered again.
@@ -487,7 +505,7 @@ export function ChatPanel() {
     }
     if (status !== "ready" && status !== "error") return
     heldSendRef.current = null
-    const refused = status === "error" && messages.at(-1)?.id === sending.messageId
+    const refused = status === "error" && !sending.streamed
     if (!refused) {
       held.settleSend(sending.threadId)
       return
@@ -511,7 +529,7 @@ export function ChatPanel() {
       ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
       : pendingRequestText(pending)
     const messageId = generateId()
-    heldSendRef.current = { messageId, version: pending.version, threadId, extra }
+    heldSendRef.current = { messageId, version: pending.version, threadId, extra, streamed: false }
     resetOverloadState()
     setStoppedNotice(false)
     turnThreadRef.current = threadId
