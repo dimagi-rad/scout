@@ -10,7 +10,6 @@ const THREAD_TITLE_PREVIEW_CHARS = 200
 
 interface ChatThreadHeaderProps {
   title: string
-  titleIsCustom: boolean
   panelOpen: boolean
   panelMode: ThreadPanelMode
   onTitleChange: (title: string) => Promise<void> | void
@@ -20,7 +19,6 @@ interface ChatThreadHeaderProps {
 
 export function ChatThreadHeader({
   title,
-  titleIsCustom,
   panelOpen,
   panelMode,
   onTitleChange,
@@ -28,7 +26,7 @@ export function ChatThreadHeader({
   onOpenCanvas,
 }: ChatThreadHeaderProps) {
   const displayTitle = shortThreadTitle(title)
-  const isUntitledFallback = !titleIsCustom && displayTitle === "Untitled"
+  const isUntitledFallback = !title.trim()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(displayTitle)
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
@@ -51,11 +49,9 @@ export function ChatThreadHeader({
     const nextDisplayTitle = cleanDraft || "Untitled"
     setDraft(nextDisplayTitle)
     setEditing(false)
-    if (!cleanDraft) {
-      if (!titleIsCustom && displayTitle === "Untitled") return
-    } else if (titleIsCustom && cleanDraft === title.trim()) {
-      return
-    }
+    // An unchanged draft is not a rename: saving it would pin the provisional
+    // title and stop the generated one from replacing it.
+    if (cleanDraft === displayTitle || (!cleanDraft && isUntitledFallback)) return
     setSaveState("saving")
     try {
       await onTitleChange(cleanDraft)
@@ -98,6 +94,7 @@ export function ChatThreadHeader({
               }}
               className="h-8 min-w-0 max-w-[34rem] rounded-md border bg-background px-2 text-sm font-medium outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
               aria-label="Thread title"
+              data-testid="chat-thread-title-input"
             />
           </form>
         ) : (
@@ -106,8 +103,10 @@ export function ChatThreadHeader({
             onClick={() => setEditing(true)}
             className="group flex min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-accent"
             aria-label="Rename thread"
+            data-testid="chat-thread-rename"
           >
             <span
+              data-testid="chat-thread-title"
               className={cn(
                 "truncate text-sm font-medium",
                 isUntitledFallback ? "text-muted-foreground" : "text-foreground",

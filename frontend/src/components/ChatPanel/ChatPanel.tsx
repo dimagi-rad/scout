@@ -127,8 +127,7 @@ export function ChatPanel() {
     />
   )
   const currentThread = threads.find((thread) => thread.id === threadId)
-  const threadTitle = currentThread?.title ?? "Untitled"
-  const titleIsCustom = currentThread?.title_is_custom ?? false
+  const threadTitle = currentThread?.title ?? ""
 
   // Use a ref so the transport body closure always reads fresh values,
   // even though useChat caches the transport from the first render.
@@ -462,7 +461,6 @@ export function ChatPanel() {
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatThreadHeader
           title={threadTitle}
-          titleIsCustom={titleIsCustom}
           panelOpen={threadPanelOpen}
           panelMode={threadPanelMode}
           onTitleChange={handleTitleChange}

@@ -12,11 +12,15 @@ import {
 
 export type { AccessDenialReason }
 
+export type ThreadTitleSource = "first_message" | "generated" | "user"
+
 export interface Thread {
   id: string
+  // The one title the header and sidebar both show: the first message until a
+  // short title is generated, or the user's rename.
   title: string
-  history_title?: string
   title_is_custom: boolean
+  title_source: ThreadTitleSource
   created_at: string
   updated_at: string
   last_viewed_at: string | null

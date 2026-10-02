@@ -8,6 +8,7 @@ function thread(id: string, title: string): Thread {
     id,
     title,
     title_is_custom: title !== "Untitled",
+    title_source: title !== "Untitled" ? "user" : "first_message",
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     last_viewed_at: null,
