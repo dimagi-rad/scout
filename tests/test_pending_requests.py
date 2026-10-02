@@ -519,3 +519,112 @@ def test_the_request_counts_as_one_human_turn_and_shows_as_one_bubble():
     assert human_turn_count(messages) == 1
     ui = langchain_messages_to_ui(messages)
     assert [(m["role"], m["id"]) for m in ui] == [("user", "pr-t-2"), ("assistant", ui[1]["id"])]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs", "checkpoint")
+class TestEndpoints:
+    async def _held(self, slug, agent_layer):
+        ws, _tenant, _user, client = await _loading_chat(slug)
+        thread_id = str(uuid.uuid4())
+        await _held_events(await _post(client, ws, thread_id, "visits?", message_id="m1"))
+        base = f"/api/workspaces/{ws.id}/threads/{thread_id}"
+        return ws, client, thread_id, base
+
+    async def test_add_part_is_idempotent_on_its_id(self, agent_layer):
+        _ws, client, _thread_id, base = await self._held("ep-add", agent_layer)
+
+        for _ in range(2):
+            response = await client.post(
+                f"{base}/pending-request/parts/",
+                data=json.dumps({"id": "m2", "text": "by month"}),
+                content_type="application/json",
+            )
+            assert response.status_code == 200
+
+        assert response.json()["version"] == 2
+        assert [p["text"] for p in response.json()["parts"]] == ["visits?", "by month"]
+
+    async def test_add_part_to_a_claimed_request_is_a_conflict(self, agent_layer):
+        _ws, client, thread_id, base = await self._held("ep-claimed", agent_layer)
+        lease = await atry_acquire_turn_lease(thread_id)
+        await pending_requests.aclaim(thread_id, lease.token)
+
+        response = await client.post(
+            f"{base}/pending-request/parts/",
+            data=json.dumps({"id": "m2", "text": "by month"}),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 409
+        assert response.json()["reason"] == "claimed"
+
+    async def test_add_part_with_nothing_held_is_a_conflict(self, agent_layer):
+        _ws, client, thread_id, base = await self._held("ep-gone", agent_layer)
+        await PendingRequest.objects.filter(thread_id=thread_id).adelete()
+
+        response = await client.post(
+            f"{base}/pending-request/parts/",
+            data=json.dumps({"id": "m2", "text": "by month"}),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 409
+        assert response.json()["reason"] == "gone"
+
+    async def test_another_users_thread_is_not_found(self, agent_layer):
+        ws, _client, _thread_id, base = await self._held("ep-foreign", agent_layer)
+        tenant = await Tenant.objects.aget(external_id="t-ep-foreign")
+        _other, intruder = await _member(ws, tenant, "other-ep@b.c")
+
+        response = await intruder.post(
+            f"{base}/pending-request/parts/",
+            data=json.dumps({"id": "m2", "text": "mine now"}),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 404
+
+    async def test_discard_needs_the_current_version(self, agent_layer):
+        _ws, client, thread_id, base = await self._held("ep-discard", agent_layer)
+
+        stale = await client.delete(
+            f"{base}/pending-request/",
+            data=json.dumps({"version": 7}),
+            content_type="application/json",
+        )
+        current = await client.delete(
+            f"{base}/pending-request/",
+            data=json.dumps({"version": 1}),
+            content_type="application/json",
+        )
+
+        assert stale.status_code == 409
+        assert stale.json()["reason"] == "version"
+        assert current.status_code == 200
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+    async def test_messages_and_the_jobs_poll_include_it(self, agent_layer):
+        ws, client, thread_id, base = await self._held("ep-read", agent_layer)
+
+        plain = await client.get(f"{base}/messages/")
+        with_pending = await client.get(f"{base}/messages/?include=pending")
+        jobs = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+
+        assert plain.json() == []
+        assert with_pending.json()["messages"] == []
+        assert with_pending.json()["pending_request"]["version"] == 1
+        assert jobs.json()["pending_requests"][thread_id]["parts"][0]["text"] == "visits?"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_messages_include_pending_for_a_thread_not_yet_created():
+    ws, _tenant, _user, client = await _loading_chat("fresh")
+
+    response = await client.get(
+        f"/api/workspaces/{ws.id}/threads/{uuid.uuid4()}/messages/?include=pending"
+    )
+
+    assert response.json() == {"messages": [], "pending_request": None}

@@ -644,7 +644,12 @@ async def test_active_jobs_empty_when_none_running():
     await client.alogin(email="a@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
-    assert resp.json() == {"jobs": [], "workspace_loads": [], "recent_terminations": []}
+    assert resp.json() == {
+        "jobs": [],
+        "workspace_loads": [],
+        "recent_terminations": [],
+        "pending_requests": {},
+    }
 
 
 @pytest.mark.asyncio

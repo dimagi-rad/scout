@@ -8,6 +8,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 
 from apps.chat.models import ThreadJob
+from apps.chat.pending_requests import aworkspace_pending_requests
 from apps.users.decorators import async_login_required
 from apps.workspaces.access import (
     access_denied_body,
@@ -115,7 +116,8 @@ async def active_jobs_view(request, workspace_id):
     in-flight load of the workspace, whoever started it. Also returns ThreadJobs that
     transitioned to a terminal state within RECENT_TERMINATION_WINDOW so the
     frontend can render an inline failure card for jobs that have already
-    vanished from the active list. Polled by useWorkspaceJobs.
+    vanished from the active list, and ``pending_requests``: the caller's requests
+    held for a load, keyed by thread id. Polled by useWorkspaceJobs.
     """
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -226,6 +228,7 @@ async def active_jobs_view(request, workspace_id):
             ],
             "workspace_loads": workspace_loads,
             "recent_terminations": recent_terminations,
+            "pending_requests": await aworkspace_pending_requests(workspace, user),
         }
     )
 
