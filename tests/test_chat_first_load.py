@@ -43,7 +43,8 @@ User = get_user_model()
 _CONDITIONAL_PROMISE = "says this conversation will resume automatically"
 _PROMISE = re.compile(
     r"resume automatically|system will resume|resumes this conversation|"
-    r"I'll continue|continue when it finishes|pick this up",
+    r"I'll continue|continue when it finishes|continue with (?:your|their) request|"
+    r"pick this up",
     re.IGNORECASE,
 )
 
@@ -400,5 +401,5 @@ class TestFullPromptPromisesAResumeOnlyWhenBound:
         )
 
         assert _promises(stable) == []
-        assert _promises(volatile) == ["resume automatically"]
+        assert _promises(volatile) == ["continue with their request", "resume automatically"]
         assert "Nothing will resume this conversation" not in volatile
