@@ -32,10 +32,10 @@ from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-# A load refused in preflight settles in about a second. The resume waits out a
-# still-streaming turn via the thread's turn lease (apps/chat/turn_lease.py);
-# this delay just spares it the retry backoff in the common case.
-CHAT_LOAD_START_DELAY_SECONDS = 30
+# The message that starts the load is held, not answered, so no turn holds the
+# thread; the delay only lets that hold commit before a load refused in preflight
+# (settled in about a second) resumes the chat without it.
+CHAT_LOAD_START_DELAY_SECONDS = 2
 
 # A rebuild refused at the connection limit doesn't spend the member's retry, but a
 # sustained outage must not queue one per message: wait this long after a refusal.

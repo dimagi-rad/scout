@@ -13,6 +13,11 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
     jobsByThreadId: {},
     recentlyCompletedThreadIds: [],
     recentTerminationsByToolCallId: {},
+    pendingByThreadId: {},
+    setPendingRequest: vi.fn(),
+    hidePendingRequest: vi.fn(),
+    forgetPendingRequest: vi.fn(),
+    refresh: vi.fn(),
     notifyJobLikelyStarted: vi.fn(),
   }),
 }))
@@ -61,7 +66,7 @@ function mockThreadApi() {
   const artifactRequests: DeferredArtifactRequest[] = []
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
-    const match = url.match(/^\/api\/workspaces\/([^/]+)\/threads\/([^/]+)\/(messages|artifacts)\/$/)
+    const match = url.match(/^\/api\/workspaces\/([^/]+)\/threads\/([^/]+)\/(messages|artifacts)\/(?:\?include=pending)?$/)
     if (!match) throw new Error(`Unexpected request: ${url}`)
     const [, workspaceId, threadId, resource] = match
     if (resource === "messages") {

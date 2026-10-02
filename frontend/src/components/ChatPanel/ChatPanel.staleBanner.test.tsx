@@ -17,6 +17,11 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
     workspaceLoads: jobs.workspaceLoads,
     recentlyCompletedThreadIds: [],
     recentTerminationsByToolCallId: {},
+    pendingByThreadId: {},
+    setPendingRequest: vi.fn(),
+    hidePendingRequest: vi.fn(),
+    forgetPendingRequest: vi.fn(),
+    refresh: vi.fn(),
     notifyJobLikelyStarted: vi.fn(),
   }),
 }))
@@ -29,7 +34,7 @@ function mockMessages(messages: UIMessage[]) {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.endsWith("/messages/")) return Response.json(messages)
+      if (url.endsWith("/messages/?include=pending")) return Response.json(messages)
       if (url.endsWith("/artifacts/")) return Response.json({ results: [] })
       throw new Error(`Unexpected request: ${url}`)
     }),

@@ -22,7 +22,9 @@ from langchain_core.messages import HumanMessage
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
+from apps.chat import pending_requests
 from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
+from apps.chat.constants import MAX_MESSAGE_LENGTH
 from apps.chat.helpers import (
     _resolve_chat_access,
     async_login_required,
@@ -30,7 +32,7 @@ from apps.chat.helpers import (
 )
 from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
-from apps.chat.stream import langgraph_to_ui_stream
+from apps.chat.stream import _sse, langgraph_to_ui_stream
 from apps.chat.tasks import aschedule_thread_title
 from apps.chat.titles import afill_turn_title, short_thread_title
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
@@ -38,6 +40,10 @@ from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capac
 from apps.common.http import parse_json_object
 from apps.workspaces.access import access_denied_response, role_satisfies
 from apps.workspaces.models import WorkspaceRole
+from apps.workspaces.services.load_activity import (
+    athread_awaits_load,
+    aworkspace_serves_nothing,
+)
 from apps.workspaces.services.thread_job_dispatch import (
     astart_chat_load,
     astart_chat_semantic_rebuild,
@@ -114,8 +120,6 @@ def _foreign_thread_response(thread: Thread, user, workspace) -> JsonResponse:
     )
     return JsonResponse({"error": "Thread not found"}, status=404)
 
-
-MAX_MESSAGE_LENGTH = 10_000
 
 TURN_LEASE_WAIT_SECONDS = 2
 THREAD_BUSY_MESSAGE = (
@@ -236,6 +240,30 @@ async def chat_view(request):
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
 
+    pending_version, err = _pending_request_version(data)
+    if err:
+        return err
+    # Names which request that version is of: a thread holds again after a send.
+    pending_request_id = data.get("pendingRequestId")
+    if pending_request_id is not None and not isinstance(pending_request_id, str):
+        return JsonResponse({"error": "pendingRequestId must be a string"}, status=400)
+
+    # Before the hold decision, so the message that starts a chat's first load is held too.
+    if (
+        role_satisfies(access.membership.role, WorkspaceRole.READ_WRITE)
+        and await astart_chat_load(workspace=workspace, user=user, thread_id=thread_id) is None
+    ):
+        await astart_chat_semantic_rebuild(workspace=workspace, user=user)
+
+    # A version means the client is sending the held request itself (its "Send now").
+    if pending_version is None:
+        try:
+            held = await _hold_while_loading(workspace, thread_id, messages[-1], user_content)
+        except pending_requests.PendingRequestTooLong as e:
+            return _request_too_long_response(str(e))
+        if held is not None:
+            return _held_response(held)
+
     # A brief wait covers Stop-then-resend: the stopped turn releases the lease
     # only after persisting its partial reply.
     lease = await aacquire_turn_lease(thread_id, wait_seconds=TURN_LEASE_WAIT_SECONDS)
@@ -250,6 +278,8 @@ async def chat_view(request):
                 access=access,
                 thread=thread,
                 user_content=user_content,
+                pending_version=pending_version,
+                pending_request_id=pending_request_id,
             )
     except asyncio.CancelledError:
         await lease.release()
@@ -263,10 +293,76 @@ async def chat_view(request):
         await lease.release()
         raise
     if lease.lost or not isinstance(response, StreamingHttpResponse):
+        held_claim = getattr(response, "held_claim", None)
+        if held_claim is not None:
+            await pending_requests.arelease(held_claim)
         await lease.release()
         if lease.lost:
             return _thread_busy_response()
     return response
+
+
+def _pending_request_version(data: dict) -> tuple[int | None, JsonResponse | None]:
+    version = data.get("pendingRequestVersion")
+    if version is None:
+        return None, None
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        return None, JsonResponse(
+            {"error": "pendingRequestVersion must be a positive integer"}, status=400
+        )
+    return version, None
+
+
+async def _hold_while_loading(workspace, thread_id: str, message: dict, text: str) -> dict | None:
+    """Hold the message for the load this chat awaits, or None to answer it now.
+
+    Only while the workspace serves no data: a refresh over served data answers
+    from what is there. A chat with no load to wait on gets a normal turn, whose
+    agent explains why nothing can load.
+    """
+    if not await athread_awaits_load(thread_id):
+        return None
+    if not await aworkspace_serves_nothing(workspace.id):
+        return None
+    part_id = message.get("id")
+    if (
+        not isinstance(part_id, str)
+        or not part_id
+        or len(part_id) > pending_requests.MAX_PART_ID_LENGTH
+    ):
+        part_id = str(uuid.uuid4())
+    return await pending_requests.ahold_message(thread_id, part_id=part_id, text=text)
+
+
+def _held_response(pending: dict) -> StreamingHttpResponse:
+    """A turn with no model call: the message joined the request held for the load."""
+
+    async def body():
+        yield _sse({"type": "start"})
+        # Transient, so the SDK hands it to onData and adds no assistant message.
+        yield _sse({"type": "data-pending-request", "data": pending, "transient": True})
+        yield _sse({"type": "finish", "finishReason": "stop"})
+
+    response = StreamingHttpResponse(body(), content_type="text/event-stream; charset=utf-8")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
+def _request_too_long_response(
+    message: str = pending_requests.REQUEST_TOO_LONG_MESSAGE,
+) -> JsonResponse:
+    return JsonResponse(
+        {
+            "error": message,
+            "reason": "pending_request_too_long",
+        },
+        status=400,
+    )
+
+
+def _pending_conflict_response(reason: str) -> JsonResponse:
+    return JsonResponse({"error": "pending_request_conflict", "reason": reason}, status=409)
 
 
 def _thread_busy_response() -> JsonResponse:
@@ -281,7 +377,15 @@ def _thread_busy_response() -> JsonResponse:
 
 
 async def _start_turn(
-    lease: TurnLease, *, user, workspace, access, thread: Thread, user_content: str
+    lease: TurnLease,
+    *,
+    user,
+    workspace,
+    access,
+    thread: Thread,
+    user_content: str,
+    pending_version: int | None = None,
+    pending_request_id: str | None = None,
 ):
     """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     thread_id = str(thread.id)
@@ -294,13 +398,6 @@ async def _start_turn(
         error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
         return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
-
-    # Before the agent is built, so its prompt already sees the load or rebuild as started.
-    if (
-        role_satisfies(access.membership.role, WorkspaceRole.READ_WRITE)
-        and await astart_chat_load(workspace=workspace, user=user, thread_id=thread_id) is None
-    ):
-        await astart_chat_semantic_rebuild(workspace=workspace, user=user)
 
     # Retry once with a fresh checkpointer on connection errors.
     try:
@@ -350,13 +447,6 @@ async def _start_turn(
     # inject synthetic ToolMessages before appending the new HumanMessage.
     dangling_tool_results = await repair_dangling_tool_calls(agent, config)
 
-    input_state = {
-        "messages": [*dangling_tool_results, HumanMessage(content=user_content)],
-        "workspace_id": str(workspace.id),
-        "user_id": str(user.id),
-        "thread_id": str(thread_id),
-    }
-
     trace_metadata = {
         "workspace_id": str(workspace.id),
     }
@@ -374,7 +464,25 @@ async def _start_turn(
         metadata=trace_metadata,
     )
 
-    response = _TurnStreamingResponse(lease)
+    # Last before the response exists, so nothing between can strand the claim; an
+    # unsent response returns it to waiting on close.
+    claimed, human_message = await _claim_held_request(
+        thread_id,
+        lease,
+        user_content=user_content,
+        pending_version=pending_version,
+        pending_request_id=pending_request_id,
+    )
+    if isinstance(human_message, JsonResponse):
+        return human_message
+    input_state = {
+        "messages": [*dangling_tool_results, human_message],
+        "workspace_id": str(workspace.id),
+        "user_id": str(user.id),
+        "thread_id": str(thread_id),
+    }
+
+    response = _TurnStreamingResponse(lease, held_claim=claimed)
 
     async def _traced_stream():
         response.turn_started = True
@@ -382,21 +490,68 @@ async def _start_turn(
         # cleanup (stopping the run, saving the partial reply) must finish before
         # the lease is released and another turn can take the thread.
         async with lease.held():
-            with trace_ctx:
-                async with contextlib.aclosing(
-                    langgraph_to_ui_stream(
-                        agent,
-                        input_state,
-                        config,
-                        owns_thread=lambda: not lease.lost,
-                        on_success=lambda: aschedule_thread_title(thread),
-                    )
-                ) as stream:
-                    async for chunk in stream:
-                        yield chunk
+            try:
+                with trace_ctx:
+                    async with contextlib.aclosing(
+                        langgraph_to_ui_stream(
+                            agent,
+                            input_state,
+                            config,
+                            owns_thread=lambda: not lease.lost,
+                            on_success=lambda: aschedule_thread_title(thread),
+                        )
+                    ) as stream:
+                        async for chunk in stream:
+                            yield chunk
+            finally:
+                if claimed is not None:
+                    await pending_requests.asettle(claimed)
 
     response.streaming_content = _traced_stream()
     return response
+
+
+async def _claim_held_request(
+    thread_id: str,
+    lease: TurnLease,
+    *,
+    user_content: str,
+    pending_version: int | None,
+    pending_request_id: str | None = None,
+) -> tuple[pending_requests.ClaimedRequest | None, HumanMessage | JsonResponse]:
+    """The turn's message, carrying any request still held for the thread.
+
+    A held request goes out with the next turn, so its text is never stranded
+    behind a load that will not resume it.
+    """
+    try:
+        claimed = await pending_requests.aclaim(thread_id, lease.token)
+    except Exception:
+        logger.exception("Could not claim the held request of thread %s", thread_id)
+        if pending_version is not None:
+            return None, _pending_conflict_response("unavailable")
+        # The request stays held and is offered again; this turn need not fail with it.
+        return None, HumanMessage(content=user_content)
+    if claimed is None:
+        if pending_version is not None:
+            return None, _pending_conflict_response("gone")
+        return None, HumanMessage(content=user_content)
+    if pending_version is not None and (
+        pending_version != claimed.version
+        or (pending_request_id is not None and pending_request_id != str(claimed.request_id))
+    ):
+        await pending_requests.arelease(claimed)
+        return None, _pending_conflict_response("version")
+    # The client sends a held request it showed whole; otherwise the held text leads.
+    content = (
+        user_content
+        if pending_version is not None
+        else f"{claimed.text}{pending_requests.PART_SEPARATOR}{user_content}"
+    )
+    if len(content) > MAX_MESSAGE_LENGTH:
+        await pending_requests.arelease(claimed)
+        return None, _request_too_long_response()
+    return claimed, HumanMessage(content=content, id=claimed.message_id)
 
 
 class _TurnStreamingResponse(StreamingHttpResponse):
@@ -406,16 +561,22 @@ class _TurnStreamingResponse(StreamingHttpResponse):
     cleanup, so ``close`` must leave a started turn alone.
     """
 
-    def __init__(self, lease: TurnLease):
+    def __init__(
+        self, lease: TurnLease, *, held_claim: pending_requests.ClaimedRequest | None = None
+    ):
         super().__init__(content_type="text/event-stream; charset=utf-8")
         self["Cache-Control"] = "no-cache"
         self["X-Accel-Buffering"] = "no"
         self.lease = lease
+        self.held_claim = held_claim
         self.turn_started = False
 
     def close(self):
         try:
             if not self.turn_started:
+                # Before the lease, so no next holder sees this claim as stale.
+                if self.held_claim is not None:
+                    pending_requests.release_sync(self.held_claim)
                 self.lease.release_sync()
         except Exception:
             logger.warning(

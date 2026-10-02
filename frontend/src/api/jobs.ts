@@ -58,10 +58,34 @@ export interface RecentTermination {
   retry_available: boolean
 }
 
+export interface PendingRequestPart {
+  id: string
+  text: string
+  added_at: string
+}
+
+/** What the user typed while their chat's first data load ran, held server-side
+ *  as one unsent message until the data can answer it. */
+export interface PendingRequest {
+  thread_id: string
+  /** Names this request; a thread's next one, after this is sent, gets a new id. */
+  request_id: string
+  /** Bumped on every change; a change sent against an older version is refused. */
+  version: number
+  parts: PendingRequestPart[]
+  /** "claimed" while a run is sending it. */
+  state: "waiting" | "claimed"
+  thread_job_id: string | null
+  /** The state of the load that will send it, or null when it has none. */
+  thread_job_state: JobState | null
+}
+
 export interface ActiveJobsResponse {
   jobs: ActiveJob[]
   workspace_loads?: WorkspaceLoad[]
   recent_terminations: RecentTermination[]
+  /** The caller's held requests, keyed by thread id. */
+  pending_requests?: Record<string, PendingRequest>
 }
 
 export const jobsApi = {

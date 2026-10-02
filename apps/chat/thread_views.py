@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from django.http import JsonResponse
 
+from apps.chat import pending_requests
 from apps.chat.artifact_links import (
     backfill_thread_artifact_links,
     latest_version_links,
@@ -182,6 +183,8 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if err:
         return err
 
+    # Opt-in, so a client from before held requests still gets the bare list.
+    with_pending = request.GET.get("include") == "pending"
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
         # New chats use client-generated UUIDs with no row until first POST, so a
@@ -189,6 +192,8 @@ async def thread_messages_view(request, workspace_id, thread_id):
         # stale — 404 so the client recovers instead of showing an empty "haunted" chat.
         if await _thread_id_taken(thread_id):
             return JsonResponse({"error": "Thread not found"}, status=404)
+        if with_pending:
+            return JsonResponse({"messages": [], "pending_request": None})
         return JsonResponse([], safe=False)
 
     try:
@@ -198,6 +203,13 @@ async def thread_messages_view(request, workspace_id, thread_id):
         return JsonResponse(
             {"error": "Conversation history is temporarily unavailable. Please try again."},
             status=503,
+        )
+    if with_pending:
+        return JsonResponse(
+            {
+                "messages": ui_messages,
+                "pending_request": await pending_requests.athread_pending_request(thread.id),
+            }
         )
     return JsonResponse(ui_messages, safe=False)
 
@@ -253,3 +265,84 @@ async def thread_viewed_view(request, workspace_id, thread_id):
     if not updated:
         return JsonResponse({"error": "Thread not found"}, status=404)
     return JsonResponse({"status": "ok"})
+
+
+def _pending_conflict(error: pending_requests.PendingRequestConflict) -> JsonResponse:
+    return JsonResponse({"error": "pending_request_conflict", "reason": error.reason}, status=409)
+
+
+@async_login_required
+async def thread_pending_request_parts_view(request, workspace_id, thread_id):
+    """POST /api/workspaces/<workspace_id>/threads/<thread_id>/pending-request/parts/
+
+    Adds ``{id, text}`` to the request held while the chat's data loads; idempotent
+    on ``id``. A 409 means the request was claimed or is gone, and the client sends
+    the text as a normal message instead.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = request._authenticated_user
+    _workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
+    if thread is None:
+        return JsonResponse({"error": "Thread not found"}, status=404)
+
+    body, err = parse_json_object(request)
+    if err:
+        return err
+    part_id, text = body.get("id"), body.get("text")
+    if (
+        not isinstance(part_id, str)
+        or not part_id
+        or len(part_id) > pending_requests.MAX_PART_ID_LENGTH
+    ):
+        return JsonResponse({"error": "id must be a non-empty string"}, status=400)
+    if not isinstance(text, str) or not text.strip():
+        return JsonResponse({"error": "text must be a non-empty string"}, status=400)
+    try:
+        pending = await pending_requests.aadd_part(thread.id, part_id=part_id, text=text)
+    except pending_requests.PendingRequestConflict as e:
+        return _pending_conflict(e)
+    except pending_requests.PendingRequestTooLong as e:
+        return JsonResponse(
+            {
+                "error": str(e),
+                "reason": "pending_request_too_long",
+            },
+            status=400,
+        )
+    return JsonResponse(pending)
+
+
+@async_login_required
+async def thread_pending_request_view(request, workspace_id, thread_id):
+    """DELETE /api/workspaces/<workspace_id>/threads/<thread_id>/pending-request/
+
+    Discards the held request at ``{version}``; a 409 means it changed, was claimed
+    or is gone.
+    """
+    if request.method != "DELETE":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = request._authenticated_user
+    _workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
+    if thread is None:
+        return JsonResponse({"error": "Thread not found"}, status=404)
+
+    body, err = parse_json_object(request)
+    if err:
+        return err
+    version = body.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return JsonResponse({"error": "version must be an integer"}, status=400)
+    try:
+        await pending_requests.adiscard(thread.id, version=version)
+    except pending_requests.PendingRequestConflict as e:
+        return _pending_conflict(e)
+    return JsonResponse({"status": "discarded"})

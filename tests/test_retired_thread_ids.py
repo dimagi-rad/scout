@@ -101,6 +101,9 @@ async def _postgres_chat(conninfo):
             patch("apps.chat.views.ensure_checkpointer", ensure),
             patch("apps.chat.thread_views.ensure_checkpointer", ensure),
             patch("apps.chat.views.build_agent_graph", side_effect=build),
+            # These workspaces serve no data yet, so a first message would be held for
+            # the load it starts; these tests are about the turn that answers it.
+            patch("apps.chat.views._hold_while_loading", new_callable=AsyncMock, return_value=None),
         ):
             yield saver
 
