@@ -534,3 +534,26 @@ async def test_an_answer_short_of_access_withdraws_the_proof_before_publishing(
 
     assert seen_at_publication == [frozenset()]
     assert not await agrace_proof_tenant_ids(user.id, connection.id, {tenant.id}, max_age=window)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_dead_refresh_grant_withdraws_the_connections_proofs(user, tenant, workspace):
+    membership = await TenantMembership.objects.select_related("connection").aget(
+        user=user, tenant=tenant
+    )
+    connection = membership.connection
+    await _aage_proof(user, tenant, timedelta(minutes=10))
+    window = timedelta(minutes=30)
+
+    async def grant_revoked(*args, **kwargs):
+        return ProviderVerificationResult.unavailable(ErrorCode.AUTH_TOKEN_EXPIRED)
+
+    result = await verify_connection_access(
+        user.id, connection.id, {tenant.id}, provider_verifier=grant_revoked
+    )
+
+    assert result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    # Nothing archived: reconnecting fixes it. But a later outage finds no proof to grace.
+    assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
+    assert not await agrace_proof_tenant_ids(user.id, connection.id, {tenant.id}, max_age=window)

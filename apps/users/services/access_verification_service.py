@@ -742,15 +742,21 @@ async def _verify_and_publish_once(
         # concerns at once, under the lease: before publication, which can be slow or
         # fail, and before anyone else can claim. A COMPLETE counts as short until the
         # mapping shows it covers the request.
-        progress.denied = provider_result.outcome in {
+        # A dead refresh grant archives nothing (reconnecting fixes it), but it is
+        # no ground for grace either, for any tenant on the connection.
+        dead_grant = (
+            provider_result.outcome == VerificationOutcome.UNAVAILABLE
+            and provider_result.error_code == ErrorCode.AUTH_TOKEN_EXPIRED
+        )
+        progress.denied = dead_grant or provider_result.outcome in {
             VerificationOutcome.COMPLETE,
             *_ANSWERS_SHORT_OF_ACCESS,
         }
-        if provider_result.outcome in _ANSWERS_SHORT_OF_ACCESS:
+        if dead_grant or provider_result.outcome in _ANSWERS_SHORT_OF_ACCESS:
             await _withdraw_proofs(
                 claim,
                 None
-                if provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
+                if dead_grant or provider_result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
                 else claim.requested_tenant_ids,
                 before=completed_at,
                 deadline=deadline,
