@@ -4,6 +4,13 @@ import { markThreadViewed } from "@/api/threads"
 import { workspaceApi } from "@/api/workspaces"
 import type { DomainSlice } from "./domainSlice"
 import { createWorkspaceRequestGuard } from "./workspaceRequest"
+import {
+  ACCESS_DENIAL_REASONS,
+  RECHECKABLE_REASONS,
+  type AccessDenialReason,
+} from "@/lib/accessReasons"
+
+export type { AccessDenialReason }
 
 export interface Thread {
   id: string
@@ -16,28 +23,6 @@ export interface Thread {
 }
 
 export type ThreadsStatus = "idle" | "loading" | "loaded" | "error"
-
-const ACCESS_DENIAL_REASONS = [
-  "tenant_access_lost",
-  "credential_missing",
-  "credential_expired",
-  "upstream_access_lost",
-  "verification_unavailable",
-  "verification_in_progress",
-  // A workspace with no sources (#381): only a delete resolves it, so never recheckable.
-  "no_sources",
-] as const
-
-export type AccessDenialReason = (typeof ACCESS_DENIAL_REASONS)[number]
-
-// A lost-access denial is also rechecked on request: once an admin restores access
-// upstream, only an explicit verification can restore the archived membership.
-const RECHECKABLE_REASONS: ReadonlySet<AccessDenialReason> = new Set([
-  "tenant_access_lost",
-  "upstream_access_lost",
-  "verification_unavailable",
-  "verification_in_progress",
-])
 
 // Denials that mean coverage was archived, which flips the workspace list's has_access
 // (the lost-access gate) only once refetched. credential_missing is a freshness denial

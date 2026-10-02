@@ -14,8 +14,9 @@ interface ChatErrorNoticeProps {
 
 /**
  * Friendly chat error. Never renders an unrecognised response body: a stale
- * thread offers a new chat, an access denial its reason-specific remedy, and
- * anything else a generic message with Retry.
+ * thread offers a new chat, an access denial its reason-specific remedy, a
+ * request that cannot succeed as sent the backend's explanation, and anything
+ * else a generic message with Retry and a new chat.
  */
 export function ChatErrorNotice({ error, onStartNewThread, onRetry }: ChatErrorNoticeProps) {
   const classified = classifyChatError(error)
@@ -35,6 +36,18 @@ export function ChatErrorNotice({ error, onStartNewThread, onRetry }: ChatErrorN
     </Button>
   )
 
+  const newThreadButton = (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={onStartNewThread}
+      data-testid="chat-error-new-thread"
+    >
+      Start new chat
+    </Button>
+  )
+
   return (
     <div
       className="text-sm text-destructive bg-destructive/10 rounded-lg px-4 py-3 space-y-2"
@@ -44,15 +57,7 @@ export function ChatErrorNotice({ error, onStartNewThread, onRetry }: ChatErrorN
       {classified.kind === "stale" && (
         <>
           <p data-testid="chat-error-message">This conversation is no longer available.</p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onStartNewThread}
-            data-testid="chat-error-new-thread"
-          >
-            Start new chat
-          </Button>
+          {newThreadButton}
         </>
       )}
       {classified.kind === "access-retry" && (
@@ -71,10 +76,16 @@ export function ChatErrorNotice({ error, onStartNewThread, onRetry }: ChatErrorN
           </Button>
         </>
       )}
+      {classified.kind === "final" && (
+        <p data-testid="chat-error-message">{classified.message}</p>
+      )}
       {classified.kind === "generic" && (
         <>
           <p data-testid="chat-error-message">{GENERIC_CHAT_ERROR_MESSAGE}</p>
-          {retryButton}
+          <div className="flex gap-2">
+            {retryButton}
+            {newThreadButton}
+          </div>
         </>
       )}
     </div>

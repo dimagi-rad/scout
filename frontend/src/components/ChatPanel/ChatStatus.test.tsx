@@ -51,6 +51,16 @@ describe("classifyChatError", () => {
     },
   )
 
+  it.each(["no_sources", "message_too_long"])(
+    "treats %s as final, with the backend text",
+    (reason) => {
+      expect(classifyChatError(bodyError({ error: "Backend remedy.", reason }))).toEqual({
+        kind: "final",
+        message: "Backend remedy.",
+      })
+    },
+  )
+
   it("falls back to Connected Accounts for a missing or off-site recovery_url", () => {
     for (const recovery_url of [undefined, "https://evil.example/", "//evil.example/", "/\\evil.example/", 42]) {
       const error = bodyError({ error: RECONNECT_TEXT, reason: "credential_expired", recovery_url })
@@ -110,6 +120,20 @@ describe("ChatErrorNotice", () => {
     expect(screen.queryByText(/secret detail/)).toBeNull()
     fireEvent.click(screen.getByTestId("chat-error-retry"))
     expect(onRetry).toHaveBeenCalledOnce()
+  })
+
+  it("shows the backend text without Retry when resending cannot succeed", () => {
+    renderNotice(bodyError({ error: "This workspace has no data sources.", reason: "no_sources" }))
+    expect(screen.getByTestId("chat-error-message")).toHaveTextContent(
+      "This workspace has no data sources.",
+    )
+    expect(screen.queryByTestId("chat-error-retry")).toBeNull()
+  })
+
+  it("offers a new chat next to Retry for a generic failure", () => {
+    const { onStartNewThread } = renderNotice(new Error("<html>502</html>"))
+    fireEvent.click(screen.getByTestId("chat-error-new-thread"))
+    expect(onStartNewThread).toHaveBeenCalledOnce()
   })
 
   it("offers a new chat for a stale thread", () => {

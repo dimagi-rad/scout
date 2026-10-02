@@ -198,7 +198,11 @@ async def chat_view(request):
         return JsonResponse({"error": "Empty message"}, status=400)
     if len(user_content) > MAX_MESSAGE_LENGTH:
         return JsonResponse(
-            {"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400
+            {
+                "error": f"Message exceeds {MAX_MESSAGE_LENGTH:,} characters. Shorten it and send again.",
+                "reason": "message_too_long",
+            },
+            status=400,
         )
 
     # Resolve workspace and verify access. The multi-tenant flag is determined

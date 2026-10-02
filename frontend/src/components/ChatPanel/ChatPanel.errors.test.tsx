@@ -120,6 +120,19 @@ describe("a chat turn denied because access could not be confirmed", () => {
   })
 })
 
+describe("a retryable freshness denial sent as 503", () => {
+  it("is classified by its reason, like the 403", async () => {
+    const api = mockChat([() => Response.json(UNAVAILABLE_BODY, { status: 503 })])
+    await renderAndSend(api)
+
+    const notice = await screen.findByTestId("chat-error")
+    expect(notice).toHaveAttribute("data-error-kind", "access-retry")
+    expect(screen.getByTestId("chat-error-retry")).toBeInTheDocument()
+    await act(async () => {})
+    expect(api.chatBodies).toHaveLength(1)
+  })
+})
+
 describe("a failed turn's notice after switching threads", () => {
   it("is dropped, so its Retry can never resend into the other thread", async () => {
     const api = mockChat([() => Response.json(UNAVAILABLE_BODY, { status: 403 })])

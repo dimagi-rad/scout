@@ -1,4 +1,5 @@
 import { ApiError } from "@/api/client"
+import { FRESHNESS_RETRY_REASONS, NO_SOURCES_REASON, RECONNECT_REASONS } from "@/lib/accessReasons"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 
 export const ACCESS_RETRY_MESSAGE =
@@ -8,25 +9,23 @@ export const GENERIC_CHAT_ERROR_MESSAGE =
   "Something went wrong sending that message. Your conversation is saved — " +
   "retrying usually works; if it keeps failing, start a new chat."
 
-// apps/workspaces/services/access_freshness.py: the upstream recheck did not finish in time.
+// The upstream recheck did not finish in time (apps/workspaces/services/access_freshness.py).
 // Deliberately no auto-retry, unlike busy errors: verification_unavailable usually
 // means the server already spent its whole 10 s interactive budget and the aborted
 // check published nothing, so a silent resend would double the wait and the load on a
 // provider that is already slow. Some verification_in_progress answers come back fast
 // and would pass on a resend, but the manual Retry covers those at no extra cost.
-const ACCESS_RETRY_REASONS = new Set(["verification_unavailable", "verification_in_progress"])
-// Only reconnecting in Connected Accounts fixes these; a retry fails the same way.
-const ACCESS_RECONNECT_REASONS = new Set([
-  "credential_expired",
-  "credential_missing",
-  "upstream_access_lost",
-  "tenant_access_lost",
-])
+// Matched on the body only: the transport drops the status, so a 403 and a 503
+// carrying the same reason classify the same way.
+const ACCESS_RETRY_REASONS = FRESHNESS_RETRY_REASONS
+// Resending the same message fails the same way; show the backend's remedy instead.
+const FINAL_REASONS: ReadonlySet<string> = new Set([NO_SOURCES_REASON, "message_too_long"])
 
 export type ChatErrorKind =
   | { kind: "stale" }
   | { kind: "access-retry" }
   | { kind: "access-reconnect"; message: string; recoveryPath: string }
+  | { kind: "final"; message: string }
   | { kind: "generic" }
 
 function isStaleThreadError(error: Error): boolean {
@@ -67,8 +66,11 @@ export function classifyChatError(error: Error): ChatErrorKind {
   const { reason, error: message, recovery_url: recoveryUrl } = body as Record<string, unknown>
   if (typeof reason !== "string") return { kind: "generic" }
   if (ACCESS_RETRY_REASONS.has(reason)) return { kind: "access-retry" }
-  if (ACCESS_RECONNECT_REASONS.has(reason) && typeof message === "string" && message) {
+  if (RECONNECT_REASONS.has(reason) && typeof message === "string" && message) {
     return { kind: "access-reconnect", message, recoveryPath: safeRecoveryPath(recoveryUrl) }
+  }
+  if (FINAL_REASONS.has(reason) && typeof message === "string" && message) {
+    return { kind: "final", message }
   }
   return { kind: "generic" }
 }
