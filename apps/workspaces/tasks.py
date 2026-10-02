@@ -3967,8 +3967,8 @@ async def _resume_claimed_job(
     return {"status": "resumed", "terminal_state": terminal}
 
 
-# Sent ahead of a request the workspace flush sends: one no load of its chat
-# resumes (held for another member's load, or left after its own load ended).
+# Sent ahead of a request the workspace flush sends: one held for a workspace
+# load (another member's, or one a read-only member could not start).
 FLUSH_NOTE = (
     f"{SYSTEM_RESUME_MARKER} A workspace data load ended while this message waited; "
     "answer it from the data now available, and say so if what it needs did not load."

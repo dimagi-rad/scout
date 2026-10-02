@@ -14,6 +14,7 @@ from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models.functions import Now
 from django.test import AsyncClient
+from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
 from procrastinate.exceptions import AlreadyEnqueued
@@ -892,7 +893,7 @@ class TestHoldForWorkspaceLoad:
 
         with (
             patch("apps.chat.views.aworkspace_load_pending", AsyncMock(return_value=True)),
-            patch.object(pending_requests, "workspace_load_pending", MagicMock(return_value=True)),
+            patch.object(pending_requests, "workspace_build_pending", MagicMock(return_value=True)),
         ):
             held = await _held_events(await _post(client, ws, thread_id, "visits?"))
 
@@ -974,6 +975,21 @@ class TestFlush:
 
         assert (await self._flush(ws, agent))["sent"] == 0
         agent.ainvoke.assert_not_awaited()
+
+    async def test_a_workspace_hold_waits_for_the_chats_own_resume(self, checkpoint):
+        ws, _user, _client, thread = await _thread("flush-own-coming")
+        await _hold_without_load(thread)
+        job = await ThreadJob.objects.acreate(
+            thread=thread, job_type="materialization", procrastinate_job_id=919191
+        )
+        agent = _flush_agent(checkpoint)
+
+        assert (await self._flush(ws, agent))["sent"] == 0
+        await ThreadJob.objects.filter(id=job.id).aupdate(state=ThreadJob.State.CANCELLED)
+        assert (await self._flush(ws, agent))["sent"] == 0
+
+        await ThreadJob.objects.filter(id=job.id).aupdate(started_at=timezone.now())
+        assert (await self._flush(ws, agent))["sent"] == 1
 
     async def test_one_its_own_ended_load_left_stays_the_users_to_send(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-ended")
