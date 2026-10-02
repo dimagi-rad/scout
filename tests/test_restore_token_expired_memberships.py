@@ -12,7 +12,8 @@ from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
 from apps.users.management.commands import restore_token_expired_memberships as command
-from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership, UpstreamAccessProof
+from apps.users.services import access_verification_service
 from apps.users.services.access_verification_types import ProviderVerificationResult
 
 
@@ -121,14 +122,17 @@ def test_apply_restores_only_what_the_provider_lists_and_is_idempotent(denied, m
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    "respond",
+    ("respond", "revoked"),
     [
-        lambda: ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED),
-        lambda: ProviderVerificationResult.unavailable("verification_unavailable"),
+        (
+            lambda: ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED),
+            True,
+        ),
+        (lambda: ProviderVerificationResult.unavailable("verification_unavailable"), False),
     ],
     ids=["revoked", "unavailable"],
 )
-def test_apply_restores_nothing_without_a_complete_listing(denied, monkeypatch, respond):
+def test_apply_restores_nothing_without_a_complete_listing(denied, monkeypatch, respond, revoked):
     _connection, _bots, memberships = denied
     monkeypatch.setattr(
         "apps.users.services.access_verification_service._REJECTION_RETRY_PAUSE_SECONDS", 0
@@ -139,6 +143,8 @@ def test_apply_restores_nothing_without_a_complete_listing(denied, monkeypatch, 
 
     assert not any(_live(m) for m in memberships[:3])
     assert "Restored 0 of 2 membership(s)." in out
+    # A current credential rejected twice is a real denial, so it archives the live row too.
+    assert _live(memberships[3]) is not revoked
 
 
 @pytest.mark.django_db(transaction=True)
@@ -153,3 +159,67 @@ def test_access_denied_connections_are_not_candidates(denied, monkeypatch):
     assert "Candidate memberships: 0" in out
     assert calls == []
     assert not any(_live(m) for m in memberships[:3])
+
+
+@pytest.mark.django_db(transaction=True)
+def test_row_that_turns_live_mid_run_is_not_archived_by_the_trim(denied, monkeypatch, user):
+    connection, bots, memberships = denied
+    newcomer = Tenant.objects.create(provider="ocs", external_id="bot-new", canonical_name="New")
+    original = access_verification_service._map_provider_result
+
+    # After the trim reads membership state, before the listing is mapped to rows.
+    async def discovery_then_map(*args, **kwargs):
+        await TenantMembership.all_objects.acreate(
+            user=user,
+            tenant=newcomer,
+            connection=connection,
+            provider_metadata={"team_slug": "acme"},
+        )
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(access_verification_service, "_map_provider_result", discovery_then_map)
+    _provider(
+        monkeypatch,
+        lambda: ProviderVerificationResult.complete(
+            {bots[0].external_id, bots[3].external_id, newcomer.external_id}
+        ),
+    )
+
+    _run("--apply")
+
+    assert _live(memberships[0])
+    assert TenantMembership.objects.filter(user=user, tenant=newcomer).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_other_team_rows_are_not_candidates_and_moved_denials_are_reported(denied, monkeypatch):
+    connection, _bots, memberships = denied
+    other_team = memberships[1]
+    other_team.provider_metadata = {"team_slug": "globex"}
+    other_team.save(update_fields=["provider_metadata"])
+
+    assert "Candidate memberships: 1 on 1 connection(s)" in _run()
+
+    connection.upstream_denied_at = timezone.now()
+    connection.save(update_fields=["upstream_denied_at"])
+    out = _run("--apply")
+
+    assert "Candidate memberships: 0" in out
+    assert f"connection {connection.pk}" in out
+    assert not any(_live(m) for m in memberships[:3])
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_later_tenant_403_is_not_a_candidate(denied, monkeypatch):
+    connection, bots, _memberships = denied
+    UpstreamAccessProof.objects.create(
+        connection=connection,
+        tenant=bots[1],
+        credential_fingerprint="x",
+        account_identity="x",
+        scope_key="acme",
+        last_attempt_result="tenant_denied",
+        last_error_code=ErrorCode.AUTH_ACCESS_DENIED,
+    )
+
+    assert "Candidate memberships: 1 on 1 connection(s)" in _run()
