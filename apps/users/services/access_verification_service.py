@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 import random
@@ -27,6 +28,7 @@ from apps.users.services.access_verification import (
     arebase_verification_claim,
     arelease_verification,
     attempt_receipt_matches,
+    avoid_positive_proofs,
 )
 from apps.users.services.access_verification_providers import (
     NETWORK_LIMITER,
@@ -601,6 +603,16 @@ async def _verify_and_publish_once(
                 and claim.request.token_snapshot is not None
             ):
                 progress.rejected = True
+                with contextlib.suppress(TimeoutError):
+                    await _await_until(
+                        avoid_positive_proofs(
+                            claim.observation.user_id,
+                            claim.observation.connection_id,
+                            claim.requested_tenant_ids,
+                        ),
+                        deadline=deadline,
+                        clock=clock,
+                    )
                 claim, early_result = await _renew_after_rejection(
                     claim,
                     refreshed=refreshed,
@@ -628,6 +640,15 @@ async def _verify_and_publish_once(
                             "recording the denial",
                             claim.observation.connection_id,
                         )
+        if (
+            progress.rejected
+            and provider_result.outcome == VerificationOutcome.UNAVAILABLE
+            and provider_result.error_code == _VERIFICATION_UNAVAILABLE
+        ):
+            # Published with the tag too, so a waiter replaying this receipt sees it.
+            provider_result = ProviderVerificationResult.unavailable(
+                VERIFICATION_UNAVAILABLE_AFTER_REJECTION
+            )
         completed_at = timezone.now()
         try:
             mapped = await _await_until(

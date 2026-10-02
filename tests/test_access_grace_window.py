@@ -14,12 +14,19 @@ from datetime import timedelta
 import httpx
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
-from asgiref.sync import sync_to_async
+from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
-from apps.users.models import Tenant, TenantConnection, TenantMembership, UpstreamAccessProof
+from apps.users.models import (
+    Tenant,
+    TenantConnection,
+    TenantMembership,
+    UpstreamAccessProof,
+    VerificationControl,
+)
 from apps.users.services import access_verification_service
+from apps.users.services.access_verification import agrace_proof_tenant_ids
 from apps.users.services.access_verification_service import (
     VERIFICATION_IN_PROGRESS_AFTER_REJECTION,
     VERIFICATION_UNAVAILABLE_AFTER_REJECTION,
@@ -249,7 +256,9 @@ async def test_property_1_sync_callers_under_the_server_loop_recheck_in_backgrou
     _fail_first_call(upstream_provider, 503)
     upstream_provider.domains = [tenant.external_id]
 
-    result = await sync_to_async(resolve_workspace_access_ex)(user, workspace.id)
+    # As Django's ASGI handler runs a sync view: in its own thread-sensitive context.
+    async with ThreadSensitiveContext():
+        result = await sync_to_async(resolve_workspace_access_ex)(user, workspace.id)
 
     assert result.granted
     await _drain_background()
@@ -373,3 +382,54 @@ async def test_an_unsettled_401_is_tagged_so_it_never_earns_grace(user, tenant):
     assert result.status == AccessVerificationStatus.UNAVAILABLE
     assert result.error_code == VERIFICATION_UNAVAILABLE_AFTER_REJECTION
     assert not access_freshness._grace_eligible(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unsettled_401_voids_the_proof_for_every_waiter(user, tenant):
+    """Requests waiting on the same lease never see the leader's tag, so the 401
+    must withdraw the proof grace would have relied on."""
+    account = await SocialAccount.objects.acreate(user=user, provider="commcare_connect", uid="w")
+    await SocialToken.objects.acreate(account=account, token="access")
+    connection = await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare_connect",
+        credential_type=TenantConnection.OAUTH,
+        social_account=account,
+    )
+    opp = await Tenant.objects.acreate(
+        provider="commcare_connect", external_id="8", canonical_name="8"
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=opp, connection=connection)
+    answers = [
+        ProviderVerificationResult.complete({"8"}),
+        ProviderVerificationResult.credential_rejected(ErrorCode.AUTH_TOKEN_EXPIRED),
+        ProviderVerificationResult.unavailable("verification_unavailable"),
+    ]
+
+    async def provider(*args, **kwargs):
+        return answers.pop(0)
+
+    async def no_sleep(_seconds):
+        return None
+
+    async def verify():
+        return await verify_connection_access(
+            user.id, connection.id, {opp.id}, provider_verifier=provider, sleep=no_sleep
+        )
+
+    assert (await verify()).status == AccessVerificationStatus.VERIFIED
+    await UpstreamAccessProof.objects.filter(connection=connection).aupdate(
+        verified_at=timezone.now() - timedelta(minutes=10)
+    )
+    window = timedelta(minutes=30)
+    assert await agrace_proof_tenant_ids(user.id, connection.id, {opp.id}, max_age=window)
+
+    await verify()
+
+    assert answers == []
+    # Not archived: the 401 may only have been a stale token.
+    assert await TenantMembership.objects.filter(user=user, tenant=opp).aexists()
+    assert not await agrace_proof_tenant_ids(user.id, connection.id, {opp.id}, max_age=window)
+    control = await VerificationControl.objects.aget(connection=connection)
+    assert control.last_attempt_error_code == VERIFICATION_UNAVAILABLE_AFTER_REJECTION

@@ -312,8 +312,8 @@ async def _aapply_grace(user_id, stale: dict, results: list) -> tuple[list, froz
     admitted = []
     for (connection_id, tenant_ids), result in zip(stale.items(), results, strict=True):
         if _grace_eligible(result) and await _agrace_admissible(user_id, connection_id, tenant_ids):
-            # Even behind a running check: this joins it as a waiter, and takes the
-            # check over if that one dies with its lease.
+            # Even behind a running check: this joins it as a waiter, and runs its
+            # own check if that one has finished without covering these tenants.
             started = schedule_background_verification(user_id, connection_id, tenant_ids)
             logger.info(
                 "upstream_access_grace user_id=%s connection_id=%s tenants=%d "

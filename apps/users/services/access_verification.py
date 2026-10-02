@@ -313,6 +313,20 @@ def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age,
         return _fresh_history_tenants(current, request, history, now=now, max_age=max_age)
 
 
+def void_positive_proofs(actor_user_id, connection_id, tenant_ids) -> None:
+    """Withdraw the positive proofs a provider 401 has called into question.
+
+    Archives nothing: the 401 may only mean a stale token, which the attempt goes on to
+    renew and retry. Until it settles, though, no proof of these tenants may stand in
+    for a fresh one, for this request or any other waiting on the same lease.
+    """
+    UpstreamAccessProof.objects.filter(
+        connection_id=connection_id,
+        connection__user_id=actor_user_id,
+        tenant_id__in=list(tenant_ids),
+    ).update(verified_at=None)
+
+
 def proofs_are_fresh(actor_user_id, connection_id, tenant_ids, *, now=None) -> bool:
     """Whether a claim for these tenants would return FRESH, without locking or claiming.
 
@@ -948,6 +962,7 @@ def publish_verification(
 aclaim_verification = sync_to_async(claim_verification)
 afresh_proof_tenant_ids = sync_to_async(fresh_proof_tenant_ids)
 agrace_proof_tenant_ids = sync_to_async(grace_proof_tenant_ids)
+avoid_positive_proofs = sync_to_async(void_positive_proofs)
 aproofs_are_fresh = sync_to_async(proofs_are_fresh)
 apublish_verification = sync_to_async(publish_verification)
 apublish_verification_receipt = sync_to_async(publish_verification_receipt)
