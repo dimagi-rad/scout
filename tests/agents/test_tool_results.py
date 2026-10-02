@@ -263,6 +263,7 @@ def test_next_offset_follows_the_list_cut_hardest():
             "datasets": [{"d": "x" * 400}] * 200,
             "workspace_errors": [{"e": "y" * 20_000}] * 10,
             "offset": 5,
+            "limit": 200,
             "total": 300,
         },
     }
@@ -301,6 +302,7 @@ def test_a_cut_sibling_list_is_not_mistaken_for_the_page():
     assert len(data["workspaces"]) == 20
     assert data["has_more"] is False
     assert "next_offset" not in data
+    assert data["inaccessible_workspace_ids_truncated"] is True
 
 
 def test_a_nested_list_that_was_cut_says_so_itself():
@@ -312,3 +314,23 @@ def test_a_nested_list_that_was_cut_says_so_itself():
     table = data["tables"]["visits"]
     assert table["columns_truncated"] is True
     assert 0 < len(table["columns"]) < 2_000
+
+
+def test_a_sibling_cut_within_total_is_still_not_taken_for_the_page():
+    payload = {
+        "success": True,
+        "data": {
+            "datasets": [{"name": "only"}],
+            "workspace_errors": [{"e": "y" * 10_000}] * 10,
+            "offset": 0,
+            "limit": 1,
+            "total": 500,
+            "has_more": True,
+        },
+    }
+
+    data = _compacted_payload("list_datasets", payload)["data"]
+
+    assert data["datasets"] == [{"name": "only"}]
+    assert "next_offset" not in data
+    assert data["workspace_errors_truncated"] is True

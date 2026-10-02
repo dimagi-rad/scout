@@ -177,23 +177,30 @@ def _note(payload: dict, target: dict, budget: int, original_bytes: int, hint: s
         payload["warnings"] = [hint]
 
 
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _cut_top_level_lists(target: dict, omitted: dict[str, int]) -> list[str]:
+    return [label for label in omitted if "." not in label and isinstance(target.get(label), list)]
+
+
 def _paged_list(target: dict, omitted: dict[str, int]) -> str | None:
-    """The cut top-level list that ``offset`` pages through, or None when none fits.
+    """The cut top-level list that ``offset`` pages through, or None when unsure.
 
     A sibling list (such as denied workspace ids) can be cut harder than the page, so
-    the page is the cut list whose kept and cut items together fit the envelope's
-    ``total`` past its ``offset``; with no ``total``, a single cut list is the page.
+    the page is the one cut list whose original length is the page the envelope's
+    ``offset``, ``limit`` and ``total`` describe; with no ``total``, a lone cut list.
     """
-    if not isinstance(target.get("offset"), int):
+    offset, limit, total = (_int(target.get(k)) for k in ("offset", "limit", "total"))
+    if offset is None:
         return None
-    cut = [label for label in omitted if "." not in label and isinstance(target.get(label), list)]
-    total = target.get("total")
-    if not isinstance(total, int):
+    cut = _cut_top_level_lists(target, omitted)
+    if total is None:
         return cut[0] if len(cut) == 1 else None
-    fits = [
-        label for label in cut if target["offset"] + len(target[label]) + omitted[label] <= total
-    ]
-    return max(fits, key=lambda label: omitted[label], default=None)
+    page_size = total - offset if limit is None else min(limit, total - offset)
+    pages = [label for label in cut if len(target[label]) + omitted[label] == page_size]
+    return pages[0] if len(pages) == 1 else None
 
 
 def fit_to_budget(payload: Any, budget: int) -> Any:
@@ -221,6 +228,11 @@ def fit_to_budget(payload: Any, budget: int) -> Any:
         target["row_count"] = len(target["rows"])
     next_offset = stuck_offset = None
     page_key = _paged_list(target, omitted)
+    if _int(target.get("offset")) is not None:
+        # In a paged listing, has_more speaks only for the page; a cut sibling says so itself.
+        for label in _cut_top_level_lists(target, omitted):
+            if label != page_key:
+                target[f"{label}_truncated"] = True
     if page_key is not None:
         kept = len(target[page_key])
         if kept:
