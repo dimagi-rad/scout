@@ -38,6 +38,30 @@ _TRUNCATION_NOTICE = (
     "open the Knowledge page to see the full set.)*"
 )
 
+_SECTION_SEPARATOR = "\n\n"
+
+# Connect's generated stg_visits TableKnowledge carries hundreds of column notes
+# (30-50 KB rendered); uncapped, one table spends the whole budget (#264).
+MAX_COLUMN_NOTES_PER_TABLE = 40
+
+
+def _fit_section(text: str, limit: int) -> str:
+    """Trim *text* to at most *limit* chars at a line boundary.
+
+    Trailing headings and labels left without their content are dropped, and a
+    section reduced to nothing but headings is dropped entirely.
+    """
+    if len(text) <= limit:
+        return text
+    lines = text[: limit + 1].split("\n")[:-1]
+    while lines and (
+        not lines[-1].strip() or lines[-1].startswith("#") or lines[-1].endswith(":**")
+    ):
+        lines.pop()
+    if all(not line.strip() or line.startswith("#") for line in lines):
+        return ""
+    return "\n".join(lines)
+
 
 class KnowledgeRetriever:
     """
@@ -61,26 +85,33 @@ class KnowledgeRetriever:
         ``user_question`` is accepted for API compatibility only; with no
         relevance index, entries are included in stable order until the budget
         is exhausted.
+
+        When over budget, sections claim space in priority order — learnings,
+        then knowledge entries, then table context — so a bulky table dump
+        cannot crowd out the short, high-value learnings (#264). Display order
+        is unchanged, and each section is cut only at a line boundary.
         """
-        sections: list[str] = []
+        sections = {
+            "entries": await self._format_knowledge_entries(),
+            "tables": await self._format_table_knowledge(),
+            "learnings": await self._format_agent_learnings(),
+        }
+        combined = _SECTION_SEPARATOR.join(text for text in sections.values() if text)
+        if len(combined) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET:
+            return combined
 
-        entries_section = await self._format_knowledge_entries()
-        if entries_section:
-            sections.append(entries_section)
-
-        tables_section = await self._format_table_knowledge()
-        if tables_section:
-            sections.append(tables_section)
-
-        learnings_section = await self._format_agent_learnings()
-        if learnings_section:
-            sections.append(learnings_section)
-
-        combined = "\n\n".join(sections)
-        if len(combined) > KNOWLEDGE_CONTEXT_CHAR_BUDGET:
-            keep = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
-            combined = combined[: max(0, keep)].rstrip() + _TRUNCATION_NOTICE
-        return combined
+        remaining = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
+        fitted: dict[str, str] = {}
+        for name in ("learnings", "entries", "tables"):
+            if not sections[name]:
+                continue
+            separator = len(_SECTION_SEPARATOR) if fitted else 0
+            kept = _fit_section(sections[name], remaining - separator)
+            if kept:
+                fitted[name] = kept
+                remaining -= len(kept) + separator
+        kept_sections = [fitted[name] for name in sections if name in fitted]
+        return _SECTION_SEPARATOR.join(kept_sections) + _TRUNCATION_NOTICE
 
     async def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""
@@ -116,8 +147,15 @@ class KnowledgeRetriever:
 
             if table.column_notes:
                 lines.append("**Column Notes:**")
-                for column, note in table.column_notes.items():
+                notes = list(table.column_notes.items())
+                for column, note in notes[:MAX_COLUMN_NOTES_PER_TABLE]:
                     lines.append(f"- `{column}`: {_sanitize_prompt_content(str(note))}")
+                omitted = len(notes) - MAX_COLUMN_NOTES_PER_TABLE
+                if omitted > 0:
+                    lines.append(
+                        f"- … {omitted} more column notes omitted to fit the prompt; "
+                        f"`describe_table` lists every column of `{table.table_name}`."
+                    )
                 lines.append("")
 
             if table.data_quality_notes:
