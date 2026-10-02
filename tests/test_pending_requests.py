@@ -1177,7 +1177,14 @@ async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
     assert await load_activity.aworkspace_load_pending(ws.id)
     assert not await load_activity.aworkspace_own_load_pending(ws)
 
-    await TenantSchema.objects.filter(id=schema.id).aupdate(load_workspace_id=ws.id)
+    await TenantSchema.objects.filter(id=schema.id).aupdate(
+        refresh_workspace_id=ws.id, state=SchemaState.PROVISIONING
+    )
+    assert await load_activity.aworkspace_own_load_pending(ws)
+
+    await TenantSchema.objects.filter(id=schema.id).aupdate(
+        refresh_workspace_id=None, load_workspace_id=ws.id
+    )
     assert await load_activity.aworkspace_own_load_pending(ws)
 
 

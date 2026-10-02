@@ -4075,7 +4075,13 @@ async def _flush_thread(thread_id) -> int:
                 await pending_requests.asettle(held)
             # The run saves the user's message before the model answers, so a run
             # that failed after that leaves the message sent, with no reply.
-            landed = await pending_requests.athread_has_message(thread_id, held.message_id)
+            try:
+                async with asyncio.timeout(pending_requests.SETTLE_TIMEOUT_SECONDS):
+                    landed = await pending_requests.athread_has_message(thread_id, held.message_id)
+            except Exception:
+                # Unknown: say nothing rather than claim a reply failed.
+                logger.warning("flush: could not read thread %s", thread_id, exc_info=True)
+                landed = False
             if landed and not answered:
                 await _persist_synthetic_thread_message(thread, FLUSH_FAILED_MESSAGE)
             answered = answered or landed
