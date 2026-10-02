@@ -298,8 +298,13 @@ async def test_thread_list_never_reads_checkpoints(monkeypatch, workspace, user)
 
     monkeypatch.setattr("apps.chat.thread_views.ensure_checkpointer", fail_checkpoint_read)
     monkeypatch.setattr("apps.chat.thread_views._load_thread_messages", fail_checkpoint_read)
-    monkeypatch.setattr("apps.chat.titles.ensure_checkpointer", fail_checkpoint_read)
-    monkeypatch.setattr("apps.chat.titles.afirst_user_message", fail_checkpoint_read)
+    reads = []
+
+    async def record_read(thread_id):
+        reads.append(thread_id)
+        return ""
+
+    monkeypatch.setattr("apps.chat.titles._aread_first_user_message", record_read)
 
     client = await _auth_client(user)
     response = await client.get(f"/api/workspaces/{workspace.id}/threads/")
@@ -311,6 +316,7 @@ async def test_thread_list_never_reads_checkpoints(monkeypatch, workspace, user)
         "Visits by worker",
         "What are module completion rates?",
     ]
+    assert reads == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -328,7 +334,7 @@ async def test_thread_list_titles_a_legacy_blank_row_once(monkeypatch, workspace
         return "What are module completion rates?"
 
     monkeypatch.setattr("apps.chat.titles.athreads_with_checkpoints", with_state)
-    monkeypatch.setattr("apps.chat.titles.afirst_user_message", first_message)
+    monkeypatch.setattr("apps.chat.titles._aread_first_user_message", first_message)
     client = await _auth_client(user)
 
     for _ in range(2):

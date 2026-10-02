@@ -34,6 +34,11 @@ TITLE_MAX_TOKENS = 32
 # A failed title is retried on the thread's next successful turn.
 TITLE_TIMEOUT_S = 8
 
+BLANK_TITLE_FILLS_PER_REQUEST = 5
+# Per process: checkpoints read once and found to hold no user message.
+_NO_FIRST_MESSAGE: set[str] = set()
+_NO_FIRST_MESSAGE_MAX = 10_000
+
 TITLE_SYSTEM_PROMPT = (
     "You name data-analysis chat conversations. Given the user's first message, reply "
     "with a short title for the conversation: at most 6 words, in the message's "
@@ -68,16 +73,12 @@ def clean_generated_title(raw: str) -> str:
     return title.rstrip(".,;:!?- \u2013\u2014" + _WRAPPING_CHARS)
 
 
-async def afirst_user_message(thread_id: str) -> str:
-    """The first user message from the checkpoint, for threads stored without a title."""
-    try:
-        checkpointer = await ensure_checkpointer()
-        checkpoint_tuple = await checkpointer.aget_tuple(
-            {"configurable": {"thread_id": str(thread_id)}}
-        )
-    except Exception:
-        logger.warning("Thread title: could not read checkpoint %s", thread_id, exc_info=True)
-        return ""
+async def _aread_first_user_message(thread_id) -> str:
+    """The first user message in the thread's checkpoint; raises if it can't be read."""
+    checkpointer = await ensure_checkpointer()
+    checkpoint_tuple = await checkpointer.aget_tuple(
+        {"configurable": {"thread_id": str(thread_id)}}
+    )
     if checkpoint_tuple is None:
         return ""
     messages = (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("messages", [])
@@ -88,6 +89,15 @@ async def afirst_user_message(thread_id: str) -> str:
         if text and not text.startswith(SYSTEM_RESUME_MARKER):
             return text
     return ""
+
+
+async def afirst_user_message(thread_id) -> str:
+    """The first user message from the checkpoint, for threads stored without a title."""
+    try:
+        return await _aread_first_user_message(thread_id)
+    except Exception:
+        logger.warning("Thread title: could not read checkpoint %s", thread_id, exc_info=True)
+        return ""
 
 
 def _needs_provisional_title(thread: Thread) -> bool:
@@ -118,15 +128,31 @@ async def afill_blank_titles(threads: list[Thread]) -> None:
 
     Rows titled before this field was the only source (canvas shells chatted in
     later) are blank; each is read from its checkpoint once, then served from the
-    row. Rows with no conversation yet are ruled out in one query.
+    row. Rows with no conversation yet are ruled out in one query. A full checkpoint
+    read is heavy, so one request reads at most a few rows, stops at the first
+    failed read, and never re-reads a checkpoint known to hold no user message.
     """
     blank = [thread for thread in threads if _needs_provisional_title(thread)]
     if not blank:
         return
     with_state = await athreads_with_checkpoints(thread.id for thread in blank)
-    for thread in blank:
-        if str(thread.id) in with_state:
-            await _aset_provisional_title(thread, await afirst_user_message(thread.id))
+    candidates = [
+        thread
+        for thread in blank
+        if str(thread.id) in with_state and str(thread.id) not in _NO_FIRST_MESSAGE
+    ]
+    for thread in candidates[:BLANK_TITLE_FILLS_PER_REQUEST]:
+        try:
+            first_message = await _aread_first_user_message(thread.id)
+        except Exception:
+            logger.warning("Thread title: could not read checkpoint %s", thread.id, exc_info=True)
+            return
+        if first_message:
+            await _aset_provisional_title(thread, first_message)
+        else:
+            if len(_NO_FIRST_MESSAGE) >= _NO_FIRST_MESSAGE_MAX:
+                _NO_FIRST_MESSAGE.clear()
+            _NO_FIRST_MESSAGE.add(str(thread.id))
 
 
 async def _acall_title_model(thread: Thread, first_message: str) -> str:

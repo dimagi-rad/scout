@@ -381,3 +381,67 @@ async def test_first_turn_titles_a_row_created_before_any_message(workspace, use
     await shell.arefresh_from_db()
     assert shell.title == "Visits by worker last month"
     assert shell.title_source == Thread.TitleSource.FIRST_MESSAGE
+
+
+async def _all_have_state(thread_ids):
+    return {str(thread_id) for thread_id in thread_ids}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_blank_title_fill_reads_a_few_rows_per_request(workspace, user, monkeypatch):
+    blank = [await _thread(workspace, user, title="") for _ in range(8)]
+    reads = []
+
+    async def first_message(thread_id):
+        reads.append(str(thread_id))
+        return f"Question {len(reads)}"
+
+    monkeypatch.setattr(titles, "athreads_with_checkpoints", _all_have_state)
+    monkeypatch.setattr(titles, "_aread_first_user_message", first_message)
+
+    await titles.afill_blank_titles(blank)
+
+    assert len(reads) == titles.BLANK_TITLE_FILLS_PER_REQUEST
+    filled = [thread for thread in blank if thread.title]
+    assert len(filled) == titles.BLANK_TITLE_FILLS_PER_REQUEST
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_blank_title_fill_stops_at_a_failed_read(workspace, user, monkeypatch, caplog):
+    blank = [await _thread(workspace, user, title="") for _ in range(3)]
+    reads = []
+
+    async def failing_read(thread_id):
+        reads.append(thread_id)
+        raise TimeoutError("pool exhausted")
+
+    monkeypatch.setattr(titles, "athreads_with_checkpoints", _all_have_state)
+    monkeypatch.setattr(titles, "_aread_first_user_message", failing_read)
+
+    with caplog.at_level(logging.WARNING, logger="apps.chat.titles"):
+        await titles.afill_blank_titles(blank)
+
+    assert len(reads) == 1
+    assert all(thread.title == "" for thread in blank)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_blank_title_fill_does_not_reread_an_empty_checkpoint(workspace, user, monkeypatch):
+    thread = await _thread(workspace, user, title="")
+    reads = []
+
+    async def no_user_message(thread_id):
+        reads.append(thread_id)
+        return ""
+
+    monkeypatch.setattr(titles, "athreads_with_checkpoints", _all_have_state)
+    monkeypatch.setattr(titles, "_aread_first_user_message", no_user_message)
+    monkeypatch.setattr(titles, "_NO_FIRST_MESSAGE", set())
+
+    await titles.afill_blank_titles([thread])
+    await titles.afill_blank_titles([thread])
+
+    assert len(reads) == 1
