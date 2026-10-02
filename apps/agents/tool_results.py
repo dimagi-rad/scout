@@ -128,9 +128,10 @@ def _cut_lists(payload: dict, target: dict, limit: int, omitted: dict[str, int])
         items = parent[key]
         keep = _longest_prefix_within(items, _size(items) - (total - limit))
         parent[key] = items[:keep]
-        if len(path) > 1:
-            # The hint names only a few paths; a nested entry, such as one table's
-            # columns, must say itself that it is incomplete.
+        if key != "rows":
+            # The hint names only a few paths and has_more speaks only for a page, so a
+            # cut list, such as one table's columns, must say itself that it is short.
+            # Cut rows already carry truncated and an updated row_count.
             parent[f"{key}_truncated"] = True
         label = ".".join(path)
         omitted[label] = omitted.get(label, 0) + len(items) - keep
@@ -228,11 +229,6 @@ def fit_to_budget(payload: Any, budget: int) -> Any:
         target["row_count"] = len(target["rows"])
     next_offset = stuck_offset = None
     page_key = _paged_list(target, omitted)
-    if _int(target.get("offset")) is not None:
-        # In a paged listing, has_more speaks only for the page; a cut sibling says so itself.
-        for label in _cut_top_level_lists(target, omitted):
-            if label != page_key:
-                target[f"{label}_truncated"] = True
     if page_key is not None:
         kept = len(target[page_key])
         if kept:

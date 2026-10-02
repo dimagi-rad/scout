@@ -256,7 +256,7 @@ def test_an_empty_row_set_still_lets_other_lists_be_cut_but_never_its_columns():
     assert 0 < len(data["tables_accessed"]) < 1_000
 
 
-def test_next_offset_follows_the_list_cut_hardest():
+def test_next_offset_follows_the_list_the_page_size_describes():
     payload = {
         "success": True,
         "data": {
@@ -334,3 +334,12 @@ def test_a_sibling_cut_within_total_is_still_not_taken_for_the_page():
     assert data["datasets"] == [{"name": "only"}]
     assert "next_offset" not in data
     assert data["workspace_errors_truncated"] is True
+
+
+def test_a_cut_top_level_list_without_paging_says_so_itself():
+    payload = {"success": True, "data": {"tables": [{"name": "t" * 200}] * 1_000}}
+
+    data = _compacted_payload("get_lineage", payload)["data"]
+
+    assert data["tables_truncated"] is True
+    assert "rows_truncated" not in data
