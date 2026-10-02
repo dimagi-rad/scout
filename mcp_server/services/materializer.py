@@ -523,7 +523,11 @@ def run_pipeline(
     ).update(state=MaterializationRun.RunState.TRANSFORMING)
     if not rows:
         MaterializationRun.objects.filter(id=run.id).update(
-            result={"cancelled": True, "sources": source_results},
+            result={
+                "cancelled": True,
+                "sources": source_results,
+                "duration_s": _elapsed(run_started),
+            },
         )
         logger.info("Run %s cancelled before transform; partial data committed", run.id)
         raise MaterializationCancelled()
