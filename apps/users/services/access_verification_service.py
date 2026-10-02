@@ -13,7 +13,7 @@ from dataclasses import replace
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import SyncToAsync, ThreadSensitiveContext
-from django.db import close_old_connections
+from django.db import connections
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
@@ -542,10 +542,10 @@ def _attempt_matches_waiter_lineage(
 class _RecyclingExecutor(ThreadPoolExecutor):
     """Closes each call's connection when done, as a request's end would.
 
-    No request signal ever fires on these threads, and with CONN_MAX_AGE at 0 a
-    connection is obsolete as soon as its call returns: left open, each thread would
-    hold an idle connection (prod and staging share one RDS), and one dropped by a
-    failover would fail every later check that lands on it.
+    No request signal ever fires on these threads: left open, each would hold an
+    idle connection (prod and staging share one RDS), and one dropped by a failover
+    would fail every later check that lands on it. The cost is a fresh connect per
+    ORM hop, a few per verification, which runs every five minutes per user.
     """
 
     def submit(self, fn, /, *args, **kwargs):
@@ -553,11 +553,13 @@ class _RecyclingExecutor(ThreadPoolExecutor):
 
     @staticmethod
     def _recycled(fn, *args, **kwargs):
-        close_old_connections()
         try:
             return fn(*args, **kwargs)
         finally:
-            close_old_connections()
+            # Best effort: a socket a failover already broke must not mask the
+            # call's own outcome.
+            with contextlib.suppress(Exception):
+                connections.close_all()
 
 
 _DETACHED_ORM_CONTEXT = ThreadSensitiveContext()
