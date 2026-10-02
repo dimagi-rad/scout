@@ -36,6 +36,7 @@ from mcp_server.context import QueryContext, _parse_db_url, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.server import (
+    MAX_REQUESTED_DATASET_WORKSPACES,
     cancel_materialization,
     describe_table,
     get_materialization_status,
@@ -464,6 +465,14 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         result = await list_datasets(workspace_id=str(workspace.id), user_id=str(user.id), limit=50)
 
         assert result["data"]["limit"] == 50
+
+    async def test_list_datasets_refuses_too_many_workspaces(self, user):
+        ids = [str(uuid.uuid4()) for _ in range(MAX_REQUESTED_DATASET_WORKSPACES + 1)]
+
+        result = await list_datasets(workspace_ids=ids, user_id=str(user.id))
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
 
     async def test_list_datasets_requires_a_workspace(self, user):
         result = await list_datasets(user_id=str(user.id))

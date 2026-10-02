@@ -63,12 +63,12 @@ def _count_queries(tool, **kwargs):
 async def _listing_kwargs(tool, user):
     kwargs = {"user_id": str(user.id), "limit": 10}
     if tool is server.list_datasets:
-        # list_datasets only spans the workspaces it is asked for.
+        # list_datasets only spans the workspaces it is asked for, at most 20 per call.
         kwargs["workspace_ids"] = [
             str(ws_id)
             async for ws_id in WorkspaceMembership.objects.filter(user=user).values_list(
                 "workspace_id", flat=True
-            )
+            )[: server.MAX_REQUESTED_DATASET_WORKSPACES]
         ]
     return kwargs
 
@@ -168,17 +168,26 @@ async def test_issue_lists_are_capped_with_full_counts(upstream_provider):
     ids_by_name = {w.name: str(w.id) async for w in Workspace.objects.filter(created_by=user)}
     active = ids_by_name["Workspace 055"]
 
-    workspaces = await server.list_workspaces(user_id=str(user.id), workspace_id=active)
+    data = (await server.list_workspaces(user_id=str(user.id), workspace_id=active))["data"]
+
+    assert data["inaccessible_workspace_count"] == 12
+    assert len(data["inaccessible_workspace_ids"]) == server.MAX_LISTED_WORKSPACE_ISSUES
+    assert data["inaccessible_workspace_ids"][0] == active
+    assert data["unverified_workspace_count"] == 12
+    assert len(data["unverified_workspace_ids"]) == server.MAX_LISTED_WORKSPACE_ISSUES
+
+
+async def test_dataset_workspace_errors_are_capped_active_first(upstream_provider):
+    user = await _member_of(20)
+    upstream_provider.failure = 503
+    ids_by_name = {w.name: str(w.id) async for w in Workspace.objects.filter(created_by=user)}
+    active = ids_by_name["Workspace 017"]
+
     datasets = await server.list_datasets(
         workspace_ids=list(ids_by_name.values()), workspace_id=active, user_id=str(user.id)
     )
 
-    for data in (workspaces["data"], datasets["data"]):
-        assert data["inaccessible_workspace_count"] == 12
-        assert len(data["inaccessible_workspace_ids"]) == server.MAX_LISTED_WORKSPACE_ISSUES
-        assert data["inaccessible_workspace_ids"][0] == active
-        assert data["unverified_workspace_count"] == 12
-        assert len(data["unverified_workspace_ids"]) == server.MAX_LISTED_WORKSPACE_ISSUES
-    errors = datasets["data"]["workspace_errors"]
-    assert datasets["data"]["workspace_error_count"] == 36
-    assert len(errors) == server.MAX_LISTED_WORKSPACE_ISSUES
+    data = datasets["data"]
+    assert data["workspace_error_count"] == 12
+    assert len(data["workspace_errors"]) == server.MAX_LISTED_WORKSPACE_ISSUES
+    assert data["workspace_errors"][0]["workspace_id"] == active

@@ -142,6 +142,8 @@ FIELD_SUMMARY_DESCRIPTION_CHARS = 160
 # Users with hundreds of memberships produced hundreds of denied ids and model
 # errors per listing; the agent needs the count and a sample, not every id.
 MAX_LISTED_WORKSPACE_ISSUES = 10
+# Each requested workspace is rechecked upstream, so one call must not fan out to hundreds.
+MAX_REQUESTED_DATASET_WORKSPACES = 20
 
 
 _P = ParamSpec("_P")
@@ -806,8 +808,8 @@ async def list_datasets(
         workspace_ids: Optional workspace UUIDs to list instead of the active workspace.
             Omit to list only the active workspace, the one every query tool reads.
             Pass ids from list_workspaces to look across other workspaces; their
-            datasets cannot be queried from this chat. Without user_id, only the
-            active workspace is allowed.
+            datasets cannot be queried from this chat. At most 20 per call. Without
+            user_id, only the active workspace is allowed.
         limit: Maximum datasets to return, clamped to 100, or to 10 with include_fields.
         offset: Number of matching datasets to skip.
         search: Optional case-insensitive search over dataset/workspace text.
@@ -845,9 +847,15 @@ async def list_datasets(
         include_fields=include_fields,
     ) as tc:
         try:
-            requested_workspace_ids = _normalize_workspace_ids(workspace_ids)
+            requested_workspace_ids = list(dict.fromkeys(_normalize_workspace_ids(workspace_ids)))
         except ValueError as exc:
             tc["result"] = error_response(VALIDATION_ERROR, str(exc))
+            return tc["result"]
+        if len(requested_workspace_ids) > MAX_REQUESTED_DATASET_WORKSPACES:
+            tc["result"] = error_response(
+                VALIDATION_ERROR,
+                f"Pass at most {MAX_REQUESTED_DATASET_WORKSPACES} workspace_ids per call.",
+            )
             return tc["result"]
 
         if not requested_workspace_ids and workspace_id:
