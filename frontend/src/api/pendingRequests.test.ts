@@ -22,8 +22,8 @@ describe("pendingPhase", () => {
     ["waiting", "pending", "waiting"],
     ["claimed", "pending", "answering"],
     ["waiting", "running", "answering"],
-    // A stopped load still resumes the chat, and the request goes with that reply.
-    ["waiting", "cancelled", "answering"],
+    // One stopped while queued never resumes, so it must not spin forever.
+    ["waiting", "cancelled", "unanswered"],
     ["waiting", "failed", "unanswered"],
     ["waiting", "completed", "unanswered"],
     ["waiting", null, "unanswered"],

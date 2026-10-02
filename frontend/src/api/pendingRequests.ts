@@ -31,14 +31,10 @@ export function pendingRequestText(pending: PendingRequest): string {
  * unanswered because its load ended without sending it (the user sends or drops it).
  */
 export function pendingPhase(pending: PendingRequest): PendingPhase {
-  // A stopped load still resumes the chat and sends the request with its reply.
-  if (
-    pending.state === "claimed" ||
-    pending.thread_job_state === "running" ||
-    pending.thread_job_state === "cancelled"
-  ) {
-    return "answering"
-  }
+  // A stopped load usually resumes and sends the request, but one stopped while
+  // still queued never does; offering Send now beats a card stuck on "Answering…",
+  // and the resume (which holds the thread) refuses a Send now it already served.
+  if (pending.state === "claimed" || pending.thread_job_state === "running") return "answering"
   if (pending.thread_job_state === "pending") return "waiting"
   return "unanswered"
 }
