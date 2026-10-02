@@ -11,6 +11,7 @@ permissions:
 jobs:
   open-issue:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Open review issue if not already open
         env:
@@ -23,6 +24,7 @@ jobs:
 
           existing=$(gh issue list --state open --search "\"${title}\" in:title" \
             --json title --jq "[.[] | select(.title == \"${title}\")] | length")
+          : "${existing:?issue lookup returned no count; refusing to risk a duplicate}"
           if [ "$existing" -gt 0 ]; then
             echo "Open issue \"${title}\" already exists; skipping."
             exit 0
