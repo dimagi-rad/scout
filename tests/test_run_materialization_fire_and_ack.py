@@ -362,3 +362,22 @@ async def test_run_materialization_queues_nothing_when_its_threadjob_cannot_be_s
     assert len(queued) == 1
     assert not await sync_to_async(_visible_to_a_worker)(queued[0])
     assert not await ThreadJob.objects.filter(thread=thread).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_running_resume_job_is_not_reported_as_a_pending_load(workspace, user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type=ThreadJob.JobType.MATERIALIZATION,
+        procrastinate_job_id=11_113,
+        tool_call_id="tc-running",
+        state=ThreadJob.State.RUNNING,
+    )
+    with patch(DISPATCH, new=AsyncMock(return_value=AsyncMock(id="tj-new"))) as dispatch:
+        result = await run_materialization(
+            workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
+        )
+    assert result["data"]["status"] == "started"
+    dispatch.assert_awaited_once()
