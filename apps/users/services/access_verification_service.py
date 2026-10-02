@@ -620,6 +620,7 @@ async def _withdraw_proofs(
     clock,
     except_tenant_ids=frozenset(),
     unsettled_by=None,
+    answered_at=None,
 ) -> None:
     """Void the positive proofs an answer short of access calls into question.
 
@@ -635,6 +636,7 @@ async def _withdraw_proofs(
                 except_tenant_ids=except_tenant_ids,
                 before=before,
                 unsettled_by=unsettled_by,
+                answered_at=answered_at,
             ),
             deadline=deadline,
             clock=clock,
@@ -767,6 +769,7 @@ async def _verify_and_publish_once(
                 # grace could otherwise stand on, not the fresh ones of sibling tenants.
                 before=completed_at - PROOF_MAX_AGE if indeterminate else completed_at,
                 unsettled_by=provider_result.outcome if indeterminate else None,
+                answered_at=completed_at,
                 deadline=deadline,
                 clock=clock,
             )

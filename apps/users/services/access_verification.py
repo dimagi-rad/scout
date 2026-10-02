@@ -340,13 +340,15 @@ def void_positive_proofs(
     except_tenant_ids=(),
     before=None,
     unsettled_by=None,
+    answered_at=None,
 ):
     """Withdraw positive proofs that an unsettled "access lost" answer calls into question.
 
     Archives nothing. ``tenant_ids`` None means the whole connection: a 401 rejects
     the credential, not one tenant, and other requests on this connection may be
     checking other tenants. ``except_tenant_ids`` are tenants the same answer
-    confirmed. ``unsettled_by`` marks every proof in scope with that outcome. ``before`` keeps a void that lands late from undoing a proof published
+    confirmed. ``unsettled_by`` marks every proof in scope older than
+    ``answered_at`` with that outcome. ``before`` keeps a void that lands late from undoing a proof published
     after the answer it is about.
     """
     proofs = UpstreamAccessProof.objects.filter(
@@ -358,8 +360,11 @@ def void_positive_proofs(
         proofs = proofs.exclude(tenant_id__in=list(except_tenant_ids))
     if unsettled_by is not None:
         # The proofs left standing are marked too, as publication would, so grace
-        # cannot stand on them later even if that publication never lands.
-        proofs.update(last_attempt_result=unsettled_by.value)
+        # cannot stand on them later even if that publication never lands. Only those
+        # older than the answer: a late mark must not land on a proof published since.
+        proofs.filter(Q(verified_at__isnull=True) | Q(verified_at__lt=answered_at)).update(
+            last_attempt_result=unsettled_by.value
+        )
     if before is not None:
         proofs = proofs.filter(verified_at__lt=before)
     proofs.update(verified_at=None)
