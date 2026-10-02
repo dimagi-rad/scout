@@ -23,7 +23,6 @@ from apps.chat.models import Thread
 logger = logging.getLogger(__name__)
 
 THREAD_TITLE_PREVIEW_CHARS = 200
-UNTITLED = "Untitled"
 
 TITLE_MAX_WORDS = 8
 TITLE_MAX_CHARS = 80
@@ -50,10 +49,6 @@ def short_thread_title(title: str) -> str:
     if len(clean) > THREAD_TITLE_PREVIEW_CHARS:
         return f"{clean[:THREAD_TITLE_PREVIEW_CHARS].rstrip()}..."
     return clean
-
-
-def display_thread_title(thread: Thread) -> str:
-    return short_thread_title(thread.title) or UNTITLED
 
 
 def clean_generated_title(raw: str) -> str:

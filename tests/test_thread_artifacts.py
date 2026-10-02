@@ -303,7 +303,7 @@ async def test_thread_list_never_reads_checkpoints(monkeypatch, workspace, user)
     response = await client.get(f"/api/workspaces/{workspace.id}/threads/")
 
     assert response.status_code == 200
-    assert [item["title"] for item in response.json()] == ["Untitled"] * 3
+    assert [item["title"] for item in response.json()] == [""] * 3
 
 
 @pytest.mark.django_db(transaction=True)

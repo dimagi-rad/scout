@@ -17,7 +17,7 @@ from apps.chat.helpers import (
 )
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
-from apps.chat.titles import display_thread_title, short_thread_title
+from apps.chat.titles import short_thread_title
 from apps.common.http import parse_json_object
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -43,7 +43,9 @@ async def _thread_id_taken(thread_id) -> bool:
 
 
 def _thread_summary(thread):
-    title = display_thread_title(thread)
+    # Blank stays blank: the client owns the "Untitled" placeholder, so it can tell a
+    # placeholder from a real title.
+    title = short_thread_title(thread.title)
     return {
         "id": str(thread.id),
         "title": title,
