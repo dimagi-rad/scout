@@ -17,7 +17,7 @@ export interface Thread {
 
 export type ThreadsStatus = "idle" | "loading" | "loaded" | "error"
 
-const ACCESS_DENIAL_REASONS = new Set([
+const ACCESS_DENIAL_REASONS = [
   "tenant_access_lost",
   "credential_missing",
   "credential_expired",
@@ -26,24 +26,36 @@ const ACCESS_DENIAL_REASONS = new Set([
   "verification_in_progress",
   // A workspace with no sources (#381): only a delete resolves it, so never recheckable.
   "no_sources",
-])
+] as const
+
+export type AccessDenialReason = (typeof ACCESS_DENIAL_REASONS)[number]
 
 // A lost-access denial is also rechecked on request: once an admin restores access
 // upstream, only an explicit verification can restore the archived membership.
-const RECHECKABLE_REASONS = new Set([
+const RECHECKABLE_REASONS: ReadonlySet<AccessDenialReason> = new Set([
   "tenant_access_lost",
   "upstream_access_lost",
   "verification_unavailable",
   "verification_in_progress",
 ])
 
-function accessDenial(error: unknown): { message: string; retryable: boolean } | null {
+interface AccessDenial {
+  reason: AccessDenialReason
+  message: string
+  retryable: boolean
+}
+
+function isAccessDenialReason(value: unknown): value is AccessDenialReason {
+  return (ACCESS_DENIAL_REASONS as readonly unknown[]).includes(value)
+}
+
+function accessDenial(error: unknown): AccessDenial | null {
   if (!(error instanceof ApiError) || typeof error.body !== "object" || error.body === null) {
     return null
   }
-  const body = error.body as { reason?: unknown }
-  if (typeof body.reason !== "string" || !ACCESS_DENIAL_REASONS.has(body.reason)) return null
-  return { message: error.message, retryable: RECHECKABLE_REASONS.has(body.reason) }
+  const { reason } = error.body as { reason?: unknown }
+  if (!isAccessDenialReason(reason)) return null
+  return { reason, message: error.message, retryable: RECHECKABLE_REASONS.has(reason) }
 }
 
 export interface UiSlice {
@@ -51,12 +63,15 @@ export interface UiSlice {
   activeArtifactId: string | null
   threads: Thread[]
   threadsStatus: ThreadsStatus
-  // Actionable message when the user lost upstream (tenant) access to the
-  // workspace — distinct from a retryable outage. null in every other case.
-  threadsAccessLostMessage: string | null
+  // Why the threads fetch was refused access — distinct from a retryable outage.
+  // null in every other case.
+  threadsAccessDenialReason: AccessDenialReason | null
   // An explicit upstream recheck can resolve this denial (a temporary failure, or
   // access an admin may since have restored), so offer "Retry verification".
   threadsAccessRetryable: boolean
+  // The server's message when "Retry verification" was itself denied. Kept apart from
+  // the threads denial so the lost-access gate shows only what the retry found.
+  accessRetryOutcome: string | null
   uiActions: {
     newThread: () => void
     selectThread: (id: string) => Promise<void>
@@ -79,8 +94,9 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
     activeArtifactId: null,
     threads: [],
     threadsStatus: "idle",
-    threadsAccessLostMessage: null,
+    threadsAccessDenialReason: null,
     threadsAccessRetryable: false,
+    accessRetryOutcome: null,
     uiActions: {
       newThread: () => {
         set({ threadId: crypto.randomUUID(), activeArtifactId: null })
@@ -110,8 +126,9 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           set({
             threads,
             threadsStatus: "loaded",
-            threadsAccessLostMessage: null,
+            threadsAccessDenialReason: null,
             threadsAccessRetryable: false,
+            accessRetryOutcome: null,
           })
         } catch (error) {
           if (!isCurrent()) return
@@ -119,18 +136,19 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           // "loaded" with [] reads as "all conversations deleted" during a
           // DB/checkpointer blip. Keep shown threads and flag the error for retry.
           console.error("[Scout] Failed to load threads:", error)
-          // An access denial carries an actionable server message; show it
-          // instead of the generic "couldn't load" + retry.
+          // An access denial gets reason-specific guidance instead of the generic
+          // "couldn't load" + retry.
           const denial = accessDenial(error)
           set({
             threadsStatus: "error",
-            threadsAccessLostMessage: denial?.message ?? null,
+            threadsAccessDenialReason: denial?.reason ?? null,
             threadsAccessRetryable: denial?.retryable === true,
           })
         }
       },
       retryAccessVerification: async (workspaceId: string) => {
         const isCurrent = requests.start("threads", workspaceId)
+        set({ accessRetryOutcome: null })
         try {
           await workspaceApi.retryAccessVerification(workspaceId)
         } catch (error) {
@@ -141,8 +159,9 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           if (denial) {
             set({
               threadsStatus: "error",
-              threadsAccessLostMessage: denial.message,
+              threadsAccessDenialReason: denial.reason,
               threadsAccessRetryable: denial.retryable,
+              accessRetryOutcome: denial.message,
             })
             return
           }

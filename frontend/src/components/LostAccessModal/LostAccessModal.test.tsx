@@ -198,10 +198,18 @@ describe("LostAccessModal upstream recheck", () => {
   it("shows the retry outcome inside the gate", () => {
     useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
     // Set after the switch: selecting a workspace resets the thread-denial state.
-    useAppStore.setState({ threadsAccessLostMessage: "We couldn't verify your access right now." })
+    useAppStore.setState({ accessRetryOutcome: "We couldn't verify your access right now." })
     renderModal()
 
     expect(screen.getByTestId("lost-access-retry-outcome")).toHaveTextContent("couldn't verify")
+  })
+
+  it("does not repeat the threads denial as a retry outcome", () => {
+    useAppStore.setState({ domains: [ws("skelly", false)], activeDomainId: "skelly" })
+    useAppStore.setState({ threadsStatus: "error", threadsAccessDenialReason: "tenant_access_lost" })
+    renderModal()
+
+    expect(screen.queryByTestId("lost-access-retry-outcome")).toBeNull()
   })
 })
 
@@ -234,6 +242,13 @@ describe("LostAccessModal with missing sources", () => {
       "Bot B: connect Open Chat Studio team 'Team B' in Connected Accounts",
     )
     expect(screen.queryByText(/If you disconnected your account/)).not.toBeInTheDocument()
+  })
+
+  it("leaves a retry's outcome to the source list, which already says what is needed", () => {
+    useAppStore.setState({ accessRetryOutcome: "Still needed — 'Bot B': connect …" })
+    renderModal()
+
+    expect(screen.queryByTestId("lost-access-retry-outcome")).toBeNull()
   })
 
   it("links to Connected Accounts", async () => {

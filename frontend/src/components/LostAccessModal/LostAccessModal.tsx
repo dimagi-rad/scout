@@ -30,7 +30,7 @@ export function LostAccessModal() {
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const retryAccessVerification = useAppStore((s) => s.uiActions.retryAccessVerification)
-  const retryOutcome = useAppStore((s) => s.threadsAccessLostMessage)
+  const retryOutcome = useAppStore((s) => s.accessRetryOutcome)
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
 
   const active = domains.find((d) => d.id === activeDomainId)
@@ -121,7 +121,7 @@ export function LostAccessModal() {
           </p>
         )}
 
-        {retryOutcome && !noSources && (
+        {retryOutcome && !noSources && missing.length === 0 && (
           <p className="mt-3 text-sm text-muted-foreground" data-testid="lost-access-retry-outcome">
             {retryOutcome}
           </p>

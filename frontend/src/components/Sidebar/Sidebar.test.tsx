@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
   const logout = vi.fn()
   const newThread = vi.fn()
   const selectThread = vi.fn()
+  const retryAccessVerification = vi.fn(() => Promise.resolve())
 
   return {
     state: {
@@ -20,9 +21,11 @@ const mocks = vi.hoisted(() => {
       threadId: null,
       threads: [] as Thread[],
       threadsStatus: "loaded",
+      threadsAccessDenialReason: null as string | null,
+      threadsAccessRetryable: false,
       domainActions: { fetchDomains, revalidateDomains },
       authActions: { logout },
-      uiActions: { fetchThreads, newThread, selectThread },
+      uiActions: { fetchThreads, newThread, selectThread, retryAccessVerification },
     },
     fetchDomains,
     revalidateDomains,
@@ -30,6 +33,7 @@ const mocks = vi.hoisted(() => {
     logout,
     newThread,
     selectThread,
+    retryAccessVerification,
   }
 })
 
@@ -247,5 +251,54 @@ describe("Sidebar workspace revalidation (#355)", () => {
     } finally {
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" })
     }
+  })
+})
+
+describe("Sidebar access denial", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.state.threadsStatus = "error"
+  })
+
+  afterEach(() => {
+    mocks.state.threadsStatus = "loaded"
+    mocks.state.threadsAccessDenialReason = null
+    mocks.state.threadsAccessRetryable = false
+  })
+
+  it("summarises a lost source in one line and offers both actions as buttons", () => {
+    mocks.state.threadsAccessDenialReason = "tenant_access_lost"
+    mocks.state.threadsAccessRetryable = true
+    renderSidebar()
+
+    expect(screen.getByTestId("sidebar-threads-access-lost")).toHaveTextContent(
+      "You no longer have access to all of this workspace's sources.",
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Retry verification" }))
+    expect(mocks.retryAccessVerification).toHaveBeenCalledWith("workspace-1")
+    const connections = screen.getByTestId("sidebar-threads-connected-accounts")
+    expect(connections).toHaveAttribute("href", "/settings/connections")
+    expect(connections).toHaveAttribute("data-slot", "button")
+  })
+
+  it("offers no verification retry when only reconnecting helps", () => {
+    mocks.state.threadsAccessDenialReason = "credential_expired"
+    renderSidebar()
+
+    expect(screen.getByTestId("sidebar-threads-access-lost")).toHaveTextContent(
+      "Your sign-in for one of this workspace's sources expired.",
+    )
+    expect(screen.queryByTestId("sidebar-threads-retry-verification")).toBeNull()
+    expect(screen.getByTestId("sidebar-threads-connected-accounts")).toBeInTheDocument()
+  })
+
+  it("does not point a workspace without sources at Connected Accounts", () => {
+    mocks.state.threadsAccessDenialReason = "no_sources"
+    renderSidebar()
+
+    expect(screen.getByTestId("sidebar-threads-access-lost")).toHaveTextContent(
+      "This workspace has no data sources.",
+    )
+    expect(screen.queryByTestId("sidebar-threads-connected-accounts")).toBeNull()
   })
 })

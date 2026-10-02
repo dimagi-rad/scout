@@ -36,7 +36,7 @@ function seedPrivateState(store: ReturnType<typeof createAppStore>, suffix = "a"
     domains: [workspace(id)], domainsStatus: "loaded", domainsError: id, activeDomainId: id,
     threadId: id, activeArtifactId: id,
     threads: [{ id, title: id } as AppStore["threads"][number]],
-    threadsStatus: "loaded", threadsAccessLostMessage: id,
+    threadsStatus: "loaded", threadsAccessDenialReason: "no_sources", accessRetryOutcome: id,
     artifacts: [{ id, title: id } as AppStore["artifacts"][number]],
     artifactsStatus: "loaded", artifactsError: id, artifactSearch: id,
     datasetCatalog: { datasets: [] } as unknown as AppStore["datasetCatalog"],
@@ -167,7 +167,7 @@ describe("account-owned store isolation", () => {
     expect(store.getState()).toMatchObject({
       user: null, authStatus: "unauthenticated", activeDomainId: null,
       domains: [], domainsStatus: "idle", domainsError: null,
-      activeArtifactId: null, threads: [], threadsStatus: "idle", threadsAccessLostMessage: null,
+      activeArtifactId: null, threads: [], threadsStatus: "idle", threadsAccessDenialReason: null, accessRetryOutcome: null,
       artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
       datasetCatalog: null, datasetStatus: "idle", datasetError: null,
       selectedDataset: null, selectedDatasetStatus: "idle", selectedDatasetError: null,
