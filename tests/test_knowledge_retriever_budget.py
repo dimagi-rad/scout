@@ -252,6 +252,34 @@ class TestFitSection:
     def test_heading_only_section_dropped(self):
         assert _fit_section("## A\n\n- a long bullet line", 8) == ""
 
+    def test_single_overlong_line_cut_at_word(self):
+        text = "## A\n\n### Entry\n\n" + " ".join(f"w{i}" for i in range(100))
+        fitted = _fit_section(text, 60)
+        assert len(fitted) <= 60
+        assert fitted.startswith("## A\n\n### Entry\n\nw0 w1")
+        assert fitted.endswith("…")
+        assert fitted[:-1].split()[-1] in {f"w{i}" for i in range(100)}
+
+    def test_overlong_line_without_spaces_dropped(self):
+        assert _fit_section("## A\n\n" + "x" * 100, 50) == ""
+
     @pytest.mark.parametrize("limit", [0, -1, -2, -50])
     def test_non_positive_limit(self, limit):
         assert _fit_section("## A\n\n- one\n- two\n- three", limit) == ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_one_paragraph_entry_over_budget_keeps_a_prefix(workspace, user):
+    await KnowledgeEntry.objects.acreate(
+        workspace=workspace,
+        title="Program context",
+        content=" ".join(f"word{i}" for i in range(3000)),
+        created_by=user,
+    )
+
+    result = await KnowledgeRetriever(workspace).retrieve()
+
+    assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
+    assert "### Program context" in result
+    assert "word0 word1" in result

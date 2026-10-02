@@ -46,6 +46,18 @@ _SECTION_SEPARATOR = "\n\n"
 MAX_COLUMN_NOTES_PER_TABLE = 40
 
 
+def _without_dangling_headings(lines: list[str]) -> list[str]:
+    """Drop trailing blanks, headings and labels; [] if no content line remains."""
+    lines = list(lines)
+    while lines and (
+        not lines[-1].strip() or lines[-1].startswith("#") or lines[-1].endswith(":**")
+    ):
+        lines.pop()
+    if all(not line.strip() or line.startswith("#") for line in lines):
+        return []
+    return lines
+
+
 def _fit_section(text: str, limit: int) -> str:
     """Trim *text* to at most *limit* chars at a line boundary.
 
@@ -56,14 +68,15 @@ def _fit_section(text: str, limit: int) -> str:
         return ""
     if len(text) <= limit:
         return text
-    lines = text[: limit + 1].split("\n")[:-1]
-    while lines and (
-        not lines[-1].strip() or lines[-1].startswith("#") or lines[-1].endswith(":**")
-    ):
-        lines.pop()
-    if all(not line.strip() or line.startswith("#") for line in lines):
-        return ""
-    return "\n".join(lines)
+    lines = _without_dangling_headings(text[: limit + 1].split("\n")[:-1])
+    if lines:
+        return "\n".join(lines)
+    # Its first content line alone overruns the limit (e.g. a one-paragraph entry):
+    # cut that line at a word rather than lose the whole section.
+    head = text[: limit - 1]
+    cut = head.rfind(" ")
+    lines = _without_dangling_headings(head[:cut].split("\n")) if cut > 0 else []
+    return "\n".join(lines) + "…" if lines else ""
 
 
 class KnowledgeRetriever:
