@@ -264,6 +264,16 @@ describe("LostAccessModal with missing sources", () => {
     expect(items[0]).toHaveTextContent(`A, B, C: ${ended}`)
   })
 
+  it("names a blank-named source by its provider", () => {
+    const tenant = { ...partial.missing_tenants[0], tenant_id: "t-blank", tenant_name: "" }
+    useAppStore.setState({ domains: [{ ...partial, missing_tenants: [tenant] }] })
+    renderModal()
+
+    expect(screen.getByTestId("lost-access-missing-t-blank")).toHaveTextContent(
+      /^Open Chat Studio: connect/,
+    )
+  })
+
   it("confirms a denied retry without repeating the source list", () => {
     useAppStore.setState({
       threadsAccessDenialReason: "tenant_access_lost",

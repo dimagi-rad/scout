@@ -1,4 +1,5 @@
 import type { MissingTenant } from "@/api/workspaces"
+import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 
 export interface MissingTenantGroup {
   remedy: string
@@ -14,4 +15,9 @@ export function groupMissingTenantsByRemedy(missing: MissingTenant[]): MissingTe
     else groups.set(tenant.remedy, [tenant])
   }
   return [...groups].map(([remedy, tenants]) => ({ remedy, tenants }))
+}
+
+/** "A, B, C" for a group; a blank name falls back to its provider, as the backend's text does. */
+export function missingTenantNames(tenants: MissingTenant[]): string {
+  return tenants.map((t) => t.tenant_name || getProviderMeta(t.provider).label).join(", ")
 }

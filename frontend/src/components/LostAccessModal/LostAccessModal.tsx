@@ -7,7 +7,7 @@ import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
-import { groupMissingTenantsByRemedy } from "@/lib/missingTenants"
+import { groupMissingTenantsByRemedy, missingTenantNames } from "@/lib/missingTenants"
 
 /** Distinct provider labels for a workspace, e.g. "CommCare" or "CommCare, Open Chat Studio". */
 function providerLabels(tenants: { provider: string }[]): string {
@@ -106,7 +106,7 @@ export function LostAccessModal() {
                   data-testid={`lost-access-missing-${tenants[0].tenant_id}`}
                 >
                   <span className="font-medium text-foreground">
-                    {tenants.map((t) => t.tenant_name).join(", ")}
+                    {missingTenantNames(tenants)}
                   </span>
                   : {remedy}
                 </li>
