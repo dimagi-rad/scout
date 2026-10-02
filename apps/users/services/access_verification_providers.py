@@ -199,8 +199,8 @@ async def _verify_connect_opportunities(
 ):
     """Check each opportunity; None means fall back to the full listing.
 
-    A no-access 404 drops that opportunity, which publication then archives as an
-    omission, exactly as the listing would have; the rest are still checked.
+    A no-access 404 ends the check: the result covers the opportunities checked so
+    far, and publication archives that one as an omission, as the listing would have.
     """
     # Keep part of the budget back, or the listing fallback could never finish.
     light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
@@ -238,7 +238,9 @@ async def _verify_connect_opportunities(
         if clock() >= deadline:
             return unavailable("light_deadline_after_response", status=response.status_code)
         if _is_connect_no_access_404(response):
-            continue
+            # Decided: publish it now, for what was checked, rather than let a later
+            # timeout discard a revocation already seen. The request is denied anyway.
+            return ProviderVerificationResult.complete(confirmed, scope=ids[: index + 1])
         if response.status_code == 404:
             # Not DRF's answer, so likely the route itself is gone; the listing
             # can still decide, and must never read this as an omission.
@@ -259,7 +261,7 @@ async def _verify_connect_opportunities(
             # A changed response shape must cost a slow check, not every check.
             return None
         confirmed.append(external_id)
-    return ProviderVerificationResult.complete(confirmed, scoped=True)
+    return ProviderVerificationResult.complete(confirmed, scope=ids)
 
 
 def _names_invalid_token(response) -> bool:

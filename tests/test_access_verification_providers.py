@@ -802,20 +802,21 @@ async def test_connect_checks_only_the_requested_opportunities(settings):
 
 
 @pytest.mark.asyncio
-async def test_connect_no_access_404_omits_that_opportunity_and_checks_the_rest(settings):
+async def test_connect_no_access_404_ends_the_check_scoped_to_what_was_checked(settings):
     settings.CONNECT_API_URL = "https://connect.example"
     result, requests = await _verify(
         _request("commcare_connect"),
-        [_connect_404(), _response(payload={"id": 9})],
+        [_response(payload={"id": 3}), _connect_404(), _response(payload={"id": 9})],
         settings=settings,
-        external_ids={"7", "9"},
+        external_ids={"3", "7", "9"},
     )
 
-    # An omission, as the full listing would have reported it: publication archives
-    # that membership alone, without stamping a connection-wide denial.
+    # An omission of 7, as the full listing would report it, published at once: no
+    # later failure can discard it. 9 was never checked, so the result says nothing
+    # about it.
     assert result.outcome == VerificationOutcome.COMPLETE
-    assert result.scoped is True
-    assert result.external_ids == frozenset({"9"})
+    assert result.external_ids == frozenset({"3"})
+    assert result.scope == frozenset({"3", "7"})
     assert len(requests) == 2
 
 

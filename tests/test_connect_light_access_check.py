@@ -153,7 +153,7 @@ async def test_connect_routing_404_revokes_nothing(user, connect_setup):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_connect_all_requested_404_archives_them_all(user, connect_setup):
+async def test_connect_404_for_every_opportunity_archives_the_first_and_denies(user, connect_setup):
     connection, opp_7, opp_8 = connect_setup
 
     result, _urls = await _verify(
@@ -168,7 +168,8 @@ async def test_connect_all_requested_404_archives_them_all(user, connect_setup):
 
     assert result.status == AccessVerificationStatus.DENIED
     assert not await _is_live(user, opp_7)
-    assert not await _is_live(user, opp_8)
+    # Never checked: the next request that needs it finds its own answer.
+    assert await _is_live(user, opp_8)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -279,10 +280,32 @@ def test_scoped_receipt_does_not_cover_a_sibling_tenant(user, connect_setup):
     connection, opp_7, opp_8 = connect_setup
     claim = claim_verification(user.id, connection.id, {opp_7.id})
 
-    publish_verification(claim, VerificationResult.complete({opp_7.id}, scoped=True))
+    publish_verification(claim, VerificationResult.complete({opp_7.id}, scope={opp_7.id}))
 
     control = VerificationControl.objects.get(connection=connection)
     receipt = _completed_attempt(control)
     assert attempt_receipt_matches(receipt, claim.lease_token, claim.observation, {opp_7.id})
     assert not attempt_receipt_matches(receipt, claim.lease_token, claim.observation, {opp_8.id})
     assert TenantMembership.objects.filter(user=user, tenant=opp_8).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_connect_no_access_404_is_recorded_even_if_a_later_check_would_fail(
+    user, connect_setup
+):
+    connection, opp_7, opp_8 = connect_setup
+    down = httpx.Response(503, request=httpx.Request("GET", OPP_8))
+
+    result, urls = await _verify(
+        user,
+        connection,
+        {opp_7.id, opp_8.id},
+        {OPP_7: _json(404, {"detail": "Not found."}, OPP_7), OPP_8: down},
+    )
+
+    # The revocation is published at once; 8 is neither checked nor touched.
+    assert urls == [OPP_7]
+    assert result.status == AccessVerificationStatus.DENIED
+    assert not await _is_live(user, opp_7)
+    assert await _is_live(user, opp_8)

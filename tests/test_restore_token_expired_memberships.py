@@ -129,7 +129,9 @@ def test_a_scoped_listing_stays_scoped_through_the_trim(denied, monkeypatch):
     listed, omitted, _archived_earlier, still_live = memberships
     _provider(
         monkeypatch,
-        lambda: ProviderVerificationResult.complete({bots[0].external_id}, scoped=True),
+        lambda: ProviderVerificationResult.complete(
+            {bots[0].external_id}, scope={bot.external_id for bot in bots}
+        ),
     )
 
     _run("--apply")

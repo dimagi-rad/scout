@@ -747,7 +747,9 @@ def _publish_verification_receipt(
                 returned = list(returned_memberships)
                 omission_scope = owned_history
             if result.scoped:
-                omission_scope = omission_scope.filter(tenant_id__in=claim.requested_tenant_ids)
+                omission_scope = omission_scope.filter(
+                    tenant_id__in=result.scope & claim.requested_tenant_ids
+                )
             _configure_transaction_deadline(deadline, clock)
             omitted_ids = list(
                 omission_scope.exclude(tenant_id__in=result.tenant_ids).values_list(

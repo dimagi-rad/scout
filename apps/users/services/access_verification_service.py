@@ -363,15 +363,24 @@ async def _map_provider_result(claim, result):
     # alias tenant the provider just confirmed.
     provider = claim.observation.provider
     if result.outcome == VerificationOutcome.COMPLETE:
-        memberships = TenantMembership.all_objects.filter(
+        owned = TenantMembership.all_objects.filter(
             user_id=claim.observation.user_id,
             connection_id=claim.observation.connection_id,
-            tenant__external_id__in=result.external_ids,
         )
+        scope = None
+        memberships = owned.filter(tenant__external_id__in=result.external_ids)
         if result.scoped:
-            memberships = memberships.filter(tenant_id__in=claim.requested_tenant_ids)
+            scope = await amemberships_on_provider(
+                owned.filter(
+                    tenant__external_id__in=result.scope,
+                    tenant_id__in=claim.requested_tenant_ids,
+                ),
+                provider,
+                "tenant_id",
+            )
+            memberships = memberships.filter(tenant_id__in=scope)
         tenant_ids = await amemberships_on_provider(memberships, provider, "tenant_id")
-        return VerificationResult.complete(set(tenant_ids), scoped=result.scoped)
+        return VerificationResult.complete(set(tenant_ids), scope=scope)
     if result.outcome == VerificationOutcome.CREDENTIAL_REJECTED:
         return VerificationResult.credential_rejected(result.error_code)
     if result.outcome == VerificationOutcome.TENANT_DENIED:

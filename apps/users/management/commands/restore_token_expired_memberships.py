@@ -10,8 +10,9 @@ still ``AUTH_TOKEN_EXPIRED`` and whose ``archived_at`` equals that denial's
 ``upstream_denied_at`` (the denial stamps both with one timestamp), so it was
 archived by that denial and by nothing since. Nothing is restored from local state:
 ``--apply`` re-runs upstream verification for the candidates with the connection's
-current credential, refreshing it if needed, and only a complete provider listing
-un-archives the candidates it names. Rows archived for any other reason stay archived
+current credential, refreshing it if needed, and only a complete provider answer (the
+listing, or Connect's per-opportunity check for a few candidates) un-archives the
+candidates it names. Rows archived for any other reason stay archived
 even if listed. A dead credential, a provider outage or a second 401 restores
 nothing, so a genuinely revoked user stays revoked. Idempotent.
 
@@ -123,7 +124,7 @@ def _restricted_verifier(user_id, connection_id, candidate_ids):
         # A scoped result must stay scoped, or publication would archive every live
         # row the per-tenant check never asked about.
         return ProviderVerificationResult.complete(
-            result.external_ids - (drop - keep), scoped=result.scoped
+            result.external_ids - (drop - keep), scope=result.scope
         )
 
     return verifier
