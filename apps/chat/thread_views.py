@@ -17,7 +17,7 @@ from apps.chat.helpers import (
 )
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
-from apps.chat.titles import afirst_user_message, short_thread_title
+from apps.chat.titles import afill_blank_titles, afirst_user_message, short_thread_title
 from apps.common.http import parse_json_object
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -71,7 +71,9 @@ async def _list_threads(user, *, workspace_id):
         return None, err
 
     queryset = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
-    return [_thread_summary(thread) async for thread in queryset], None
+    threads = [thread async for thread in queryset]
+    await afill_blank_titles(threads)
+    return [_thread_summary(thread) for thread in threads], None
 
 
 async def _load_thread_messages(thread_id) -> list[dict]:
@@ -130,6 +132,7 @@ async def thread_detail_view(request, workspace_id, thread_id):
     if request.method == "GET":
         if thread is None:
             return JsonResponse({"error": "Thread not found"}, status=404)
+        await afill_blank_titles([thread])
         return JsonResponse(_thread_summary(thread))
 
     if request.method == "PATCH":

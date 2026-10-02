@@ -16,7 +16,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
-from apps.chat.checkpointer import ensure_checkpointer
+from apps.chat.checkpointer import athreads_with_checkpoints, ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread
 
@@ -88,6 +88,45 @@ async def afirst_user_message(thread_id: str) -> str:
         if text and not text.startswith(SYSTEM_RESUME_MARKER):
             return text
     return ""
+
+
+def _needs_provisional_title(thread: Thread) -> bool:
+    return thread.title_source == Thread.TitleSource.FIRST_MESSAGE and not thread.title
+
+
+async def _aset_provisional_title(thread: Thread, text: str) -> None:
+    title = short_thread_title(text)
+    # Conditional so a rename that lands meanwhile still wins.
+    if title and await Thread.objects.filter(
+        pk=thread.pk, title_source=Thread.TitleSource.FIRST_MESSAGE, title=""
+    ).aupdate(title=title):
+        thread.title = title
+
+
+async def afill_turn_title(thread: Thread, message: str) -> None:
+    """Title a blank row on a new turn: its first stored message, else this one.
+
+    A row made before the first message (the canvas creates one) has no title yet.
+    """
+    await afill_blank_titles([thread])
+    if _needs_provisional_title(thread):
+        await _aset_provisional_title(thread, message)
+
+
+async def afill_blank_titles(threads: list[Thread]) -> None:
+    """Store the first message as the title of blank rows that hold a conversation.
+
+    Rows titled before this field was the only source (canvas shells chatted in
+    later) are blank; each is read from its checkpoint once, then served from the
+    row. Rows with no conversation yet are ruled out in one query.
+    """
+    blank = [thread for thread in threads if _needs_provisional_title(thread)]
+    if not blank:
+        return
+    with_state = await athreads_with_checkpoints(thread.id for thread in blank)
+    for thread in blank:
+        if str(thread.id) in with_state:
+            await _aset_provisional_title(thread, await afirst_user_message(thread.id))
 
 
 async def _acall_title_model(thread: Thread, first_message: str) -> str:

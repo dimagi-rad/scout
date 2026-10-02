@@ -290,20 +290,56 @@ async def test_thread_list_returns_one_title_per_thread(workspace, user):
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_thread_list_never_reads_checkpoints(monkeypatch, workspace, user):
-    for _ in range(3):
-        await Thread.objects.acreate(workspace=workspace, user=user, title="")
+    for title in ("What are module completion rates?", "Visits by worker", ""):
+        await Thread.objects.acreate(workspace=workspace, user=user, title=title)
 
     async def fail_checkpoint_read(*args, **kwargs):
         raise AssertionError("the thread list must not read checkpoints")
 
     monkeypatch.setattr("apps.chat.thread_views.ensure_checkpointer", fail_checkpoint_read)
     monkeypatch.setattr("apps.chat.thread_views._load_thread_messages", fail_checkpoint_read)
+    monkeypatch.setattr("apps.chat.titles.ensure_checkpointer", fail_checkpoint_read)
+    monkeypatch.setattr("apps.chat.titles.afirst_user_message", fail_checkpoint_read)
 
     client = await _auth_client(user)
     response = await client.get(f"/api/workspaces/{workspace.id}/threads/")
 
     assert response.status_code == 200
-    assert [item["title"] for item in response.json()] == [""] * 3
+    # The blank row has no conversation yet, so it stays blank without a read.
+    assert sorted(item["title"] for item in response.json()) == [
+        "",
+        "Visits by worker",
+        "What are module completion rates?",
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_thread_list_titles_a_legacy_blank_row_once(monkeypatch, workspace, user):
+    # A canvas shell chatted in before this PR: a conversation but no stored title.
+    thread = await Thread.objects.acreate(workspace=workspace, user=user, title="")
+    reads = []
+
+    async def with_state(thread_ids):
+        return {str(thread_id) for thread_id in thread_ids}
+
+    async def first_message(thread_id):
+        reads.append(str(thread_id))
+        return "What are module completion rates?"
+
+    monkeypatch.setattr("apps.chat.titles.athreads_with_checkpoints", with_state)
+    monkeypatch.setattr("apps.chat.titles.afirst_user_message", first_message)
+    client = await _auth_client(user)
+
+    for _ in range(2):
+        response = await client.get(f"/api/workspaces/{workspace.id}/threads/")
+        assert response.status_code == 200
+        assert response.json()[0]["title"] == "What are module completion rates?"
+
+    assert reads == [str(thread.id)]
+    await thread.arefresh_from_db()
+    assert thread.title == "What are module completion rates?"
+    assert thread.title_source == Thread.TitleSource.FIRST_MESSAGE
 
 
 @pytest.mark.django_db(transaction=True)

@@ -32,7 +32,7 @@ from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.chat.tasks import aschedule_thread_title
-from apps.chat.titles import short_thread_title
+from apps.chat.titles import afill_turn_title, short_thread_title
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
@@ -79,15 +79,7 @@ async def _upsert_thread(thread_id, user, history_title: str = "", *, workspace)
         raise ForeignThreadError(thread)
     if not created:
         await Thread.objects.filter(pk=thread.pk).aupdate(updated_at=timezone.now())
-        # A row made before the first message (the canvas creates one) has no title yet;
-        # the list endpoint reads only the row, so give it the provisional title now.
-        # Conditional so a rename that lands after the read above still wins.
-        if thread.title_source == Thread.TitleSource.FIRST_MESSAGE and not thread.title:
-            title = short_thread_title(history_title)
-            if await Thread.objects.filter(
-                pk=thread.pk, title_source=Thread.TitleSource.FIRST_MESSAGE, title=""
-            ).aupdate(title=title):
-                thread.title = title
+        await afill_turn_title(thread, history_title)
     return thread
 
 
