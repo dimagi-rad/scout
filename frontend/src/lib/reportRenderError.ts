@@ -101,6 +101,30 @@ export function reportRenderError(report: RenderErrorReport): void {
   })
 }
 
+// React hands a boundary whatever was thrown. A non-Error may be app data, so a
+// string is kept as the message, as an Error's would be, and anything else is
+// described only by its type, as in the artifact sandbox.
+export function nonErrorMessage(thrown: unknown): string {
+  return typeof thrown === "string"
+    ? thrown
+    : `Non-Error exception (${thrown === null ? "null" : typeof thrown})`
+}
+
+/** Report whatever a React or router error boundary caught, redacted as above. */
+export function reportBoundaryError(
+  thrown: unknown,
+  ids: Pick<RenderErrorReport, "artifactId" | "artifactVersion"> = {},
+): void {
+  const error = thrown instanceof Error ? thrown : undefined
+  reportRenderError({
+    source: "boundary",
+    name: error?.name ?? "Error",
+    message: error ? error.message : nonErrorMessage(thrown),
+    stack: error?.stack,
+    ...ids,
+  })
+}
+
 export function resetReportedRenderErrorsForTests(): void {
   reported.clear()
   reportCounts.clear()

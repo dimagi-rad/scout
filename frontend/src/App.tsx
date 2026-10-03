@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { router } from "@/router"
 import { EmbedPage } from "@/pages/EmbedPage"
 import { setSentryUser } from "@/lib/sentry"
+import { reportBoundaryError } from "@/lib/reportRenderError"
 
 /** Strip the deploy prefix (e.g. "/scout") so route matching works at any mount point. */
 function stripBasePath(pathname: string): string {
@@ -68,7 +69,9 @@ function AppContent() {
 
   return (
     <NetworkStatusProvider key={user?.id}>
-      <RouterProvider router={router} />
+      {/* Each route's default error element only logs, so layout crashes outside
+          AppLayout's own boundary would otherwise go unreported. */}
+      <RouterProvider router={router} onError={(error) => reportBoundaryError(error)} />
     </NetworkStatusProvider>
   )
 }

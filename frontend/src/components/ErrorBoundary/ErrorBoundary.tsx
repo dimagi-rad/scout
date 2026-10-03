@@ -1,7 +1,7 @@
 import { Component, type ReactNode } from "react"
 import { AlertTriangle, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { reportRenderError } from "@/lib/reportRenderError"
+import { nonErrorMessage, reportBoundaryError } from "@/lib/reportRenderError"
 
 interface Props {
   children: ReactNode
@@ -15,15 +15,6 @@ interface Props {
 interface State {
   hasError: boolean
   error: Error | null
-}
-
-// React hands a boundary whatever was thrown. A non-Error may be app data, so a
-// string is kept as the message, as an Error's would be, and anything else is
-// described only by its type, as in the artifact sandbox.
-function nonErrorMessage(thrown: unknown): string {
-  return typeof thrown === "string"
-    ? thrown
-    : `Non-Error exception (${thrown === null ? "null" : typeof thrown})`
 }
 
 /**
@@ -47,14 +38,9 @@ export class ErrorBoundary extends Component<Props, State> {
   componentDidCatch(thrown: unknown, errorInfo: React.ErrorInfo) {
     console.error("ErrorBoundary caught an error:", thrown, errorInfo)
     // Not the state's normalised error: its stack would be this boundary's.
-    const error = thrown instanceof Error ? thrown : undefined
     // React 19 does not rethrow errors a boundary catches, so Sentry's global
     // handlers never see them.
-    reportRenderError({
-      source: "boundary",
-      name: error?.name ?? "Error",
-      message: error ? error.message : nonErrorMessage(thrown),
-      stack: error?.stack,
+    reportBoundaryError(thrown, {
       artifactId: this.props.artifactId,
       artifactVersion: this.props.artifactVersion,
     })
