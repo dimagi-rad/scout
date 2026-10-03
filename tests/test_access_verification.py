@@ -548,6 +548,51 @@ def test_rotation_or_denial_fence_rejects_publication(
     assert not UpstreamAccessProof.objects.exists()
 
 
+@pytest.mark.parametrize("connection_wide", [True, False])
+@pytest.mark.django_db
+def test_complete_publication_relabels_denied_tombstones_only_after_a_connection_denial(
+    user, tenant, verification_connection, connection_wide
+):
+    """A listing that clears a connection-wide denial shows the credential works, so a
+    denied source it still omits is gone. After a per-source denial, omission is how
+    the provider withholds that source, so it stays denied."""
+    conn, own = verification_connection
+    gone_tenant = Tenant.objects.create(
+        provider=tenant.provider, external_id="gone", canonical_name="Gone"
+    )
+    gone = TenantMembership.objects.create(user=user, tenant=gone_tenant, connection=conn)
+    newly_omitted_tenant = Tenant.objects.create(
+        provider=tenant.provider, external_id="new-omit", canonical_name="New omit"
+    )
+    newly_omitted = TenantMembership.objects.create(
+        user=user, tenant=newly_omitted_tenant, connection=conn
+    )
+    denied_at = timezone.now()
+    TenantMembership.objects.filter(pk__in=[own.pk, gone.pk]).update(
+        archived_at=denied_at, archived_reason=TenantMembership.ARCHIVED_DENIED
+    )
+    conn.upstream_denial_code = ErrorCode.AUTH_TOKEN_EXPIRED if connection_wide else ""
+    conn.upstream_denied_at = denied_at
+    conn.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+
+    assert (
+        publish_verification(claim, VerificationResult.complete({tenant.id}))
+        == PublicationStatus.PUBLISHED
+    )
+
+    own.refresh_from_db()
+    gone.refresh_from_db()
+    newly_omitted.refresh_from_db()
+    assert own.archived_at is None
+    assert own.archived_reason == ""
+    assert gone.archived_reason == (
+        TenantMembership.ARCHIVED_UNLISTED if connection_wide else TenantMembership.ARCHIVED_DENIED
+    )
+    assert newly_omitted.archived_at is not None
+    assert newly_omitted.archived_reason == TenantMembership.ARCHIVED_UNLISTED
+
+
 @pytest.mark.django_db
 def test_complete_publication_restores_only_observed_connection_history(
     user, tenant, verification_connection

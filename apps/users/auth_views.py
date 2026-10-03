@@ -322,10 +322,10 @@ def providers_view(request):
         # problems on it. The card is keyed by the identity's provider, not the
         # connection's: both CommCare HQ servers' connections are "commcare".
         for conn in oauth_connections:
-            if conn.social_account is not None:
-                connection_ids_by_account_provider.setdefault(
-                    conn.social_account.provider, []
-                ).append(str(conn.id))
+            # A legacy or orphaned connection has no identity; its own provider
+            # still puts it on a card, so its notice can offer Reconnect.
+            key = conn.social_account.provider if conn.social_account else conn.provider
+            connection_ids_by_account_provider.setdefault(key, []).append(str(conn.id))
         seen_statuses: dict[str, set[str]] = {}
         for social_token in tokens:
             if not is_active_identity(social_token.account, bindings):

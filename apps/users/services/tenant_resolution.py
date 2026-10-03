@@ -221,7 +221,8 @@ def _sync_memberships(
             )
             return []
         # Keep the last denial as a fence against discoveries started before it.
-        if current.upstream_denial_code:
+        cleared_connection_denial = bool(current.upstream_denial_code)
+        if cleared_connection_denial:
             TenantConnection.objects.filter(pk=connection.pk).update(upstream_denial_code="")
         fresh_ids: set = set()
         memberships: list[TenantMembership] = []
@@ -229,7 +230,8 @@ def _sync_memberships(
             tm, _ = TenantMembership.all_objects.get_or_create(user=user, tenant=tenant)
             tm.connection = connection
             tm.archived_at = None
-            fields = ["connection", "archived_at"]
+            tm.archived_reason = ""
+            fields = ["connection", "archived_at", "archived_reason"]
             if membership_extra:
                 for attr, val in membership_extra.items():
                     setattr(tm, attr, val)  # team_slug/team_name setters mutate provider_metadata
@@ -254,11 +256,13 @@ def _sync_memberships(
         unlisted_qs.filter(archived_at__isnull=True).update(
             archived_at=timezone.now(), archived_reason=TenantMembership.ARCHIVED_UNLISTED
         )
-        # A source denied earlier that a complete listing still omits is gone, not
-        # withheld: once access is back, it must stop reading as a denial.
-        unlisted_qs.filter(archived_reason=TenantMembership.ARCHIVED_DENIED).update(
-            archived_reason=TenantMembership.ARCHIVED_UNLISTED
-        )
+        if cleared_connection_denial:
+            # The credential works again, so a source the connection-wide denial
+            # archived that this listing still omits is gone, not withheld. A
+            # per-source denial stays: omission is how the provider withholds it.
+            unlisted_qs.filter(archived_reason=TenantMembership.ARCHIVED_DENIED).update(
+                archived_reason=TenantMembership.ARCHIVED_UNLISTED
+            )
         return memberships
 
 

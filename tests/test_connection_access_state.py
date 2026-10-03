@@ -205,6 +205,46 @@ async def test_recovery_relabels_a_denied_bot_the_listing_no_longer_has(user):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_refresh_keeps_a_per_bot_denial_the_listing_still_omits(user):
+    """Omission is how OCS withholds a bot it denied, so clicking Refresh sources
+    before an admin acts must not turn the warning into "no longer listed"."""
+    app = await _ocs_app()
+    conn = await _ocs_team(user, app, team="acme")
+    await _bot(user, conn, "kept")
+    denied = await _bot(user, conn, "denied")
+    await _record_denial(conn, code=DENIED_CODE, tenant_id=denied.tenant_id)
+    kept = await Tenant.objects.aget(external_id="kept")
+
+    await _sync_memberships(
+        user, await TenantConnection.objects.aget(pk=conn.pk), [kept], archive_team_slug="acme"
+    )
+
+    client = await _login(user)
+    [row] = (await client.get("/api/auth/connections/")).json()
+    assert row["access_state"] == ACCESS_PARTIAL
+    assert [(b["tenant_id"], b["archived_reason"]) for b in row["archived_chatbots"]] == [
+        ("denied", "denied")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_connection_without_an_identity_still_lands_on_its_card(user):
+    """Legacy rows can have no social_account; the card (and its Reconnect) must still
+    cover them."""
+    await _ocs_app()
+    conn = await TenantConnection.objects.acreate(
+        user=user, provider="ocs", credential_type=OAUTH, scope_key="acme"
+    )
+    await SocialAccount.objects.acreate(user=user, provider="ocs", uid="42#other")
+
+    client = await _login(user)
+    [provider] = (await client.get("/api/auth/providers/")).json()["providers"]
+    assert provider["connection_ids"] == [str(conn.id)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_expired_sign_in_is_expired_not_refused(user):
     app = await _ocs_app()
     conn = await _ocs_team(user, app, team="acme", expires_in_hours=-1)

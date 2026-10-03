@@ -137,7 +137,10 @@ def _persist_api_key_connection(
             tm.team_slug = team_slug
             tm.team_name = team_name
             tm.archived_at = None
-            tm.save(update_fields=["connection", "provider_metadata", "archived_at"])
+            tm.archived_reason = ""
+            tm.save(
+                update_fields=["connection", "provider_metadata", "archived_at", "archived_reason"]
+            )
             rows.append(
                 {
                     "membership_id": str(tm.id),
