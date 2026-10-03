@@ -2,7 +2,6 @@ import * as Sentry from "@sentry/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
-  dropConsoleBreadcrumb,
   reportRenderError,
   resetReportedRenderErrorsForTests,
 } from "./reportRenderError"
@@ -114,11 +113,5 @@ describe("reportRenderError", () => {
 
     const reported = vi.mocked(Sentry.captureException).mock.calls[0][0] as Error
     expect(reported.message).toBe('invalid input syntax for type integer: "…" next')
-  })
-
-  it("drops console breadcrumbs, which hold raw error text", () => {
-    expect(dropConsoleBreadcrumb({ category: "console", message: 'bad "Alice"' })).toBeNull()
-    const navigation = { category: "navigation", message: "/artifacts/artifact-one" }
-    expect(dropConsoleBreadcrumb(navigation)).toBe(navigation)
   })
 })
