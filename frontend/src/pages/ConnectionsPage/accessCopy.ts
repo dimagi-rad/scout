@@ -12,8 +12,26 @@ const SOURCE_NOUN: Record<string, string> = {
   ocs: "bots",
 }
 
+const SOURCE_NOUN_ONE: Record<string, string> = {
+  commcare: "project",
+  commcare_connect: "opportunity",
+  ocs: "bot",
+}
+
 export function productName(provider: string): string {
   return PRODUCT[provider] ?? provider
+}
+
+/** "bots", "opportunities": what a provider calls its data sources. */
+export function sourcesNoun(provider: string): string {
+  return SOURCE_NOUN[provider] ?? "sources"
+}
+
+/** "1 bot", "3 opportunities": what a provider calls its data sources. */
+export function sourceCount(provider: string, n: number): string {
+  const noun =
+    n === 1 ? (SOURCE_NOUN_ONE[provider] ?? "source") : (SOURCE_NOUN[provider] ?? "sources")
+  return `${n} ${noun}`
 }
 
 function withArticle(word: string): string {

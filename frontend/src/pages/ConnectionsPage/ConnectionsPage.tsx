@@ -6,7 +6,6 @@ import { oauthConnectUrl, type OAuthProvider, type OAuthProviderStatus } from "@
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
 import {
   SearchFilterBar,
   type FilterGroup,
@@ -15,27 +14,22 @@ import {
   ApiConnectionDialog,
   type ApiKeyConnection,
 } from "@/components/ApiConnectionDialog"
+import {
+  FALLBACK_TINT,
+  PROVIDER_TINT,
+  canonicalProvider,
+  getProviderMeta,
+} from "@/components/WorkspaceBadge/providerMeta"
 import { accessNotice, productName, providerAccessLines } from "./accessCopy"
+import { ConnectionCard } from "./ConnectionCard"
+import {
+  connectionRemoveCopy,
+  providerDisconnectLabel,
+  providerDisconnectMessage,
+} from "./disconnectCopy"
+import { useExpandedConnections } from "./useExpandedConnections"
 
-const providerBadgeStyles: Record<string, string> = {
-  commcare: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
-  commcare_connect: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
-  ocs: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400",
-}
-
-function ProviderBadge({ provider }: { provider: string }) {
-  return (
-    <Badge
-      variant="secondary"
-      className={
-        providerBadgeStyles[provider] ??
-        "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"
-      }
-    >
-      {provider}
-    </Badge>
-  )
-}
+const PROVIDER_ORDER = ["commcare", "commcare_connect", "ocs"]
 
 function teamLabelFor(conn: ApiKeyConnection): string {
   // A CommCare connection's scope is its HQ server, not a team; naming it keeps a
@@ -49,9 +43,6 @@ function teamLabelFor(conn: ApiKeyConnection): string {
   const named = [...conn.chatbots, ...(conn.archived_chatbots ?? [])].find((cb) => cb.team_name)
   return named?.team_name || conn.provider
 }
-
-const WARNING_BADGE =
-  "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
 
 /** Status line and connect-button label per provider status. */
 const PROVIDER_STATUS_COPY: Partial<
@@ -100,6 +91,7 @@ export function ConnectionsPage() {
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
+  const [confirmDisconnectId, setConfirmDisconnectId] = useState<string | null>(null)
 
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string | null>>({
@@ -107,6 +99,22 @@ export function ConnectionsPage() {
   })
 
   const [dialogState, setDialogState] = useState<DialogState>(null)
+  const { choices: expandedChoices, setExpanded } = useExpandedConnections()
+  const [searchToggles, setSearchToggles] = useState<Record<string, boolean>>({})
+
+  function changeSearch(value: string) {
+    setSearch(value)
+    // A new search starts when the box goes from empty to filled, not per keystroke.
+    if (!value.trim() || !search.trim()) setSearchToggles({})
+  }
+
+  function toggle(conn: ApiKeyConnection, expanded: boolean) {
+    if (search.trim()) {
+      setSearchToggles((prev) => ({ ...prev, [conn.connection_id]: !expanded }))
+    } else {
+      setExpanded(conn.connection_id, !expanded)
+    }
+  }
 
   const fetchProviders = useCallback(async () => {
     setLoadingProviders(true)
@@ -151,7 +159,7 @@ export function ConnectionsPage() {
       name: "provider",
       options: [...counts.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([value, count]) => ({ value, label: value, count })),
+        .map(([value, count]) => ({ value, label: productName(value), count })),
     }
   }, [connections])
 
@@ -165,6 +173,7 @@ export function ConnectionsPage() {
         const haystacks = [
           teamLabelFor(c),
           c.provider,
+          productName(c.provider),
           ...[...c.chatbots, ...(c.archived_chatbots ?? [])].flatMap((cb) => [
             cb.tenant_name,
             cb.tenant_id,
@@ -175,6 +184,36 @@ export function ConnectionsPage() {
       return true
     })
   }, [connections, search, activeFilters])
+
+  // One section per provider in a fixed order, connections by name inside it.
+  const groupedConnections = useMemo(() => {
+    const groups = new Map<string, ApiKeyConnection[]>()
+    for (const c of filteredConnections) {
+      groups.set(c.provider, [...(groups.get(c.provider) ?? []), c])
+    }
+    const rank = (p: string) => {
+      const i = PROVIDER_ORDER.indexOf(p)
+      return i === -1 ? PROVIDER_ORDER.length : i
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+      .map(([provider, conns]) => ({
+        provider,
+        connections: [...conns].sort((a, b) =>
+          teamLabelFor(a).localeCompare(teamLabelFor(b), undefined, { numeric: true }),
+        ),
+      }))
+  }, [filteredConnections])
+
+  function isExpanded(conn: ApiKeyConnection): boolean {
+    // A search can match a source by name, so its matches open; toggling one then
+    // lasts only for this search rather than overwriting the remembered choice.
+    if (search.trim()) return searchToggles[conn.connection_id] ?? true
+    const chosen = expandedChoices[conn.connection_id]
+    if (chosen !== undefined) return chosen
+    // Collapsed by default, except where sources were lost: the notice names them.
+    return conn.access_state === "refused" || conn.access_state === "partial"
+  }
 
   function handleFilterChange(group: string, value: string | null) {
     setActiveFilters((prev) => ({ ...prev, [group]: value }))
@@ -270,69 +309,131 @@ export function ConnectionsPage() {
               provider.status === "needs_team" ||
               provider.status === "unavailable"
             const ids = new Set(provider.connection_ids ?? [])
+            const cardConnections = connections
+              .filter((c) => ids.has(c.connection_id))
+              .map((conn) => ({ conn, teamLabel: teamLabelFor(conn) }))
             const accessLines = providerAccessLines(
               provider.name,
-              connections
-                .filter((c) => ids.has(c.connection_id))
-                // The status line already says the sign-in expired.
-                .filter((c) => !(provider.status === "expired" && c.access_state === "expired"))
-                .map((conn) => ({ conn, teamLabel: teamLabelFor(conn) })),
+              // The status line already says the sign-in expired.
+              cardConnections.filter(
+                ({ conn }) => !(provider.status === "expired" && conn.access_state === "expired"),
+              ),
             )
+            const dataProvider = canonicalProvider(provider.id)
+            const isConfirmingDisconnect = confirmDisconnectId === provider.id
+            const { Icon } = getProviderMeta(dataProvider)
+            const teamCount =
+              provider.supports_multiple_scopes && provider.status === "connected" && ids.size > 0
+                ? ` · ${ids.size} ${ids.size === 1 ? "team" : "teams"}`
+                : ""
             return (
-              <Card key={provider.id}>
-                <CardContent className="flex items-center justify-between p-4">
-                  <div>
-                    <p className="font-medium">{provider.name}</p>
-                    <p
-                      className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}
-                      data-testid={`provider-status-${provider.id}`}
-                    >
-                      {copy.label}
-                    </p>
-                    {accessLines.length > 0 && (
-                      <div data-testid={`provider-access-${provider.id}`}>
-                        {accessLines.map((line) => (
-                          <p key={line} className="text-sm text-amber-600">
-                            {line}
-                          </p>
-                        ))}
+              <Card key={provider.id} data-testid={`provider-card-${provider.id}`}>
+                <CardContent className="space-y-3 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <span
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${PROVIDER_TINT[dataProvider] ?? FALLBACK_TINT}`}
+                        data-testid={`provider-icon-${provider.id}`}
+                      >
+                        <Icon className="h-5 w-5" aria-hidden />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="font-medium">{provider.name}</p>
+                        <p
+                          className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}
+                          data-testid={`provider-status-${provider.id}`}
+                        >
+                          {copy.label}
+                          {teamCount}
+                        </p>
+                        {accessLines.length > 0 && (
+                          <div data-testid={`provider-access-${provider.id}`}>
+                            {accessLines.map((line) => (
+                              <p key={line} className="text-sm text-amber-600">
+                                {line}
+                              </p>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    {(provider.status === "connected" || provider.status === "unavailable") &&
-                      provider.supports_multiple_scopes && (
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {(provider.status === "connected" || provider.status === "unavailable") &&
+                        provider.supports_multiple_scopes && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            asChild
+                            data-testid={`connect-another-${provider.id}`}
+                          >
+                            <a href={connectUrlFor(provider)}>Connect another team</a>
+                          </Button>
+                        )}
+                      {provider.status !== "connected" && copy.action && (
                         <Button
                           variant="outline"
                           size="sm"
                           asChild
-                          data-testid={`connect-another-${provider.id}`}
+                          data-testid={`connect-${provider.id}`}
                         >
-                          <a href={connectUrlFor(provider)}>Connect another team</a>
+                          <a href={connectUrlFor(provider)}>{copy.action}</a>
                         </Button>
                       )}
-                    {provider.status !== "connected" && copy.action && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        asChild
-                        data-testid={`connect-${provider.id}`}
-                      >
-                        <a href={connectUrlFor(provider)}>{copy.action}</a>
-                      </Button>
-                    )}
-                    {canDisconnect && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleDisconnect(provider.id)}
-                        disabled={disconnecting === provider.id}
-                        data-testid={`disconnect-${provider.id}`}
-                      >
-                        {disconnecting === provider.id ? "Disconnecting..." : "Disconnect all"}
-                      </Button>
-                    )}
+                      {canDisconnect && !isConfirmingDisconnect && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setConfirmDisconnectId(provider.id)}
+                          // Its confirmation counts the connections, so wait for them.
+                          disabled={disconnecting === provider.id || loadingConnections}
+                          data-testid={`disconnect-${provider.id}`}
+                        >
+                          {disconnecting === provider.id
+                            ? "Disconnecting..."
+                            : providerDisconnectLabel(provider.supports_multiple_scopes)}
+                        </Button>
+                      )}
+                    </div>
                   </div>
+                  {canDisconnect && isConfirmingDisconnect && (
+                    <div
+                      className="flex flex-wrap items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3"
+                      data-testid={`disconnect-confirm-${provider.id}`}
+                    >
+                      <p className="text-sm font-medium">
+                        {providerDisconnectMessage(
+                          provider.name,
+                          dataProvider,
+                          provider.supports_multiple_scopes,
+                          cardConnections,
+                          connections.some(
+                            (c) => c.credential_type === "api_key" && c.provider === dataProvider,
+                          ),
+                        )}
+                      </p>
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setConfirmDisconnectId(null)}
+                          data-testid={`cancel-disconnect-${provider.id}`}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => {
+                            setConfirmDisconnectId(null)
+                            void handleDisconnect(provider.id)
+                          }}
+                          data-testid={`confirm-disconnect-${provider.id}`}
+                        >
+                          {providerDisconnectLabel(provider.supports_multiple_scopes)}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             )
@@ -371,7 +472,7 @@ export function ConnectionsPage() {
             {connections.length > 0 && (
               <SearchFilterBar
                 search={search}
-                onSearchChange={setSearch}
+                onSearchChange={changeSearch}
                 placeholder="Search connections..."
                 filters={
                   providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []
@@ -390,167 +491,115 @@ export function ConnectionsPage() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-4">
-                {filteredConnections.map((conn) => {
-                  const isApiKey = conn.credential_type === "api_key"
-                  const isConfirming = confirmRemoveId === conn.connection_id
-                  const teamLabel = teamLabelFor(conn)
-                  const statusBadge = conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined
-                  const notice = accessNotice(conn, teamLabel)
-                  const oauthProvider = providerForConnection.get(conn.connection_id)
-                  const archived = conn.archived_chatbots ?? []
-
+              <div className="space-y-6">
+                {groupedConnections.map((group) => {
+                  const { Icon } = getProviderMeta(group.provider)
                   return (
-                    <Card
-                      key={conn.connection_id}
-                      data-testid={`connection-card-${conn.connection_id}`}
+                    <section
+                      key={group.provider}
+                      className="space-y-2"
+                      data-testid={`connection-group-${group.provider}`}
                     >
-                      <CardContent className="space-y-4 p-4">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-2">
-                              <p
-                                className="font-medium"
-                                data-testid={`connection-team-${conn.connection_id}`}
-                              >
-                                {teamLabel}
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <ProviderBadge provider={conn.provider} />
-                              <Badge variant="secondary">
-                                {isApiKey ? "API Key" : "OAuth"}
-                              </Badge>
-                              {statusBadge && (
-                                <Badge
-                                  variant="secondary"
-                                  className={WARNING_BADGE}
-                                  data-testid={`${statusBadge.testId}-${conn.connection_id}`}
-                                >
-                                  {statusBadge.label}
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
-                          {!isConfirming && (
-                            <div className="flex shrink-0 gap-2">
-                              {isApiKey && (
+                      <h3 className="flex items-center gap-2 text-sm font-medium">
+                        <span
+                          className={`flex h-6 w-6 items-center justify-center rounded ${PROVIDER_TINT[group.provider] ?? FALLBACK_TINT}`}
+                        >
+                          <Icon className="h-4 w-4" aria-hidden />
+                        </span>
+                        {productName(group.provider)}
+                        <span className="text-muted-foreground">{group.connections.length}</span>
+                      </h3>
+                      {group.connections.map((conn) => {
+                        const isApiKey = conn.credential_type === "api_key"
+                        const isConfirming = confirmRemoveId === conn.connection_id
+                        const teamLabel = teamLabelFor(conn)
+                        const oauthProvider = providerForConnection.get(conn.connection_id)
+                        const notice = accessNotice(conn, teamLabel)
+                        const expanded = isExpanded(conn)
+                        const removal = connectionRemoveCopy(conn, teamLabel)
+                        return (
+                          <ConnectionCard
+                            key={conn.connection_id}
+                            conn={conn}
+                            teamLabel={teamLabel}
+                            statusBadge={conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined}
+                            notice={notice}
+                            expanded={expanded}
+                            onToggle={() => toggle(conn, expanded)}
+                            reconnect={
+                              notice?.offerReconnect && oauthProvider ? (
                                 <Button
-                                  variant="ghost"
+                                  variant="outline"
                                   size="sm"
-                                  onClick={() =>
-                                    setDialogState({ mode: "edit", editing: conn })
-                                  }
-                                  data-testid={`edit-connection-${conn.connection_id}`}
+                                  asChild
+                                  data-testid={`connection-reconnect-${conn.connection_id}`}
                                 >
-                                  Edit
+                                  <a href={connectUrlFor(oauthProvider)}>Reconnect</a>
                                 </Button>
-                              )}
-                              {/* Removing one OAuth connection disconnects that team
-                                  only, leaving the user's other teams signed in. */}
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="text-destructive hover:text-destructive"
-                                onClick={() => setConfirmRemoveId(conn.connection_id)}
-                                data-testid={`remove-connection-${conn.connection_id}`}
-                              >
-                                Remove
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-
-                        {notice && (
-                          <div
-                            className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
-                            data-testid={`connection-access-${conn.connection_id}`}
-                            data-access-state={conn.access_state}
-                          >
-                            <p className="font-medium">{notice.title}</p>
-                            <p>{notice.body}</p>
-                            {notice.offerReconnect && oauthProvider && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                asChild
-                                data-testid={`connection-reconnect-${conn.connection_id}`}
-                              >
-                                <a href={connectUrlFor(oauthProvider)}>Reconnect</a>
-                              </Button>
-                            )}
-                          </div>
-                        )}
-
-                        {isConfirming && (
-                          <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                            <p className="text-sm font-medium">
-                              Remove{" "}
-                              <span className="font-semibold">{teamLabel}</span>? Its
-                              chatbots will be hidden and its saved credentials removed. You can reconnect later.
-                            </p>
-                            <div className="flex shrink-0 gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setConfirmRemoveId(null)}
-                                data-testid={`cancel-remove-${conn.connection_id}`}
-                              >
-                                Cancel
-                              </Button>
-                              <Button
-                                variant="destructive"
-                                size="sm"
-                                onClick={() => confirmRemove(conn)}
-                                disabled={removing === conn.connection_id}
-                                data-testid={`confirm-remove-${conn.connection_id}`}
-                              >
-                                {removing === conn.connection_id
-                                  ? "Removing..."
-                                  : "Confirm Remove"}
-                              </Button>
-                            </div>
-                          </div>
-                        )}
-
-                        <ul className="space-y-1 border-t pt-3">
-                          {conn.chatbots.map((cb) => (
-                            <li
-                              key={cb.membership_id}
-                              className="flex items-center justify-between gap-4 text-sm"
-                            >
-                              <span className="font-medium">
-                                {cb.tenant_name || cb.tenant_id}
-                              </span>
-                              <span className="text-muted-foreground">
-                                {cb.tenant_id}
-                              </span>
-                            </li>
-                          ))}
-                          {archived.map((cb) => (
-                            <li
-                              key={cb.membership_id}
-                              className="flex items-center justify-between gap-4 text-sm text-muted-foreground"
-                              data-testid={`connection-chatbot-no-access-${cb.membership_id}`}
-                            >
-                              <span className="flex items-center gap-2">
-                                <span className="font-medium">{cb.tenant_name || cb.tenant_id}</span>
-                                {cb.archived_reason === "unlisted" ? (
-                                  <Badge variant="outline" title={`${productName(conn.provider)} no longer lists it`}>
-                                    No longer listed
-                                  </Badge>
-                                ) : (
-                                  <Badge variant="secondary" className={WARNING_BADGE}>
-                                    No access
-                                  </Badge>
-                                )}
-                              </span>
-                              <span>{cb.tenant_id}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </CardContent>
-                    </Card>
+                              ) : null
+                            }
+                            actions={
+                              isConfirming ? null : (
+                                <>
+                                  {isApiKey && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setDialogState({ mode: "edit", editing: conn })}
+                                      data-testid={`edit-connection-${conn.connection_id}`}
+                                    >
+                                      Edit
+                                    </Button>
+                                  )}
+                                  {/* Removing one OAuth connection disconnects that team
+                                      only, leaving the user's other teams signed in. */}
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-destructive hover:text-destructive"
+                                    onClick={() => setConfirmRemoveId(conn.connection_id)}
+                                    data-testid={`remove-connection-${conn.connection_id}`}
+                                  >
+                                    {removal.action}
+                                  </Button>
+                                </>
+                              )
+                            }
+                            confirmation={
+                              isConfirming ? (
+                                <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                                  <p
+                                    className="text-sm font-medium"
+                                    data-testid={`remove-message-${conn.connection_id}`}
+                                  >
+                                    {removal.message}
+                                  </p>
+                                  <div className="flex shrink-0 gap-2">
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => setConfirmRemoveId(null)}
+                                      data-testid={`cancel-remove-${conn.connection_id}`}
+                                    >
+                                      Cancel
+                                    </Button>
+                                    <Button
+                                      variant="destructive"
+                                      size="sm"
+                                      onClick={() => confirmRemove(conn)}
+                                      disabled={removing === conn.connection_id}
+                                      data-testid={`confirm-remove-${conn.connection_id}`}
+                                    >
+                                      {removing === conn.connection_id ? "Removing..." : removal.action}
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : null
+                            }
+                          />
+                        )
+                      })}
+                    </section>
                   )
                 })}
               </div>
