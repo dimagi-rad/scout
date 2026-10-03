@@ -2926,6 +2926,15 @@ async def prune_old_procrastinate_jobs(timestamp: int = 0) -> dict:
     return {"pruned": True}
 
 
+# The scout-worker-silent alarm (infra/scout-stack.yml) fires on 15 minutes without a
+# worker log line, and an idle worker's janitors log nothing, so it flapped all day.
+@app.periodic(cron="*/5 * * * *")
+@app.task
+async def log_worker_heartbeat(timestamp: int = 0) -> None:
+    """Log one line, so a worker that is running its jobs is never silent."""
+    logger.info("worker heartbeat: periodic jobs are running")
+
+
 @contextlib.contextmanager
 def _resume_langfuse_span(
     *, thread_job_id: str, thread_id: str, user_id: str, workspace_id: str, status: str

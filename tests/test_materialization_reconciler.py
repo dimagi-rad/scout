@@ -2,6 +2,7 @@
 (arch #255, 03#9 + 10#0) and the reconcile_stale_thread_job allowlist hardening.
 """
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -21,6 +22,7 @@ from apps.workspaces.services.reconciliation import (
 )
 from apps.workspaces.tasks import (
     JOB_RETENTION_HOURS,
+    log_worker_heartbeat,
     prune_old_procrastinate_jobs,
     reconcile_stale_materialization_runs,
 )
@@ -329,3 +331,14 @@ async def test_prune_old_jobs_degrades_gracefully_on_error():
         result = await prune_old_procrastinate_jobs()
 
     assert result == {"pruned": False}
+
+
+@pytest.mark.asyncio
+async def test_worker_heartbeat_logs_an_info_line(caplog):
+    """The worker-silence alarm counts worker log lines, so each tick must log one."""
+    with caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"):
+        await log_worker_heartbeat()
+
+    assert [r.levelno for r in caplog.records if r.name == "apps.workspaces.tasks"] == [
+        logging.INFO
+    ]
