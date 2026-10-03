@@ -363,6 +363,9 @@ describe("ConnectionsPage", () => {
         "Open Chat Studio isn't granting access to 1 of 3 bots for team acme.",
       )
       expect(screen.queryByTestId("connection-reconnect-c1")).toBeNull()
+      expect(screen.getByTestId("provider-access-ocs")).toHaveTextContent(
+        "Open Chat Studio isn't granting access to some sources for team acme.",
+      )
       expect(screen.getByTestId("connection-chatbot-no-access-m-3")).toHaveTextContent("No access")
       expect(screen.getByTestId("connection-chatbot-no-access-m-4")).toHaveTextContent(
         "No longer listed",

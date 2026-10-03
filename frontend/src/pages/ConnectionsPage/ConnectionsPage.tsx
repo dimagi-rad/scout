@@ -46,7 +46,7 @@ function teamLabelFor(conn: ApiKeyConnection): string {
   // scope_label is the credential's own team; the chatbot fallback covers
   // connections created before the scope was recorded on the connection.
   if (conn.scope_label) return conn.scope_label
-  const named = conn.chatbots.find((cb) => cb.team_name)
+  const named = [...conn.chatbots, ...(conn.archived_chatbots ?? [])].find((cb) => cb.team_name)
   return named?.team_name || conn.provider
 }
 
@@ -289,15 +289,15 @@ export function ConnectionsPage() {
                     >
                       {copy.label}
                     </p>
-                    {accessLines.map((line) => (
-                      <p
-                        key={line}
-                        className="text-sm text-amber-600"
-                        data-testid={`provider-access-${provider.id}`}
-                      >
-                        {line}
-                      </p>
-                    ))}
+                    {accessLines.length > 0 && (
+                      <div data-testid={`provider-access-${provider.id}`}>
+                        {accessLines.map((line) => (
+                          <p key={line} className="text-sm text-amber-600">
+                            {line}
+                          </p>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex shrink-0 gap-2">
                     {(provider.status === "connected" || provider.status === "unavailable") &&

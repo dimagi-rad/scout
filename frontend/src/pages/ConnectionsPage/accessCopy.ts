@@ -86,15 +86,19 @@ export function providerAccessLines(
   providerName: string,
   connections: { conn: ApiKeyConnection; teamLabel: string }[],
 ): string[] {
-  const refused = connections
-    .filter(({ conn }) => conn.access_state === "refused" || conn.access_state === "partial")
-    .map(({ conn, teamLabel }) => scopePhrase(conn, teamLabel))
-  const expired = connections
-    .filter(({ conn }) => conn.access_state === "expired")
-    .map(({ conn, teamLabel }) => scopePhrase(conn, teamLabel))
+  const scopes = (state: ApiKeyConnection["access_state"]) =>
+    connections
+      .filter(({ conn }) => conn.access_state === state)
+      .map(({ conn, teamLabel }) => scopePhrase(conn, teamLabel))
+  const refused = scopes("refused")
+  const partial = scopes("partial")
+  const expired = scopes("expired")
   const lines: string[] = []
   if (refused.length) {
     lines.push(`${providerName} isn't granting access for ${refused.join(", ")}.`)
+  }
+  if (partial.length) {
+    lines.push(`${providerName} isn't granting access to some sources for ${partial.join(", ")}.`)
   }
   if (expired.length) lines.push(`Sign-in expired for ${expired.join(", ")}.`)
   return lines
