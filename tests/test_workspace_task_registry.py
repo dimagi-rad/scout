@@ -26,6 +26,7 @@ EXPECTED_SIGNATURES = {
     "expire_stale_thread_jobs": "(timestamp: int = 0) -> dict",
     "expire_stale_workspace_data_recoveries": "(timestamp: int = 0) -> dict",
     "flush_pending_requests": "(workspace_id: str) -> dict",
+    "log_worker_keepalive": "(timestamp: int = 0) -> None",
     "materialize_workspace": (
         "(context, workspace_id: str, user_id: str = '', load_intent: dict | None = None, "
         "only_unserved: bool = False, notify_thread: bool = True) -> dict"
@@ -54,6 +55,7 @@ EXPECTED_CRONS = {
     "expire_inactive_schemas": "*/30 * * * *",
     "expire_stale_thread_jobs": "*/15 * * * *",
     "expire_stale_workspace_data_recoveries": "*/15 * * * *",
+    "log_worker_keepalive": "*/5 * * * *",
     "prune_old_procrastinate_jobs": "17 3 * * *",
     "prune_resume_streams": "*/15 * * * *",
     "reconcile_refresh_candidates": "*/15 * * * *",
