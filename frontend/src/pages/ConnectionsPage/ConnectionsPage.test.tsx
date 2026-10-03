@@ -351,15 +351,22 @@ describe("ConnectionsPage", () => {
           status: "connected",
           access_state: "partial",
           chatbots: [bot("1"), bot("2")],
-          archived_chatbots: [{ ...bot("3"), archived_at: "2026-10-01T00:00:00Z" }],
+          archived_chatbots: [
+            { ...bot("3"), archived_at: "2026-10-01T00:00:00Z", archived_reason: "denied" },
+            { ...bot("4"), archived_at: "2026-09-01T00:00:00Z", archived_reason: "unlisted" },
+          ],
         },
       ])
 
+      // A bot dropped from the listing is not a denial, so it isn't counted as lost.
       expect(await screen.findByTestId("connection-access-c1")).toHaveTextContent(
         "Open Chat Studio isn't granting access to 1 of 3 bots for team acme.",
       )
       expect(screen.queryByTestId("connection-reconnect-c1")).toBeNull()
-      expect(screen.getByTestId("connection-chatbot-no-access-m-3")).toBeTruthy()
+      expect(screen.getByTestId("connection-chatbot-no-access-m-3")).toHaveTextContent("No access")
+      expect(screen.getByTestId("connection-chatbot-no-access-m-4")).toHaveTextContent(
+        "No longer listed",
+      )
       expect(screen.queryByTestId("connection-chatbot-no-access-m-1")).toBeNull()
     })
   })

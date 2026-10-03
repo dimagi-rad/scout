@@ -68,7 +68,7 @@ export function accessNotice(conn: ApiKeyConnection, teamLabel: string): AccessN
         offerReconnect: !isApiKey,
       }
     case "partial": {
-      const lost = conn.archived_chatbots?.length ?? 0
+      const lost = (conn.archived_chatbots ?? []).filter((b) => b.archived_reason !== "unlisted").length
       const total = lost + conn.chatbots.length
       return {
         title: `${product} isn't granting access to ${lost} of ${total} ${noun} for ${scope}.`,

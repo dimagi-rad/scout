@@ -15,7 +15,7 @@ import {
   ApiConnectionDialog,
   type ApiKeyConnection,
 } from "@/components/ApiConnectionDialog"
-import { accessNotice, providerAccessLines } from "./accessCopy"
+import { accessNotice, productName, providerAccessLines } from "./accessCopy"
 
 const providerBadgeStyles: Record<string, string> = {
   commcare: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
@@ -535,9 +535,15 @@ export function ConnectionsPage() {
                             >
                               <span className="flex items-center gap-2">
                                 <span className="font-medium">{cb.tenant_name || cb.tenant_id}</span>
-                                <Badge variant="secondary" className={WARNING_BADGE}>
-                                  No access
-                                </Badge>
+                                {cb.archived_reason === "unlisted" ? (
+                                  <Badge variant="outline" title={`${productName(conn.provider)} no longer lists it`}>
+                                    No longer listed
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="secondary" className={WARNING_BADGE}>
+                                    No access
+                                  </Badge>
+                                )}
                               </span>
                               <span>{cb.tenant_id}</span>
                             </li>

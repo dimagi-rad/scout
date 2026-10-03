@@ -45,7 +45,11 @@ export interface ApiKeyConnection {
   denied_at?: string | null
   chatbots: ConnectionChatbot[]
   /** Sources this connection no longer reaches (archived memberships). */
-  archived_chatbots?: (ConnectionChatbot & { archived_at: string })[]
+  archived_chatbots?: (ConnectionChatbot & {
+    archived_at: string
+    /** denied: a recorded upstream denial. unlisted: dropped from the provider's listing. */
+    archived_reason?: "denied" | "unlisted"
+  })[]
 }
 
 interface FieldOption {
