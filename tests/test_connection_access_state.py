@@ -26,6 +26,11 @@ from apps.users.services.connection_access import (
     connection_access_state,
 )
 
+OAUTH = TenantConnection.OAUTH
+API_KEY = TenantConnection.API_KEY
+EXPIRED_CODE = ErrorCode.AUTH_TOKEN_EXPIRED
+DENIED_CODE = ErrorCode.AUTH_ACCESS_DENIED
+
 
 async def _login(user):
     client = AsyncClient()
@@ -33,12 +38,16 @@ async def _login(user):
     return client
 
 
-async def _ocs_app():
-    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+async def _site():
     site, _ = await Site.objects.aget_or_create(
         id=1, defaults={"domain": "testserver", "name": "test"}
     )
-    await app.sites.aadd(site)
+    return site
+
+
+async def _ocs_app():
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    await app.sites.aadd(await _site())
     return app
 
 
@@ -55,14 +64,14 @@ async def _ocs_team(user, app, *, team, expires_in_hours=5):
     return await TenantConnection.objects.acreate(
         user=user,
         provider="ocs",
-        credential_type=TenantConnection.OAUTH,
+        credential_type=OAUTH,
         scope_key=team,
         scope_label=team,
         social_account=account,
     )
 
 
-async def _bot(user, conn, external_id, *, archived=False):
+async def _bot(user, conn, external_id, *, archived_at=None):
     tenant = await Tenant.objects.acreate(
         provider="ocs", external_id=external_id, canonical_name=f"Bot {external_id}"
     )
@@ -72,7 +81,13 @@ async def _bot(user, conn, external_id, *, archived=False):
         connection=conn,
         team_slug=conn.scope_key,
         team_name=conn.scope_label,
-        archived_at=timezone.now() if archived else None,
+        archived_at=archived_at,
+    )
+
+
+async def _deny(conn, *, code="", at):
+    await TenantConnection.objects.filter(pk=conn.pk).aupdate(
+        upstream_denial_code=code, upstream_denied_at=at
     )
 
 
@@ -82,11 +97,9 @@ async def test_refused_team_reports_denial_and_lists_its_archived_bots(user):
     app = await _ocs_app()
     conn = await _ocs_team(user, app, team="dimagi-dev")
     denied_at = timezone.now()
-    await TenantConnection.objects.filter(pk=conn.pk).aupdate(
-        upstream_denial_code=ErrorCode.AUTH_TOKEN_EXPIRED, upstream_denied_at=denied_at
-    )
-    await _bot(user, conn, "1", archived=True)
-    await _bot(user, conn, "2", archived=True)
+    await _deny(conn, code=EXPIRED_CODE, at=denied_at)
+    await _bot(user, conn, "1", archived_at=denied_at)
+    await _bot(user, conn, "2", archived_at=denied_at)
 
     client = await _login(user)
     [row] = (await client.get("/api/auth/connections/")).json()
@@ -94,22 +107,26 @@ async def test_refused_team_reports_denial_and_lists_its_archived_bots(user):
     # The sign-in is healthy, so the 401 is OCS refusing it, not an expiry.
     assert row["status"] == "connected"
     assert row["access_state"] == ACCESS_REFUSED
-    assert row["denial_code"] == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert row["denial_code"] == EXPIRED_CODE
     assert row["denied_at"] == denied_at.isoformat()
     assert row["chatbots"] == []
     assert [b["tenant_name"] for b in row["archived_chatbots"]] == ["Bot 1", "Bot 2"]
-    assert all(b["archived_at"] for b in row["archived_chatbots"])
+    assert {b["archived_reason"] for b in row["archived_chatbots"]} == {"denied"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_healthy_team_is_ok_and_partial_team_marks_only_lost_bots(user):
+async def test_partial_team_marks_denied_bots_apart_from_unlisted_ones(user):
     app = await _ocs_app()
     healthy = await _ocs_team(user, app, team="acme")
     await _bot(user, healthy, "a1")
     partial = await _ocs_team(user, app, team="globex")
+    denied_at = timezone.now()
+    # A single-bot 403 stamps the time but leaves the connection's code empty.
+    await _deny(partial, at=denied_at)
     await _bot(user, partial, "g1")
-    await _bot(user, partial, "g2", archived=True)
+    await _bot(user, partial, "g2", archived_at=denied_at)
+    await _bot(user, partial, "g3", archived_at=denied_at - timedelta(days=3))
 
     client = await _login(user)
     by_scope = {r["scope_key"]: r for r in (await client.get("/api/auth/connections/")).json()}
@@ -117,9 +134,29 @@ async def test_healthy_team_is_ok_and_partial_team_marks_only_lost_bots(user):
     assert by_scope["acme"]["access_state"] == ACCESS_OK
     assert by_scope["acme"]["denial_code"] is None
     assert by_scope["acme"]["archived_chatbots"] == []
-    assert by_scope["globex"]["access_state"] == ACCESS_PARTIAL
-    assert [b["tenant_id"] for b in by_scope["globex"]["chatbots"]] == ["g1"]
-    assert [b["tenant_id"] for b in by_scope["globex"]["archived_chatbots"]] == ["g2"]
+    globex = by_scope["globex"]
+    assert globex["access_state"] == ACCESS_PARTIAL
+    assert globex["denied_at"] is None
+    assert [b["tenant_id"] for b in globex["chatbots"]] == ["g1"]
+    assert {b["tenant_id"]: b["archived_reason"] for b in globex["archived_chatbots"]} == {
+        "g2": "denied",
+        "g3": "unlisted",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_bots_dropped_from_the_listing_alone_raise_no_alarm(user):
+    """A deleted bot is archived on the next sync; nobody can restore it, so the
+    connection must not keep telling the user to ask an admin."""
+    app = await _ocs_app()
+    conn = await _ocs_team(user, app, team="acme")
+    await _bot(user, conn, "gone", archived_at=timezone.now())
+
+    client = await _login(user)
+    [row] = (await client.get("/api/auth/connections/")).json()
+    assert row["access_state"] == ACCESS_OK
+    assert row["archived_chatbots"][0]["archived_reason"] == "unlisted"
 
 
 @pytest.mark.asyncio
@@ -127,9 +164,7 @@ async def test_healthy_team_is_ok_and_partial_team_marks_only_lost_bots(user):
 async def test_expired_sign_in_is_expired_not_refused(user):
     app = await _ocs_app()
     conn = await _ocs_team(user, app, team="acme", expires_in_hours=-1)
-    await TenantConnection.objects.filter(pk=conn.pk).aupdate(
-        upstream_denial_code=ErrorCode.AUTH_TOKEN_EXPIRED, upstream_denied_at=timezone.now()
-    )
+    await _deny(conn, code=EXPIRED_CODE, at=timezone.now())
 
     client = await _login(user)
     [row] = (await client.get("/api/auth/connections/")).json()
@@ -144,10 +179,7 @@ async def test_providers_view_names_the_connections_each_card_covers(user):
     acme = await _ocs_team(user, app, team="acme")
     globex = await _ocs_team(user, app, team="globex")
     await TenantConnection.objects.acreate(
-        user=user,
-        provider="ocs",
-        credential_type=TenantConnection.API_KEY,
-        encrypted_credential="enc",
+        user=user, provider="ocs", credential_type=API_KEY, encrypted_credential="enc"
     )
 
     client = await _login(user)
@@ -156,26 +188,60 @@ async def test_providers_view_names_the_connections_each_card_covers(user):
     assert provider["connection_ids"] == sorted([str(acme.id), str(globex.id)])
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_commcare_www_and_eu_cards_each_cover_their_own_connection(user):
+    """Both servers' connections are provider "commcare"; the card keys on the identity."""
+    site = await _site()
+    connections = {}
+    for app_provider, scope in (("commcare", ""), ("commcare_eu", "eu")):
+        app = await SocialApp.objects.acreate(
+            provider=app_provider, name=app_provider, client_id="c", secret="s"
+        )
+        await app.sites.aadd(site)
+        account = await SocialAccount.objects.acreate(
+            user=user, provider=app_provider, uid=f"u-{app_provider}"
+        )
+        connections[app_provider] = await TenantConnection.objects.acreate(
+            user=user,
+            provider="commcare",
+            credential_type=OAUTH,
+            scope_key=scope,
+            social_account=account,
+        )
+
+    client = await _login(user)
+    providers = (await client.get("/api/auth/providers/")).json()["providers"]
+    assert {p["id"]: p["connection_ids"] for p in providers} == {
+        "commcare": [str(connections["commcare"].id)],
+        "commcare_eu": [str(connections["commcare_eu"].id)],
+    }
+
+
 @pytest.mark.parametrize(
-    ("credential_type", "status", "code", "live", "archived", "expected"),
+    ("provider", "credential_type", "status", "code", "live", "denied", "expected"),
     [
-        (TenantConnection.OAUTH, "connected", "", 2, 0, ACCESS_OK),
-        (TenantConnection.OAUTH, "connected", "", 0, 0, ACCESS_OK),
-        (TenantConnection.OAUTH, "expired", ErrorCode.AUTH_TOKEN_EXPIRED, 0, 2, ACCESS_EXPIRED),
-        (TenantConnection.OAUTH, "connected", ErrorCode.AUTH_TOKEN_EXPIRED, 0, 2, ACCESS_REFUSED),
-        (TenantConnection.OAUTH, "unavailable", ErrorCode.AUTH_ACCESS_DENIED, 0, 2, ACCESS_REFUSED),
-        (TenantConnection.OAUTH, "connected", "", 0, 2, ACCESS_REFUSED),
-        (TenantConnection.OAUTH, "connected", "", 1, 1, ACCESS_PARTIAL),
-        (TenantConnection.OAUTH, "needs_team", "", 0, 0, ACCESS_OK),
-        (TenantConnection.API_KEY, None, ErrorCode.AUTH_TOKEN_EXPIRED, 0, 2, ACCESS_EXPIRED),
-        (TenantConnection.API_KEY, None, ErrorCode.AUTH_ACCESS_DENIED, 0, 2, ACCESS_REFUSED),
+        ("ocs", OAUTH, "connected", "", 2, 0, ACCESS_OK),
+        ("ocs", OAUTH, "connected", "", 0, 0, ACCESS_OK),
+        ("ocs", OAUTH, "expired", EXPIRED_CODE, 0, 2, ACCESS_EXPIRED),
+        ("ocs", OAUTH, "connected", EXPIRED_CODE, 0, 2, ACCESS_REFUSED),
+        ("ocs", OAUTH, "unavailable", DENIED_CODE, 0, 2, ACCESS_REFUSED),
+        ("ocs", OAUTH, "connected", "", 0, 2, ACCESS_REFUSED),
+        ("ocs", OAUTH, "connected", "", 1, 1, ACCESS_PARTIAL),
+        ("ocs", OAUTH, "needs_team", "", 0, 0, ACCESS_OK),
+        ("ocs", API_KEY, None, EXPIRED_CODE, 0, 2, ACCESS_EXPIRED),
+        ("ocs", API_KEY, None, DENIED_CODE, 0, 2, ACCESS_REFUSED),
+        # Account-wide tokens: a 401 is a dead sign-in, which reconnecting fixes.
+        ("commcare", OAUTH, "connected", EXPIRED_CODE, 0, 2, ACCESS_EXPIRED),
+        ("commcare_connect", OAUTH, "connected", EXPIRED_CODE, 0, 2, ACCESS_EXPIRED),
+        ("commcare", OAUTH, "connected", DENIED_CODE, 0, 2, ACCESS_REFUSED),
     ],
 )
-def test_connection_access_state(credential_type, status, code, live, archived, expected):
+def test_connection_access_state(provider, credential_type, status, code, live, denied, expected):
     conn = TenantConnection(
-        provider="ocs", credential_type=credential_type, upstream_denial_code=code
+        provider=provider, credential_type=credential_type, upstream_denial_code=code
     )
     assert (
-        connection_access_state(conn, status=status, live_count=live, archived_count=archived)
+        connection_access_state(conn, status=status, live_count=live, denied_count=denied)
         == expected
     )

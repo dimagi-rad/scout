@@ -23,7 +23,11 @@ from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
 )
-from apps.users.services.connection_access import connection_access_state
+from apps.users.services.connection_access import (
+    ARCHIVED_DENIED,
+    archived_reason,
+    connection_access_state,
+)
 from apps.users.services.credential_resolver import (
     _aresolve_oauth_credential,
     aconnection_status,
@@ -265,9 +269,9 @@ async def tenant_credential_list_view(request):
             chatbots = []
             archived_chatbots = []
             # all_objects: the archived tombstones are the sources this connection
-            # no longer reaches, which the page marks no-access.
+            # no longer reaches, which the page marks.
             async for tm in (
-                TenantMembership.all_objects.filter(connection=conn)
+                TenantMembership.all_objects.filter(connection=conn, user=user)
                 .select_related("tenant")
                 .order_by(Lower("tenant__canonical_name"), "id")
             ):
@@ -281,7 +285,13 @@ async def tenant_credential_list_view(request):
                 if tm.archived_at is None:
                     chatbots.append(entry)
                 else:
-                    archived_chatbots.append(entry | {"archived_at": tm.archived_at.isoformat()})
+                    archived_chatbots.append(
+                        entry
+                        | {
+                            "archived_at": tm.archived_at.isoformat(),
+                            "archived_reason": archived_reason(conn, tm.archived_at),
+                        }
+                    )
             is_oauth = conn.credential_type == TenantConnection.OAUTH
             status = await aconnection_status(conn) if is_oauth else None
             results.append(
@@ -302,11 +312,17 @@ async def tenant_credential_list_view(request):
                         conn,
                         status=status,
                         live_count=len(chatbots),
-                        archived_count=len(archived_chatbots),
+                        denied_count=sum(
+                            b["archived_reason"] == ARCHIVED_DENIED for b in archived_chatbots
+                        ),
                     ),
                     "denial_code": conn.upstream_denial_code or None,
+                    # upstream_denied_at outlives a cleared code as a fence; without
+                    # the code it is history, not a current denial.
                     "denied_at": (
-                        conn.upstream_denied_at.isoformat() if conn.upstream_denied_at else None
+                        conn.upstream_denied_at.isoformat()
+                        if conn.upstream_denial_code and conn.upstream_denied_at
+                        else None
                     ),
                     "chatbots": chatbots,
                     "archived_chatbots": archived_chatbots,
