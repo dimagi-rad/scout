@@ -781,7 +781,8 @@ def _publish_verification_receipt(
         accepted_tenant_ids = frozenset()
         if result.outcome == VerificationOutcome.COMPLETE:
             # A scoped result that confirmed nothing proves nothing about the credential.
-            if current.upstream_denial_code and (result.tenant_ids or not result.scoped):
+            credential_proven = bool(result.tenant_ids or not result.scoped)
+            if current.upstream_denial_code and credential_proven:
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
             # Claims match on the canonical provider, so publication must too or an
@@ -847,13 +848,14 @@ def _publish_verification_receipt(
                 # As for a recorded denial: no grant cached before this may outlive it.
                 user_id = current.user_id
                 transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
-            # A complete answer from this credential says nothing it omits was
-            # withheld from the connection as a whole: such a tombstone is gone.
-            _configure_transaction_deadline(deadline, clock)
-            omission_scope.filter(
-                archived_reason=TenantMembership.ARCHIVED_DENIED_CONNECTION,
-                tenant_id__in=omitted_ids,
-            ).update(archived_reason=TenantMembership.ARCHIVED_UNLISTED)
+            if credential_proven:
+                # The credential works, so nothing it omits was withheld from the
+                # connection as a whole: such a tombstone is gone.
+                _configure_transaction_deadline(deadline, clock)
+                omission_scope.filter(
+                    archived_reason=TenantMembership.ARCHIVED_DENIED_CONNECTION,
+                    tenant_id__in=omitted_ids,
+                ).update(archived_reason=TenantMembership.ARCHIVED_UNLISTED)
             # Legacy discovery can restore a tombstone without our lease; it must
             # not revive an older positive proof after authoritative omission.
             _configure_transaction_deadline(deadline, clock)

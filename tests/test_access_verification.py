@@ -599,6 +599,32 @@ def test_complete_publication_relabels_only_connection_wide_denial_tombstones(
 
 
 @pytest.mark.django_db
+def test_scoped_complete_that_confirmed_nothing_keeps_a_connection_denial(
+    user, tenant, verification_connection
+):
+    """It leaves the denial code set, so it must not retire the tombstones either."""
+    conn, own = verification_connection
+    denied_at = timezone.now()
+    TenantMembership.objects.filter(pk=own.pk).update(
+        archived_at=denied_at, archived_reason=TenantMembership.ARCHIVED_DENIED_CONNECTION
+    )
+    conn.upstream_denial_code = ErrorCode.AUTH_TOKEN_EXPIRED
+    conn.upstream_denied_at = denied_at
+    conn.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
+    claim = claim_verification(user.id, conn.id, {tenant.id})
+
+    assert (
+        publish_verification(claim, VerificationResult.complete(set(), scope={tenant.id}))
+        == PublicationStatus.PUBLISHED
+    )
+
+    own.refresh_from_db()
+    conn.refresh_from_db()
+    assert conn.upstream_denial_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert own.archived_reason == TenantMembership.ARCHIVED_DENIED_CONNECTION
+
+
+@pytest.mark.django_db
 def test_complete_publication_restores_only_observed_connection_history(
     user, tenant, verification_connection
 ):
