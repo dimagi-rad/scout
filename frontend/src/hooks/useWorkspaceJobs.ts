@@ -8,6 +8,15 @@ import {
 } from "@/api/jobs"
 
 const POLL_INTERVAL_MS = 3000
+// Delay before the next poll after 1, 2, 3+ consecutive failures. A denied
+// workspace (403, or 503 while access freshness resolves) or a down API
+// otherwise gets hammered every 3s for as long as the tab stays open.
+const BACKOFF_MS = [10_000, 30_000, 60_000]
+
+export function pollDelayMs(failures: number): number {
+  if (failures <= 0) return POLL_INTERVAL_MS
+  return BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1]
+}
 
 interface State {
   workspaceId: string | null
@@ -111,6 +120,9 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
   // Thread id -> request id: a thread can send one request and hold the next
   // between two polls, which must still count as a send.
   const prevPendingRef = useRef<Map<string, string>>(new Map())
+  const failuresRef = useRef(0)
+  // Set by the polling effect: drops the backoff and polls now.
+  const restartPollingRef = useRef<() => Promise<void>>(() => Promise.resolve())
   const workspaceIdRef = useRef(workspaceId)
   useEffect(() => {
     workspaceIdRef.current = workspaceId
@@ -127,6 +139,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       if (workspaceIdRef.current !== workspaceId) return
       if (poll < appliedPollRef.current) return
       appliedPollRef.current = poll
+      failuresRef.current = 0
       const currentThreadIds = new Set(data.jobs.map((j) => j.thread_id))
       const pendingRequests = data.pending_requests ?? {}
       const currentPending = new Map(
@@ -164,6 +177,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
         setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
       }
     } catch (e) {
+      if (workspaceIdRef.current === workspaceId) failuresRef.current += 1
       setState((s) => ({ ...s, lastError: String(e) }))
     }
   }, [workspaceId])
@@ -176,39 +190,47 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     prevPendingRef.current = new Map()
     setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
     setOverrides((prev) => (Object.keys(prev).length === 0 ? prev : {}))
+    failuresRef.current = 0
     let cancelled = false
-    let interval: ReturnType<typeof setInterval> | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
 
     // Gate polling on tab visibility (arch #254, 05#6): a hidden tab needs no
     // live job status, and each poll triggers an API-side janitor reconciliation.
     // Pausing while hidden removes that idle load; resume catches up immediately.
-    const startPolling = () => {
-      if (interval !== null) return
-      interval = setInterval(() => {
-        if (!cancelled) void fetchOnce()
-      }, POLL_INTERVAL_MS)
-    }
     const stopPolling = () => {
-      if (interval !== null) {
-        clearInterval(interval)
-        interval = null
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
       }
     }
+    const schedule = () => {
+      stopPolling()
+      if (cancelled || document.visibilityState !== "visible") return
+      timer = setTimeout(() => {
+        timer = null
+        void fetchOnce().then(schedule)
+      }, pollDelayMs(failuresRef.current))
+    }
+    const restart = () => {
+      if (cancelled) return Promise.resolve()
+      failuresRef.current = 0
+      stopPolling()
+      const done = fetchOnce()
+      void done.then(schedule)
+      return done
+    }
+    restartPollingRef.current = restart
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
-        if (!cancelled) void fetchOnce()
-        startPolling()
-      } else {
-        stopPolling()
-      }
+      if (document.visibilityState === "visible") void restart()
+      else stopPolling()
     }
 
     document.addEventListener("visibilitychange", handleVisibility)
     // Fire immediately on mount so the UI populates without waiting one tick.
-    void fetchOnce()
-    if (document.visibilityState === "visible") startPolling()
+    void fetchOnce().then(schedule)
 
     return () => {
+      restartPollingRef.current = () => Promise.resolve()
       cancelled = true
       stopPolling()
       document.removeEventListener("visibilitychange", handleVisibility)
@@ -246,6 +268,11 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     })
   }, [])
 
+  const notifyJobLikelyStarted = useCallback(() => {
+    void restartPollingRef.current()
+  }, [])
+  const refresh = useCallback(() => restartPollingRef.current(), [])
+
   const sameWorkspace = state.workspaceId === workspaceId
   const pendingByThreadId = useMemo(() => {
     // Overrides are cleared only once the next workspace starts polling.
@@ -282,7 +309,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     setPendingRequest,
     hidePendingRequest,
     forgetPendingRequest,
-    refresh: fetchOnce,
-    notifyJobLikelyStarted: fetchOnce,
+    refresh,
+    notifyJobLikelyStarted,
   }
 }

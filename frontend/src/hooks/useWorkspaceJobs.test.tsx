@@ -1,8 +1,9 @@
 import { act, renderHook, waitFor } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { jobsApi, type ActiveJobsResponse, type PendingRequest, type WorkspaceLoad } from "@/api/jobs"
-import { useWorkspaceJobsImpl } from "./useWorkspaceJobs"
+import { ApiError } from "@/api/client"
+import { pollDelayMs, useWorkspaceJobsImpl } from "./useWorkspaceJobs"
 
 const load: WorkspaceLoad = {
   tenant_id: "t1",
@@ -143,5 +144,114 @@ describe("useWorkspaceJobsImpl held requests", () => {
     })
 
     expect(result.current.pendingByThreadId["thread-1"]).toEqual(held)
+  })
+})
+
+describe("pollDelayMs", () => {
+  it("steps 3s, 10s, 30s, 60s and stays capped", () => {
+    expect([0, 1, 2, 3, 4, 40].map(pollDelayMs)).toEqual([3000, 10000, 30000, 60000, 60000, 60000])
+  })
+})
+
+describe("useWorkspaceJobsImpl poll backoff", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true })
+  })
+
+  const denied = () => new ApiError(403, "denied")
+
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms)
+    })
+  }
+
+  it("backs off on 403, 503 and network errors up to 60s", async () => {
+    const spy = vi
+      .spyOn(jobsApi, "active")
+      .mockRejectedValueOnce(denied())
+      .mockRejectedValueOnce(new ApiError(503, "fresh"))
+      .mockRejectedValueOnce(new TypeError("network"))
+      .mockRejectedValue(new ApiError(500, "boom"))
+    renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await advance(0)
+    expect(spy).toHaveBeenCalledTimes(1)
+    await advance(9_999)
+    expect(spy).toHaveBeenCalledTimes(1)
+    await advance(1)
+    expect(spy).toHaveBeenCalledTimes(2)
+    await advance(30_000)
+    expect(spy).toHaveBeenCalledTimes(3)
+    await advance(60_000)
+    expect(spy).toHaveBeenCalledTimes(4)
+    await advance(59_999)
+    expect(spy).toHaveBeenCalledTimes(4)
+    await advance(1)
+    expect(spy).toHaveBeenCalledTimes(5)
+  })
+
+  it("returns to 3s after a successful poll", async () => {
+    const spy = vi
+      .spyOn(jobsApi, "active")
+      .mockRejectedValueOnce(denied())
+      .mockResolvedValue(empty)
+    renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await advance(10_000)
+    expect(spy).toHaveBeenCalledTimes(2)
+    await advance(3_000)
+    expect(spy).toHaveBeenCalledTimes(3)
+  })
+
+  it("resets to 3s and polls now when a job likely started", async () => {
+    const spy = vi.spyOn(jobsApi, "active").mockRejectedValue(denied())
+    const { result } = renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await advance(10_000)
+    expect(spy).toHaveBeenCalledTimes(2)
+    act(() => result.current.notifyJobLikelyStarted())
+    await advance(0)
+    expect(spy).toHaveBeenCalledTimes(3)
+    await advance(10_000)
+    expect(spy).toHaveBeenCalledTimes(4)
+  })
+
+  it("resets the backoff on a workspace switch", async () => {
+    const spy = vi.spyOn(jobsApi, "active").mockRejectedValue(denied())
+    const { rerender } = renderHook(({ id }) => useWorkspaceJobsImpl(id), {
+      initialProps: { id: "ws-a" },
+    })
+    await advance(10_000)
+    await advance(30_000)
+    expect(spy).toHaveBeenCalledTimes(3)
+    rerender({ id: "ws-b" })
+    await advance(0)
+    expect(spy).toHaveBeenCalledTimes(4)
+    await advance(10_000)
+    expect(spy).toHaveBeenCalledTimes(5)
+  })
+
+  it("pauses while hidden and resets when the tab is visible again", async () => {
+    const spy = vi.spyOn(jobsApi, "active").mockRejectedValue(denied())
+    renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await advance(10_000)
+    await advance(30_000)
+    expect(spy).toHaveBeenCalledTimes(3)
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true })
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+    await advance(120_000)
+    expect(spy).toHaveBeenCalledTimes(3)
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true })
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+    await advance(0)
+    expect(spy).toHaveBeenCalledTimes(4)
+    await advance(10_000)
+    expect(spy).toHaveBeenCalledTimes(5)
   })
 })
