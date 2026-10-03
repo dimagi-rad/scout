@@ -85,7 +85,9 @@ export function isNoiseEvent(event: ErrorEvent, hint: EventHint = {}): boolean {
   if (errorName(original) === "AbortError") return true
   if (event.exception?.values?.some((value) => value.type === "AbortError")) return true
 
-  const status = errorStatus(findApiError(original))
+  // Only the thrown error itself, not its cause: an error wrapping a 403 may be a
+  // real bug in the code that handled it.
+  const status = errorName(original) === "ApiError" ? errorStatus(original) : undefined
   if (status !== undefined && EXPECTED_API_STATUSES.has(status)) return true
 
   if (eventMessages(event, hint).some((message) => NOISE_MESSAGES.some((re) => re.test(message)))) {

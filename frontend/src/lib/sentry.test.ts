@@ -295,8 +295,8 @@ describe("isNoiseEvent", () => {
 
   it.each([401, 403, 503])("ignores expected %i API responses", (status) => {
     expect(isNoiseEvent(errorEvent(), { originalException: new ApiError(status, "nope") })).toBe(true)
-    const wrapped = new Error("load failed", { cause: new ApiError(status, "nope") })
-    expect(isNoiseEvent(errorEvent(), { originalException: wrapped })).toBe(true)
+    const wrapped = new Error("chart failed", { cause: new ApiError(status, "nope") })
+    expect(isNoiseEvent(errorEvent(), { originalException: wrapped })).toBe(false)
   })
 
   it("reports unexpected API failures and ordinary errors", () => {
