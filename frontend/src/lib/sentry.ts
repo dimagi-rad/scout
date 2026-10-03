@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/react"
-import type { Breadcrumb, ErrorEvent, EventHint, StackFrame } from "@sentry/react"
+import type { Breadcrumb, ErrorEvent, EventHint, Exception, StackFrame } from "@sentry/react"
 import { safeText } from "./reportRenderError"
 
 // Expected responses the UI already handles: signed out, no access, and the
@@ -51,8 +51,11 @@ function eventMessages(event: ErrorEvent, hint: EventHint): string[] {
   return messages
 }
 
-function eventFrames(event: ErrorEvent): StackFrame[] {
-  return (event.exception?.values ?? []).flatMap((value) => value.stacktrace?.frames ?? [])
+// Sentry lists frames oldest first and the thrown error last. Only the frame that
+// threw counts: extensions wrap fetch and timers, so they sit mid-stack in real
+// Scout errors too.
+function topFrame(event: ErrorEvent): StackFrame | undefined {
+  return event.exception?.values?.at(-1)?.stacktrace?.frames?.at(-1)
 }
 
 /** True for errors that are not Scout bugs: browser quirks, extensions, aborts, expected API statuses. */
@@ -70,16 +73,22 @@ export function isNoiseEvent(event: ErrorEvent, hint: EventHint = {}): boolean {
     return true
   }
 
-  const frames = eventFrames(event)
-  return frames.some((frame) => EXTENSION_URL.test(frame.filename ?? frame.abs_path ?? ""))
+  const frame = topFrame(event)
+  return EXTENSION_URL.test(frame?.filename ?? frame?.abs_path ?? "")
 }
 
 /**
  * Sentry `beforeBreadcrumb` hook. Console breadcrumbs hold raw error text and
- * logged values, and request breadcrumbs hold full URLs.
+ * logged values, request breadcrumbs hold full URLs, and UI breadcrumbs hold
+ * attribute values such as a thread button's title, which is the first chat message.
  */
 export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   if (breadcrumb.category === "console") return null
+  if (breadcrumb.category?.startsWith("ui.") && breadcrumb.message) {
+    // A value may itself contain quotes, so match up to the closing bracket.
+    const message = breadcrumb.message.replace(/\[([\w:-]+)=[^\]]*\]/g, "[$1]")
+    breadcrumb = { ...breadcrumb, message }
+  }
   if (!breadcrumb.data) return breadcrumb
   const data = { ...breadcrumb.data }
   for (const key of ["url", "from", "to"]) {
@@ -88,8 +97,22 @@ export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   return { ...breadcrumb, data }
 }
 
+// An ApiError's message is server text, which can name customer columns, datasets
+// or SQL errors without quoting them, and a non-Error rejection's value is raw data.
+function exceptionValue(value: Exception, hint: EventHint): string | undefined {
+  const original = hint.originalException
+  if (value.type === "ApiError") {
+    const status = errorStatus(original)
+    return status === undefined ? "API request failed" : `API request failed (HTTP ${status})`
+  }
+  if (value.mechanism?.type === "onunhandledrejection" && !(original instanceof Error)) {
+    return "Non-Error promise rejection"
+  }
+  return value.value && safeText(value.value)
+}
+
 /** Removes request bodies, cookies, headers, query strings, email and raw values from an event. */
-export function scrubEvent(event: ErrorEvent): ErrorEvent {
+export function scrubEvent(event: ErrorEvent, hint: EventHint = {}): ErrorEvent {
   if (event.request) {
     const userAgent = event.request.headers?.["User-Agent"]
     event.request = {
@@ -110,9 +133,11 @@ export function scrubEvent(event: ErrorEvent): ErrorEvent {
   // Error text can echo customer values, such as SQL literals or chat text an API quotes back.
   if (event.message) event.message = safeText(event.message)
   for (const value of event.exception?.values ?? []) {
-    if (value.value) value.value = safeText(value.value)
+    value.value = exceptionValue(value, hint)
     for (const frame of value.stacktrace?.frames ?? []) {
       delete frame.vars
+      frame.filename = stripUrl(frame.filename)
+      frame.abs_path = stripUrl(frame.abs_path)
     }
   }
 
@@ -125,7 +150,7 @@ export function scrubEvent(event: ErrorEvent): ErrorEvent {
 }
 
 export function beforeSend(event: ErrorEvent, hint: EventHint): ErrorEvent | null {
-  return isNoiseEvent(event, hint) ? null : scrubEvent(event)
+  return isNoiseEvent(event, hint) ? null : scrubEvent(event, hint)
 }
 
 /** Errors only: no tracing, no replay, no default PII. A no-op without a DSN. */

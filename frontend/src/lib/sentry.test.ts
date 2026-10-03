@@ -1,8 +1,18 @@
+import * as Sentry from "@sentry/react"
 import type { ErrorEvent } from "@sentry/react"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { ApiError } from "@/api/client"
-import { beforeSend, isNoiseEvent, scrubBreadcrumb, scrubEvent, stripUrl } from "./sentry"
+import {
+  beforeSend,
+  initSentry,
+  isNoiseEvent,
+  scrubBreadcrumb,
+  scrubEvent,
+  stripUrl,
+} from "./sentry"
+
+vi.mock("@sentry/react", () => ({ init: vi.fn(), setUser: vi.fn() }))
 
 function errorEvent(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
   return {
@@ -85,7 +95,7 @@ describe("scrubEvent", () => {
         exception: {
           values: [
             {
-              type: "ApiError",
+              type: "Error",
               value: 'invalid input syntax for type integer: "Alice"',
               stacktrace: { frames: [{ filename: "app.js", vars: { message: "secret chat" } }] },
             },
@@ -97,6 +107,52 @@ describe("scrubEvent", () => {
     const value = event.exception!.values![0]
     expect(value.value).toBe('invalid input syntax for type integer: "…"')
     expect(value.stacktrace!.frames![0].vars).toBeUndefined()
+  })
+
+  it("replaces an ApiError's server text with its status", () => {
+    const event = scrubEvent(
+      errorEvent({ exception: { values: [{ type: "ApiError", value: "Column patient_name not found" }] } }),
+      { originalException: new ApiError(400, "Column patient_name not found") },
+    )
+    expect(event.exception!.values![0].value).toBe("API request failed (HTTP 400)")
+  })
+
+  it("replaces the raw value of a non-Error promise rejection", () => {
+    const event = scrubEvent(
+      errorEvent({
+        exception: {
+          values: [
+            {
+              type: "UnhandledRejection",
+              value: "Non-Error promise rejection captured with value: patient Alice",
+              mechanism: { type: "onunhandledrejection", handled: false },
+            },
+          ],
+        },
+      }),
+      { originalException: "patient Alice" },
+    )
+    expect(event.exception!.values![0].value).toBe("Non-Error promise rejection")
+  })
+
+  it("strips query strings from frame URLs", () => {
+    const event = scrubEvent(
+      errorEvent({
+        exception: {
+          values: [
+            {
+              type: "Error",
+              value: "x",
+              stacktrace: { frames: [{ filename: "https://scout.example/embed?token=a", abs_path: "/a?b" }] },
+            },
+          ],
+        },
+      }),
+    )
+    expect(event.exception!.values![0].stacktrace!.frames![0]).toEqual({
+      filename: "https://scout.example/embed",
+      abs_path: "/a",
+    })
   })
 
   it("scrubs breadcrumbs already on the event", () => {
@@ -128,9 +184,22 @@ describe("scrubBreadcrumb", () => {
     ).toEqual({ category: "navigation", data: { from: "/", to: "/chat" } })
   })
 
+  it("drops attribute values from UI breadcrumbs, which can hold thread titles", () => {
+    const click = {
+      category: "ui.click",
+      message: 'nav > button.flex[title="how many "HIV+" patients in Kisumu"][data-testid="thread-1"]',
+    }
+    expect(scrubBreadcrumb(click)).toEqual({
+      category: "ui.click",
+      message: "nav > button.flex[title][data-testid]",
+    })
+  })
+
   it("leaves other breadcrumbs alone", () => {
     const click = { category: "ui.click", message: "button.send" }
-    expect(scrubBreadcrumb(click)).toBe(click)
+    expect(scrubBreadcrumb(click)).toEqual(click)
+    const custom = { category: "app", message: 'kept [title="x"]' }
+    expect(scrubBreadcrumb(custom)).toBe(custom)
   })
 })
 
@@ -158,6 +227,26 @@ describe("isNoiseEvent", () => {
       },
     })
     expect(isNoiseEvent(event)).toBe(true)
+  })
+
+  it("reports a Scout error whose stack passes through an extension wrapper", () => {
+    const event = errorEvent({
+      exception: {
+        values: [
+          {
+            type: "TypeError",
+            value: "boom",
+            stacktrace: {
+              frames: [
+                { filename: "chrome-extension://abc/wrap.js" },
+                { filename: "https://scout.example/assets/index.js" },
+              ],
+            },
+          },
+        ],
+      },
+    })
+    expect(isNoiseEvent(event)).toBe(false)
   })
 
   it("ignores aborted and dropped requests", () => {
@@ -196,5 +285,36 @@ describe("beforeSend", () => {
     expect(beforeSend(errorEvent(), { originalException: new ApiError(401, "signed out") })).toBeNull()
     const sent = beforeSend(errorEvent({ user: { id: "u", email: "a@example.com" } }), {})
     expect(sent?.user).toEqual({ id: "u" })
+  })
+})
+
+describe("initSentry", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.clearAllMocks()
+  })
+
+  it("does nothing without a DSN", () => {
+    vi.stubEnv("VITE_SENTRY_DSN", "")
+    initSentry()
+    expect(Sentry.init).not.toHaveBeenCalled()
+  })
+
+  it("reports errors only, without default PII", () => {
+    vi.stubEnv("VITE_SENTRY_DSN", "https://key@o0.ingest.sentry.io/1")
+    vi.stubEnv("VITE_SENTRY_RELEASE", "abc123")
+    vi.stubEnv("VITE_SENTRY_ENVIRONMENT", "production")
+    initSentry()
+    const options = vi.mocked(Sentry.init).mock.calls[0][0]!
+    expect(options).toMatchObject({
+      dsn: "https://key@o0.ingest.sentry.io/1",
+      release: "abc123",
+      environment: "production",
+      sendDefaultPii: false,
+      beforeSend,
+      beforeBreadcrumb: scrubBreadcrumb,
+    })
+    expect(options).not.toHaveProperty("tracesSampleRate")
+    expect(options).not.toHaveProperty("integrations")
   })
 })
