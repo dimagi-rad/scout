@@ -289,4 +289,17 @@ describe("useWorkspaceJobsImpl poll backoff", () => {
     await advance(3_000)
     expect(spy).toHaveBeenCalledTimes(4)
   })
+
+  it("does not poll on online while the tab is hidden", async () => {
+    const spy = vi.spyOn(jobsApi, "active").mockRejectedValue(denied())
+    renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await advance(0)
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true })
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"))
+      window.dispatchEvent(new Event("online"))
+    })
+    await advance(120_000)
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
 })

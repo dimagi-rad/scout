@@ -229,7 +229,10 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     }
 
     // Coming back online is the likeliest moment a backed-off poll can succeed.
-    const handleOnline = () => void restart()
+    // A hidden tab stays paused; the visibility handler restarts it later.
+    const handleOnline = () => {
+      if (document.visibilityState === "visible") void restart()
+    }
 
     document.addEventListener("visibilitychange", handleVisibility)
     window.addEventListener("online", handleOnline)
