@@ -124,7 +124,7 @@ class Command(BaseCommand):
             candidates, _kept = _teamless_ocs(TenantMembership.all_objects.filter(user_id=user_id))
             archived = TenantMembership.all_objects.filter(
                 pk__in=[m.pk for m in candidates if m.pk in scanned], archived_at__isnull=True
-            ).update(archived_at=timezone.now())
+            ).update(archived_at=timezone.now(), archived_reason="")
             # A no-op outside a request scope; kept so the write stays safe if it is
             # ever reused from one, like the other archival paths.
             transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))

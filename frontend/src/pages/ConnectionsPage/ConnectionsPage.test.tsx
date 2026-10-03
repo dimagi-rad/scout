@@ -245,4 +245,132 @@ describe("ConnectionsPage", () => {
       expect(screen.getByTestId("connection-card-c3")).toBeTruthy()
     })
   })
+
+  describe("access state", () => {
+    const ocsProvider = {
+      id: "ocs",
+      name: "Open Chat Studio",
+      login_url: "/accounts/ocs/login/",
+      connected: true,
+      status: "connected",
+      supports_multiple_scopes: true,
+      connection_ids: ["c1", "c2"],
+    }
+    const bot = (id: string) => ({
+      membership_id: `m-${id}`,
+      tenant_id: id,
+      tenant_name: `Bot ${id}`,
+      team_slug: "dimagi-dev",
+      team_name: "dimagi-dev",
+    })
+
+    function renderWith(connections: unknown[]) {
+      vi.mocked(api.get).mockImplementation((path) =>
+        Promise.resolve(path === "/api/auth/providers/" ? { providers: [ocsProvider] } : connections),
+      )
+      render(<ConnectionsPage />)
+    }
+
+    it("says a team's access is refused upstream, what to do, and which bots are lost", async () => {
+      renderWith([
+        {
+          connection_id: "c1",
+          provider: "ocs",
+          credential_type: "oauth",
+          scope_key: "dimagi-dev",
+          scope_label: "dimagi-dev",
+          status: "connected",
+          access_state: "refused",
+          denial_code: "AUTH_TOKEN_EXPIRED",
+          denied_at: "2026-10-01T00:00:00Z",
+          chatbots: [],
+          archived_chatbots: [{ ...bot("1"), archived_at: "2026-10-01T00:00:00Z" }],
+        },
+      ])
+
+      const notice = await screen.findByTestId("connection-access-c1")
+      expect(notice).toHaveTextContent("Open Chat Studio isn't granting access for team dimagi-dev.")
+      expect(notice).toHaveTextContent(
+        "Ask an Open Chat Studio admin for the team to restore your access, then click Refresh sources, or reconnect choosing this team.",
+      )
+      expect(screen.getByTestId("connection-reconnect-c1")).toHaveAttribute(
+        "href",
+        expect.stringContaining("/accounts/ocs/login/?process=connect"),
+      )
+      expect(screen.getByTestId("connection-chatbot-no-access-m-1")).toHaveTextContent("Bot 1No access")
+      expect(screen.getByTestId("provider-status-ocs")).toHaveTextContent("Connected")
+      expect(screen.getByTestId("provider-access-ocs")).toHaveTextContent(
+        "Open Chat Studio isn't granting access for team dimagi-dev.",
+      )
+    })
+
+    it("tells an expired sign-in to reconnect, and stays quiet for a healthy team", async () => {
+      renderWith([
+        {
+          connection_id: "c1",
+          provider: "ocs",
+          credential_type: "oauth",
+          scope_key: "acme",
+          scope_label: "acme",
+          status: "expired",
+          access_state: "expired",
+          chatbots: [bot("1")],
+          archived_chatbots: [],
+        },
+        {
+          connection_id: "c2",
+          provider: "ocs",
+          credential_type: "oauth",
+          scope_key: "globex",
+          scope_label: "globex",
+          status: "connected",
+          access_state: "ok",
+          chatbots: [bot("2")],
+          archived_chatbots: [],
+        },
+      ])
+
+      const notice = await screen.findByTestId("connection-access-c1")
+      expect(notice).toHaveTextContent("Your Open Chat Studio sign-in for team acme has expired.")
+      expect(notice).toHaveTextContent("Reconnect to restore access.")
+      expect(notice).not.toHaveTextContent("admin")
+      expect(screen.queryByTestId("connection-access-c2")).toBeNull()
+      expect(screen.getByTestId("provider-access-ocs")).toHaveTextContent(
+        "Sign-in expired for team acme.",
+      )
+    })
+
+    it("counts lost bots for a partly refused team", async () => {
+      renderWith([
+        {
+          connection_id: "c1",
+          provider: "ocs",
+          credential_type: "oauth",
+          scope_key: "acme",
+          scope_label: "acme",
+          status: "connected",
+          access_state: "partial",
+          chatbots: [bot("1"), bot("2")],
+          archived_chatbots: [
+            { ...bot("3"), archived_at: "2026-10-01T00:00:00Z", archived_reason: "denied" },
+            { ...bot("4"), archived_at: "2026-09-01T00:00:00Z", archived_reason: "unlisted" },
+          ],
+        },
+      ])
+
+      // A bot dropped from the listing is not a denial, so it isn't counted as lost.
+      expect(await screen.findByTestId("connection-access-c1")).toHaveTextContent(
+        "Open Chat Studio isn't granting access to 1 of 3 bots for team acme.",
+      )
+      expect(screen.queryByTestId("connection-reconnect-c1")).toBeNull()
+      expect(screen.getByTestId("provider-access-ocs")).toHaveTextContent(
+        "Open Chat Studio isn't granting access to some sources for team acme.",
+      )
+      expect(screen.getByTestId("connection-chatbot-no-access-m-3")).toHaveTextContent("No access")
+      expect(screen.getByTestId("connection-chatbot-no-access-m-4")).toHaveTextContent(
+        "No longer listed",
+      )
+      expect(screen.queryByTestId("connection-chatbot-no-access-m-1")).toBeNull()
+    })
+  })
 })

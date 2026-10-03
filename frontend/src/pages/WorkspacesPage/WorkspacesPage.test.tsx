@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { MemoryRouter } from "react-router-dom"
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { WorkspacesPage } from "./WorkspacesPage"
 import { useAppStore } from "@/store/store"
 import type { WorkspaceListItem } from "@/api/workspaces"
@@ -24,6 +24,10 @@ const ws = (id: string, display_name: string, created_at: string): WorkspaceList
   last_synced_at: null,
   created_at,
 })
+
+function LocationProbe() {
+  return <div data-testid="location">{useLocation().pathname}</div>
+}
 
 function renderPage() {
   return render(
@@ -141,5 +145,65 @@ describe("WorkspacesPage", () => {
     const select = screen.getByTestId("workspaces-sort")
     expect(select).toHaveClass("bg-background", "text-foreground")
     expect(select).not.toHaveClass("bg-transparent")
+  })
+
+  it("links to Connected Accounts from the header", () => {
+    useAppStore.setState({ domains: many(2) })
+    renderPage()
+    expect(screen.getByTestId("workspaces-connected-accounts")).toHaveAttribute(
+      "href",
+      "/settings/connections",
+    )
+    expect(screen.queryByTestId("workspaces-no-access-banner")).toBeNull()
+  })
+
+  it("flags no-access workspaces and points to Connected Accounts", () => {
+    useAppStore.setState({
+      domains: [
+        ws("ok", "Reachable", "2026-01-01T00:00:00Z"),
+        { ...ws("lost", "Lost bot", "2026-01-02T00:00:00Z"), has_access: false },
+      ],
+    })
+    renderPage()
+    expect(screen.getByTestId("workspaces-no-access-banner")).toHaveTextContent(
+      "You don't have access to 1 workspace.",
+    )
+    expect(screen.getByTestId("workspaces-no-access-connections")).toHaveAttribute(
+      "href",
+      "/settings/connections",
+    )
+    expect(screen.getByTestId("workspace-no-access-lost")).toHaveTextContent("No access")
+    expect(screen.queryByTestId("workspace-no-access-ok")).toBeNull()
+  })
+
+  it("opens a workspace inside the embed", async () => {
+    useAppStore.setState({ domains: [ws("abc", "Alpha", "2026-01-02T00:00:00Z")] })
+    render(
+      <MemoryRouter initialEntries={["/embed/workspaces"]}>
+        <Routes>
+          <Route path="/embed/workspaces" element={<WorkspacesPage />} />
+          <Route path="*" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await userEvent.setup().click(screen.getByTestId("workspace-row-abc"))
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/embed\/workspaces\/.*abc$/)
+  })
+
+  it("keeps the Connected Accounts links inside the embed", () => {
+    useAppStore.setState({ domains: [{ ...ws("lost", "Lost", "2026-01-02T00:00:00Z"), has_access: false }] })
+    render(
+      <MemoryRouter initialEntries={["/embed/workspaces"]}>
+        <WorkspacesPage />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId("workspaces-connected-accounts")).toHaveAttribute(
+      "href",
+      "/embed/settings/connections",
+    )
+    expect(screen.getByTestId("workspaces-no-access-connections")).toHaveAttribute(
+      "href",
+      "/embed/settings/connections",
+    )
   })
 })

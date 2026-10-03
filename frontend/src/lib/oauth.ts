@@ -20,6 +20,8 @@ export interface OAuthProvider {
   status?: OAuthProviderStatus | null
   /** True when one token covers one scope (an OCS team), so several can coexist. */
   supports_multiple_scopes?: boolean
+  /** The user's OAuth connections this card covers (ids from /api/auth/connections/). */
+  connection_ids?: string[]
 }
 
 /** Start OAuth for an already signed-in user, returning to the app path `next`. */

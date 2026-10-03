@@ -15,7 +15,11 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.agents.model_label import model_display_name
-from apps.common.commcare_servers import server_for_provider
+from apps.common.commcare_servers import (
+    UnknownCommCareServer,
+    get_commcare_server,
+    server_for_provider,
+)
 from apps.common.http import parse_json_object, string_field
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
@@ -296,6 +300,7 @@ def providers_view(request):
 
     connected_providers = set()
     token_status = {}  # provider -> "connected" | "expired" | "unavailable" | "needs_team"
+    connection_ids_by_account_provider: dict[str, list[str]] = {}
     if request.user.is_authenticated:
         connected_providers = set(
             SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
@@ -309,12 +314,30 @@ def providers_view(request):
         # queryset order. Reduced below to "connected while at least one works",
         # then "expired" (the only status naming a user action) ahead of "unavailable";
         # the per-team detail lives on /api/auth/connections/.
-        bindings = {
-            (conn.provider, conn.scope_key): conn.social_account_id
-            for conn in TenantConnection.objects.filter(
+        oauth_connections = list(
+            TenantConnection.objects.filter(
                 user=request.user, credential_type=TenantConnection.OAUTH
-            )
+            ).select_related("social_account")
+        )
+        bindings = {
+            (conn.provider, conn.scope_key): conn.social_account_id for conn in oauth_connections
         }
+        # Which connections each card covers, so the page can show their access
+        # problems on it. The card is keyed by the identity's provider, not the
+        # connection's: both CommCare HQ servers' connections are "commcare".
+        for conn in oauth_connections:
+            # A legacy or orphaned connection has no identity; its own provider
+            # still puts it on a card, so its notice can offer Reconnect.
+            if conn.social_account:
+                key = conn.social_account.provider
+            elif conn.provider == "commcare" and conn.scope_key:
+                try:
+                    key = get_commcare_server(conn.scope_key).provider_id
+                except UnknownCommCareServer:
+                    key = conn.provider
+            else:
+                key = conn.provider
+            connection_ids_by_account_provider.setdefault(key, []).append(str(conn.id))
         seen_statuses: dict[str, set[str]] = {}
         for social_token in tokens:
             if not is_active_identity(social_token.account, bindings):
@@ -382,6 +405,12 @@ def providers_view(request):
             # connect/disconnect, for a provider whose token covers one scope.
             entry["supports_multiple_scopes"] = (
                 app.provider in SCOPED_OAUTH_PROVIDERS or app.provider_id in SCOPED_OAUTH_PROVIDERS
+            )
+            entry["connection_ids"] = sorted(
+                {
+                    *connection_ids_by_account_provider.get(app.provider, []),
+                    *connection_ids_by_account_provider.get(app.provider_id, []),
+                }
             )
             if is_connected:
                 # No token_status entry means the SocialAccount exists but no token

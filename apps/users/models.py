@@ -369,7 +369,25 @@ class TenantMembership(models.Model):
         help_text="Provider-specific data (e.g. OCS team_slug/team_name); empty for providers without it.",
     )
     last_selected_at = models.DateTimeField(null=True, blank=True)
+    # A per-source denial (403) vs one that took the whole connection (401): only the
+    # latter is undone by a working listing that omits the source.
+    ARCHIVED_DENIED = "denied"
+    ARCHIVED_DENIED_CONNECTION = "denied_connection"
+    ARCHIVED_UNLISTED = "unlisted"
+
     archived_at = models.DateTimeField(null=True, blank=True)
+    archived_reason = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        db_default="",
+        help_text=(
+            'Why the row was archived: "denied" (a per-source upstream denial), '
+            '"denied_connection" (a connection-wide one) or "unlisted" (dropped from the '
+            "provider's listing). Empty for disconnects and older rows. Meaningless while "
+            "archived_at is null."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     # ``objects`` (default) is live-only so access reads can never see a revoked

@@ -6,6 +6,7 @@ import { workspaceLoadState, workspaceHasRecordedLoad, workspaceHasAccess, type 
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { formatRelativeTime } from "@/lib/relativeTime"
 import { cn } from "@/lib/utils"
@@ -212,19 +213,21 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const accessible = useMemo(() => domains.filter(workspaceHasAccess), [domains])
   const lost = useMemo(() => domains.filter((d) => !workspaceHasAccess(d)), [domains])
 
-  // Providers present across the user's workspaces, ordered by count desc.
+  // Providers across ALL the user's workspaces, no-access ones included, ordered
+  // by count desc: a provider whose workspaces are all no-access still gets a tab,
+  // which lists them under "No access". Each count is what its tab lists.
   const providers = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const ws of accessible) {
+    for (const ws of domains) {
       for (const p of new Set((ws.tenants ?? []).map((t) => t.provider))) {
         counts.set(p, (counts.get(p) ?? 0) + 1)
       }
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([value, count]) => ({ value, count }))
-  }, [accessible])
+  }, [domains])
 
   // Segmented controls only earn their space when there's enough to navigate.
-  const showSegments = accessible.length >= SEGMENT_MIN_WORKSPACES || providers.length > 1
+  const showSegments = domains.length >= SEGMENT_MIN_WORKSPACES || providers.length > 1
 
   // Recent workspaces (newest first), filtered to ones the user still has.
   const recent = useMemo(() => {
@@ -264,18 +267,22 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     return list
   }, [accessible, recent, search, segment, recordedLoadsOnly])
 
-  // Lost-access workspaces matching the current search, shown disabled below.
+  // Lost-access workspaces matching the current search (or provider tab), shown
+  // disabled below.
   const lostVisible = useMemo(() => {
     const q = search.trim().toLowerCase()
-    const list = q
-      ? lost.filter(
-          (ws) =>
-            ws.display_name.toLowerCase().includes(q) ||
-            (ws.tenants ?? []).some((t) => t.tenant_name.toLowerCase().includes(q)),
-        )
-      : lost
+    let list = lost
+    if (q) {
+      list = lost.filter(
+        (ws) =>
+          ws.display_name.toLowerCase().includes(q) ||
+          (ws.tenants ?? []).some((t) => t.tenant_name.toLowerCase().includes(q)),
+      )
+    } else if (segment !== "recent" && segment !== "all") {
+      list = lost.filter((ws) => hasProvider(ws, segment))
+    }
     return [...list].sort((a, b) => a.display_name.localeCompare(b.display_name))
-  }, [lost, search])
+  }, [lost, search, segment])
 
   function resetView() {
     setHighlight(0)
@@ -372,7 +379,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   }
   const segmentCount = (key: SegmentKey): number | null => {
     if (key === "recent") return recent.length || null
-    if (key === "all") return accessible.length
+    if (key === "all") return domains.length
     return providers.find((p) => p.value === key)?.count ?? null
   }
 
@@ -567,7 +574,20 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
 
             {lostVisible.length > 0 && (
               <div data-testid="workspace-list-lost" className="mt-1 border-t pt-1">
-                <p className="px-2 py-1 text-xs font-medium text-muted-foreground/70">No access</p>
+                <div className="flex items-center justify-between gap-2 px-2 py-1">
+                  <p className="text-xs font-medium text-muted-foreground/70">No access</p>
+                  <button
+                    type="button"
+                    data-testid="workspace-lost-connections"
+                    onClick={() => {
+                      close()
+                      navigate(`${pathPrefix}${CONNECTIONS_PATH}`)
+                    }}
+                    className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    Check Connected Accounts
+                  </button>
+                </div>
                 {lostVisible.map((ws) => (
                   <LostAccessRow key={ws.id} ws={ws} />
                 ))}

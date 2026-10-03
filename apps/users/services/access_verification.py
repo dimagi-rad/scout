@@ -781,7 +781,8 @@ def _publish_verification_receipt(
         accepted_tenant_ids = frozenset()
         if result.outcome == VerificationOutcome.COMPLETE:
             # A scoped result that confirmed nothing proves nothing about the credential.
-            if current.upstream_denial_code and (result.tenant_ids or not result.scoped):
+            credential_proven = bool(result.tenant_ids or not result.scoped)
+            if current.upstream_denial_code and credential_proven:
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
             # Claims match on the canonical provider, so publication must too or an
@@ -811,6 +812,7 @@ def _publish_verification_receipt(
                 returned = list(returned_memberships)
                 for membership in returned:
                     membership.archived_at = None
+                    membership.archived_reason = ""
                     membership.provider_metadata = {
                         **(membership.provider_metadata or {}),
                         "team_slug": current.scope_key,
@@ -818,13 +820,15 @@ def _publish_verification_receipt(
                     # Per-tenant write: recompute so N tenants cannot each wait the
                     # full remaining budget.
                     _configure_transaction_deadline(deadline, clock)
-                    membership.save(update_fields=["archived_at", "provider_metadata"])
+                    membership.save(
+                        update_fields=["archived_at", "archived_reason", "provider_metadata"]
+                    )
                 omission_scope = owned_history.filter(
                     provider_metadata__team_slug=current.scope_key
                 )
             else:
                 _configure_transaction_deadline(deadline, clock)
-                returned_memberships.update(archived_at=None)
+                returned_memberships.update(archived_at=None, archived_reason="")
                 returned = list(returned_memberships)
                 omission_scope = owned_history
             if result.scoped:
@@ -839,11 +843,19 @@ def _publish_verification_receipt(
             )
             _configure_transaction_deadline(deadline, clock)
             if omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
-                archived_at=decision_now
+                archived_at=decision_now, archived_reason=TenantMembership.ARCHIVED_UNLISTED
             ):
                 # As for a recorded denial: no grant cached before this may outlive it.
                 user_id = current.user_id
                 transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
+            if credential_proven:
+                # The credential works, so nothing it omits was withheld from the
+                # connection as a whole: such a tombstone is gone.
+                _configure_transaction_deadline(deadline, clock)
+                omission_scope.filter(
+                    archived_reason=TenantMembership.ARCHIVED_DENIED_CONNECTION,
+                    tenant_id__in=omitted_ids,
+                ).update(archived_reason=TenantMembership.ARCHIVED_UNLISTED)
             # Legacy discovery can restore a tombstone without our lease; it must
             # not revive an older positive proof after authoritative omission.
             _configure_transaction_deadline(deadline, clock)

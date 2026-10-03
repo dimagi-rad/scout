@@ -15,6 +15,7 @@ import {
   ApiConnectionDialog,
   type ApiKeyConnection,
 } from "@/components/ApiConnectionDialog"
+import { accessNotice, productName, providerAccessLines } from "./accessCopy"
 
 const providerBadgeStyles: Record<string, string> = {
   commcare: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
@@ -45,7 +46,7 @@ function teamLabelFor(conn: ApiKeyConnection): string {
   // scope_label is the credential's own team; the chatbot fallback covers
   // connections created before the scope was recorded on the connection.
   if (conn.scope_label) return conn.scope_label
-  const named = conn.chatbots.find((cb) => cb.team_name)
+  const named = [...conn.chatbots, ...(conn.archived_chatbots ?? [])].find((cb) => cb.team_name)
   return named?.team_name || conn.provider
 }
 
@@ -135,6 +136,12 @@ export function ConnectionsPage() {
     void fetchProviders().then(fetchConnections)
   }, [fetchProviders, fetchConnections])
 
+  const providerForConnection = useMemo(() => {
+    const byId = new Map<string, OAuthProvider>()
+    for (const p of providers) for (const id of p.connection_ids ?? []) byId.set(id, p)
+    return byId
+  }, [providers])
+
   const providerFilterGroup = useMemo((): FilterGroup => {
     const counts = new Map<string, number>()
     for (const c of connections) {
@@ -158,7 +165,10 @@ export function ConnectionsPage() {
         const haystacks = [
           teamLabelFor(c),
           c.provider,
-          ...c.chatbots.flatMap((cb) => [cb.tenant_name, cb.tenant_id]),
+          ...[...c.chatbots, ...(c.archived_chatbots ?? [])].flatMap((cb) => [
+            cb.tenant_name,
+            cb.tenant_id,
+          ]),
         ]
         if (!haystacks.some((h) => h.toLowerCase().includes(lowerSearch))) return false
       }
@@ -259,6 +269,15 @@ export function ConnectionsPage() {
               provider.status === "connected" ||
               provider.status === "needs_team" ||
               provider.status === "unavailable"
+            const ids = new Set(provider.connection_ids ?? [])
+            const accessLines = providerAccessLines(
+              provider.name,
+              connections
+                .filter((c) => ids.has(c.connection_id))
+                // The status line already says the sign-in expired.
+                .filter((c) => !(provider.status === "expired" && c.access_state === "expired"))
+                .map((conn) => ({ conn, teamLabel: teamLabelFor(conn) })),
+            )
             return (
               <Card key={provider.id}>
                 <CardContent className="flex items-center justify-between p-4">
@@ -270,6 +289,15 @@ export function ConnectionsPage() {
                     >
                       {copy.label}
                     </p>
+                    {accessLines.length > 0 && (
+                      <div data-testid={`provider-access-${provider.id}`}>
+                        {accessLines.map((line) => (
+                          <p key={line} className="text-sm text-amber-600">
+                            {line}
+                          </p>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex shrink-0 gap-2">
                     {(provider.status === "connected" || provider.status === "unavailable") &&
@@ -368,6 +396,9 @@ export function ConnectionsPage() {
                   const isConfirming = confirmRemoveId === conn.connection_id
                   const teamLabel = teamLabelFor(conn)
                   const statusBadge = conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined
+                  const notice = accessNotice(conn, teamLabel)
+                  const oauthProvider = providerForConnection.get(conn.connection_id)
+                  const archived = conn.archived_chatbots ?? []
 
                   return (
                     <Card
@@ -430,6 +461,27 @@ export function ConnectionsPage() {
                           )}
                         </div>
 
+                        {notice && (
+                          <div
+                            className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
+                            data-testid={`connection-access-${conn.connection_id}`}
+                            data-access-state={conn.access_state}
+                          >
+                            <p className="font-medium">{notice.title}</p>
+                            <p>{notice.body}</p>
+                            {notice.offerReconnect && oauthProvider && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                asChild
+                                data-testid={`connection-reconnect-${conn.connection_id}`}
+                              >
+                                <a href={connectUrlFor(oauthProvider)}>Reconnect</a>
+                              </Button>
+                            )}
+                          </div>
+                        )}
+
                         {isConfirming && (
                           <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
                             <p className="text-sm font-medium">
@@ -473,6 +525,27 @@ export function ConnectionsPage() {
                               <span className="text-muted-foreground">
                                 {cb.tenant_id}
                               </span>
+                            </li>
+                          ))}
+                          {archived.map((cb) => (
+                            <li
+                              key={cb.membership_id}
+                              className="flex items-center justify-between gap-4 text-sm text-muted-foreground"
+                              data-testid={`connection-chatbot-no-access-${cb.membership_id}`}
+                            >
+                              <span className="flex items-center gap-2">
+                                <span className="font-medium">{cb.tenant_name || cb.tenant_id}</span>
+                                {cb.archived_reason === "unlisted" ? (
+                                  <Badge variant="outline" title={`${productName(conn.provider)} no longer lists it`}>
+                                    No longer listed
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="secondary" className={WARNING_BADGE}>
+                                    No access
+                                  </Badge>
+                                )}
+                              </span>
+                              <span>{cb.tenant_id}</span>
                             </li>
                           ))}
                         </ul>

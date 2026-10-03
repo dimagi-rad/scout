@@ -229,7 +229,8 @@ def _sync_memberships(
             tm, _ = TenantMembership.all_objects.get_or_create(user=user, tenant=tenant)
             tm.connection = connection
             tm.archived_at = None
-            fields = ["connection", "archived_at"]
+            tm.archived_reason = ""
+            fields = ["connection", "archived_at", "archived_reason"]
             if membership_extra:
                 for attr, val in membership_extra.items():
                     setattr(tm, attr, val)  # team_slug/team_name setters mutate provider_metadata
@@ -244,14 +245,22 @@ def _sync_memberships(
 
         if not archive:
             return memberships
-        archive_qs = TenantMembership.all_objects.filter(
-            user=user, connection=connection, archived_at__isnull=True
-        ).exclude(tenant_id__in=fresh_ids)
+        unlisted_qs = TenantMembership.all_objects.filter(user=user, connection=connection).exclude(
+            tenant_id__in=fresh_ids
+        )
         if archive_team_slug is not None:
             if not archive_team_slug:
                 return memberships  # team-scoped provider without a team → never revoke
-            archive_qs = archive_qs.filter(provider_metadata__team_slug=archive_team_slug)
-        archive_qs.update(archived_at=timezone.now())
+            unlisted_qs = unlisted_qs.filter(provider_metadata__team_slug=archive_team_slug)
+        unlisted_qs.filter(archived_at__isnull=True).update(
+            archived_at=timezone.now(), archived_reason=TenantMembership.ARCHIVED_UNLISTED
+        )
+        # The listing works, so a source the connection-wide denial archived that it
+        # still omits is gone. A per-source denial stays: omission is how the
+        # provider withholds a source it denied.
+        unlisted_qs.filter(archived_reason=TenantMembership.ARCHIVED_DENIED_CONNECTION).update(
+            archived_reason=TenantMembership.ARCHIVED_UNLISTED
+        )
         return memberships
 
 
