@@ -23,6 +23,7 @@ from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
 )
+from apps.users.services.connection_access import connection_access_state
 from apps.users.services.credential_resolver import (
     _aresolve_oauth_credential,
     aconnection_status,
@@ -262,21 +263,27 @@ async def tenant_credential_list_view(request):
             .order_by("-created_at")
         ):
             chatbots = []
+            archived_chatbots = []
+            # all_objects: the archived tombstones are the sources this connection
+            # no longer reaches, which the page marks no-access.
             async for tm in (
-                conn.memberships.filter(archived_at__isnull=True)
+                TenantMembership.all_objects.filter(connection=conn)
                 .select_related("tenant")
                 .order_by(Lower("tenant__canonical_name"), "id")
             ):
-                chatbots.append(
-                    {
-                        "membership_id": str(tm.id),
-                        "tenant_id": tm.tenant.external_id,
-                        "tenant_name": tm.tenant.canonical_name,
-                        "team_slug": tm.team_slug,
-                        "team_name": tm.team_name,
-                    }
-                )
+                entry = {
+                    "membership_id": str(tm.id),
+                    "tenant_id": tm.tenant.external_id,
+                    "tenant_name": tm.tenant.canonical_name,
+                    "team_slug": tm.team_slug,
+                    "team_name": tm.team_name,
+                }
+                if tm.archived_at is None:
+                    chatbots.append(entry)
+                else:
+                    archived_chatbots.append(entry | {"archived_at": tm.archived_at.isoformat()})
             is_oauth = conn.credential_type == TenantConnection.OAUTH
+            status = await aconnection_status(conn) if is_oauth else None
             results.append(
                 {
                     "connection_id": str(conn.id),
@@ -290,8 +297,19 @@ async def tenant_credential_list_view(request):
                     "scope_label": conn.scope_label,
                     # Per connection, not per provider: two teams have independent
                     # tokens and one can expire while the other is fine.
-                    "status": await aconnection_status(conn) if is_oauth else None,
+                    "status": status,
+                    "access_state": connection_access_state(
+                        conn,
+                        status=status,
+                        live_count=len(chatbots),
+                        archived_count=len(archived_chatbots),
+                    ),
+                    "denial_code": conn.upstream_denial_code or None,
+                    "denied_at": (
+                        conn.upstream_denied_at.isoformat() if conn.upstream_denied_at else None
+                    ),
                     "chatbots": chatbots,
+                    "archived_chatbots": archived_chatbots,
                 }
             )
         return JsonResponse(results, safe=False)
