@@ -137,3 +137,52 @@ describe("workspace load-history indicator", () => {
     expect(api.get).not.toHaveBeenCalled()
   })
 })
+
+describe("provider tabs", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState(useAppStore.getInitialState(), true)
+  })
+
+  function providerWorkspace(id: string, provider: string, hasAccess = true): WorkspaceListItem {
+    return workspace({
+      id,
+      display_name: `${provider} ${id}`,
+      has_access: hasAccess,
+      tenants: [{ id: `tenant-${id}`, tenant_name: `Source ${id}`, provider }],
+    })
+  }
+
+  it("shows a tab for a provider whose workspaces are all no-access, and lists them there", () => {
+    openSwitcher([
+      providerWorkspace("cc1", "commcare"),
+      providerWorkspace("cc2", "commcare"),
+      providerWorkspace("ocs1", "ocs", false),
+      providerWorkspace("ocs2", "ocs", false),
+    ])
+
+    const ocsTab = screen.getByTestId("workspace-seg-ocs")
+    expect(ocsTab).toHaveTextContent("Open Chat Studio2")
+    // Counts include no-access workspaces, so All is every workspace listed.
+    expect(screen.getByTestId("workspace-seg-all")).toHaveTextContent("All4")
+    expect(screen.getByTestId("workspace-seg-commcare")).toHaveTextContent("CommCare2")
+
+    fireEvent.click(ocsTab)
+    expect(screen.queryByTestId("domain-item-cc1")).not.toBeInTheDocument()
+    expect(screen.getByTestId("domain-item-lost-ocs1")).toBeInTheDocument()
+    expect(screen.getByTestId("domain-item-lost-ocs2")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId("workspace-seg-commcare"))
+    expect(screen.getByTestId("domain-item-cc1")).toBeInTheDocument()
+    expect(screen.queryByTestId("workspace-list-lost")).not.toBeInTheDocument()
+  })
+
+  it("links the no-access section to Connected Accounts", () => {
+    openSwitcher([providerWorkspace("cc1", "commcare"), providerWorkspace("ocs1", "ocs", false)])
+    fireEvent.click(screen.getByTestId("workspace-seg-all"))
+
+    expect(screen.getByTestId("workspace-lost-connections")).toHaveTextContent(
+      "Check Connected Accounts",
+    )
+  })
+})
