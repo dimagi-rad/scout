@@ -125,7 +125,7 @@ describe("scrubEvent", () => {
             {
               type: "UnhandledRejection",
               value: "Non-Error promise rejection captured with value: patient Alice",
-              mechanism: { type: "onunhandledrejection", handled: false },
+              mechanism: { type: "auto.browser.global_handlers.onunhandledrejection", handled: false },
             },
           ],
         },
@@ -193,6 +193,14 @@ describe("scrubBreadcrumb", () => {
       category: "ui.click",
       message: "nav > button.flex[title][data-testid]",
     })
+  })
+
+  it("drops attribute values that contain brackets or quotes", () => {
+    const click = {
+      category: "ui.click",
+      message: 'li > a[aria-label="Q3 [draft] "x]y" patients"][title="t"] > span.t',
+    }
+    expect(scrubBreadcrumb(click)?.message).toBe("li > a[aria-label][title] > span.t")
   })
 
   it("leaves other breadcrumbs alone", () => {

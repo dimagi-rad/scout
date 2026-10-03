@@ -85,8 +85,9 @@ export function isNoiseEvent(event: ErrorEvent, hint: EventHint = {}): boolean {
 export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   if (breadcrumb.category === "console") return null
   if (breadcrumb.category?.startsWith("ui.") && breadcrumb.message) {
-    // A value may itself contain quotes, so match up to the closing bracket.
-    const message = breadcrumb.message.replace(/\[([\w:-]+)=[^\]]*\]/g, "[$1]")
+    // Values are unescaped and may hold quotes or brackets, so a value ends only at
+    // a `"]` followed by the next attribute, the next element or the end.
+    const message = breadcrumb.message.replace(/\[([\w:-]+)="[\s\S]*?"\](?=$|\[| > )/g, "[$1]")
     breadcrumb = { ...breadcrumb, message }
   }
   if (!breadcrumb.data) return breadcrumb
@@ -105,7 +106,7 @@ function exceptionValue(value: Exception, hint: EventHint): string | undefined {
     const status = errorStatus(original)
     return status === undefined ? "API request failed" : `API request failed (HTTP ${status})`
   }
-  if (value.mechanism?.type === "onunhandledrejection" && !(original instanceof Error)) {
+  if (value.type === "UnhandledRejection" && !(original instanceof Error)) {
     return "Non-Error promise rejection"
   }
   return value.value && safeText(value.value)
