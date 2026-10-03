@@ -31,6 +31,10 @@ export function providerDisconnectMessage(
   const total = liveSources(oauthConnections.map((c) => c.conn))
   const sources = sourceCount(dataProvider, total)
   const keys = hasApiKeys ? " API key connections stay." : ""
+  if (supportsMultipleScopes && oauthConnections.length === 0) {
+    // A team-less sign-in (#379) reaches nothing, so there is nothing to count.
+    return `Disconnect ${providerName}?${keys} You can reconnect later.`
+  }
   if (supportsMultipleScopes) {
     const n = oauthConnections.length
     const teams = oauthConnections.map((c) => c.teamLabel).join(", ")
@@ -41,7 +45,7 @@ export function providerDisconnectMessage(
     )
   }
   return (
-    `Disconnect ${providerName}? It is one sign-in for all your ${sourcesNoun(dataProvider)}, ` +
+    `Disconnect ${providerName}? One sign-in covers all your ${sourcesNoun(dataProvider)} there, ` +
     `so Scout loses access to ${allOf(dataProvider, total)}.${keys} You can reconnect later.`
   )
 }

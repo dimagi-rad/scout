@@ -104,7 +104,8 @@ export function ConnectionsPage() {
 
   function changeSearch(value: string) {
     setSearch(value)
-    setSearchToggles({})
+    // A new search starts when the box goes from empty to filled, not per keystroke.
+    if (!value.trim() || !search.trim()) setSearchToggles({})
   }
 
   function toggle(conn: ApiKeyConnection, expanded: boolean) {

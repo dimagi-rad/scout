@@ -5,7 +5,10 @@ const STORAGE_KEY = "scout.connectedAccounts.expanded"
 function readStored(): Record<string, boolean> {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}")
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, boolean>) : {}
+    if (!parsed || typeof parsed !== "object") return {}
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, v]) => typeof v === "boolean"),
+    ) as Record<string, boolean>
   } catch {
     return {}
   }

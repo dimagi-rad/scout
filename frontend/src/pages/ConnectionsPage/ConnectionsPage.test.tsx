@@ -81,7 +81,10 @@ describe("ConnectionsPage", () => {
     expect(screen.getByTestId("connect-ocs").textContent).toBe("Connect a team")
     expect(screen.queryByText("Connection expired")).toBeNull()
     expect(screen.getByTestId("remove-connection-c1")).toBeTruthy()
-    expect(screen.getByTestId("disconnect-ocs")).toBeTruthy()
+    fireEvent.click(screen.getByTestId("disconnect-ocs"))
+    expect(screen.getByTestId("disconnect-confirm-ocs")).toHaveTextContent(
+      "Disconnect Open Chat Studio? You can reconnect later.",
+    )
   })
 
   it.each([
@@ -466,7 +469,7 @@ describe("ConnectionsPage", () => {
       fireEvent.click(button)
       expect(post).not.toHaveBeenCalled()
       expect(screen.getByTestId("disconnect-confirm-commcare_connect")).toHaveTextContent(
-        "Disconnect CommCare Connect? It is one sign-in for all your opportunities, so Scout loses access to all 3 opportunities. You can reconnect later.",
+        "Disconnect CommCare Connect? One sign-in covers all your opportunities there, so Scout loses access to all 3 opportunities. You can reconnect later.",
       )
 
       fireEvent.click(screen.getByTestId("cancel-disconnect-commcare_connect"))
@@ -622,6 +625,9 @@ describe("ConnectionsPage", () => {
       expect(screen.getByTestId("connection-sources-o2")).toBeTruthy()
       fireEvent.change(screen.getByTestId("search-filter-input"), { target: { value: "team" } })
       fireEvent.click(screen.getByTestId("connection-toggle-o1"))
+      expect(screen.queryByTestId("connection-sources-o1")).toBeNull()
+      // Refining the same search keeps the toggle.
+      fireEvent.change(screen.getByTestId("search-filter-input"), { target: { value: "tea" } })
       expect(screen.queryByTestId("connection-sources-o1")).toBeNull()
 
       fireEvent.change(screen.getByTestId("search-filter-input"), { target: { value: "" } })
