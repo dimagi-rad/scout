@@ -5,12 +5,16 @@ def backfill_denied(apps, schema_editor):
     # A recorded denial stamps the archive and the connection with one time, so rows
     # still matching their connection's latest stamp are denials. Earlier per-tenant
     # denials were restamped away and stay unknown ("").
+    # A current code marks a connection-wide denial; without one the latest stamp was
+    # a per-source 403.
     TenantMembership = apps.get_model("users", "TenantMembership")
-    TenantMembership.objects.filter(
+    latest = TenantMembership.objects.filter(
         archived_at__isnull=False,
         connection__upstream_denied_at__isnull=False,
         archived_at=models.F("connection__upstream_denied_at"),
-    ).update(archived_reason="denied")
+    )
+    latest.exclude(connection__upstream_denial_code="").update(archived_reason="denied_connection")
+    latest.filter(connection__upstream_denial_code="").update(archived_reason="denied")
 
 
 class Migration(migrations.Migration):
@@ -27,9 +31,10 @@ class Migration(migrations.Migration):
                 db_default="",
                 default="",
                 help_text=(
-                    'Why the row was archived: "denied" (a recorded upstream denial) or '
-                    '"unlisted" (dropped from the provider\'s listing). Empty for '
-                    "disconnects and older rows. Meaningless while archived_at is null."
+                    'Why the row was archived: "denied" (a per-source upstream denial), '
+                    '"denied_connection" (a connection-wide one) or "unlisted" (dropped from '
+                    "the provider's listing). Empty for disconnects and older rows. "
+                    "Meaningless while archived_at is null."
                 ),
                 max_length=20,
             ),

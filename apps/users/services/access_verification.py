@@ -780,12 +780,10 @@ def _publish_verification_receipt(
             return PublicationReceipt(PublicationStatus.REJECTED)
         accepted_tenant_ids = frozenset()
         if result.outcome == VerificationOutcome.COMPLETE:
-            cleared_connection_denial = False
             # A scoped result that confirmed nothing proves nothing about the credential.
             if current.upstream_denial_code and (result.tenant_ids or not result.scoped):
                 current.upstream_denial_code = ""
                 current.save(update_fields=["upstream_denial_code"])
-                cleared_connection_denial = True
             # Claims match on the canonical provider, so publication must too or an
             # alias tenant stays claimable while never being published or archived.
             _configure_transaction_deadline(deadline, clock)
@@ -849,13 +847,13 @@ def _publish_verification_receipt(
                 # As for a recorded denial: no grant cached before this may outlive it.
                 user_id = current.user_id
                 transaction.on_commit(lambda: access_cache.invalidate(user_id=user_id))
-            if cleared_connection_denial:
-                # The credential works again, so a source the connection-wide denial
-                # archived that this listing still omits is gone, not withheld.
-                _configure_transaction_deadline(deadline, clock)
-                omission_scope.filter(
-                    archived_reason=TenantMembership.ARCHIVED_DENIED, tenant_id__in=omitted_ids
-                ).update(archived_reason=TenantMembership.ARCHIVED_UNLISTED)
+            # A complete answer from this credential says nothing it omits was
+            # withheld from the connection as a whole: such a tombstone is gone.
+            _configure_transaction_deadline(deadline, clock)
+            omission_scope.filter(
+                archived_reason=TenantMembership.ARCHIVED_DENIED_CONNECTION,
+                tenant_id__in=omitted_ids,
+            ).update(archived_reason=TenantMembership.ARCHIVED_UNLISTED)
             # Legacy discovery can restore a tombstone without our lease; it must
             # not revive an older positive proof after authoritative omission.
             _configure_transaction_deadline(deadline, clock)

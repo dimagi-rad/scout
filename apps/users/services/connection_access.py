@@ -25,7 +25,10 @@ ARCHIVED_UNLISTED = TenantMembership.ARCHIVED_UNLISTED
 
 def archived_reason(membership: TenantMembership) -> str:
     """Why an archived membership is gone, as the page shows it."""
-    if membership.archived_reason == ARCHIVED_DENIED:
+    if membership.archived_reason in (
+        TenantMembership.ARCHIVED_DENIED,
+        TenantMembership.ARCHIVED_DENIED_CONNECTION,
+    ):
         return ARCHIVED_DENIED
     return ARCHIVED_UNLISTED
 

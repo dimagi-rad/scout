@@ -229,6 +229,57 @@ async def test_refresh_keeps_a_per_bot_denial_the_listing_still_omits(user):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_a_later_listing_relabels_after_an_additive_sync_cleared_the_code(user):
+    """An additive sync (a manager's add replay) clears the denial code without
+    archiving; the next complete listing must still retire the deleted bot."""
+    app = await _ocs_app()
+    conn = await _ocs_team(user, app, team="acme")
+    await _bot(user, conn, "kept")
+    await _bot(user, conn, "deleted")
+    await _record_denial(conn, code=EXPIRED_CODE)
+    kept = await Tenant.objects.aget(external_id="kept")
+    deleted = await TenantMembership.all_objects.aget(tenant__external_id="deleted")
+    assert deleted.archived_reason == TenantMembership.ARCHIVED_DENIED_CONNECTION
+
+    await _sync_memberships(
+        user,
+        await TenantConnection.objects.aget(pk=conn.pk),
+        [kept],
+        archive_team_slug="acme",
+        archive=False,
+    )
+    assert (await TenantConnection.objects.aget(pk=conn.pk)).upstream_denial_code == ""
+    await _sync_memberships(
+        user, await TenantConnection.objects.aget(pk=conn.pk), [kept], archive_team_slug="acme"
+    )
+
+    await deleted.arefresh_from_db()
+    assert deleted.archived_reason == TenantMembership.ARCHIVED_UNLISTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_orphaned_eu_connection_lands_on_the_eu_card(user):
+    site = await _site()
+    for app_provider in ("commcare", "commcare_eu"):
+        app = await SocialApp.objects.acreate(
+            provider=app_provider, name=app_provider, client_id="c", secret="s"
+        )
+        await app.sites.aadd(site)
+    eu = await TenantConnection.objects.acreate(
+        user=user, provider="commcare", credential_type=OAUTH, scope_key="eu"
+    )
+
+    client = await _login(user)
+    providers = (await client.get("/api/auth/providers/")).json()["providers"]
+    assert {p["id"]: p["connection_ids"] for p in providers} == {
+        "commcare": [],
+        "commcare_eu": [str(eu.id)],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_connection_without_an_identity_still_lands_on_its_card(user):
     """Legacy rows can have no social_account; the card (and its Reconnect) must still
     cover them."""

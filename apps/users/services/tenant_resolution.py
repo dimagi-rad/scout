@@ -221,8 +221,7 @@ def _sync_memberships(
             )
             return []
         # Keep the last denial as a fence against discoveries started before it.
-        cleared_connection_denial = bool(current.upstream_denial_code)
-        if cleared_connection_denial:
+        if current.upstream_denial_code:
             TenantConnection.objects.filter(pk=connection.pk).update(upstream_denial_code="")
         fresh_ids: set = set()
         memberships: list[TenantMembership] = []
@@ -256,13 +255,12 @@ def _sync_memberships(
         unlisted_qs.filter(archived_at__isnull=True).update(
             archived_at=timezone.now(), archived_reason=TenantMembership.ARCHIVED_UNLISTED
         )
-        if cleared_connection_denial:
-            # The credential works again, so a source the connection-wide denial
-            # archived that this listing still omits is gone, not withheld. A
-            # per-source denial stays: omission is how the provider withholds it.
-            unlisted_qs.filter(archived_reason=TenantMembership.ARCHIVED_DENIED).update(
-                archived_reason=TenantMembership.ARCHIVED_UNLISTED
-            )
+        # The listing works, so a source the connection-wide denial archived that it
+        # still omits is gone. A per-source denial stays: omission is how the
+        # provider withholds a source it denied.
+        unlisted_qs.filter(archived_reason=TenantMembership.ARCHIVED_DENIED_CONNECTION).update(
+            archived_reason=TenantMembership.ARCHIVED_UNLISTED
+        )
         return memberships
 
 

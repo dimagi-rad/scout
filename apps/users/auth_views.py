@@ -15,7 +15,11 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.agents.model_label import model_display_name
-from apps.common.commcare_servers import server_for_provider
+from apps.common.commcare_servers import (
+    UnknownCommCareServer,
+    get_commcare_server,
+    server_for_provider,
+)
 from apps.common.http import parse_json_object, string_field
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
@@ -324,7 +328,15 @@ def providers_view(request):
         for conn in oauth_connections:
             # A legacy or orphaned connection has no identity; its own provider
             # still puts it on a card, so its notice can offer Reconnect.
-            key = conn.social_account.provider if conn.social_account else conn.provider
+            if conn.social_account:
+                key = conn.social_account.provider
+            elif conn.provider == "commcare" and conn.scope_key:
+                try:
+                    key = get_commcare_server(conn.scope_key).provider_id
+                except UnknownCommCareServer:
+                    key = conn.provider
+            else:
+                key = conn.provider
             connection_ids_by_account_provider.setdefault(key, []).append(str(conn.id))
         seen_statuses: dict[str, set[str]] = {}
         for social_token in tokens:

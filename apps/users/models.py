@@ -369,7 +369,10 @@ class TenantMembership(models.Model):
         help_text="Provider-specific data (e.g. OCS team_slug/team_name); empty for providers without it.",
     )
     last_selected_at = models.DateTimeField(null=True, blank=True)
+    # A per-source denial (403) vs one that took the whole connection (401): only the
+    # latter is undone by a working listing that omits the source.
     ARCHIVED_DENIED = "denied"
+    ARCHIVED_DENIED_CONNECTION = "denied_connection"
     ARCHIVED_UNLISTED = "unlisted"
 
     archived_at = models.DateTimeField(null=True, blank=True)
@@ -379,9 +382,10 @@ class TenantMembership(models.Model):
         default="",
         db_default="",
         help_text=(
-            'Why the row was archived: "denied" (a recorded upstream denial) or "unlisted" '
-            "(dropped from the provider's listing). Empty for disconnects and older rows. "
-            "Meaningless while archived_at is null."
+            'Why the row was archived: "denied" (a per-source upstream denial), '
+            '"denied_connection" (a connection-wide one) or "unlisted" (dropped from the '
+            "provider's listing). Empty for disconnects and older rows. Meaningless while "
+            "archived_at is null."
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
