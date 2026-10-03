@@ -124,7 +124,8 @@ Sentry is off by default. Setting `SENTRY_DSN` activates it for the API, Procras
 | `VITE_SENTRY_DSN` | (empty) | Frontend DSN. Baked into the bundle at build time; must be set at `bun run build` (not runtime). |
 | `VITE_SENTRY_ENVIRONMENT` | Vite's `MODE` | Environment tag for browser events. |
 | `VITE_SENTRY_RELEASE` | (empty) | Release tag for browser events. Should match `SENTRY_RELEASE` server-side. |
-| `VITE_SENTRY_TRACES_SAMPLE_RATE` | `0` | Browser performance sampling. |
+
+The browser SDK reports errors only: no tracing or session replay, `sendDefaultPii` off, and a `beforeSend` hook (`frontend/src/lib/sentry.ts`) that strips query strings, masks workspace slugs and dataset names in URL paths, strips headers, bodies, extra data, email and UI attribute values, replaces API error text with the HTTP status, redacts quoted text in other messages, and drops noise such as aborted requests and expected 401/403/503 API responses.
 
 For frontend source map upload (recommended — otherwise stack traces show minified code): set `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` in the build environment. All three must be set for the Vite plugin to activate. `@sentry/vite-plugin` generates hidden source maps, uploads them, then deletes them so they don't ship to browsers.
 

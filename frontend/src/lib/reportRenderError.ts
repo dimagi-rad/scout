@@ -1,4 +1,3 @@
-import type { Breadcrumb } from "@sentry/react"
 import * as Sentry from "@sentry/react"
 
 export type RenderErrorSource = "sandbox" | "boundary"
@@ -43,7 +42,7 @@ function redactQuoted(text: string): string {
   return text.replace(/["'`][^\n]*["'`]/g, "\"…\"")
 }
 
-function safeText(text: string, maxLength = MAX_MESSAGE_LENGTH): string {
+export function safeText(text: string, maxLength = MAX_MESSAGE_LENGTH): string {
   // Collapsed before redaction so a quoted value broken across lines is still
   // dropped, and so the text cannot pose as a stack frame of its own.
   const redacted = redactQuoted(text.replace(/\s*[\r\n\v\f\u2028\u2029]+\s*/g, " "))
@@ -54,15 +53,6 @@ function safeStack(stack: string | undefined): string | undefined {
   if (!stack) return undefined
   const frames = stack.split("\n").filter((line) => STACK_FRAME.test(line))
   return frames.slice(0, MAX_STACK_FRAMES).map(redactQuoted).join("\n") || undefined
-}
-
-/**
- * Sentry `beforeBreadcrumb` hook. Console breadcrumbs hold raw error text, such
- * as the message an ErrorBoundary logs before it is redacted here, and every
- * later event in the session would carry them.
- */
-export function dropConsoleBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
-  return breadcrumb.category === "console" ? null : breadcrumb
 }
 
 /**
@@ -108,6 +98,30 @@ export function reportRenderError(report: RenderErrorReport): void {
       scope.setTag("artifact_version", String(report.artifactVersion))
     }
     Sentry.captureException(error)
+  })
+}
+
+// React hands a boundary whatever was thrown. A non-Error may be app data, so a
+// string is kept as the message, as an Error's would be, and anything else is
+// described only by its type, as in the artifact sandbox.
+export function nonErrorMessage(thrown: unknown): string {
+  return typeof thrown === "string"
+    ? thrown
+    : `Non-Error exception (${thrown === null ? "null" : typeof thrown})`
+}
+
+/** Report whatever a React or router error boundary caught, redacted as above. */
+export function reportBoundaryError(
+  thrown: unknown,
+  ids: Pick<RenderErrorReport, "artifactId" | "artifactVersion"> = {},
+): void {
+  const error = thrown instanceof Error ? thrown : undefined
+  reportRenderError({
+    source: "boundary",
+    name: error?.name ?? "Error",
+    message: error ? error.message : nonErrorMessage(thrown),
+    stack: error?.stack,
+    ...ids,
   })
 }
 
