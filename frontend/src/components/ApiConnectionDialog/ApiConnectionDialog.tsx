@@ -35,7 +35,17 @@ export interface ApiKeyConnection {
    * needs_team: a team-less OCS sign-in that can reach no data (#379).
    */
   status: "connected" | "expired" | "needs_team" | null
+  /**
+   * Whether the connection still reaches its sources. expired: the sign-in or key
+   * is dead, so reconnecting fixes it. refused: the provider refuses a working
+   * sign-in, so an admin there must restore access. partial: some sources lost.
+   */
+  access_state?: "ok" | "expired" | "refused" | "partial"
+  denial_code?: string | null
+  denied_at?: string | null
   chatbots: ConnectionChatbot[]
+  /** Sources this connection no longer reaches (archived memberships). */
+  archived_chatbots?: (ConnectionChatbot & { archived_at: string })[]
 }
 
 interface FieldOption {
