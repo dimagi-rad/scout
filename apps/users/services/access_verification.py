@@ -839,7 +839,7 @@ def _publish_verification_receipt(
             )
             _configure_transaction_deadline(deadline, clock)
             if omission_scope.filter(archived_at__isnull=True, tenant_id__in=omitted_ids).update(
-                archived_at=decision_now
+                archived_at=decision_now, archived_reason=TenantMembership.ARCHIVED_UNLISTED
             ):
                 # As for a recorded denial: no grant cached before this may outlive it.
                 user_id = current.user_id

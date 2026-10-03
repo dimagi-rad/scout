@@ -120,7 +120,7 @@ def record_validated_upstream_denial(connection, *, code, tenant_id=None, now=No
         connection.upstream_denial_code = code
     connection.upstream_denied_at = now
     connection.save(update_fields=["upstream_denial_code", "upstream_denied_at"])
-    archived = memberships.update(archived_at=now)
+    archived = memberships.update(archived_at=now, archived_reason=TenantMembership.ARCHIVED_DENIED)
     # The turn that saw the denial must not keep running on a grant cached before it.
     # After commit, so a sibling tool call can't re-read the unarchived rows; one
     # that read them before is refused its store by the scope's generation.

@@ -244,14 +244,21 @@ def _sync_memberships(
 
         if not archive:
             return memberships
-        archive_qs = TenantMembership.all_objects.filter(
-            user=user, connection=connection, archived_at__isnull=True
-        ).exclude(tenant_id__in=fresh_ids)
+        unlisted_qs = TenantMembership.all_objects.filter(user=user, connection=connection).exclude(
+            tenant_id__in=fresh_ids
+        )
         if archive_team_slug is not None:
             if not archive_team_slug:
                 return memberships  # team-scoped provider without a team → never revoke
-            archive_qs = archive_qs.filter(provider_metadata__team_slug=archive_team_slug)
-        archive_qs.update(archived_at=timezone.now())
+            unlisted_qs = unlisted_qs.filter(provider_metadata__team_slug=archive_team_slug)
+        unlisted_qs.filter(archived_at__isnull=True).update(
+            archived_at=timezone.now(), archived_reason=TenantMembership.ARCHIVED_UNLISTED
+        )
+        # A source denied earlier that a complete listing still omits is gone, not
+        # withheld: once access is back, it must stop reading as a denial.
+        unlisted_qs.filter(archived_reason=TenantMembership.ARCHIVED_DENIED).update(
+            archived_reason=TenantMembership.ARCHIVED_UNLISTED
+        )
         return memberships
 
 

@@ -6,7 +6,7 @@ records the denial and archives the memberships while the token stays healthy.
 """
 
 from apps.common.error_codes import ErrorCode
-from apps.users.models import TenantConnection
+from apps.users.models import TenantConnection, TenantMembership
 from apps.users.services.oauth_scope import canonical_provider
 
 ACCESS_OK = "ok"
@@ -17,16 +17,15 @@ ACCESS_REFUSED = "refused"
 # Some sources were denied; the rest still work.
 ACCESS_PARTIAL = "partial"
 
-# Why an archived membership is gone, as the page shows it.
-ARCHIVED_DENIED = "denied"
-# Dropped from the provider's listing (bot deleted, domain left): nothing to fix.
-ARCHIVED_UNLISTED = "unlisted"
+ARCHIVED_DENIED = TenantMembership.ARCHIVED_DENIED
+# Dropped from the provider's listing (bot deleted, domain left), or a disconnect or
+# older row whose cause wasn't recorded: nothing an admin can fix.
+ARCHIVED_UNLISTED = TenantMembership.ARCHIVED_UNLISTED
 
 
-def archived_reason(conn: TenantConnection, archived_at) -> str:
-    """A recorded denial stamps the archive and ``upstream_denied_at`` with one time;
-    the same match ``restore_token_expired_memberships`` relies on."""
-    if conn.upstream_denied_at is not None and archived_at == conn.upstream_denied_at:
+def archived_reason(membership: TenantMembership) -> str:
+    """Why an archived membership is gone, as the page shows it."""
+    if membership.archived_reason == ARCHIVED_DENIED:
         return ARCHIVED_DENIED
     return ARCHIVED_UNLISTED
 

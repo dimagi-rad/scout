@@ -25,6 +25,8 @@ from apps.users.services.connection_access import (
     ACCESS_REFUSED,
     connection_access_state,
 )
+from apps.users.services.tenant_resolution import _sync_memberships
+from apps.users.services.upstream_denial import record_validated_upstream_denial
 
 OAUTH = TenantConnection.OAUTH
 API_KEY = TenantConnection.API_KEY
@@ -71,7 +73,7 @@ async def _ocs_team(user, app, *, team, expires_in_hours=5):
     )
 
 
-async def _bot(user, conn, external_id, *, archived_at=None):
+async def _bot(user, conn, external_id, *, archived_reason=None):
     tenant = await Tenant.objects.acreate(
         provider="ocs", external_id=external_id, canonical_name=f"Bot {external_id}"
     )
@@ -81,13 +83,15 @@ async def _bot(user, conn, external_id, *, archived_at=None):
         connection=conn,
         team_slug=conn.scope_key,
         team_name=conn.scope_label,
-        archived_at=archived_at,
+        archived_at=timezone.now() if archived_reason is not None else None,
+        archived_reason=archived_reason or "",
     )
 
 
-async def _deny(conn, *, code="", at):
-    await TenantConnection.objects.filter(pk=conn.pk).aupdate(
-        upstream_denial_code=code, upstream_denied_at=at
+async def _record_denial(conn, *, code, tenant_id=None, at=None):
+    fresh = await TenantConnection.objects.aget(pk=conn.pk)
+    await sync_to_async(record_validated_upstream_denial)(
+        fresh, code=code, tenant_id=tenant_id, now=at
     )
 
 
@@ -96,10 +100,10 @@ async def _deny(conn, *, code="", at):
 async def test_refused_team_reports_denial_and_lists_its_archived_bots(user):
     app = await _ocs_app()
     conn = await _ocs_team(user, app, team="dimagi-dev")
+    await _bot(user, conn, "1")
+    await _bot(user, conn, "2")
     denied_at = timezone.now()
-    await _deny(conn, code=EXPIRED_CODE, at=denied_at)
-    await _bot(user, conn, "1", archived_at=denied_at)
-    await _bot(user, conn, "2", archived_at=denied_at)
+    await _record_denial(conn, code=EXPIRED_CODE, at=denied_at)
 
     client = await _login(user)
     [row] = (await client.get("/api/auth/connections/")).json()
@@ -116,17 +120,22 @@ async def test_refused_team_reports_denial_and_lists_its_archived_bots(user):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_partial_team_marks_denied_bots_apart_from_unlisted_ones(user):
+async def test_partial_team_keeps_every_per_bot_denial_apart_from_unlisted_ones(user):
     app = await _ocs_app()
     healthy = await _ocs_team(user, app, team="acme")
     await _bot(user, healthy, "a1")
     partial = await _ocs_team(user, app, team="globex")
-    denied_at = timezone.now()
-    # A single-bot 403 stamps the time but leaves the connection's code empty.
-    await _deny(partial, at=denied_at)
     await _bot(user, partial, "g1")
-    await _bot(user, partial, "g2", archived_at=denied_at)
-    await _bot(user, partial, "g3", archived_at=denied_at - timedelta(days=3))
+    first = await _bot(user, partial, "g2")
+    second = await _bot(user, partial, "g3")
+    await _bot(user, partial, "g4", archived_reason="unlisted")
+    # Two single-bot 403s at different times: the second restamps the connection,
+    # which must not relabel the first.
+    now = timezone.now()
+    await _record_denial(
+        partial, code=DENIED_CODE, tenant_id=first.tenant_id, at=now - timedelta(days=1)
+    )
+    await _record_denial(partial, code=DENIED_CODE, tenant_id=second.tenant_id, at=now)
 
     client = await _login(user)
     by_scope = {r["scope_key"]: r for r in (await client.get("/api/auth/connections/")).json()}
@@ -136,11 +145,13 @@ async def test_partial_team_marks_denied_bots_apart_from_unlisted_ones(user):
     assert by_scope["acme"]["archived_chatbots"] == []
     globex = by_scope["globex"]
     assert globex["access_state"] == ACCESS_PARTIAL
+    # A per-bot denial records no connection-wide code.
     assert globex["denied_at"] is None
     assert [b["tenant_id"] for b in globex["chatbots"]] == ["g1"]
     assert {b["tenant_id"]: b["archived_reason"] for b in globex["archived_chatbots"]} == {
         "g2": "denied",
-        "g3": "unlisted",
+        "g3": "denied",
+        "g4": "unlisted",
     }
 
 
@@ -151,12 +162,45 @@ async def test_bots_dropped_from_the_listing_alone_raise_no_alarm(user):
     connection must not keep telling the user to ask an admin."""
     app = await _ocs_app()
     conn = await _ocs_team(user, app, team="acme")
-    await _bot(user, conn, "gone", archived_at=timezone.now())
+    await _bot(user, conn, "kept")
+    await _bot(user, conn, "gone")
+    kept = await Tenant.objects.aget(external_id="kept")
+
+    await _sync_memberships(
+        user, await TenantConnection.objects.aget(pk=conn.pk), [kept], archive_team_slug="acme"
+    )
 
     client = await _login(user)
     [row] = (await client.get("/api/auth/connections/")).json()
     assert row["access_state"] == ACCESS_OK
-    assert row["archived_chatbots"][0]["archived_reason"] == "unlisted"
+    assert [(b["tenant_id"], b["archived_reason"]) for b in row["archived_chatbots"]] == [
+        ("gone", "unlisted")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recovery_relabels_a_denied_bot_the_listing_no_longer_has(user):
+    """The team is denied, the user is re-added, and one bot was deleted meanwhile:
+    the recovered listing restores the rest and the deleted one stops reading denied."""
+    app = await _ocs_app()
+    conn = await _ocs_team(user, app, team="acme")
+    await _bot(user, conn, "kept")
+    await _bot(user, conn, "deleted")
+    await _record_denial(conn, code=EXPIRED_CODE)
+    kept = await Tenant.objects.aget(external_id="kept")
+
+    await _sync_memberships(
+        user, await TenantConnection.objects.aget(pk=conn.pk), [kept], archive_team_slug="acme"
+    )
+
+    client = await _login(user)
+    [row] = (await client.get("/api/auth/connections/")).json()
+    assert row["access_state"] == ACCESS_OK
+    assert [b["tenant_id"] for b in row["chatbots"]] == ["kept"]
+    assert [(b["tenant_id"], b["archived_reason"]) for b in row["archived_chatbots"]] == [
+        ("deleted", "unlisted")
+    ]
 
 
 @pytest.mark.asyncio
@@ -164,7 +208,7 @@ async def test_bots_dropped_from_the_listing_alone_raise_no_alarm(user):
 async def test_expired_sign_in_is_expired_not_refused(user):
     app = await _ocs_app()
     conn = await _ocs_team(user, app, team="acme", expires_in_hours=-1)
-    await _deny(conn, code=EXPIRED_CODE, at=timezone.now())
+    await _record_denial(conn, code=EXPIRED_CODE)
 
     client = await _login(user)
     [row] = (await client.get("/api/auth/connections/")).json()

@@ -289,7 +289,7 @@ async def tenant_credential_list_view(request):
                         entry
                         | {
                             "archived_at": tm.archived_at.isoformat(),
-                            "archived_reason": archived_reason(conn, tm.archived_at),
+                            "archived_reason": archived_reason(tm),
                         }
                     )
             is_oauth = conn.credential_type == TenantConnection.OAUTH
