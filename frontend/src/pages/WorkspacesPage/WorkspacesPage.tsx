@@ -1,11 +1,17 @@
 import { useState, useMemo, useEffect } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link, useLocation, useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
-import { workspaceApi, type AwaitingInvite, type WorkspaceListItem } from "@/api/workspaces"
+import {
+  workspaceApi,
+  workspaceHasAccess,
+  type AwaitingInvite,
+  type WorkspaceListItem,
+} from "@/api/workspaces"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { RoleBadge } from "@/components/RoleBadge"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
+import { CONNECTIONS_PATH } from "@/lib/routes"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Users, ChevronRight } from "lucide-react"
@@ -95,6 +101,15 @@ function WorkspaceRow({ workspace, onClick }: { workspace: WorkspaceListItem; on
         )}
       </div>
       <div className="flex items-center gap-3">
+        {!workspaceHasAccess(workspace) && (
+          <Badge
+            variant="secondary"
+            className="bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
+            data-testid={`workspace-no-access-${workspace.id}`}
+          >
+            No access
+          </Badge>
+        )}
         <RoleBadge role={workspace.role} />
         <ChevronRight className="h-4 w-4 text-muted-foreground" />
       </div>
@@ -136,8 +151,29 @@ function AwaitingInvitesBanner() {
   )
 }
 
+function NoAccessBanner({ count, connectionsPath }: { count: number; connectionsPath: string }) {
+  return (
+    <div
+      className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
+      data-testid="workspaces-no-access-banner"
+    >
+      <span>
+        You don't have access to {count} {count === 1 ? "workspace" : "workspaces"}. Connected
+        Accounts shows why and what to do.
+      </span>
+      <Button variant="outline" size="sm" asChild>
+        <Link to={connectionsPath} data-testid="workspaces-no-access-connections">
+          Open Connected Accounts
+        </Link>
+      </Button>
+    </div>
+  )
+}
+
 export function WorkspacesPage() {
   const navigate = useNavigate()
+  const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
+  const connectionsPath = `${pathPrefix}${CONNECTIONS_PATH}`
   const domains = useAppStore((s) => s.domains)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
@@ -219,6 +255,10 @@ export function WorkspacesPage() {
   }, [domains, search, activeFilters, sort])
 
   const visible = filtered.slice(0, visibleCount)
+  const noAccessCount = useMemo(
+    () => domains.filter((ws) => !workspaceHasAccess(ws)).length,
+    [domains],
+  )
 
   function handleSearchChange(value: string) {
     setSearch(value)
@@ -244,12 +284,23 @@ export function WorkspacesPage() {
             Your workspaces across connected data sources
           </p>
         </div>
-        <Button onClick={() => setShowCreate(true)} data-testid="new-workspace-btn">
-          New workspace
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <Button variant="outline" asChild>
+            <Link to={connectionsPath} data-testid="workspaces-connected-accounts">
+              Connected Accounts
+            </Link>
+          </Button>
+          <Button onClick={() => setShowCreate(true)} data-testid="new-workspace-btn">
+            New workspace
+          </Button>
+        </div>
       </div>
 
       <AwaitingInvitesBanner />
+
+      {!isLoading && noAccessCount > 0 && (
+        <NoAccessBanner count={noAccessCount} connectionsPath={connectionsPath} />
+      )}
 
       {isLoading ? (
         <div className="space-y-3">
