@@ -22,7 +22,7 @@ from apps.workspaces.services.reconciliation import (
 )
 from apps.workspaces.tasks import (
     JOB_RETENTION_HOURS,
-    log_worker_heartbeat,
+    log_worker_keepalive,
     prune_old_procrastinate_jobs,
     reconcile_stale_materialization_runs,
 )
@@ -334,10 +334,10 @@ async def test_prune_old_jobs_degrades_gracefully_on_error():
 
 
 @pytest.mark.asyncio
-async def test_worker_heartbeat_logs_an_info_line(caplog):
+async def test_worker_keepalive_logs_an_info_line(caplog):
     """The worker-silence alarm counts worker log lines, so each tick must log one."""
     with caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"):
-        await log_worker_heartbeat()
+        await log_worker_keepalive()
 
     assert [r.levelno for r in caplog.records if r.name == "apps.workspaces.tasks"] == [
         logging.INFO

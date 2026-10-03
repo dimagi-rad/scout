@@ -2895,7 +2895,7 @@ async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
     return await sweep_stale_materialization_runs()
 
 
-# procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~144 janitor
+# procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~2,000 janitor
 # jobs/day plus every materialization/teardown/rebuild/resume. Keep finalized jobs
 # for a week (forensics + idempotency headroom) then prune (arch #255, 10#0).
 JOB_RETENTION_HOURS = 24 * 7
@@ -2928,11 +2928,12 @@ async def prune_old_procrastinate_jobs(timestamp: int = 0) -> dict:
 
 # The scout-worker-silent alarm (infra/scout-stack.yml) fires on 15 minutes without a
 # worker log line, and an idle worker's janitors log nothing, so it flapped all day.
+# The lock stops ticks piling up behind a long job: one queued tick is enough.
 @app.periodic(cron="*/5 * * * *")
-@app.task
-async def log_worker_heartbeat(timestamp: int = 0) -> None:
+@app.task(queueing_lock="log_worker_keepalive")
+async def log_worker_keepalive(timestamp: int = 0) -> None:
     """Log one line, so a worker that is running its jobs is never silent."""
-    logger.info("worker heartbeat: periodic jobs are running")
+    logger.info("worker keepalive: periodic jobs are running")
 
 
 @contextlib.contextmanager

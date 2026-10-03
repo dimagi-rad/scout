@@ -657,8 +657,8 @@ Resources:
           MetricValue: '1'
           DefaultValue: 0
 
-  # Liveness signal: every worker task logs at least at INFO, so a healthy
-  # worker emits a steady stream of log events. Count ALL worker log events;
+  # Liveness signal: the log_worker_keepalive task (apps/workspaces/tasks.py)
+  # logs every 5 minutes while the worker runs jobs. Count ALL worker log events;
   # a drop to zero (alarmed below with TreatMissingData: breaching) means the
   # worker process is dead/stuck — the 2026-06-09 silent-failure mode.
   WorkerHeartbeatMetricFilter:
