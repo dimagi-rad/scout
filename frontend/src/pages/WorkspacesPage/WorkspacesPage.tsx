@@ -368,7 +368,7 @@ export function WorkspacesPage() {
                   <WorkspaceRow
                     key={ws.id}
                     workspace={ws}
-                    onClick={() => navigate(workspacePath(ws))}
+                    onClick={() => navigate(`${pathPrefix}${workspacePath(ws)}`)}
                   />
                 ))}
               </div>

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { MemoryRouter } from "react-router-dom"
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { WorkspacesPage } from "./WorkspacesPage"
 import { useAppStore } from "@/store/store"
 import type { WorkspaceListItem } from "@/api/workspaces"
@@ -24,6 +24,10 @@ const ws = (id: string, display_name: string, created_at: string): WorkspaceList
   last_synced_at: null,
   created_at,
 })
+
+function LocationProbe() {
+  return <div data-testid="location">{useLocation().pathname}</div>
+}
 
 function renderPage() {
   return render(
@@ -170,6 +174,20 @@ describe("WorkspacesPage", () => {
     )
     expect(screen.getByTestId("workspace-no-access-lost")).toHaveTextContent("No access")
     expect(screen.queryByTestId("workspace-no-access-ok")).toBeNull()
+  })
+
+  it("opens a workspace inside the embed", async () => {
+    useAppStore.setState({ domains: [ws("abc", "Alpha", "2026-01-02T00:00:00Z")] })
+    render(
+      <MemoryRouter initialEntries={["/embed/workspaces"]}>
+        <Routes>
+          <Route path="/embed/workspaces" element={<WorkspacesPage />} />
+          <Route path="*" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await userEvent.setup().click(screen.getByTestId("workspace-row-abc"))
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/embed\/workspaces\/.*abc$/)
   })
 
   it("keeps the Connected Accounts links inside the embed", () => {
