@@ -9,6 +9,7 @@ import { OnboardingWizard } from "@/components/OnboardingWizard/OnboardingWizard
 import { Skeleton } from "@/components/ui/skeleton"
 import { router } from "@/router"
 import { EmbedPage } from "@/pages/EmbedPage"
+import { setSentryUser } from "@/lib/sentry"
 
 /** Strip the deploy prefix (e.g. "/scout") so route matching works at any mount point. */
 function stripBasePath(pathname: string): string {
@@ -36,6 +37,9 @@ function AppContent() {
       fetchMe()
     }
   }, [fetchMe, isEmbedPage])
+
+  const userId = user?.id
+  useEffect(() => setSentryUser(userId), [userId])
 
   if (isEmbedPage) {
     return <EmbedPage />
