@@ -51,7 +51,7 @@ export function ConnectionCard({
             type="button"
             onClick={onToggle}
             aria-expanded={expanded}
-            aria-controls={sourcesId}
+            aria-controls={expanded ? sourcesId : undefined}
             data-testid={`connection-toggle-${id}`}
             className="flex min-w-0 flex-1 items-start gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >

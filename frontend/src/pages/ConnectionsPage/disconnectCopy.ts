@@ -5,8 +5,9 @@ function liveSources(connections: ApiKeyConnection[]): number {
   return connections.reduce((n, c) => n + c.chatbots.length, 0)
 }
 
-/** "all 12 bots", but "1 bot". */
+/** "all 12 bots", but "1 bot", and "any bots" when there are none. */
 function allOf(provider: string, n: number): string {
+  if (n === 0) return `any ${sourcesNoun(provider)}`
   return n === 1 ? sourceCount(provider, n) : `all ${sourceCount(provider, n)}`
 }
 

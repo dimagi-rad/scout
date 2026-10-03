@@ -100,6 +100,20 @@ export function ConnectionsPage() {
 
   const [dialogState, setDialogState] = useState<DialogState>(null)
   const { choices: expandedChoices, setExpanded } = useExpandedConnections()
+  const [searchToggles, setSearchToggles] = useState<Record<string, boolean>>({})
+
+  function changeSearch(value: string) {
+    setSearch(value)
+    setSearchToggles({})
+  }
+
+  function toggle(conn: ApiKeyConnection, expanded: boolean) {
+    if (search.trim()) {
+      setSearchToggles((prev) => ({ ...prev, [conn.connection_id]: !expanded }))
+    } else {
+      setExpanded(conn.connection_id, !expanded)
+    }
+  }
 
   const fetchProviders = useCallback(async () => {
     setLoadingProviders(true)
@@ -191,8 +205,9 @@ export function ConnectionsPage() {
   }, [filteredConnections])
 
   function isExpanded(conn: ApiKeyConnection): boolean {
-    // A search can match a source by name, so show the sources it matched in.
-    if (search.trim()) return true
+    // A search can match a source by name, so its matches open; toggling one then
+    // lasts only for this search rather than overwriting the remembered choice.
+    if (search.trim()) return searchToggles[conn.connection_id] ?? true
     const chosen = expandedChoices[conn.connection_id]
     if (chosen !== undefined) return chosen
     // Collapsed by default, except where sources were lost: the notice names them.
@@ -313,7 +328,7 @@ export function ConnectionsPage() {
             return (
               <Card key={provider.id} data-testid={`provider-card-${provider.id}`}>
                 <CardContent className="space-y-3 p-4">
-                  <div className="flex items-center justify-between gap-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex min-w-0 items-start gap-3">
                       <span
                         className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${PROVIDER_TINT[dataProvider] ?? FALLBACK_TINT}`}
@@ -341,7 +356,7 @@ export function ConnectionsPage() {
                         )}
                       </div>
                     </div>
-                    <div className="flex shrink-0 gap-2">
+                    <div className="flex flex-wrap gap-2">
                       {(provider.status === "connected" || provider.status === "unavailable") &&
                         provider.supports_multiple_scopes && (
                           <Button
@@ -368,7 +383,8 @@ export function ConnectionsPage() {
                           variant="outline"
                           size="sm"
                           onClick={() => setConfirmDisconnectId(provider.id)}
-                          disabled={disconnecting === provider.id}
+                          // Its confirmation counts the connections, so wait for them.
+                          disabled={disconnecting === provider.id || loadingConnections}
                           data-testid={`disconnect-${provider.id}`}
                         >
                           {disconnecting === provider.id
@@ -378,7 +394,7 @@ export function ConnectionsPage() {
                       )}
                     </div>
                   </div>
-                  {isConfirmingDisconnect && (
+                  {canDisconnect && isConfirmingDisconnect && (
                     <div
                       className="flex flex-wrap items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3"
                       data-testid={`disconnect-confirm-${provider.id}`}
@@ -455,7 +471,7 @@ export function ConnectionsPage() {
             {connections.length > 0 && (
               <SearchFilterBar
                 search={search}
-                onSearchChange={setSearch}
+                onSearchChange={changeSearch}
                 placeholder="Search connections..."
                 filters={
                   providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []
@@ -508,7 +524,7 @@ export function ConnectionsPage() {
                             statusBadge={conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined}
                             notice={notice}
                             expanded={expanded}
-                            onToggle={() => setExpanded(conn.connection_id, !expanded)}
+                            onToggle={() => toggle(conn, expanded)}
                             reconnect={
                               notice?.offerReconnect && oauthProvider ? (
                                 <Button

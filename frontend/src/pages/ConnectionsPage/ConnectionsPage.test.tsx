@@ -6,7 +6,7 @@ import { refreshUserTenants } from "@/api/userTenantsCache"
 import { useAppStore } from "@/store/store"
 import { ConnectionsPage } from "./ConnectionsPage"
 
-vi.mock("@/api/client", () => ({ api: { get: vi.fn() } }))
+vi.mock("@/api/client", () => ({ api: { get: vi.fn(), post: vi.fn(), delete: vi.fn() } }))
 vi.mock("@/api/userTenantsCache", () => ({ refreshUserTenants: vi.fn() }))
 
 describe("ConnectionsPage", () => {
@@ -446,8 +446,7 @@ describe("ConnectionsPage", () => {
     }
 
     it("says Connect is one sign-in for every opportunity, and asks before disconnecting", async () => {
-      const post = vi.fn().mockResolvedValue({})
-      ;(api as unknown as { post: typeof post }).post = post
+      const post = vi.mocked(api.post).mockResolvedValue({})
       renderWith(
         [
           {
@@ -479,6 +478,38 @@ describe("ConnectionsPage", () => {
         fireEvent.click(screen.getByTestId("confirm-disconnect-commcare_connect"))
       })
       expect(post).toHaveBeenCalledWith("/api/auth/providers/commcare_connect/disconnect/")
+    })
+
+    it("drops an open confirmation once the provider has nothing left to disconnect", async () => {
+      const providers = [
+        {
+          id: "ocs",
+          name: "Open Chat Studio",
+          login_url: "/accounts/ocs/login/",
+          connected: true,
+          status: "connected",
+          supports_multiple_scopes: true,
+          connection_ids: ["t1"],
+        },
+      ]
+      let connections: unknown[] = [conn("t1", "ocs", "acme", [bot("1")])]
+      vi.mocked(api.get).mockImplementation((path) =>
+        Promise.resolve(path === "/api/auth/providers/" ? { providers } : connections),
+      )
+      vi.mocked(api.delete).mockResolvedValue({})
+      render(<ConnectionsPage />)
+
+      fireEvent.click(await screen.findByTestId("disconnect-ocs"))
+      expect(screen.getByTestId("disconnect-confirm-ocs")).toBeTruthy()
+      fireEvent.click(screen.getByTestId("remove-connection-t1"))
+      providers[0] = { ...providers[0], status: null as unknown as string, connection_ids: [] }
+      connections = []
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("confirm-remove-t1"))
+      })
+
+      expect(api.delete).toHaveBeenCalledWith("/api/auth/connections/t1/")
+      expect(screen.queryByTestId("disconnect-confirm-ocs")).toBeNull()
     })
 
     it("names every OCS team when disconnecting them all, and keeps API keys", async () => {
@@ -580,6 +611,22 @@ describe("ConnectionsPage", () => {
       expect(screen.getByTestId("filter-provider-commcare_connect")).toHaveTextContent(
         "CommCare Connect",
       )
+    })
+
+    it("opens search matches without letting a toggle there overwrite the remembered choice", async () => {
+      renderList()
+      fireEvent.click(await screen.findByTestId("connection-toggle-o1"))
+      expect(screen.getByTestId("connection-sources-o1")).toBeTruthy()
+
+      fireEvent.change(screen.getByTestId("search-filter-input"), { target: { value: "Bot z1" } })
+      expect(screen.getByTestId("connection-sources-o2")).toBeTruthy()
+      fireEvent.change(screen.getByTestId("search-filter-input"), { target: { value: "team" } })
+      fireEvent.click(screen.getByTestId("connection-toggle-o1"))
+      expect(screen.queryByTestId("connection-sources-o1")).toBeNull()
+
+      fireEvent.change(screen.getByTestId("search-filter-input"), { target: { value: "" } })
+      expect(screen.getByTestId("connection-sources-o1")).toBeTruthy()
+      expect(screen.queryByTestId("connection-sources-o2")).toBeNull()
     })
 
     it("starts collapsed and remembers a card the viewer opened", async () => {
