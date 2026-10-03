@@ -156,6 +156,7 @@ describe("pollDelayMs", () => {
 describe("useWorkspaceJobsImpl poll backoff", () => {
   beforeEach(() => {
     vi.useFakeTimers()
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true })
   })
   afterEach(() => {
     vi.useRealTimers()
@@ -253,5 +254,39 @@ describe("useWorkspaceJobsImpl poll backoff", () => {
     expect(spy).toHaveBeenCalledTimes(4)
     await advance(10_000)
     expect(spy).toHaveBeenCalledTimes(5)
+  })
+
+  it("resets the backoff on refresh() and when the browser comes back online", async () => {
+    const spy = vi.spyOn(jobsApi, "active").mockRejectedValue(denied())
+    const { result } = renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await advance(10_000)
+    await advance(30_000)
+    expect(spy).toHaveBeenCalledTimes(3)
+    await act(() => result.current.refresh())
+    expect(spy).toHaveBeenCalledTimes(4)
+    await advance(10_000)
+    expect(spy).toHaveBeenCalledTimes(5)
+    act(() => {
+      window.dispatchEvent(new Event("online"))
+    })
+    await advance(0)
+    expect(spy).toHaveBeenCalledTimes(6)
+  })
+
+  it("ignores a stale failure that lands after a newer success", async () => {
+    let failStale: (e: Error) => void = () => {}
+    const spy = vi
+      .spyOn(jobsApi, "active")
+      .mockImplementationOnce(() => Promise.reject(denied()))
+      .mockImplementationOnce(() => new Promise((_, reject) => (failStale = reject)))
+      .mockResolvedValue(empty)
+    const { result } = renderHook(() => useWorkspaceJobsImpl("ws-a"))
+    await advance(10_000)
+    expect(spy).toHaveBeenCalledTimes(2)
+    await act(() => result.current.refresh())
+    expect(spy).toHaveBeenCalledTimes(3)
+    await act(async () => failStale(denied()))
+    await advance(3_000)
+    expect(spy).toHaveBeenCalledTimes(4)
   })
 })

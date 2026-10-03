@@ -112,7 +112,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
   const [recentlyCompletedThreadIds, setRecentlyCompletedThreadIds] = useState<string[]>([])
   const [overrides, setOverrides] = useState<Record<string, PendingOverride>>({})
   const overrideSeqRef = useRef(0)
-  // Polls overlap (the interval plus refreshes); an older one landing last must
+  // Polls overlap (the timer chain plus refreshes); an older one landing last must
   // not overwrite a newer snapshot or the diff the next poll is taken against.
   const pollSeqRef = useRef(0)
   const appliedPollRef = useRef(0)
@@ -177,7 +177,10 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
         setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
       }
     } catch (e) {
-      if (workspaceIdRef.current === workspaceId) failuresRef.current += 1
+      // Only the newest poll counts: a stale failure must not undo a reset or success.
+      if (workspaceIdRef.current === workspaceId && poll === pollSeqRef.current) {
+        failuresRef.current += 1
+      }
       setState((s) => ({ ...s, lastError: String(e) }))
     }
   }, [workspaceId])
@@ -225,7 +228,11 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       else stopPolling()
     }
 
+    // Coming back online is the likeliest moment a backed-off poll can succeed.
+    const handleOnline = () => void restart()
+
     document.addEventListener("visibilitychange", handleVisibility)
+    window.addEventListener("online", handleOnline)
     // Fire immediately on mount so the UI populates without waiting one tick.
     void fetchOnce().then(schedule)
 
@@ -234,6 +241,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       cancelled = true
       stopPolling()
       document.removeEventListener("visibilitychange", handleVisibility)
+      window.removeEventListener("online", handleOnline)
     }
   }, [workspaceId, fetchOnce])
 
