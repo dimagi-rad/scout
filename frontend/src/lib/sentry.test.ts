@@ -31,6 +31,20 @@ describe("stripUrl", () => {
     expect(stripUrl("/plain/path")).toBe("/plain/path")
     expect(stripUrl(undefined)).toBeUndefined()
   })
+
+  it("masks workspace slugs and dataset names in paths", () => {
+    const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
+    expect(stripUrl(`https://scout.example/workspaces/acme-health/${id}/chat`)).toBe(
+      `https://scout.example/workspaces/:slug/${id}/chat`,
+    )
+    expect(stripUrl(`/workspaces/acme/${id}`)).toBe(`/workspaces/:slug/${id}`)
+    expect(stripUrl(`/api/workspaces/${id}/threads/`)).toBe(`/api/workspaces/${id}/threads/`)
+    expect(stripUrl(`/workspaces/${id}/chat/${id}`)).toBe(`/workspaces/${id}/chat/${id}`)
+    expect(stripUrl("/datasets/hiv_patients?x=1")).toBe("/datasets/:name")
+    expect(stripUrl(`/api/workspaces/${id}/datasets/hiv_patients/`)).toBe(
+      `/api/workspaces/${id}/datasets/:name/`,
+    )
+  })
 })
 
 describe("scrubEvent", () => {
@@ -117,6 +131,14 @@ describe("scrubEvent", () => {
     expect(event.exception!.values![0].value).toBe("API request failed (HTTP 400)")
   })
 
+  it("keeps the status of an ApiError that is another error's cause", () => {
+    const event = scrubEvent(
+      errorEvent({ exception: { values: [{ type: "ApiError", value: "Dataset hiv missing" }] } }),
+      { originalException: new Error("load failed", { cause: new ApiError(404, "Dataset hiv missing") }) },
+    )
+    expect(event.exception!.values![0].value).toBe("API request failed (HTTP 404)")
+  })
+
   it("replaces the raw value of a non-Error promise rejection", () => {
     const event = scrubEvent(
       errorEvent({
@@ -187,11 +209,11 @@ describe("scrubBreadcrumb", () => {
   it("drops attribute values from UI breadcrumbs, which can hold thread titles", () => {
     const click = {
       category: "ui.click",
-      message: 'nav > button.flex[title="how many "HIV+" patients in Kisumu"][data-testid="thread-1"]',
+      message: 'nav > button.flex[type="button"][title="how many "HIV+" patients in Kisumu"]',
     }
     expect(scrubBreadcrumb(click)).toEqual({
       category: "ui.click",
-      message: "nav > button.flex[title][data-testid]",
+      message: "nav > button.flex[type][title]",
     })
   })
 
@@ -201,6 +223,11 @@ describe("scrubBreadcrumb", () => {
       message: 'li > a[aria-label="Q3 [draft] "x]y" patients"][title="t"] > span.t',
     }
     expect(scrubBreadcrumb(click)?.message).toBe("li > a[aria-label][title] > span.t")
+  })
+
+  it("drops the whole selector when a value defeats the attribute pattern", () => {
+    const click = { category: "ui.click", message: 'button[aria-label="Open a"][b"]' }
+    expect(scrubBreadcrumb(click)?.message).toBe("[redacted selector]")
   })
 
   it("leaves other breadcrumbs alone", () => {
@@ -268,6 +295,8 @@ describe("isNoiseEvent", () => {
 
   it.each([401, 403, 503])("ignores expected %i API responses", (status) => {
     expect(isNoiseEvent(errorEvent(), { originalException: new ApiError(status, "nope") })).toBe(true)
+    const wrapped = new Error("load failed", { cause: new ApiError(status, "nope") })
+    expect(isNoiseEvent(errorEvent(), { originalException: wrapped })).toBe(true)
   })
 
   it("reports unexpected API failures and ordinary errors", () => {

@@ -23,11 +23,23 @@ const NOISE_MESSAGES = [
 // hold raw values such as ApiError.body or a rejected object's fields.
 const KEPT_CONTEXTS = new Set(["app", "browser", "os", "device", "culture", "runtime", "react"])
 
-/** Drops the query string and fragment, where tokens and OAuth codes travel. */
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+// Workspace slugs come from the workspace's display name, and dataset names are
+// customer schema; the ids beside them identify the resource well enough.
+const WORKSPACE_SLUG = new RegExp(`/workspaces/(?!${UUID}(?:/|$))[^/]+(?=/${UUID}(?:/|$))`, "gi")
+const DATASET_NAME = /\/datasets\/[^/]+/g
+
+/**
+ * Drops the query string and fragment, where tokens and OAuth codes travel, and
+ * masks path segments named after customer data.
+ */
 export function stripUrl<T>(url: T): T {
   if (typeof url !== "string") return url
   const cut = url.search(/[?#]/)
-  return (cut === -1 ? url : url.slice(0, cut)) as T
+  const path = cut === -1 ? url : url.slice(0, cut)
+  return path
+    .replace(WORKSPACE_SLUG, "/workspaces/:slug")
+    .replace(DATASET_NAME, "/datasets/:name") as T
 }
 
 function errorName(error: unknown): string | undefined {
@@ -40,6 +52,15 @@ function errorStatus(error: unknown): number | undefined {
   if (error === null || typeof error !== "object" || !("status" in error)) return undefined
   const { status } = error as { status: unknown }
   return typeof status === "number" ? status : undefined
+}
+
+// A caught ApiError is often rethrown as the `cause` of a more specific error.
+function findApiError(error: unknown, depth = 0): unknown {
+  if (errorName(error) === "ApiError") return error
+  if (depth >= 5 || error === null || typeof error !== "object" || !("cause" in error)) {
+    return undefined
+  }
+  return findApiError((error as { cause: unknown }).cause, depth + 1)
 }
 
 function eventMessages(event: ErrorEvent, hint: EventHint): string[] {
@@ -64,10 +85,8 @@ export function isNoiseEvent(event: ErrorEvent, hint: EventHint = {}): boolean {
   if (errorName(original) === "AbortError") return true
   if (event.exception?.values?.some((value) => value.type === "AbortError")) return true
 
-  const status = errorStatus(original)
-  if (errorName(original) === "ApiError" && status !== undefined && EXPECTED_API_STATUSES.has(status)) {
-    return true
-  }
+  const status = errorStatus(findApiError(original))
+  if (status !== undefined && EXPECTED_API_STATUSES.has(status)) return true
 
   if (eventMessages(event, hint).some((message) => NOISE_MESSAGES.some((re) => re.test(message)))) {
     return true
@@ -88,7 +107,9 @@ export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
     // Values are unescaped and may hold quotes or brackets, so a value ends only at
     // a `"]` followed by the next attribute, the next element or the end.
     const message = breadcrumb.message.replace(/\[([\w:-]+)="[\s\S]*?"\](?=$|\[| > )/g, "[$1]")
-    breadcrumb = { ...breadcrumb, message }
+    // A quote left over means a value fooled the pattern (one containing `"][`),
+    // so the whole selector goes rather than a fragment of it.
+    breadcrumb = { ...breadcrumb, message: /["']/.test(message) ? "[redacted selector]" : message }
   }
   if (!breadcrumb.data) return breadcrumb
   const data = { ...breadcrumb.data }
@@ -103,7 +124,7 @@ export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
 function exceptionValue(value: Exception, hint: EventHint): string | undefined {
   const original = hint.originalException
   if (value.type === "ApiError") {
-    const status = errorStatus(original)
+    const status = errorStatus(findApiError(original))
     return status === undefined ? "API request failed" : `API request failed (HTTP ${status})`
   }
   if (value.type === "UnhandledRejection" && !(original instanceof Error)) {
