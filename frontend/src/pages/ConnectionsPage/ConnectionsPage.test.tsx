@@ -412,6 +412,115 @@ describe("ConnectionsPage", () => {
     })
   })
 
+  describe("disconnecting", () => {
+    const bot = (id: string) => ({
+      membership_id: `m-${id}`,
+      tenant_id: id,
+      tenant_name: `Source ${id}`,
+      team_slug: "",
+      team_name: "",
+    })
+    const conn = (
+      id: string,
+      provider: string,
+      scope_label: string,
+      chatbots: unknown[],
+      credential_type = "oauth",
+    ) => ({
+      connection_id: id,
+      provider,
+      credential_type,
+      scope_key: scope_label,
+      scope_label,
+      status: credential_type === "oauth" ? "connected" : null,
+      access_state: "ok",
+      chatbots,
+      archived_chatbots: [],
+    })
+
+    function renderWith(providers: unknown[], connections: unknown[]) {
+      vi.mocked(api.get).mockImplementation((path) =>
+        Promise.resolve(path === "/api/auth/providers/" ? { providers } : connections),
+      )
+      render(<ConnectionsPage />)
+    }
+
+    it("says Connect is one sign-in for every opportunity, and asks before disconnecting", async () => {
+      const post = vi.fn().mockResolvedValue({})
+      ;(api as unknown as { post: typeof post }).post = post
+      renderWith(
+        [
+          {
+            id: "commcare_connect",
+            name: "CommCare Connect",
+            login_url: "/accounts/commcare_connect/login/",
+            connected: true,
+            status: "connected",
+            connection_ids: ["cc"],
+          },
+        ],
+        [conn("cc", "commcare_connect", "", [bot("1"), bot("2"), bot("3")])],
+      )
+
+      const button = await screen.findByTestId("disconnect-commcare_connect")
+      expect(button.textContent).toBe("Disconnect")
+      fireEvent.click(button)
+      expect(post).not.toHaveBeenCalled()
+      expect(screen.getByTestId("disconnect-confirm-commcare_connect")).toHaveTextContent(
+        "Disconnect CommCare Connect? It is one sign-in for all your opportunities, so Scout loses access to all 3 opportunities. You can reconnect later.",
+      )
+
+      fireEvent.click(screen.getByTestId("cancel-disconnect-commcare_connect"))
+      expect(screen.queryByTestId("disconnect-confirm-commcare_connect")).toBeNull()
+      expect(post).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByTestId("disconnect-commcare_connect"))
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("confirm-disconnect-commcare_connect"))
+      })
+      expect(post).toHaveBeenCalledWith("/api/auth/providers/commcare_connect/disconnect/")
+    })
+
+    it("names every OCS team when disconnecting them all, and keeps API keys", async () => {
+      renderWith(
+        [
+          {
+            id: "ocs",
+            name: "Open Chat Studio",
+            login_url: "/accounts/ocs/login/",
+            connected: true,
+            status: "connected",
+            supports_multiple_scopes: true,
+            connection_ids: ["t1", "t2"],
+          },
+        ],
+        [
+          conn("t1", "ocs", "acme", [bot("1")]),
+          conn("t2", "ocs", "globex", [bot("2"), bot("3")]),
+          conn("k1", "ocs", "keyed", [bot("4")], "api_key"),
+        ],
+      )
+
+      const button = await screen.findByTestId("disconnect-ocs")
+      expect(button.textContent).toBe("Disconnect all teams")
+      fireEvent.click(button)
+      expect(screen.getByTestId("disconnect-confirm-ocs")).toHaveTextContent(
+        "Disconnect all 2 Open Chat Studio teams (acme, globex)? Scout loses access to their 3 bots. API key connections stay. You can reconnect later.",
+      )
+
+      expect(screen.getByTestId("remove-connection-t1").textContent).toBe("Disconnect")
+      expect(screen.getByTestId("remove-connection-k1").textContent).toBe("Remove")
+      fireEvent.click(screen.getByTestId("remove-connection-t1"))
+      expect(screen.getByTestId("remove-message-t1")).toHaveTextContent(
+        "Disconnect team acme? Scout loses access to its 1 bot. Your other teams stay connected.",
+      )
+      fireEvent.click(screen.getByTestId("remove-connection-k1"))
+      expect(screen.getByTestId("remove-message-k1")).toHaveTextContent(
+        "Remove the API key connection keyed? Scout loses access to its 1 bot and deletes the saved key.",
+      )
+    })
+  })
+
   describe("connections list layout", () => {
     beforeEach(() => localStorage.clear())
 

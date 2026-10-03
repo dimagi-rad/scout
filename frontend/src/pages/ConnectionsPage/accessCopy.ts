@@ -22,6 +22,11 @@ export function productName(provider: string): string {
   return PRODUCT[provider] ?? provider
 }
 
+/** "bots", "opportunities": what a provider calls its data sources. */
+export function sourcesNoun(provider: string): string {
+  return SOURCE_NOUN[provider] ?? "sources"
+}
+
 /** "1 bot", "3 opportunities": what a provider calls its data sources. */
 export function sourceCount(provider: string, n: number): string {
   const noun =

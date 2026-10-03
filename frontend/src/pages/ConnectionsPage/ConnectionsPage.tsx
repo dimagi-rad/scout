@@ -22,6 +22,11 @@ import {
 } from "@/components/WorkspaceBadge/providerMeta"
 import { accessNotice, productName, providerAccessLines } from "./accessCopy"
 import { ConnectionCard } from "./ConnectionCard"
+import {
+  connectionRemoveCopy,
+  providerDisconnectLabel,
+  providerDisconnectMessage,
+} from "./disconnectCopy"
 import { useExpandedConnections } from "./useExpandedConnections"
 
 const PROVIDER_ORDER = ["commcare", "commcare_connect", "ocs"]
@@ -86,6 +91,7 @@ export function ConnectionsPage() {
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
+  const [confirmDisconnectId, setConfirmDisconnectId] = useState<string | null>(null)
 
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string | null>>({
@@ -287,15 +293,18 @@ export function ConnectionsPage() {
               provider.status === "needs_team" ||
               provider.status === "unavailable"
             const ids = new Set(provider.connection_ids ?? [])
+            const cardConnections = connections
+              .filter((c) => ids.has(c.connection_id))
+              .map((conn) => ({ conn, teamLabel: teamLabelFor(conn) }))
             const accessLines = providerAccessLines(
               provider.name,
-              connections
-                .filter((c) => ids.has(c.connection_id))
-                // The status line already says the sign-in expired.
-                .filter((c) => !(provider.status === "expired" && c.access_state === "expired"))
-                .map((conn) => ({ conn, teamLabel: teamLabelFor(conn) })),
+              // The status line already says the sign-in expired.
+              cardConnections.filter(
+                ({ conn }) => !(provider.status === "expired" && conn.access_state === "expired"),
+              ),
             )
             const dataProvider = canonicalProvider(provider.id)
+            const isConfirmingDisconnect = confirmDisconnectId === provider.id
             const { Icon } = getProviderMeta(dataProvider)
             const teamCount =
               provider.supports_multiple_scopes && provider.status === "connected" && ids.size > 0
@@ -303,68 +312,111 @@ export function ConnectionsPage() {
                 : ""
             return (
               <Card key={provider.id} data-testid={`provider-card-${provider.id}`}>
-                <CardContent className="flex items-center justify-between gap-4 p-4">
-                  <div className="flex min-w-0 items-start gap-3">
-                    <span
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${PROVIDER_TINT[dataProvider] ?? FALLBACK_TINT}`}
-                      data-testid={`provider-icon-${provider.id}`}
-                    >
-                      <Icon className="h-5 w-5" aria-hidden />
-                    </span>
-                    <div className="min-w-0">
-                      <p className="font-medium">{provider.name}</p>
-                      <p
-                        className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}
-                        data-testid={`provider-status-${provider.id}`}
+                <CardContent className="space-y-3 p-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <span
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${PROVIDER_TINT[dataProvider] ?? FALLBACK_TINT}`}
+                        data-testid={`provider-icon-${provider.id}`}
                       >
-                        {copy.label}
-                        {teamCount}
-                      </p>
-                      {accessLines.length > 0 && (
-                        <div data-testid={`provider-access-${provider.id}`}>
-                          {accessLines.map((line) => (
-                            <p key={line} className="text-sm text-amber-600">
-                              {line}
-                            </p>
-                          ))}
-                        </div>
-                      )}
+                        <Icon className="h-5 w-5" aria-hidden />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="font-medium">{provider.name}</p>
+                        <p
+                          className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}
+                          data-testid={`provider-status-${provider.id}`}
+                        >
+                          {copy.label}
+                          {teamCount}
+                        </p>
+                        {accessLines.length > 0 && (
+                          <div data-testid={`provider-access-${provider.id}`}>
+                            {accessLines.map((line) => (
+                              <p key={line} className="text-sm text-amber-600">
+                                {line}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    {(provider.status === "connected" || provider.status === "unavailable") &&
-                      provider.supports_multiple_scopes && (
+                    <div className="flex shrink-0 gap-2">
+                      {(provider.status === "connected" || provider.status === "unavailable") &&
+                        provider.supports_multiple_scopes && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            asChild
+                            data-testid={`connect-another-${provider.id}`}
+                          >
+                            <a href={connectUrlFor(provider)}>Connect another team</a>
+                          </Button>
+                        )}
+                      {provider.status !== "connected" && copy.action && (
                         <Button
                           variant="outline"
                           size="sm"
                           asChild
-                          data-testid={`connect-another-${provider.id}`}
+                          data-testid={`connect-${provider.id}`}
                         >
-                          <a href={connectUrlFor(provider)}>Connect another team</a>
+                          <a href={connectUrlFor(provider)}>{copy.action}</a>
                         </Button>
                       )}
-                    {provider.status !== "connected" && copy.action && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        asChild
-                        data-testid={`connect-${provider.id}`}
-                      >
-                        <a href={connectUrlFor(provider)}>{copy.action}</a>
-                      </Button>
-                    )}
-                    {canDisconnect && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleDisconnect(provider.id)}
-                        disabled={disconnecting === provider.id}
-                        data-testid={`disconnect-${provider.id}`}
-                      >
-                        {disconnecting === provider.id ? "Disconnecting..." : "Disconnect all"}
-                      </Button>
-                    )}
+                      {canDisconnect && !isConfirmingDisconnect && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setConfirmDisconnectId(provider.id)}
+                          disabled={disconnecting === provider.id}
+                          data-testid={`disconnect-${provider.id}`}
+                        >
+                          {disconnecting === provider.id
+                            ? "Disconnecting..."
+                            : providerDisconnectLabel(provider.supports_multiple_scopes)}
+                        </Button>
+                      )}
+                    </div>
                   </div>
+                  {isConfirmingDisconnect && (
+                    <div
+                      className="flex flex-wrap items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3"
+                      data-testid={`disconnect-confirm-${provider.id}`}
+                    >
+                      <p className="text-sm font-medium">
+                        {providerDisconnectMessage(
+                          provider.name,
+                          dataProvider,
+                          provider.supports_multiple_scopes,
+                          cardConnections,
+                          connections.some(
+                            (c) => c.credential_type === "api_key" && c.provider === dataProvider,
+                          ),
+                        )}
+                      </p>
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setConfirmDisconnectId(null)}
+                          data-testid={`cancel-disconnect-${provider.id}`}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => {
+                            setConfirmDisconnectId(null)
+                            void handleDisconnect(provider.id)
+                          }}
+                          data-testid={`confirm-disconnect-${provider.id}`}
+                        >
+                          {providerDisconnectLabel(provider.supports_multiple_scopes)}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             )
@@ -447,6 +499,7 @@ export function ConnectionsPage() {
                         const oauthProvider = providerForConnection.get(conn.connection_id)
                         const notice = accessNotice(conn, teamLabel)
                         const expanded = isExpanded(conn)
+                        const removal = connectionRemoveCopy(conn, teamLabel)
                         return (
                           <ConnectionCard
                             key={conn.connection_id}
@@ -490,7 +543,7 @@ export function ConnectionsPage() {
                                     onClick={() => setConfirmRemoveId(conn.connection_id)}
                                     data-testid={`remove-connection-${conn.connection_id}`}
                                   >
-                                    Remove
+                                    {removal.action}
                                   </Button>
                                 </>
                               )
@@ -498,10 +551,11 @@ export function ConnectionsPage() {
                             confirmation={
                               isConfirming ? (
                                 <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                                  <p className="text-sm font-medium">
-                                    Remove <span className="font-semibold">{teamLabel}</span>? Its
-                                    chatbots will be hidden and its saved credentials removed. You can
-                                    reconnect later.
+                                  <p
+                                    className="text-sm font-medium"
+                                    data-testid={`remove-message-${conn.connection_id}`}
+                                  >
+                                    {removal.message}
                                   </p>
                                   <div className="flex shrink-0 gap-2">
                                     <Button
@@ -519,7 +573,7 @@ export function ConnectionsPage() {
                                       disabled={removing === conn.connection_id}
                                       data-testid={`confirm-remove-${conn.connection_id}`}
                                     >
-                                      {removing === conn.connection_id ? "Removing..." : "Confirm Remove"}
+                                      {removing === conn.connection_id ? "Removing..." : removal.action}
                                     </Button>
                                   </div>
                                 </div>
