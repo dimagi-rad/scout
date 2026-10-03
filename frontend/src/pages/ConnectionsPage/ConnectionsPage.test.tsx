@@ -113,6 +113,44 @@ describe("ConnectionsPage", () => {
     expect(screen.queryByTestId("disconnect-commcare") !== null).toBe(disconnect)
   })
 
+  it("shows each provider's icon and how many teams a scoped provider has", async () => {
+    vi.mocked(api.get).mockImplementation((path) =>
+      Promise.resolve(
+        path === "/api/auth/providers/"
+          ? {
+              providers: [
+                {
+                  id: "ocs",
+                  name: "Open Chat Studio",
+                  login_url: "/accounts/ocs/login/",
+                  connected: true,
+                  status: "connected",
+                  supports_multiple_scopes: true,
+                  connection_ids: ["t1", "t2"],
+                },
+                {
+                  id: "commcare_eu",
+                  name: "CommCare HQ (EU)",
+                  login_url: "/accounts/commcare_eu/login/",
+                  connected: true,
+                  status: "connected",
+                  connection_ids: ["e1"],
+                },
+              ],
+            }
+          : [],
+      ),
+    )
+    render(<ConnectionsPage />)
+
+    expect((await screen.findByTestId("provider-status-ocs")).textContent).toBe(
+      "Connected · 2 teams",
+    )
+    expect(screen.getByTestId("provider-status-commcare_eu").textContent).toBe("Connected")
+    expect(screen.getByTestId("provider-icon-ocs").className).toContain("bg-purple-100")
+    expect(screen.getByTestId("provider-icon-commcare_eu").className).toContain("bg-blue-100")
+  })
+
   it("still offers connecting another team while a scoped provider is unavailable", async () => {
     vi.mocked(api.get).mockImplementation((path) =>
       Promise.resolve(

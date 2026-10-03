@@ -15,24 +15,18 @@ import {
   ApiConnectionDialog,
   type ApiKeyConnection,
 } from "@/components/ApiConnectionDialog"
+import {
+  FALLBACK_TINT,
+  PROVIDER_TINT,
+  canonicalProvider,
+  getProviderMeta,
+} from "@/components/WorkspaceBadge/providerMeta"
 import { accessNotice, productName, providerAccessLines } from "./accessCopy"
-
-const providerBadgeStyles: Record<string, string> = {
-  commcare: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
-  commcare_connect: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
-  ocs: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400",
-}
 
 function ProviderBadge({ provider }: { provider: string }) {
   return (
-    <Badge
-      variant="secondary"
-      className={
-        providerBadgeStyles[provider] ??
-        "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"
-      }
-    >
-      {provider}
+    <Badge variant="secondary" className={PROVIDER_TINT[provider] ?? FALLBACK_TINT}>
+      {productName(provider)}
     </Badge>
   )
 }
@@ -278,26 +272,41 @@ export function ConnectionsPage() {
                 .filter((c) => !(provider.status === "expired" && c.access_state === "expired"))
                 .map((conn) => ({ conn, teamLabel: teamLabelFor(conn) })),
             )
+            const dataProvider = canonicalProvider(provider.id)
+            const { Icon } = getProviderMeta(dataProvider)
+            const teamCount =
+              provider.supports_multiple_scopes && provider.status === "connected" && ids.size > 0
+                ? ` · ${ids.size} ${ids.size === 1 ? "team" : "teams"}`
+                : ""
             return (
-              <Card key={provider.id}>
-                <CardContent className="flex items-center justify-between p-4">
-                  <div>
-                    <p className="font-medium">{provider.name}</p>
-                    <p
-                      className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}
-                      data-testid={`provider-status-${provider.id}`}
+              <Card key={provider.id} data-testid={`provider-card-${provider.id}`}>
+                <CardContent className="flex items-center justify-between gap-4 p-4">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${PROVIDER_TINT[dataProvider] ?? FALLBACK_TINT}`}
+                      data-testid={`provider-icon-${provider.id}`}
                     >
-                      {copy.label}
-                    </p>
-                    {accessLines.length > 0 && (
-                      <div data-testid={`provider-access-${provider.id}`}>
-                        {accessLines.map((line) => (
-                          <p key={line} className="text-sm text-amber-600">
-                            {line}
-                          </p>
-                        ))}
-                      </div>
-                    )}
+                      <Icon className="h-5 w-5" aria-hidden />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="font-medium">{provider.name}</p>
+                      <p
+                        className={`text-sm ${copy.warn ? "text-amber-600" : "text-muted-foreground"}`}
+                        data-testid={`provider-status-${provider.id}`}
+                      >
+                        {copy.label}
+                        {teamCount}
+                      </p>
+                      {accessLines.length > 0 && (
+                        <div data-testid={`provider-access-${provider.id}`}>
+                          {accessLines.map((line) => (
+                            <p key={line} className="text-sm text-amber-600">
+                              {line}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <div className="flex shrink-0 gap-2">
                     {(provider.status === "connected" || provider.status === "unavailable") &&
