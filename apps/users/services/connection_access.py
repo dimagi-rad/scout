@@ -14,7 +14,8 @@ ACCESS_OK = "ok"
 ACCESS_EXPIRED = "expired"
 # The provider refuses a working sign-in: an admin there must restore access.
 ACCESS_REFUSED = "refused"
-# Some sources were denied; the rest still work.
+# Some sources are archived by a recorded denial and the rest still work. Lasts until
+# a complete listing omits them too, which relabels them unlisted.
 ACCESS_PARTIAL = "partial"
 
 ARCHIVED_DENIED = TenantMembership.ARCHIVED_DENIED
