@@ -6,7 +6,6 @@ import { oauthConnectUrl, type OAuthProvider, type OAuthProviderStatus } from "@
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
 import {
   SearchFilterBar,
   type FilterGroup,
@@ -22,14 +21,10 @@ import {
   getProviderMeta,
 } from "@/components/WorkspaceBadge/providerMeta"
 import { accessNotice, productName, providerAccessLines } from "./accessCopy"
+import { ConnectionCard } from "./ConnectionCard"
+import { useExpandedConnections } from "./useExpandedConnections"
 
-function ProviderBadge({ provider }: { provider: string }) {
-  return (
-    <Badge variant="secondary" className={PROVIDER_TINT[provider] ?? FALLBACK_TINT}>
-      {productName(provider)}
-    </Badge>
-  )
-}
+const PROVIDER_ORDER = ["commcare", "commcare_connect", "ocs"]
 
 function teamLabelFor(conn: ApiKeyConnection): string {
   // A CommCare connection's scope is its HQ server, not a team; naming it keeps a
@@ -43,9 +38,6 @@ function teamLabelFor(conn: ApiKeyConnection): string {
   const named = [...conn.chatbots, ...(conn.archived_chatbots ?? [])].find((cb) => cb.team_name)
   return named?.team_name || conn.provider
 }
-
-const WARNING_BADGE =
-  "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
 
 /** Status line and connect-button label per provider status. */
 const PROVIDER_STATUS_COPY: Partial<
@@ -101,6 +93,7 @@ export function ConnectionsPage() {
   })
 
   const [dialogState, setDialogState] = useState<DialogState>(null)
+  const { choices: expandedChoices, setExpanded } = useExpandedConnections()
 
   const fetchProviders = useCallback(async () => {
     setLoadingProviders(true)
@@ -145,7 +138,7 @@ export function ConnectionsPage() {
       name: "provider",
       options: [...counts.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([value, count]) => ({ value, label: value, count })),
+        .map(([value, count]) => ({ value, label: productName(value), count })),
     }
   }, [connections])
 
@@ -159,6 +152,7 @@ export function ConnectionsPage() {
         const haystacks = [
           teamLabelFor(c),
           c.provider,
+          productName(c.provider),
           ...[...c.chatbots, ...(c.archived_chatbots ?? [])].flatMap((cb) => [
             cb.tenant_name,
             cb.tenant_id,
@@ -169,6 +163,35 @@ export function ConnectionsPage() {
       return true
     })
   }, [connections, search, activeFilters])
+
+  // One section per provider in a fixed order, connections by name inside it.
+  const groupedConnections = useMemo(() => {
+    const groups = new Map<string, ApiKeyConnection[]>()
+    for (const c of filteredConnections) {
+      groups.set(c.provider, [...(groups.get(c.provider) ?? []), c])
+    }
+    const rank = (p: string) => {
+      const i = PROVIDER_ORDER.indexOf(p)
+      return i === -1 ? PROVIDER_ORDER.length : i
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+      .map(([provider, conns]) => ({
+        provider,
+        connections: [...conns].sort((a, b) =>
+          teamLabelFor(a).localeCompare(teamLabelFor(b), undefined, { numeric: true }),
+        ),
+      }))
+  }, [filteredConnections])
+
+  function isExpanded(conn: ApiKeyConnection): boolean {
+    // A search can match a source by name, so show the sources it matched in.
+    if (search.trim()) return true
+    const chosen = expandedChoices[conn.connection_id]
+    if (chosen !== undefined) return chosen
+    // Collapsed by default, except where sources were lost: the notice names them.
+    return conn.access_state === "refused" || conn.access_state === "partial"
+  }
 
   function handleFilterChange(group: string, value: string | null) {
     setActiveFilters((prev) => ({ ...prev, [group]: value }))
@@ -399,167 +422,113 @@ export function ConnectionsPage() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-4">
-                {filteredConnections.map((conn) => {
-                  const isApiKey = conn.credential_type === "api_key"
-                  const isConfirming = confirmRemoveId === conn.connection_id
-                  const teamLabel = teamLabelFor(conn)
-                  const statusBadge = conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined
-                  const notice = accessNotice(conn, teamLabel)
-                  const oauthProvider = providerForConnection.get(conn.connection_id)
-                  const archived = conn.archived_chatbots ?? []
-
+              <div className="space-y-6">
+                {groupedConnections.map((group) => {
+                  const { Icon } = getProviderMeta(group.provider)
                   return (
-                    <Card
-                      key={conn.connection_id}
-                      data-testid={`connection-card-${conn.connection_id}`}
+                    <section
+                      key={group.provider}
+                      className="space-y-2"
+                      data-testid={`connection-group-${group.provider}`}
                     >
-                      <CardContent className="space-y-4 p-4">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-2">
-                              <p
-                                className="font-medium"
-                                data-testid={`connection-team-${conn.connection_id}`}
-                              >
-                                {teamLabel}
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <ProviderBadge provider={conn.provider} />
-                              <Badge variant="secondary">
-                                {isApiKey ? "API Key" : "OAuth"}
-                              </Badge>
-                              {statusBadge && (
-                                <Badge
-                                  variant="secondary"
-                                  className={WARNING_BADGE}
-                                  data-testid={`${statusBadge.testId}-${conn.connection_id}`}
-                                >
-                                  {statusBadge.label}
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
-                          {!isConfirming && (
-                            <div className="flex shrink-0 gap-2">
-                              {isApiKey && (
+                      <h3 className="flex items-center gap-2 text-sm font-medium">
+                        <span
+                          className={`flex h-6 w-6 items-center justify-center rounded ${PROVIDER_TINT[group.provider] ?? FALLBACK_TINT}`}
+                        >
+                          <Icon className="h-4 w-4" aria-hidden />
+                        </span>
+                        {productName(group.provider)}
+                        <span className="text-muted-foreground">{group.connections.length}</span>
+                      </h3>
+                      {group.connections.map((conn) => {
+                        const isApiKey = conn.credential_type === "api_key"
+                        const isConfirming = confirmRemoveId === conn.connection_id
+                        const teamLabel = teamLabelFor(conn)
+                        const oauthProvider = providerForConnection.get(conn.connection_id)
+                        const notice = accessNotice(conn, teamLabel)
+                        const expanded = isExpanded(conn)
+                        return (
+                          <ConnectionCard
+                            key={conn.connection_id}
+                            conn={conn}
+                            teamLabel={teamLabel}
+                            statusBadge={conn.status ? CONNECTION_STATUS_BADGE[conn.status] : undefined}
+                            notice={notice}
+                            expanded={expanded}
+                            onToggle={() => setExpanded(conn.connection_id, !expanded)}
+                            reconnect={
+                              notice?.offerReconnect && oauthProvider ? (
                                 <Button
-                                  variant="ghost"
+                                  variant="outline"
                                   size="sm"
-                                  onClick={() =>
-                                    setDialogState({ mode: "edit", editing: conn })
-                                  }
-                                  data-testid={`edit-connection-${conn.connection_id}`}
+                                  asChild
+                                  data-testid={`connection-reconnect-${conn.connection_id}`}
                                 >
-                                  Edit
+                                  <a href={connectUrlFor(oauthProvider)}>Reconnect</a>
                                 </Button>
-                              )}
-                              {/* Removing one OAuth connection disconnects that team
-                                  only, leaving the user's other teams signed in. */}
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="text-destructive hover:text-destructive"
-                                onClick={() => setConfirmRemoveId(conn.connection_id)}
-                                data-testid={`remove-connection-${conn.connection_id}`}
-                              >
-                                Remove
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-
-                        {notice && (
-                          <div
-                            className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
-                            data-testid={`connection-access-${conn.connection_id}`}
-                            data-access-state={conn.access_state}
-                          >
-                            <p className="font-medium">{notice.title}</p>
-                            <p>{notice.body}</p>
-                            {notice.offerReconnect && oauthProvider && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                asChild
-                                data-testid={`connection-reconnect-${conn.connection_id}`}
-                              >
-                                <a href={connectUrlFor(oauthProvider)}>Reconnect</a>
-                              </Button>
-                            )}
-                          </div>
-                        )}
-
-                        {isConfirming && (
-                          <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                            <p className="text-sm font-medium">
-                              Remove{" "}
-                              <span className="font-semibold">{teamLabel}</span>? Its
-                              chatbots will be hidden and its saved credentials removed. You can reconnect later.
-                            </p>
-                            <div className="flex shrink-0 gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setConfirmRemoveId(null)}
-                                data-testid={`cancel-remove-${conn.connection_id}`}
-                              >
-                                Cancel
-                              </Button>
-                              <Button
-                                variant="destructive"
-                                size="sm"
-                                onClick={() => confirmRemove(conn)}
-                                disabled={removing === conn.connection_id}
-                                data-testid={`confirm-remove-${conn.connection_id}`}
-                              >
-                                {removing === conn.connection_id
-                                  ? "Removing..."
-                                  : "Confirm Remove"}
-                              </Button>
-                            </div>
-                          </div>
-                        )}
-
-                        <ul className="space-y-1 border-t pt-3">
-                          {conn.chatbots.map((cb) => (
-                            <li
-                              key={cb.membership_id}
-                              className="flex items-center justify-between gap-4 text-sm"
-                            >
-                              <span className="font-medium">
-                                {cb.tenant_name || cb.tenant_id}
-                              </span>
-                              <span className="text-muted-foreground">
-                                {cb.tenant_id}
-                              </span>
-                            </li>
-                          ))}
-                          {archived.map((cb) => (
-                            <li
-                              key={cb.membership_id}
-                              className="flex items-center justify-between gap-4 text-sm text-muted-foreground"
-                              data-testid={`connection-chatbot-no-access-${cb.membership_id}`}
-                            >
-                              <span className="flex items-center gap-2">
-                                <span className="font-medium">{cb.tenant_name || cb.tenant_id}</span>
-                                {cb.archived_reason === "unlisted" ? (
-                                  <Badge variant="outline" title={`${productName(conn.provider)} no longer lists it`}>
-                                    No longer listed
-                                  </Badge>
-                                ) : (
-                                  <Badge variant="secondary" className={WARNING_BADGE}>
-                                    No access
-                                  </Badge>
-                                )}
-                              </span>
-                              <span>{cb.tenant_id}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </CardContent>
-                    </Card>
+                              ) : null
+                            }
+                            actions={
+                              isConfirming ? null : (
+                                <>
+                                  {isApiKey && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setDialogState({ mode: "edit", editing: conn })}
+                                      data-testid={`edit-connection-${conn.connection_id}`}
+                                    >
+                                      Edit
+                                    </Button>
+                                  )}
+                                  {/* Removing one OAuth connection disconnects that team
+                                      only, leaving the user's other teams signed in. */}
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-destructive hover:text-destructive"
+                                    onClick={() => setConfirmRemoveId(conn.connection_id)}
+                                    data-testid={`remove-connection-${conn.connection_id}`}
+                                  >
+                                    Remove
+                                  </Button>
+                                </>
+                              )
+                            }
+                            confirmation={
+                              isConfirming ? (
+                                <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                                  <p className="text-sm font-medium">
+                                    Remove <span className="font-semibold">{teamLabel}</span>? Its
+                                    chatbots will be hidden and its saved credentials removed. You can
+                                    reconnect later.
+                                  </p>
+                                  <div className="flex shrink-0 gap-2">
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => setConfirmRemoveId(null)}
+                                      data-testid={`cancel-remove-${conn.connection_id}`}
+                                    >
+                                      Cancel
+                                    </Button>
+                                    <Button
+                                      variant="destructive"
+                                      size="sm"
+                                      onClick={() => confirmRemove(conn)}
+                                      disabled={removing === conn.connection_id}
+                                      data-testid={`confirm-remove-${conn.connection_id}`}
+                                    >
+                                      {removing === conn.connection_id ? "Removing..." : "Confirm Remove"}
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : null
+                            }
+                          />
+                        )
+                      })}
+                    </section>
                   )
                 })}
               </div>

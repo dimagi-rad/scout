@@ -411,4 +411,81 @@ describe("ConnectionsPage", () => {
       expect(screen.queryByTestId("connection-chatbot-no-access-m-1")).toBeNull()
     })
   })
+
+  describe("connections list layout", () => {
+    beforeEach(() => localStorage.clear())
+
+    const bot = (id: string) => ({
+      membership_id: `m-${id}`,
+      tenant_id: id,
+      tenant_name: `Bot ${id}`,
+      team_slug: "",
+      team_name: "",
+    })
+    const conn = (id: string, provider: string, scope_label: string, chatbots: unknown[]) => ({
+      connection_id: id,
+      provider,
+      credential_type: "oauth",
+      scope_key: scope_label,
+      scope_label,
+      status: "connected",
+      access_state: "ok",
+      chatbots,
+      archived_chatbots: [],
+    })
+
+    function renderList() {
+      vi.mocked(api.get).mockImplementation((path) =>
+        Promise.resolve(
+          path === "/api/auth/providers/"
+            ? { providers: [] }
+            : [
+                conn("o2", "ocs", "Zeta team", [bot("z1")]),
+                conn("o1", "ocs", "alpha team", [bot("a1"), bot("a2")]),
+                conn("cc", "commcare_connect", "Connect", [bot("opp")]),
+              ],
+        ),
+      )
+      return render(<ConnectionsPage />)
+    }
+
+    it("groups connections by provider in a fixed order, by name inside each", async () => {
+      renderList()
+      await screen.findByTestId("connection-card-o1")
+      const groups = screen.getAllByTestId(/^connection-group-/).map((g) => g.dataset.testid)
+      expect(groups).toEqual(["connection-group-commcare_connect", "connection-group-ocs"])
+      const ocsCards = screen
+        .getByTestId("connection-group-ocs")
+        .querySelectorAll("[data-testid^='connection-card-']")
+      expect([...ocsCards].map((c) => c.getAttribute("data-testid"))).toEqual([
+        "connection-card-o1",
+        "connection-card-o2",
+      ])
+      expect(screen.getByTestId("connection-source-count-o1")).toHaveTextContent("2 bots")
+      expect(screen.getByTestId("connection-source-count-cc")).toHaveTextContent("1 opportunity")
+    })
+
+    it("labels the provider filter chips by product name", async () => {
+      renderList()
+      expect(await screen.findByTestId("filter-provider-ocs")).toHaveTextContent("Open Chat Studio")
+      expect(screen.getByTestId("filter-provider-commcare_connect")).toHaveTextContent(
+        "CommCare Connect",
+      )
+    })
+
+    it("starts collapsed and remembers a card the viewer opened", async () => {
+      const { unmount } = renderList()
+      const toggle = await screen.findByTestId("connection-toggle-o1")
+      expect(toggle).toHaveAttribute("aria-expanded", "false")
+      expect(screen.queryByTestId("connection-sources-o1")).toBeNull()
+
+      fireEvent.click(toggle)
+      expect(screen.getByTestId("connection-sources-o1")).toHaveTextContent("Bot a1")
+      unmount()
+
+      renderList()
+      expect(await screen.findByTestId("connection-sources-o1")).toBeTruthy()
+      expect(screen.queryByTestId("connection-sources-o2")).toBeNull()
+    })
+  })
 })
