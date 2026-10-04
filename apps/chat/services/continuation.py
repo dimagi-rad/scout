@@ -2,8 +2,7 @@
 
 The registered queue tasks in ``apps.workspaces.tasks`` are thin wrappers around
 these. Nothing here may import that module (it imports this one), so the two
-tasks this re-queues are reached by their registered names, pinned by
-``tests/test_chat_continuation_task_names.py``.
+tasks this re-queues are reached through ``apps.workspaces.task_dispatch``.
 """
 
 import asyncio
@@ -43,12 +42,17 @@ from apps.workspaces.services.load_outcome import (
     build_failure_summary_for_job,
 )
 from apps.workspaces.services.query_state import semantic_layer_state
-from config.procrastinate import app
+from apps.workspaces.task_dispatch import (
+    FLUSH_PENDING_REQUESTS,
+    RESUME_THREAD_AFTER_MATERIALIZATION,
+    adefer_flush_pending_requests,
+    adefer_resume_thread,
+)
 
 logger = logging.getLogger(__name__)
 
-RESUME_TASK_NAME = "apps.workspaces.tasks.resume_thread_after_materialization"
-FLUSH_TASK_NAME = "apps.workspaces.tasks.flush_pending_requests"
+RESUME_TASK_NAME = RESUME_THREAD_AFTER_MATERIALIZATION
+FLUSH_TASK_NAME = FLUSH_PENDING_REQUESTS
 
 # User-facing failure copy. The frontend renders these straight from the
 # checkpointer (apps/chat/thread_views.py:_load_thread_messages → AIMessage).
@@ -175,11 +179,12 @@ async def _defer_resume_while_thread_busy(tj: ThreadJob, busy_attempt: int) -> d
     # The running job holds no queueing lock once doing, so the re-queue can take
     # it; AlreadyEnqueued means another resume of this job already re-queued.
     try:
-        await app.configure_task(
-            RESUME_TASK_NAME,
-            schedule_in={"seconds": delay},
+        await adefer_resume_thread(
+            thread_job_id=str(tj.id),
+            busy_attempt=busy_attempt + 1,
             queueing_lock=_resume_lock(str(tj.id)),
-        ).defer_async(thread_job_id=str(tj.id), busy_attempt=busy_attempt + 1)
+            schedule_in={"seconds": delay},
+        )
     except AlreadyEnqueued:
         return {"status": "thread_busy_already_queued"}
     logger.info(
@@ -821,11 +826,11 @@ async def defer_pending_flush(workspace_id, delay: int = PENDING_FLUSH_DELAY_SEC
     if not workspace_id:
         return
     try:
-        await app.configure_task(
-            FLUSH_TASK_NAME,
+        await adefer_flush_pending_requests(
+            workspace_id=str(workspace_id),
             queueing_lock=f"pending-flush:{workspace_id}",
             schedule_in={"seconds": delay},
-        ).defer_async(workspace_id=str(workspace_id))
+        )
     except AlreadyEnqueued:
         pass
     except Exception:

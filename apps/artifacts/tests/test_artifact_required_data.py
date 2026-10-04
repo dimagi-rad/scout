@@ -210,7 +210,7 @@ async def test_required_excluded_source_repairs_b_but_not_healthy_a(
             workspace=setup.workspace, name="source_b__visits"
         ).aupdate(is_visible=True)
     defer = AsyncMock(return_value=SimpleNamespace(id=902))
-    with patch("apps.artifacts.views.recover_workspace_data.defer_async", new=defer):
+    with patch("apps.artifacts.views.adefer_recover_workspace_data", new=defer):
         healthy = await setup.client.get(recovery_url(setup.a))
         healthy_post = await setup.client.post(recovery_url(setup.a), data={})
         broken = await setup.client.get(recovery_url(setup.b))
@@ -300,7 +300,7 @@ async def test_model_drift_does_not_authorize_provider_reload(required_setup, ch
         await SemanticDataset.objects.filter(id=dataset.id).aupdate(
             metadata={**dataset.metadata, "curated_fields": ["is_visible"]}
         )
-    with patch("apps.artifacts.views.recover_workspace_data.defer_async", new=AsyncMock()) as defer:
+    with patch("apps.artifacts.views.adefer_recover_workspace_data", new=AsyncMock()) as defer:
         response = await setup.client.post(recovery_url(setup.b), data={})
     assert response.status_code == 409
     assert response.json()["data_recovery"]["status"] == "model_drift"
@@ -561,7 +561,7 @@ async def test_recovery_worker_reports_lost_tenant_access_after_wait(required_se
 async def test_concurrent_recovery_posts_keep_one_durable_request(required_setup):
     setup = required_setup
     with patch(
-        "apps.artifacts.views.recover_workspace_data.defer_async",
+        "apps.artifacts.views.adefer_recover_workspace_data",
         new=AsyncMock(return_value=SimpleNamespace(id=909)),
     ) as defer:
         responses = await asyncio.gather(
@@ -652,7 +652,7 @@ async def test_readable_failure_is_disclosed_until_later_verified_repair(
         assert (await setup.client.get(query_url(setup.a))).status_code == 200
         query.assert_awaited_once()
     with patch(
-        "apps.artifacts.views.recover_workspace_data.defer_async",
+        "apps.artifacts.views.adefer_recover_workspace_data",
         new=AsyncMock(return_value=SimpleNamespace(id=904)),
     ):
         queued = await setup.client.post(recovery_url(setup.a), data={})

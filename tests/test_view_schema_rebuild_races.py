@@ -147,8 +147,8 @@ def test_a_source_added_during_the_build_stays_named_missing(two_live_sources, u
     def add_mid_build(cursor, schema_name, build_token):
         write_marker(cursor, schema_name, build_token)
         with (
-            patch("apps.workspaces.services.workspace_service.rebuild_workspace_view_schema"),
-            patch("apps.workspaces.services.workspace_service.materialize_workspace"),
+            patch("apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"),
+            patch("apps.workspaces.services.workspace_service.defer_materialize_workspace"),
         ):
             add_workspace_tenant(workspace, added, actor_id=user.id)
 
@@ -181,9 +181,11 @@ def test_an_add_still_committing_when_the_first_build_publishes_is_named_missing
     def add():
         try:
             with (
-                patch("apps.workspaces.services.workspace_service.rebuild_workspace_view_schema"),
                 patch(
-                    "apps.workspaces.services.workspace_service.materialize_workspace.defer",
+                    "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
+                ),
+                patch(
+                    "apps.workspaces.services.workspace_service.defer_materialize_workspace",
                     side_effect=hold_add_open,
                 ),
             ):

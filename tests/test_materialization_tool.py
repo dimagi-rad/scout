@@ -28,7 +28,9 @@ async def test_headless_materialization_tool_blocks_and_reports_completion(
             "view_schema": None,
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     tool = create_materialization_tool(workspace, user, job_id=99)
     assert tool.name == "run_materialization"
@@ -51,7 +53,9 @@ async def test_headless_materialization_tool_reports_failure(workspace, user, mo
             "view_schema": None,
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     tool = create_materialization_tool(workspace, user)
     result = await tool.ainvoke({})
@@ -80,7 +84,9 @@ async def test_headless_materialization_tool_preserves_post_wait_authorization_d
         called = True
         return denied
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _denied_after_wait)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _denied_after_wait
+    )
 
     result = await create_materialization_tool(workspace, user).ainvoke({})
 
@@ -112,7 +118,9 @@ async def test_headless_tool_renders_lost_tenant_denial_with_its_guidance(
             "guidance": credential_guidance(_summary_failures(failures)),
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _denied_after_wait)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _denied_after_wait
+    )
 
     result = await create_materialization_tool(workspace, user).ainvoke({})
 
@@ -153,7 +161,9 @@ async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, us
             ),
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     tool = create_materialization_tool(workspace, user)
     result = await tool.ainvoke({})
@@ -185,7 +195,9 @@ async def test_headless_tool_reports_an_unqueryable_workspace(workspace, user, m
             "guidance": [],
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     tool = create_materialization_tool(workspace, user)
     result = await tool.ainvoke({})
@@ -222,7 +234,9 @@ async def test_headless_tool_does_not_claim_data_loaded_when_nothing_loaded(
             "guidance": ["t1, t2: expired or revoked sign-in — reconnect the affected account"],
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     tool = create_materialization_tool(workspace, user)
     result = await tool.ainvoke({})
@@ -264,7 +278,9 @@ async def test_headless_tool_partial_load_with_failed_view_stays_partial(
             "guidance": [],
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     tool = create_materialization_tool(workspace, user)
     result = await tool.ainvoke({})
@@ -306,7 +322,7 @@ async def test_headless_materialization_discloses_confirmed_exclusions(
             "view_schema": {"ok": True, "tenant_coverage": coverage},
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    monkeypatch.setattr("apps.agents.tools.materialization_tool.materialize_workspace_inline", core)
     result = await create_materialization_tool(workspace, user).ainvoke({})
     assert result["status"] == "partial"
     assert result["tenant_coverage"] == coverage
@@ -329,7 +345,7 @@ async def test_headless_materialization_reports_deferred_promotion(workspace, us
             },
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    monkeypatch.setattr("apps.agents.tools.materialization_tool.materialize_workspace_inline", core)
     result = await create_materialization_tool(workspace, user).ainvoke({})
     assert result["status"] == "partial"
     assert "deferred" in result["message"]
@@ -348,7 +364,7 @@ async def test_deferred_promotion_keeps_actual_load_outcome(workspace, user, mon
             "cube_schema": {"ok": False, "status": "deferred"},
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    monkeypatch.setattr("apps.agents.tools.materialization_tool.materialize_workspace_inline", core)
     result = await create_materialization_tool(workspace, user).ainvoke({})
     assert result["status"] == ("partial" if loaded else "failed")
     assert "source-1" in result["message"]
@@ -382,7 +398,9 @@ async def test_a_run_denied_mid_way_is_explained_even_when_no_source_failed(
             "guidance": [],
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     result = await create_materialization_tool(workspace, user).ainvoke({})
 
@@ -410,7 +428,9 @@ async def test_a_mid_run_denial_with_a_failed_view_build_still_forbids_querying(
             "guidance": [],
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", _fake_core
+    )
 
     result = await create_materialization_tool(workspace, user).ainvoke({})
 

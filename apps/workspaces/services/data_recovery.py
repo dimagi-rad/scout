@@ -23,6 +23,11 @@ from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE
 from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.query_state import workspace_query_surface
 
+# Set on a recovery's result when the database refused it at its connection limit:
+# the attempt never ran, so it must not count as the member's one retry.
+CAPACITY_REFUSED_KEY = "capacity_refused"
+CHAT_RECOVERY_SOURCE = "chat"
+
 ROLE_DENIED_MESSAGE = (
     "The requesting user no longer has a read-write or manage workspace role. "
     "Ask a workspace member with write access to retry."

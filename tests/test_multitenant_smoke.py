@@ -48,9 +48,9 @@ def test_adding_a_tenant_that_already_serves_data_only_rebuilds_views(api_client
 
     with (
         patch(
-            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+            "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
         ) as mock_defer,
-        patch("apps.workspaces.services.workspace_service.materialize_workspace.defer") as load,
+        patch("apps.workspaces.services.workspace_service.defer_materialize_workspace") as load,
     ):
         api_client.force_login(user)
         resp = api_client.post(
@@ -78,9 +78,9 @@ def test_adding_an_unloaded_tenant_loads_it_before_publishing(api_client, setup)
 
     with (
         patch(
-            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+            "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
         ) as rebuild,
-        patch("apps.workspaces.services.workspace_service.materialize_workspace.defer") as load,
+        patch("apps.workspaces.services.workspace_service.defer_materialize_workspace") as load,
     ):
         api_client.force_login(user)
         resp = api_client.post(

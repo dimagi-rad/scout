@@ -18,9 +18,12 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceRole,
 )
-from apps.workspaces.services.refresh_requests import find_legacy_refresh_jobs
+from apps.workspaces.services.refresh_requests import (
+    find_legacy_refresh_jobs,
+    settle_finished_refresh_candidates,
+)
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.tasks import refresh_tenant_schema, settle_finished_refresh_candidates
+from apps.workspaces.task_dispatch import defer_refresh_tenant_schema
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -205,7 +208,7 @@ class RefreshSchemaView(APIView):
                 "in_progress", "A refresh is already in progress.", status.HTTP_409_CONFLICT
             )
         new_schema = SchemaManager().create_refresh_schema(tenant)
-        job = refresh_tenant_schema.defer(
+        job = defer_refresh_tenant_schema(
             schema_id=str(new_schema.id),
             membership_id=str(tenant_membership.id),
             actor_user_id=str(request.user.id),

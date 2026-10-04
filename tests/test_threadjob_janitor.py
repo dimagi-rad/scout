@@ -12,7 +12,6 @@ from apps.chat.models import Thread, ThreadJob
 from apps.workspaces.models import Workspace
 from apps.workspaces.services.reconciliation import (
     RESUME_STUCK_RUNNING_MESSAGE,
-    RESUME_TASK_NAME,
     STALE_JOB_THRESHOLD,
     _procrastinate_job_status,
     reconcile_stale_thread_job,
@@ -84,15 +83,15 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
     # The janitor defers the resume task — state is NOT flipped by the janitor.
     # The resume task is responsible for that transition.
-    configure_resume.assert_called_once_with(RESUME_TASK_NAME)
-    configure_resume.return_value.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+    defer_resume.assert_awaited_once_with(thread_job_id=str(tj.id))
     assert result == {"flipped": 1}
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.PENDING
@@ -120,11 +119,11 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(
-            side_effect=RuntimeError("queue unavailable")
-        )
+        defer_resume.side_effect = RuntimeError("queue unavailable")
         result = await expire_stale_thread_jobs()
 
     # flipped count is 0 because defer failed (fallback path doesn't increment)
@@ -161,14 +160,15 @@ async def test_janitor_skips_threadjob_when_procrastinate_status_unknown():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value=None),  # status unknown
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
     # No resume deferred and no state change — the row is left for the next
     # tick to retry.
-    configure_resume.return_value.defer_async.assert_not_called()
+    defer_resume.assert_not_called()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.PENDING
     assert result == {"flipped": 0}
@@ -199,16 +199,17 @@ async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
         patch(
             "apps.workspaces.services.reconciliation.persist_synthetic_failure_message",
             new=AsyncMock(return_value=None),
         ),
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
-    configure_resume.return_value.defer_async.assert_not_called()
+    defer_resume.assert_not_called()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert tj.completed_at is not None
@@ -248,13 +249,14 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ),
         patch(
             "apps.chat.services.agent_execution.build_agent_for_resume",
             new=AsyncMock(return_value=mock_agent),
         ),
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
     assert result["flipped"] == 1
@@ -393,11 +395,11 @@ async def test_janitor_fallback_failed_writes_error_summary():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(
-            side_effect=RuntimeError("queue down")
-        )
+        defer_resume.side_effect = RuntimeError("queue down")
         await expire_stale_thread_jobs()
 
     await tj.arefresh_from_db()
@@ -433,16 +435,17 @@ async def test_janitor_flips_pending_failed_job_directly_without_resume():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="failed"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
         patch(
             "apps.workspaces.services.reconciliation.persist_synthetic_failure_message",
             new=AsyncMock(return_value=None),
         ) as persist,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
-    configure_resume.return_value.defer_async.assert_not_called()
+    defer_resume.assert_not_called()
     persist.assert_awaited_once()
     assert result["flipped"] == 1
     await tj.arefresh_from_db()
@@ -498,17 +501,18 @@ async def test_janitor_reconciles_stale_job_against_real_failed_procrastinate_ro
     )
 
     with (
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
         patch(
             "apps.workspaces.services.reconciliation.persist_synthetic_failure_message",
             new=AsyncMock(return_value=None),
         ),
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
     # Failed procrastinate job -> ThreadJob flipped straight to FAILED, no resume.
-    configure_resume.return_value.defer_async.assert_not_called()
+    defer_resume.assert_not_called()
     assert result["flipped"] == 1
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED

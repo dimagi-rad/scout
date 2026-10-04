@@ -22,13 +22,18 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.status import workspace_schema_status
+from apps.workspaces.task_dispatch import (
+    MATERIALIZE_WORKSPACE,
+    REBUILD_WORKSPACE_SEMANTIC_MODEL,
+    REBUILD_WORKSPACE_VIEW_SCHEMA,
+)
 
-MATERIALIZE_TASK_NAME = "apps.workspaces.tasks.materialize_workspace"
-REBUILD_VIEW_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_view_schema"
+MATERIALIZE_TASK_NAME = MATERIALIZE_WORKSPACE
+REBUILD_VIEW_TASK_NAME = REBUILD_WORKSPACE_VIEW_SCHEMA
 # A view rebuild queued on its own (a source added to a serving workspace) is a
 # build in flight too, so the status counts it; the chat auto-load does not wait on it.
 _STATUS_TASK_NAMES = (MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME)
-REBUILD_SEMANTIC_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_semantic_model"
+REBUILD_SEMANTIC_TASK_NAME = REBUILD_WORKSPACE_SEMANTIC_MODEL
 # Everything that must finish before a held request can be answered from the data.
 _BUILD_TASK_NAMES = (*_STATUS_TASK_NAMES, REBUILD_SEMANTIC_TASK_NAME)
 _QUEUED_OR_RUNNING = ("todo", "doing", "aborting")

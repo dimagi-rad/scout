@@ -184,13 +184,14 @@ async def test_reconcile_thread_job_skips_unknown_status():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="some_future_status"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         action = await reconcile_stale_thread_job(tj)
 
     assert action is None
-    configure_resume.return_value.defer_async.assert_not_called()
+    defer_resume.assert_not_called()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.PENDING
 
@@ -207,13 +208,14 @@ async def test_reconcile_thread_job_skips_aborting_status():
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="aborting"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         action = await reconcile_stale_thread_job(tj)
 
     assert action is None
-    configure_resume.return_value.defer_async.assert_not_called()
+    defer_resume.assert_not_called()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.PENDING
 
@@ -234,13 +236,14 @@ async def test_reconcile_thread_job_fails_on_cancelled_status():
             "apps.workspaces.services.reconciliation.persist_synthetic_failure_message",
             new=AsyncMock(return_value=None),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         action = await reconcile_stale_thread_job(tj)
 
     assert action == "failed"
-    configure_resume.return_value.defer_async.assert_not_called()
+    defer_resume.assert_not_called()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
 

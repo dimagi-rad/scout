@@ -16,7 +16,7 @@ from apps.workspaces.services.load_generations import (
     acapture_workspace_load_intent,
 )
 from apps.workspaces.services.thread_job_dispatch import adispatch_thread_materialization
-from apps.workspaces.tasks import materialize_workspace
+from apps.workspaces.task_dispatch import adefer_materialize_workspace
 from apps.workspaces.workspace_resolver import aresolve_workspace
 from config.procrastinate import app
 
@@ -217,7 +217,7 @@ async def materialization_retry_view(request, workspace_id):
         return JsonResponse({"status": "started", "thread_job_id": str(tj.id)})
 
     try:
-        job = await materialize_workspace.defer_async(
+        job = await adefer_materialize_workspace(
             workspace_id=str(workspace.id),
             user_id=str(user.id),
             load_intent=load_intent,
