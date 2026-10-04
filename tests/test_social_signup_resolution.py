@@ -5,30 +5,23 @@ allauth auto-signup fires neither ``social_account_added`` (connect only) nor a
 """
 
 import pytest
+from allauth.account.models import EmailAddress
 from allauth.core.context import request_context
 from allauth.socialaccount.helpers import complete_social_login
-from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
+from allauth.socialaccount.models import SocialAccount, SocialToken
 from asgiref.sync import sync_to_async
+from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.messages.middleware import MessageMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
-from django.contrib.sites.models import Site
 
 from apps.users.providers.ocs.provider import OCSProvider
 from apps.workspaces.models import WorkspaceInvite, WorkspaceInviteStatus, WorkspaceRole
 from tests.tenant_access import grant_tenant_access
 
+User = get_user_model()
+
 INVITEE_EMAIL = "invitee@dimagi.com"
-
-
-@pytest.fixture
-def ocs_app(db):
-    site, _ = Site.objects.get_or_create(
-        id=1, defaults={"domain": "testserver", "name": "Test Server"}
-    )
-    app = SocialApp.objects.create(provider=OCSProvider.id, name="OCS", client_id="x", secret="x")
-    app.sites.add(site)
-    return app
 
 
 @pytest.fixture
@@ -52,7 +45,7 @@ def _sign_in(rf, ocs_app, sub="ocs-new"):
 
 @pytest.fixture
 def resolver(mocker, tenant):
-    """Stands in for OCS discovery: the sign-in grants access to the invited tenant."""
+    """Stands in for discovery: the sign-in grants access to the invited (CommCare) tenant."""
 
     async def resolve(user, token, **kwargs):
         await sync_to_async(grant_tenant_access)(user, tenant)
@@ -103,3 +96,19 @@ def test_returning_sign_in_resolves_once(rf, ocs_app, invite, resolver, mocker):
     _sign_in(rf, ocs_app)
 
     resolver.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_sign_in_linking_an_existing_user_by_email_resolves_once(
+    rf, ocs_app, invite, resolver, mocker
+):
+    mocker.patch("apps.users.signals.notify_invite_accepted")
+    existing = User.objects.create(email=INVITEE_EMAIL, username="invitee")
+    EmailAddress.objects.create(user=existing, email=INVITEE_EMAIL, verified=True, primary=True)
+
+    _sign_in(rf, ocs_app)
+
+    assert SocialAccount.objects.get(provider="ocs").user_id == existing.pk
+    resolver.assert_called_once()
+    invite.refresh_from_db()
+    assert invite.status == WorkspaceInviteStatus.ACCEPTED

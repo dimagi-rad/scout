@@ -123,9 +123,9 @@ def resolve_existing_tenants_on_social_login(request, sociallogin, **kwargs):
         resolve_tenant_on_social_login(request, sociallogin)
 
 
-def resolve_tenants_on_social_signup(request, user, sociallogin=None, **kwargs):
-    # Auto-signup sends neither social_account_added (connect only) nor an existing
-    # pre_social_login, so a first sign-in would otherwise resolve nothing until the next.
+def resolve_tenant_on_social_signup(request, user, sociallogin=None, **kwargs):
+    # A new user's signup sends neither social_account_added (connect only) nor an
+    # existing-account pre_social_login, so without this it resolves nothing until the next login.
     if sociallogin is not None:
         resolve_tenant_on_social_login(request, sociallogin)
 

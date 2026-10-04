@@ -23,10 +23,10 @@ class UsersConfig(AppConfig):
             reconcile_existing_user_on_login,
             resolve_existing_tenants_on_social_login,
             resolve_tenant_on_social_login,
-            resolve_tenants_on_social_signup,
+            resolve_tenant_on_social_signup,
         )
 
         social_account_added.connect(resolve_tenant_on_social_login)
-        user_signed_up.connect(resolve_tenants_on_social_signup)
+        user_signed_up.connect(resolve_tenant_on_social_signup)
         pre_social_login.connect(reconcile_existing_user_on_login)
         pre_social_login.connect(resolve_existing_tenants_on_social_login)
