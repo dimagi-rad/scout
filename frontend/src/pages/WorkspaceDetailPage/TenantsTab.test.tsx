@@ -5,7 +5,7 @@ import { beforeEach, expect, it, vi } from "vitest"
 import { ApiError } from "@/api/client"
 import { workspaceApi } from "@/api/workspaces"
 import { getUserTenantsCached } from "@/api/userTenantsCache"
-import { TenantsTab } from "./WorkspaceDetailPage"
+import { TenantsTab } from "./TenantsTab"
 
 vi.mock("@/api/workspaces", () => ({
   workspaceApi: { getTenants: vi.fn(), removeTenant: vi.fn() },

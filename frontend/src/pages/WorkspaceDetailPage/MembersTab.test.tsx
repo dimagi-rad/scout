@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from "vitest"
 
 import { ApiError } from "@/api/client"
 import { workspaceApi, type WorkspaceMember } from "@/api/workspaces"
-import { MembersTab } from "./WorkspaceDetailPage"
+import { MembersTab } from "./MembersTab"
 
 vi.mock("@/api/workspaces", () => ({
   workspaceApi: { getMembers: vi.fn(), revokeInvite: vi.fn(), addMember: vi.fn() },
