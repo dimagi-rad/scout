@@ -39,7 +39,10 @@ from apps.users.services.access_verification_types import (
     CredentialRequestSnapshot,
     VerificationOutcome,
 )
-from apps.users.services.api_key_providers.base import CredentialVerificationError
+from apps.users.services.api_key_providers.base import (
+    CredentialVerificationError,
+    TenantDescriptor,
+)
 from apps.users.services.api_key_providers.commcare import CommCareStrategy
 from apps.users.services.api_key_providers.ocs import OCSStrategy
 from apps.users.services.tenant_resolution import (
@@ -64,6 +67,7 @@ UNAVAILABLE = VerificationOutcome.UNAVAILABLE
 # Where each path reads its wall clock; verification takes an injected clock instead.
 _RESOLUTION_CLOCK = "apps.users.services.tenant_resolution"
 _COMMCARE_KEY_CLOCK = "apps.users.services.api_key_providers.commcare"
+_OCS_KEY_CLOCK = "apps.users.services.api_key_providers.ocs"
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,8 @@ class EntryPath:
     server: str = ""
     credential_type: str = TenantConnection.OAUTH
     clock_module: str | None = None
+    # An API-key path that re-checks a known tenant on key rotation.
+    rotation: bool = False
 
     def __str__(self) -> str:
         return self.id
@@ -103,6 +109,14 @@ COMMCARE_PATHS = [
         credential_type=TenantConnection.API_KEY,
         clock_module=_COMMCARE_KEY_CLOCK,
     ),
+    EntryPath(
+        "commcare-api-key-rotation",
+        "commcare",
+        "api_key",
+        credential_type=TenantConnection.API_KEY,
+        clock_module=_COMMCARE_KEY_CLOCK,
+        rotation=True,
+    ),
     EntryPath("commcare-oauth-verification", "commcare", "verification"),
     EntryPath("commcare-eu-oauth-verification", "commcare", "verification", server="eu"),
     EntryPath(
@@ -114,7 +128,21 @@ COMMCARE_PATHS = [
 ]
 OCS_PATHS = [
     EntryPath("ocs-oauth-discovery", "ocs", "discovery", clock_module=_RESOLUTION_CLOCK),
-    EntryPath("ocs-api-key", "ocs", "api_key", credential_type=TenantConnection.API_KEY),
+    EntryPath(
+        "ocs-api-key",
+        "ocs",
+        "api_key",
+        credential_type=TenantConnection.API_KEY,
+        clock_module=_OCS_KEY_CLOCK,
+    ),
+    EntryPath(
+        "ocs-api-key-rotation",
+        "ocs",
+        "api_key",
+        credential_type=TenantConnection.API_KEY,
+        clock_module=_OCS_KEY_CLOCK,
+        rotation=True,
+    ),
     EntryPath("ocs-oauth-verification", "ocs", "verification"),
     EntryPath(
         "ocs-api-key-verification",
@@ -135,6 +163,13 @@ _OCS_KEY_PARTIAL = "OCS API-key listing reads a page without results as an empty
 _OCS_KEY_TRANSPORT = "OCS API-key listing lets a transport error escape as a non-form error"
 _CONNECT_DISCOVERY_PAGES = "Connect discovery would read only page 1 of a paginated envelope"
 KNOWN_GAPS = {
+    ("ocs-api-key-rotation", "deadline"): _OCS_KEY_UNBOUNDED,
+    ("ocs-api-key-rotation", "list-not-an-array"): _OCS_KEY_RAW_ERRORS,
+    ("ocs-api-key-rotation", "not-an-object"): _OCS_KEY_RAW_ERRORS,
+    ("ocs-api-key-rotation", "not-json"): _OCS_KEY_RAW_ERRORS,
+    ("ocs-api-key-rotation", "missing-list-on-page-2"): _OCS_KEY_PARTIAL,
+    ("ocs-api-key-rotation", "transport-page-1"): _OCS_KEY_TRANSPORT,
+    ("ocs-api-key-rotation", "transport-page-2"): _OCS_KEY_TRANSPORT,
     ("ocs-api-key", "deadline"): _OCS_KEY_UNBOUNDED,
     ("ocs-api-key", "list-not-an-array"): _OCS_KEY_RAW_ERRORS,
     ("ocs-api-key", "not-an-object"): _OCS_KEY_RAW_ERRORS,
@@ -246,6 +281,7 @@ class Upstream:
     routes: dict[str, Callable] = field(default_factory=dict)
     fallback: Callable | None = None
     requests: list[str] = field(default_factory=list)
+    headers: list[httpx.Headers] = field(default_factory=list)
     now: float = 1_000.0
     seconds_per_request: float = 0.0
 
@@ -257,6 +293,7 @@ class Upstream:
             return httpx.Response(200, json={"results": []})
         url = str(request.url)
         self.requests.append(url)
+        self.headers.append(request.headers)
         self.now += self.seconds_per_request
         answer = self.routes.get(url) or self.fallback
         if answer is None:
@@ -355,22 +392,33 @@ async def _discover(path: EntryPath) -> Outcome:
     return outcome
 
 
-async def _onboard(path: EntryPath) -> Outcome:
+def probe_id(path: EntryPath, probe: str) -> str:
+    """``first``: a tenant on saved page 1; ``last``: one on page 2; else literal."""
+    if probe == "first":
+        return sorted(ids_of(path, first_page(path)))[0]
+    if probe == "last":
+        return sorted(ids_of(path, second_page(path)))[0]
+    return probe
+
+
+async def _onboard(path: EntryPath, probe: str) -> Outcome:
+    """A key strategy, asked about ``probe`` where it answers for one tenant.
+
+    Rejection cases probe a page-1 tenant, so a path that silently stopped early
+    would accept rather than fail for an unrelated reason; listing cases probe page 2.
+    """
     outcome = Outcome()
+    wanted = probe_id(path, probe)
+    strategy = CommCareStrategy if path.family == "commcare" else OCSStrategy
+    fields = {"api_key": API_KEY}
+    if path.family == "commcare":
+        fields |= {"server": path.server, "domain": wanted, "username": API_USERNAME}
     try:
-        if path.family == "commcare":
-            # The key strategy answers for one named domain; the last page's proves
-            # that the whole listing was read.
-            descriptors = await CommCareStrategy.verify_and_discover(
-                {
-                    "server": path.server,
-                    "domain": "late-page",
-                    "username": API_USERNAME,
-                    "api_key": API_KEY,
-                }
-            )
+        if path.rotation:
+            await strategy.verify_for_tenant(fields, wanted)
+            descriptors = [TenantDescriptor(wanted, wanted)]
         else:
-            descriptors = await OCSStrategy.verify_and_discover({"api_key": API_KEY})
+            descriptors = await strategy.verify_and_discover(fields)
     except Exception as error:
         outcome.error = error
     else:
@@ -408,24 +456,48 @@ async def _verify(path: EntryPath, upstream: Upstream, external_ids) -> Outcome:
     return Outcome(ids=result.external_ids, scope=result.scope, verdict=result.outcome)
 
 
-async def run(path: EntryPath, upstream: Upstream, *, external_ids=()) -> Outcome:
+def expected_credential(path: EntryPath) -> dict[str, str]:
+    if path.credential_type == TenantConnection.OAUTH:
+        return {"authorization": f"Bearer {TOKEN}"}
+    if path.family == "commcare":
+        return {"authorization": f"ApiKey {API_USERNAME}:{API_KEY}"}
+    return {"x-api-key": API_KEY}
+
+
+async def run(
+    path: EntryPath, upstream: Upstream, *, probe: str = "first", external_ids=()
+) -> Outcome:
     clock = (
-        patch(f"{path.clock_module}.time", SimpleNamespace(monotonic=upstream.monotonic))
+        # create=True: a path with no budget yet has no clock to patch.
+        patch(
+            f"{path.clock_module}.time",
+            SimpleNamespace(monotonic=upstream.monotonic),
+            create=True,
+        )
         if path.clock_module
         else nullcontext()
     )
     with clock:
         if path.kind == "discovery":
-            return await _discover(path)
-        if path.kind == "api_key":
-            return await _onboard(path)
-        return await _verify(path, upstream, external_ids)
+            outcome = await _discover(path)
+        elif path.kind == "api_key":
+            outcome = await _onboard(path, probe)
+        else:
+            outcome = await _verify(path, upstream, external_ids)
+    # Every page needs the credential in the provider's own scheme; a page sent
+    # without it would come back 401, which discovery reads as a revocation.
+    for headers in upstream.headers:
+        for name, value in expected_credential(path).items():
+            assert headers.get(name) == value, f"{path} sent the wrong credential"
+    return outcome
 
 
-def assert_listed(path: EntryPath, outcome: Outcome, expected: frozenset[str]) -> None:
+def assert_listed(
+    path: EntryPath, outcome: Outcome, expected: frozenset[str], probe: str = "last"
+) -> None:
     assert outcome.error is None, repr(outcome.error)
-    if path.kind == "api_key" and path.family == "commcare":
-        assert outcome.ids == {"late-page"}
+    if path.kind == "api_key" and (path.family == "commcare" or path.rotation):
+        assert outcome.ids == {probe_id(path, probe)}
     else:
         assert outcome.ids == expected
     if path.kind == "verification":
@@ -453,7 +525,7 @@ def next_reference(path: EntryPath, form: str) -> str:
         "relative-path": f"{target.path}?{target.query}",
         "query-only": f"?{target.query}",
         "absolute": page_two_url(path),
-        # Connect's proxy emits http links for its https origin; the policy upgrades them.
+        # The policy upgrades an http link on the https origin (Connect's proxy emits them).
         "http-same-host": page_two_url(path).replace("https://", "http://", 1),
     }[form]
 
@@ -467,7 +539,7 @@ async def test_every_page_is_read(path, form, upstream):
         first = with_next(path, first, next_reference(path, form))
     serve_pages(upstream, path, first=first)
 
-    outcome = await run(path, upstream)
+    outcome = await run(path, upstream, probe="last")
 
     assert_listed(path, outcome, ids_of(path, first, second_page(path)))
     assert upstream.requests == [listing_url(path), page_two_url(path)]
@@ -550,7 +622,7 @@ def endless(path: EntryPath, upstream: Upstream):
 async def test_endless_pagination_stops_at_the_page_cap(path, variant, upstream):
     upstream.fallback = endless(path, upstream)
 
-    outcome = await run(path, upstream)
+    outcome = await run(path, upstream, probe="tenant-1")
 
     assert_rejected(path, outcome)
     assert 1 < len(upstream.requests) <= 100
@@ -559,10 +631,11 @@ async def test_endless_pagination_stops_at_the_page_cap(path, variant, upstream)
 @pytest.mark.parametrize(("path", "variant"), cases(PAGINATED_PATHS, ("deadline",)))
 async def test_listing_that_outlives_its_budget_is_rejected(path, variant, upstream):
     upstream.fallback = endless(path, upstream)
-    # Longer than any path's whole budget, so no path may start a third page.
+    # Past every key and verification budget after one page, and discovery's 60s
+    # after two, so no path may start a third page.
     upstream.seconds_per_request = 40.0
 
-    outcome = await run(path, upstream)
+    outcome = await run(path, upstream, probe="tenant-1")
 
     assert_rejected(path, outcome, verdict=UNAVAILABLE)
     assert len(upstream.requests) <= 2
@@ -608,8 +681,9 @@ def serve_malformed(upstream: Upstream, path: EntryPath, variant: str) -> None:
 )
 async def test_malformed_page_is_never_read_as_fewer_tenants(path, variant, upstream):
     serve_malformed(upstream, path, variant)
+    page_one_readable = variant in ("missing-list-on-page-2", "next-not-a-string")
 
-    outcome = await run(path, upstream)
+    outcome = await run(path, upstream, probe="first" if page_one_readable else "only")
 
     assert_rejected(path, outcome)
 
@@ -624,7 +698,7 @@ async def test_conflicting_duplicate_identity(path, variant, upstream):
     )
     serve_pages(upstream, path, first=first, second=second)
 
-    outcome = await run(path, upstream)
+    outcome = await run(path, upstream, probe="last")
 
     if path.kind == "verification":
         assert_rejected(path, outcome)
@@ -668,8 +742,9 @@ def assert_failure_mapping(path: EntryPath, outcome: Outcome, failure: str) -> N
             # A recorded denial is what revokes; nothing else about the listing may.
             assert outcome.standing_active is not outcome.denied
         else:
-            expected = httpx.ConnectError if failure == "transport" else httpx.HTTPStatusError
-            assert isinstance(outcome.error, expected), repr(outcome.error)
+            # Callers catch everything; only the auth errors carry meaning downstream.
+            assert outcome.error is not None
+            assert not isinstance(outcome.error, tuple(_AUTH_ERRORS.values())), repr(outcome.error)
             assert not outcome.denied
             assert outcome.standing_active, "an upstream failure archived a standing membership"
     elif path.kind == "api_key":
@@ -677,6 +752,7 @@ def assert_failure_mapping(path: EntryPath, outcome: Outcome, failure: str) -> N
         message = {
             "401": "rejected the API key",
             "403": "rejected the API key",
+            "302": "unexpected status 302",
             "500": "unexpected status",
             "503": "unexpected status",
             "transport": "could not be reached",
@@ -688,6 +764,7 @@ def assert_failure_mapping(path: EntryPath, outcome: Outcome, failure: str) -> N
             == {
                 "401": VerificationOutcome.CREDENTIAL_REJECTED,
                 "403": INDETERMINATE,
+                "302": INDETERMINATE,
                 "500": UNAVAILABLE,
                 "503": UNAVAILABLE,
                 "transport": UNAVAILABLE,
@@ -766,7 +843,7 @@ async def test_connect_failure_keeps_each_callers_mapping(path, variant, upstrea
 CONNECT_VERIFICATION = CONNECT_PATHS[1]
 
 
-async def test_connect_few_opportunities_are_checked_one_by_one(upstream, user):
+async def test_connect_few_opportunities_are_checked_one_by_one(upstream):
     upstream.routes[connect_opportunity_url("101")] = json_answer(saved("connect_opportunity_101"))
 
     outcome = await run(CONNECT_VERIFICATION, upstream, external_ids={"101"})
@@ -775,7 +852,7 @@ async def test_connect_few_opportunities_are_checked_one_by_one(upstream, user):
     assert upstream.requests == [connect_opportunity_url("101")]
 
 
-async def test_connect_no_access_answer_is_an_omission_within_the_scope(upstream, user):
+async def test_connect_no_access_answer_is_an_omission_within_the_scope(upstream):
     upstream.routes[connect_opportunity_url("101")] = json_answer(saved("connect_opportunity_101"))
     upstream.routes[connect_opportunity_url("555")] = json_answer(
         saved("connect_opportunity_not_found"), 404
@@ -787,7 +864,7 @@ async def test_connect_no_access_answer_is_an_omission_within_the_scope(upstream
     assert CONNECT_LISTING not in upstream.requests
 
 
-async def test_connect_routing_404_falls_back_to_the_whole_listing(upstream, user):
+async def test_connect_routing_404_falls_back_to_the_whole_listing(upstream):
     upstream.routes[connect_opportunity_url("101")] = text_answer("<html>Not Found</html>", 404)
     upstream.routes[CONNECT_LISTING] = json_answer(saved("connect_opp_org_program_list"))
 
@@ -797,7 +874,7 @@ async def test_connect_routing_404_falls_back_to_the_whole_listing(upstream, use
     assert upstream.requests == [connect_opportunity_url("101"), CONNECT_LISTING]
 
 
-async def test_connect_many_opportunities_use_the_whole_listing(upstream, user):
+async def test_connect_many_opportunities_use_the_whole_listing(upstream):
     upstream.routes[CONNECT_LISTING] = json_answer(saved("connect_opp_org_program_list"))
     wanted = {str(external_id) for external_id in range(101, 107)}
 
@@ -807,10 +884,62 @@ async def test_connect_many_opportunities_use_the_whole_listing(upstream, user):
     assert upstream.requests == [CONNECT_LISTING]
 
 
-async def test_connect_rejected_token_outranks_the_scoped_check(upstream, user):
+async def test_connect_rejected_token_outranks_the_scoped_check(upstream):
     upstream.routes[connect_opportunity_url("101")] = json_answer({"detail": "x"}, 401)
 
     outcome = await run(CONNECT_VERIFICATION, upstream, external_ids={"101"})
 
     assert outcome.verdict == VerificationOutcome.CREDENTIAL_REJECTED
     assert CONNECT_LISTING not in upstream.requests
+
+
+REDIRECTS = ("redirect-off-origin", "redirect-same-origin")
+
+
+@pytest.mark.parametrize(
+    ("path", "variant"),
+    cases(PAGINATED_PATHS + CONNECT_PATHS, REDIRECTS, discovery={"redirect-off-origin"}),
+)
+async def test_redirect_is_never_followed_with_the_credential(path, variant, upstream):
+    target = (
+        "https://attacker.example/collect/"
+        if variant == "redirect-off-origin"
+        else f"{origin(path)}/elsewhere/"
+    )
+    upstream.routes[listing_url(path)] = lambda request: httpx.Response(
+        302, headers={"Location": target}
+    )
+
+    outcome = await run(path, upstream)
+
+    assert upstream.requests == [listing_url(path)]
+    assert_failure_mapping(path, outcome, "302")
+
+
+STRICTNESS = ("missing-next", "too-many-rows")
+
+
+@pytest.mark.parametrize(
+    ("path", "variant"), cases(PAGINATED_PATHS, STRICTNESS, discovery={"missing-next"})
+)
+async def test_only_verification_demands_a_declared_end_and_a_bounded_list(path, variant, upstream):
+    """Without ``next`` the other callers take the page as the last; verification
+    wants the end stated, and refuses a list past its row cap."""
+    if variant == "missing-next":
+        page = first_page(path)
+        if path.family == "commcare":
+            page["meta"].pop("next")
+        else:
+            page.pop("next")
+        probe = "first"
+    else:
+        page = make_page(path, [row(path, f"bulk-{i}", "Bulk") for i in range(10_001)], None)
+        probe = "bulk-0"
+    upstream.routes[listing_url(path)] = json_answer(page)
+
+    outcome = await run(path, upstream, probe=probe)
+
+    if path.kind == "verification":
+        assert_rejected(path, outcome)
+    else:
+        assert_listed(path, outcome, ids_of(path, page), probe=probe)
